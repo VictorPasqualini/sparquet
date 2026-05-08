@@ -1,0 +1,63 @@
+{
+  "name": "upsert_orders_iceberg",
+  "description": "Lê pedidos incrementais em Parquet e faz upsert em tabela Iceberg",
+  "spark": {
+    "app_name": "OrdersUpsert",
+    "configs": {
+      "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+      "spark.sql.catalog.local": "org.apache.iceberg.spark.SparkCatalog",
+      "spark.sql.catalog.local.type": "hadoop",
+      "spark.sql.catalog.local.warehouse": "/warehouse"
+    }
+  },
+  "transformations": [
+    {
+      "type": "cast",
+      "columns": {
+        "order_id": "long",
+        "amount": "double",
+        "order_date": "date"
+      }
+    },
+    {
+      "type": "filter",
+      "condition": "amount > 0"
+    },
+    {
+      "type": "with_timestamp",
+      "column_name": "updated_at"
+    }
+  ],
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      {
+        "type": "not_null",
+        "columns": [
+          "order_id",
+          "customer_id",
+          "amount"
+        ]
+      },
+      {
+        "type": "range",
+        "column": "amount",
+        "min": 0
+      }
+    ]
+  },
+  "input": {
+    "format": "parquet",
+    "path": "/data/incremental/orders"
+  },
+  "output": {
+    "format": "iceberg",
+    "path": "local.db.orders",
+    "mode": "merge",
+    "options": {
+      "merge_keys": [
+        "order_id"
+      ]
+    }
+  }
+}

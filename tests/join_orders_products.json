@@ -1,0 +1,105 @@
+{
+  "name": "join_orders_products",
+  "description": "Junta pedidos com tabela de produtos, calcula total e separa outputs por perfil",
+
+  "input": {
+    "format": "csv",
+    "path": "E:/projetos/pessoal/framework-spark/tests/csv/orders.csv",
+    "options": {
+      "header": "true",
+      "inferSchema": "true"
+    }
+  },
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "status = 'completed'"
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "order_id": "integer",
+        "customer_id": "integer",
+        "product_id": "integer",
+        "quantity": "integer",
+        "sale_date": "date"
+      }
+    },
+    {
+      "type": "join",
+      "with": {
+        "format": "csv",
+        "path": "E:/projetos/pessoal/framework-spark/tests/csv/products.csv",
+        "options": {
+          "header": "true",
+          "inferSchema": "true"
+        }
+      },
+      "on": "product_id",
+      "how": "left"
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "unit_price": "double"
+      }
+    },
+    {
+      "type": "add_column",
+      "name": "total_amount",
+      "expression": "quantity * unit_price"
+    },
+    {
+      "type": "add_column",
+      "name": "sale_year",
+      "expression": "year(sale_date)"
+    },
+    {
+      "type": "with_timestamp",
+      "column_name": "ingestion_timestamp"
+    }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      {
+        "type": "not_null",
+        "columns": ["order_id", "product_id", "total_amount"]
+      },
+      {
+        "type": "range",
+        "column": "total_amount",
+        "min": 0
+      },
+      {
+        "type": "row_count",
+        "min": 1
+      }
+    ]
+  },
+
+  "outputs": [
+    {
+      "format": "parquet",
+      "path": "E:/projetos/pessoal/framework-spark/tests/parquet/orders_full",
+      "mode": "overwrite",
+      "comment": "Saída completa com todas as colunas"
+    },
+    {
+      "format": "parquet",
+      "path": "E:/projetos/pessoal/framework-spark/tests/parquet/orders_analytics",
+      "mode": "overwrite",
+      "columns": ["order_id", "customer_id", "product_name", "category", "quantity", "total_amount", "sale_date", "sale_year"],
+      "comment": "Saída para analytics: sem colunas operacionais e de PII"
+    },
+    {
+      "format": "csv",
+      "path": "E:/projetos/pessoal/framework-spark/tests/csv/orders_export",
+      "mode": "overwrite",
+      "columns": ["order_id", "customer_id", "product_name", "total_amount"],
+      "comment": "Saída CSV enxuta para exportação"
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "name": "etl_sales_enrichment",
+  "description": "ETL de vendas: enriquece com tabela de produtos via join e salva em Iceberg + Parquet backup",
+  "spark": {
+    "app_name": "SalesEnrichmentETL",
+    "master": "local[4]",
+    "configs": {
+      "spark.sql.shuffle.partitions": "8",
+      "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+      "spark.sql.catalog.local": "org.apache.iceberg.spark.SparkCatalog",
+      "spark.sql.catalog.local.type": "hadoop",
+      "spark.sql.catalog.local.warehouse": "/warehouse"
+    }
+  },
+  "transformations": [
+    {
+      "type": "select",
+      "columns": [
+        "sale_id",
+        "product_id",
+        "customer_id",
+        "quantity",
+        "unit_price",
+        "sale_date",
+        "region"
+      ]
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "sale_id": "long",
+        "product_id": "integer",
+        "customer_id": "long",
+        "quantity": "integer",
+        "unit_price": "double",
+        "sale_date": "date"
+      }
+    },
+    {
+      "type": "filter",
+      "condition": "quantity > 0 AND unit_price > 0"
+    },
+    {
+      "type": "join",
+      "with": {
+        "format": "parquet",
+        "path": "/data/ref/products"
+      },
+      "on": "product_id",
+      "how": "left"
+    },
+    {
+      "type": "add_column",
+      "name": "total_amount",
+      "expression": "quantity * unit_price"
+    },
+    {
+      "type": "add_column",
+      "name": "sale_year",
+      "expression": "year(sale_date)"
+    },
+    {
+      "type": "add_column",
+      "name": "sale_month",
+      "expression": "month(sale_date)"
+    },
+    {
+      "type": "drop_duplicates",
+      "columns": [
+        "sale_id"
+      ]
+    },
+    {
+      "type": "fill_na",
+      "value": "UNKNOWN",
+      "columns": [
+        "region"
+      ]
+    },
+    {
+      "type": "with_timestamp",
+      "column_name": "ingestion_timestamp"
+    }
+  ],
+  "validations": {
+    "on_failure": "fail",
+    "rules": [
+      {
+        "type": "not_null",
+        "columns": [
+          "sale_id",
+          "product_id",
+          "customer_id",
+          "sale_date"
+        ]
+      },
+      {
+        "type": "unique",
+        "columns": [
+          "sale_id"
+        ]
+      },
+      {
+        "type": "range",
+        "column": "quantity",
+        "min": 1
+      },
+      {
+        "type": "row_count",
+        "min": 1
+      },
+      {
+        "type": "custom_sql",
+        "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE total_amount <= 0",
+        "error_message": "Detectados registros com total_amount invalido"
+      }
+    ]
+  },
+  "input": {
+    "format": "parquet",
+    "path": "/data/raw/sales",
+    "options": {
+      "mergeSchema": "true"
+    }
+  },
+  "output": {
+    "format": "iceberg",
+    "path": "local.sales.enriched",
+    "mode": "append",
+    "partition_by": [
+      "sale_year",
+      "sale_month"
+    ]
+  }
+}

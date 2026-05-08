@@ -1,0 +1,71 @@
+{
+  "name": "ingestion_customers_csv_to_parquet",
+  "description": "Lê clientes do CSV, filtra ativos, valida qualidade e salva em Parquet",
+
+  "input": {
+    "format": "csv",
+    "path": "E:/projetos/pessoal/framework-spark/tests/csv/customers.csv",
+    "options": {
+      "header": "true",
+      "inferSchema": "true"
+    }
+  },
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "status = 'active'"
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "id": "integer",
+        "age": "integer",
+        "monthly_revenue": "double"
+      }
+    },
+    {
+      "type": "add_column",
+      "name": "revenue_tier",
+      "expression": "CASE WHEN monthly_revenue >= 4000 THEN 'high' WHEN monthly_revenue >= 2000 THEN 'mid' ELSE 'low' END"
+    },
+    {
+      "type": "drop_duplicates",
+      "columns": ["id"]
+    },
+    {
+      "type": "with_timestamp",
+      "column_name": "ingestion_timestamp"
+    }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      {
+        "type": "not_null",
+        "columns": ["id", "name"]
+      },
+      {
+        "type": "unique",
+        "columns": ["id"]
+      },
+      {
+        "type": "range",
+        "column": "age",
+        "min": 0,
+        "max": 120
+      },
+      {
+        "type": "row_count",
+        "min": 1
+      }
+    ]
+  },
+
+  "output": {
+    "format": "parquet",
+    "path": "E:/projetos/pessoal/framework-spark/tests/parquet",
+    "mode": "overwrite"
+  }
+}

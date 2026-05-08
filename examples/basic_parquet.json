@@ -1,0 +1,87 @@
+{
+  "name": "ingestion_customers",
+  "description": "Lê clientes brutos em Parquet, filtra ativos e salva processado",
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "status = 'active'"
+    },
+    {
+      "type": "select",
+      "columns": [
+        "id",
+        "name",
+        "email",
+        "age",
+        "country",
+        "created_at"
+      ]
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "age": "integer",
+        "created_at": "timestamp"
+      }
+    },
+    {
+      "type": "rename",
+      "mappings": {
+        "created_at": "creation_date"
+      }
+    },
+    {
+      "type": "drop_duplicates",
+      "columns": [
+        "id"
+      ]
+    },
+    {
+      "type": "with_timestamp",
+      "column_name": "ingestion_timestamp"
+    }
+  ],
+  "validations": {
+    "on_failure": "fail",
+    "rules": [
+      {
+        "type": "not_null",
+        "columns": [
+          "id",
+          "email"
+        ]
+      },
+      {
+        "type": "unique",
+        "columns": [
+          "id"
+        ]
+      },
+      {
+        "type": "range",
+        "column": "age",
+        "min": 0,
+        "max": 150
+      },
+      {
+        "type": "row_count",
+        "min": 1
+      }
+    ]
+  },
+  "input": {
+    "format": "parquet",
+    "path": "/data/raw/customers",
+    "options": {
+      "mergeSchema": "true"
+    }
+  },
+  "output": {
+    "format": "parquet",
+    "path": "/data/processed/customers",
+    "mode": "overwrite",
+    "partition_by": [
+      "country"
+    ]
+  }
+}
