@@ -42,9 +42,11 @@
           "expression": "CASE WHEN status_criterio IS NULL THEN TRUE ELSE status_criterio END"
         },
         {
-          "type":      "sql",
-          "view_name": "contratos_com_criterio",
-          "query":     "SELECT id_cessao, id_operacao, numero_contrato, data_referencia, MIN(status_criterio_contrato) AS status_criterio_contrato FROM contratos_com_criterio GROUP BY id_cessao, id_operacao, numero_contrato, data_referencia"
+          "type": "group_by",
+          "by":   ["id_cessao", "id_operacao", "numero_contrato", "data_referencia"],
+          "agg":  [
+            { "func": "min", "column": "status_criterio_contrato", "alias": "status_criterio_contrato" }
+          ]
         },
         {
           "type":      "filter",

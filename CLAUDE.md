@@ -86,6 +86,16 @@ JSON/dict → PipelineConfig → Pipeline.run()
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
     {
+      "type": "group_by",
+      "by": ["col1", "col2"],
+      "agg": [
+        { "func": "min|max|sum|avg|count|first|last|count_distinct|collect_list|collect_set",
+          "column": "col",   // opcional para count
+          "alias": "nome"    // opcional
+        }
+      ]
+    },
+    {
       "type": "join",
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
