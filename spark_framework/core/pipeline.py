@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 from spark_framework.core.config import OutputConfig, PipelineConfig
 from spark_framework.core.context import SparkContextManager
@@ -65,6 +66,7 @@ class Pipeline:
             spark = SparkContextManager.get_or_create(self.config.spark)
 
             df = ReaderFactory.create(spark, self.config.input).read()
+            df = df.withColumn("ingestion_ts", F.current_timestamp())
             rows_read = df.count()
             log.info(
                 "Leitura concluida",

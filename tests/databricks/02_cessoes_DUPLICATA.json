@@ -1,0 +1,46 @@
+{
+  "name": "cessoes_DUPLICATA",
+  "description": "Processa cessoes do tipo DUPLICATA: gera payload JSON, publica no Kafka e grava monitoramento no Delta.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_para_processar"
+  },
+
+  "transformations": [
+    {
+      "type":      "filter",
+      "condition": "tipo_ativo = 'DUPLICATA'"
+    },
+    {
+      "type":       "with_column",
+      "name":       "payload",
+      "expression": "to_json(struct(cessao_id, operacao_id, cedente_cnpj, sacado_cpf_cnpj, valor_face, valor_presente, data_vencimento, numero_nota_fiscal, serie_nota_fiscal, chave_nfe))"
+    },
+    {
+      "type":       "with_column",
+      "name":       "header",
+      "expression": "concat('DUPLICATA-', cessao_id)"
+    }
+  ],
+
+  "outputs": [
+    {
+      "format":  "kafka",
+      "path":    "cessoes-processadas",
+      "mode":    "append",
+      "columns": ["header", "payload"],
+      "options": {
+        "bootstrap_servers": "BROKER1:9092,BROKER2:9092",
+        "value_column":      "payload",
+        "key_column":        "header"
+      }
+    },
+    {
+      "format":  "delta",
+      "path":    "MEU_CATALOG.MEU_SCHEMA.cessoes_monitoramento",
+      "mode":    "append",
+      "columns": ["cessao_id", "operacao_id", "tipo_ativo", "cedente_nome", "sacado_nome", "valor_face", "data_vencimento", "payload", "ingestion_ts"]
+    }
+  ]
+}
