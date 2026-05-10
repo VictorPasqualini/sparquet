@@ -1,0 +1,43 @@
+{
+  "name": "contratos_aprovados",
+  "description": "Prepara contratos aprovados por criterio: join com status_criterios, agrega status minimo por contrato e filtra aprovados. Resultado cacheado como view para reuso em 02_cessoes_base.",
+
+  "input": {
+    "format": "delta",
+    "path": "lastros.silver_contrato"
+  },
+
+  "transformations": [
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_status_criterios_contratos" },
+      "on":   ["id_cessao", "id_operacao", "numero_contrato"],
+      "how":  "left"
+    },
+
+    {
+      "type":       "with_column",
+      "name":       "status_criterio_contrato",
+      "expression": "CASE WHEN status_criterio IS NULL THEN TRUE ELSE status_criterio END"
+    },
+
+    {
+      "type":      "sql",
+      "view_name": "contratos_com_criterio",
+      "query":     "SELECT id_cessao, id_operacao, numero_contrato, data_referencia, MIN(status_criterio_contrato) AS status_criterio_contrato FROM contratos_com_criterio GROUP BY id_cessao, id_operacao, numero_contrato, data_referencia"
+    },
+
+    {
+      "type":      "filter",
+      "condition": "status_criterio_contrato = TRUE"
+    }
+  ],
+
+  "output": {
+    "format":  "view",
+    "path":    "contratos_aprovados",
+    "mode":    "overwrite",
+    "columns": ["id_cessao", "numero_contrato", "data_referencia"],
+    "options": { "cache": "true" }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "cessoes_base",
+  "description": "Monta a base de cessoes pendentes de registro: filtra status elegivel, join com parametrizacao, contratos aprovados e tipo_contrato da remessa. O enriquecimento de multi_ativos, filtragem por parametros e anti-join de controle ficam no orquestrador Python.",
+
+  "input": {
+    "format": "delta",
+    "path":   "lastros.silver_cessao"
+  },
+
+  "transformations": [
+    {
+      "type":    "select",
+      "columns": ["id_cessao", "id_operacao"]
+    },
+
+    {
+      "type":      "sql",
+      "view_name": "cessoes_sel",
+      "query":     "SELECT c.* FROM cessoes_sel c INNER JOIN (SELECT id_cessao FROM lastros.silver_cessoes_status WHERE status IN (1, 10, 11)) s ON c.id_cessao = s.id_cessao"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_parametrizacao_registro_lastro" },
+      "on":   "id_operacao",
+      "how":  "inner"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "view", "path": "contratos_aprovados" },
+      "on":   "id_cessao",
+      "how":  "inner"
+    },
+
+    {
+      "type":      "sql",
+      "view_name": "cessoes_pre_remessa",
+      "query":     "SELECT c.*, r.tipo_contrato FROM cessoes_pre_remessa c LEFT JOIN (SELECT id_cessao, tipo_contrato FROM lastros.bronze_remessa) r ON c.id_cessao = r.id_cessao"
+    }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_base",
+    "mode":   "overwrite",
+    "options": { "cache": "false" }
+  }
+}
