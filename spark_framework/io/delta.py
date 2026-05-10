@@ -43,7 +43,8 @@ class DeltaWriter(BaseWriter):
 
     Opções relevantes em 'options':
       merge_keys       – lista de colunas que identificam o registro (para merge)
-      merge_condition  – condição SQL extra para o MERGE (opcional)
+      merge_condition  – condição SQL extra para o MERGE usando T.campo / S.campo
+                         onde T = target (tabela destino) e S = source (DataFrame)
 
     Exemplos de JSON:
       { "format": "delta", "path": "catalog.schema.clientes", "mode": "overwrite" }
@@ -96,22 +97,20 @@ class DeltaWriter(BaseWriter):
         view = "_spark_fw_merge_src"
         df.createOrReplaceTempView(view)
 
-        join_cond = " AND ".join(
-            f"target.{k} = source.{k}" for k in merge_keys
-        )
+        join_cond = " AND ".join(f"T.{k} = S.{k}" for k in merge_keys)
         extra = self.config.options.get("merge_condition", "")
         if extra:
             join_cond = f"({join_cond}) AND ({extra})"
 
         update_set = ", ".join(
-            f"target.{c} = source.{c}" for c in df.columns if c not in merge_keys
+            f"T.{c} = S.{c}" for c in df.columns if c not in merge_keys
         )
         insert_cols = ", ".join(df.columns)
-        insert_vals = ", ".join(f"source.{c}" for c in df.columns)
+        insert_vals = ", ".join(f"S.{c}" for c in df.columns)
 
         sql = f"""
-            MERGE INTO {target} AS target
-            USING {view} AS source
+            MERGE INTO {target} AS T
+            USING {view} AS S
             ON {join_cond}
             WHEN MATCHED THEN
                 UPDATE SET {update_set}

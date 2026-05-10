@@ -2,9 +2,10 @@
 # Orquestrador de registro de cessões — CERC / B3
 #
 # Responsabilidades:
-#   1. Preparação via framework  (JSONs declarativos, sem lógica no código)
-#        01_contratos.json   → view 'contratos_aprovados'
-#        02_cessoes_base.json → view 'cessoes_base'
+#   1. Preparação via framework  (JSON declarativo, sem lógica no código)
+#        cessoes_base.json → view 'cessoes_base'
+#          └─ inclui: filtro por status, join parametrizacao, join contratos
+#             (com critérios avaliados via with_transformations) e tipo_contrato
 #   2. Enriquecimento Python    (multi_ativos, params de job, anti-join de controle)
 #   3. Loop por fluxo           (tipo_ativo × registradora × tipo_fluxo)
 #        → funções customizadas de payload
@@ -66,23 +67,18 @@ def validar_param_unico(nome: str, tipo: type):
 
 
 # =============================================================================
-# ETAPA 1 & 2 — Preparação de dados via framework (JSON declarativo)
+# ETAPA 1 — Preparação de dados via framework (JSON declarativo)
 # =============================================================================
 fw = SparkFramework()
 
-r_contratos = fw.run(f"{BASE_PATH}/01_contratos.json")
-print(r_contratos.summary())
-if not r_contratos.success:
-    raise RuntimeError(f"Falha na preparação de contratos: {r_contratos.error}")
-
-r_cessoes = fw.run(f"{BASE_PATH}/02_cessoes_base.json")
+r_cessoes = fw.run(f"{BASE_PATH}/cessoes_base.json")
 print(r_cessoes.summary())
 if not r_cessoes.success:
     raise RuntimeError(f"Falha na preparação de cessões: {r_cessoes.error}")
 
 
 # =============================================================================
-# ETAPA 3 — Enriquecimento e filtragem (lógica não-trivial em Python)
+# ETAPA 2 — Enriquecimento e filtragem (lógica não-trivial em Python)
 # =============================================================================
 df = spark.table("cessoes_base")
 
@@ -148,7 +144,7 @@ df_nao_processadas = df
 
 
 # =============================================================================
-# ETAPA 4 — Loop de processamento por tipo_ativo / registradora / fluxo
+# ETAPA 3 — Loop de processamento por tipo_ativo / registradora / fluxo
 # =============================================================================
 for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
     for tipo_fluxo, atributos_fluxo in fluxo_operacao.items():
