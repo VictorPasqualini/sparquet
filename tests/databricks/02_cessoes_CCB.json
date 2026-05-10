@@ -1,0 +1,46 @@
+{
+  "name": "cessoes_CCB",
+  "description": "Processa cessoes do tipo CCB: gera payload JSON, publica no Kafka e grava monitoramento no Delta.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_para_processar"
+  },
+
+  "transformations": [
+    {
+      "type":      "filter",
+      "condition": "tipo_ativo = 'CCB'"
+    },
+    {
+      "type":       "with_column",
+      "name":       "payload",
+      "expression": "to_json(struct(cessao_id, operacao_id, cedente_cnpj, sacado_cpf_cnpj, valor_face, valor_presente, taxa_juros, indice_correcao, data_emissao, data_vencimento, numero_ccb))"
+    },
+    {
+      "type":       "with_column",
+      "name":       "header",
+      "expression": "concat('CCB-', cessao_id)"
+    }
+  ],
+
+  "outputs": [
+    {
+      "format":  "kafka",
+      "path":    "cessoes-processadas",
+      "mode":    "append",
+      "columns": ["header", "payload"],
+      "options": {
+        "bootstrap_servers": "BROKER1:9092,BROKER2:9092",
+        "value_column":      "payload",
+        "key_column":        "header"
+      }
+    },
+    {
+      "format":  "delta",
+      "path":    "MEU_CATALOG.MEU_SCHEMA.cessoes_monitoramento",
+      "mode":    "append",
+      "columns": ["cessao_id", "operacao_id", "tipo_ativo", "cedente_nome", "sacado_nome", "valor_face", "taxa_juros", "data_vencimento", "payload", "ingestion_ts"]
+    }
+  ]
+}
