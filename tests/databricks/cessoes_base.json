@@ -14,9 +14,13 @@
     },
 
     {
-      "type":      "sql",
-      "view_name": "cessoes_sel",
-      "query":     "SELECT c.* FROM cessoes_sel c INNER JOIN (SELECT id_cessao FROM lastros.silver_cessoes_status WHERE status IN (1, 10, 11)) s ON c.id_cessao = s.id_cessao"
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_cessoes_status" },
+      "with_transformations": [
+        { "type": "filter", "condition": "status IN (1, 10, 11)" }
+      ],
+      "on":  "id_cessao",
+      "how": "leftsemi"
     },
 
     {
@@ -62,9 +66,13 @@
     },
 
     {
-      "type":      "sql",
-      "view_name": "cessoes_pre_remessa",
-      "query":     "SELECT c.*, r.tipo_contrato FROM cessoes_pre_remessa c LEFT JOIN (SELECT id_cessao, tipo_contrato FROM lastros.bronze_remessa) r ON c.id_cessao = r.id_cessao"
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+      "with_transformations": [
+        { "type": "select", "columns": ["id_cessao", "tipo_contrato"] }
+      ],
+      "on":  "id_cessao",
+      "how": "left"
     }
   ],
 
