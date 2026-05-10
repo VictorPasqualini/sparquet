@@ -30,14 +30,16 @@ class IcebergWriter(BaseWriter):
                 "Iceberg merge mode requires 'merge_keys' inside output.options"
             )
 
-        df.createOrReplaceTempView("_merge_source")
-        join_condition = " AND ".join(
-            f"target.{k} = source.{k}" for k in merge_keys
-        )
+        df.createOrReplaceTempView("_spark_fw_merge_src")
+        join_cond = " AND ".join(f"T.{k} = S.{k}" for k in merge_keys)
+        extra = self.config.options.get("merge_condition", "")
+        if extra:
+            join_cond = f"({join_cond}) AND ({extra})"
+
         self.spark.sql(f"""
-            MERGE INTO {self.config.path} AS target
-            USING _merge_source AS source
-            ON {join_condition}
+            MERGE INTO {self.config.path} AS T
+            USING _spark_fw_merge_src AS S
+            ON {join_cond}
             WHEN MATCHED THEN UPDATE SET *
             WHEN NOT MATCHED THEN INSERT *
         """)

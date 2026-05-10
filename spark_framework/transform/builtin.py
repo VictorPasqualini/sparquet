@@ -127,16 +127,32 @@ class JoinTransformation(BaseTransformation):
     Supports all Spark join types: inner, cross, left, right, full/outer,
     semi/leftsemi, anti/leftanti and their underscore variants.
 
-    JSON params:
-      with   – source config (format + path + options)
-      on     – column name (str) or list of column names
-      how    – join type (default: inner)
+    The left DataFrame is aliased as 'l' and the right as 'r', so SQL
+    expressions in 'on' and in downstream transformations can use l.campo
+    and r.campo to disambiguate columns.
 
-    Example:
+    JSON params:
+      with                 – source config (format + path + options)
+      on                   – column name, list of column names, or SQL expression
+                             (SQL expressions containing spaces use l./r. aliases)
+      how                  – join type (default: inner)
+      with_transformations – list of transformations applied to the right-side
+                             DataFrame before the join (all builtin types supported)
+
+    Examples:
       { "type": "join",
         "with": { "format": "parquet", "path": "/ref/products" },
         "on": "product_id",
         "how": "leftanti" }
+
+      { "type": "join",
+        "with": { "format": "delta", "path": "catalog.schema.contratos" },
+        "with_transformations": [
+          { "type": "filter", "condition": "status = 1" },
+          { "type": "select", "columns": ["id", "nome"] }
+        ],
+        "on": "id",
+        "how": "inner" }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
@@ -144,6 +160,14 @@ class JoinTransformation(BaseTransformation):
 
         source_cfg = InputConfig.from_dict(self.config.params["with"])
         other = ReaderFactory.create(df.sparkSession, source_cfg).read()
+
+        raw_transforms = self.config.params.get("with_transformations", [])
+        if raw_transforms:
+            from spark_framework.core.config import TransformationConfig
+            from spark_framework.transform.engine import TransformationEngine
+            engine = TransformationEngine()
+            cfgs = [TransformationConfig.from_dict(t) for t in raw_transforms]
+            other = engine.apply(other, cfgs)
 
         on = self.config.params["on"]
         how: str = self.config.params.get("how", "inner").lower()
@@ -153,7 +177,14 @@ class JoinTransformation(BaseTransformation):
                 f"Tipo de join '{how}' invalido. "
                 f"Opcoes: {sorted(_VALID_JOIN_TYPES)}"
             )
-        return df.join(other, on, how)
+
+        left = df.alias("l")
+        right = other.alias("r")
+
+        # String with spaces → SQL expression (supports l.campo / r.campo)
+        if isinstance(on, str) and " " in on:
+            return left.join(right, F.expr(on), how)
+        return left.join(right, on, how)
 
 
 class UnionTransformation(BaseTransformation):

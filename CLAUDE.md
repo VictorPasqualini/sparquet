@@ -85,12 +85,19 @@ JSON/dict → PipelineConfig → Pipeline.run()
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
-    { "type": "with_timestamp", "column_name": "ingestion_ts" },
     {
       "type": "join",
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
-      "on": "join_key",             // string ou ["key1", "key2"]
-      "how": "inner|left|right|full"
+      "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
+      "how": "inner|left|right|full|leftanti|leftsemi|...",
+      // with_transformations: aplica transformações no df da direita antes do join
+      // Suporta agregações, filtros, selects — qualquer tipo builtin.
+      // O df esquerdo (principal) é alias 'l'; o da direita é alias 'r'.
+      "with_transformations": [
+        { "type": "filter", "condition": "status = 1" },
+        { "type": "sql", "view_name": "v", "query": "SELECT id, MIN(val) AS val FROM v GROUP BY id" },
+        { "type": "select", "columns": ["id", "val"] }
+      ]
     },
     {
       "type": "union",
@@ -122,7 +129,11 @@ JSON/dict → PipelineConfig → Pipeline.run()
     "mode": "overwrite|append|merge",
     "partition_by": ["col"],
     "columns": ["col_a", "col_b"],    // opcional: projeta só essas colunas
-    "options": { "merge_keys": ["id"] }
+    // merge: T = target (tabela destino), S = source (DataFrame sendo escrito)
+    "options": {
+      "merge_keys": ["id"],
+      "merge_condition": "T.deleted = FALSE"   // condição SQL extra — usa T./S.
+    }
   },
 
   // OU múltiplas saídas (cada uma pode ter "columns" diferente):
