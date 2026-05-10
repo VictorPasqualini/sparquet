@@ -9,8 +9,10 @@ from spark_framework.io.base import BaseReader, BaseWriter
 from spark_framework.io.csv import CsvReader, CsvWriter
 from spark_framework.io.delta import DeltaReader, DeltaWriter
 from spark_framework.io.iceberg import IcebergReader, IcebergWriter
+from spark_framework.io.kafka import KafkaWriter
 from spark_framework.io.parquet import ParquetReader, ParquetWriter
 from spark_framework.io.txt import TxtReader, TxtWriter
+from spark_framework.io.view import ViewReader, ViewWriter
 
 _READERS: Dict[str, Type[BaseReader]] = {
     "parquet": ParquetReader,
@@ -18,6 +20,7 @@ _READERS: Dict[str, Type[BaseReader]] = {
     "csv": CsvReader,
     "delta": DeltaReader,
     "txt": TxtReader,
+    "view": ViewReader,
 }
 
 _WRITERS: Dict[str, Type[BaseWriter]] = {
@@ -26,6 +29,8 @@ _WRITERS: Dict[str, Type[BaseWriter]] = {
     "csv": CsvWriter,
     "delta": DeltaWriter,
     "txt": TxtWriter,
+    "kafka": KafkaWriter,
+    "view": ViewWriter,
 }
 
 
