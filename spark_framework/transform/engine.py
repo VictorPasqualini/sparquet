@@ -19,7 +19,7 @@ from spark_framework.transform.builtin import (
     SortTransformation,
     SqlTransformation,
     UnionTransformation,
-    WithTimestampTransformation,
+    WithColumnTransformation,
 )
 from spark_framework.utils.logger import logger
 
@@ -29,12 +29,12 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "drop": DropTransformation,
     "rename": RenameTransformation,
     "cast": CastTransformation,
-    "add_column": AddColumnTransformation,
+    "with_column": WithColumnTransformation,
+    "add_column": AddColumnTransformation,   # alias backward-compat
     "drop_duplicates": DropDuplicatesTransformation,
     "sql": SqlTransformation,
     "fill_na": FillNaTransformation,
     "sort": SortTransformation,
-    "with_timestamp": WithTimestampTransformation,
     "join": JoinTransformation,
     "union": UnionTransformation,
 }
