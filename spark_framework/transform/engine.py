@@ -13,6 +13,7 @@ from spark_framework.transform.builtin import (
     DropTransformation,
     FillNaTransformation,
     FilterTransformation,
+    GroupByTransformation,
     JoinTransformation,
     RenameTransformation,
     SelectTransformation,
@@ -32,6 +33,7 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "with_column": WithColumnTransformation,
     "add_column": AddColumnTransformation,   # alias backward-compat
     "drop_duplicates": DropDuplicatesTransformation,
+    "group_by": GroupByTransformation,
     "sql": SqlTransformation,
     "fill_na": FillNaTransformation,
     "sort": SortTransformation,

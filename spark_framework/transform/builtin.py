@@ -111,6 +111,69 @@ class SortTransformation(BaseTransformation):
         return df.orderBy(*order_cols)
 
 
+_AGG_FUNCTIONS = {
+    "min":            F.min,
+    "max":            F.max,
+    "sum":            F.sum,
+    "avg":            F.avg,
+    "mean":           F.avg,
+    "count":          F.count,
+    "first":          F.first,
+    "last":           F.last,
+    "count_distinct": F.countDistinct,
+    "collect_list":   F.collect_list,
+    "collect_set":    F.collect_set,
+}
+
+
+class GroupByTransformation(BaseTransformation):
+    """Groups the DataFrame and applies aggregations without raw SQL.
+
+    JSON params:
+      by  – list of columns to group by
+      agg – list of aggregation specs, each with:
+              func   – aggregation function name (see supported list below)
+              column – column to aggregate (optional for count)
+              alias  – output column name (optional; defaults to Spark naming)
+
+    Supported func values:
+      min, max, sum, avg/mean, count, first, last,
+      count_distinct, collect_list, collect_set
+
+    Example:
+      { "type": "group_by",
+        "by": ["id", "categoria"],
+        "agg": [
+          { "func": "sum",   "column": "valor",  "alias": "total"  },
+          { "func": "min",   "column": "status", "alias": "status" },
+          { "func": "count",                     "alias": "n"      }
+        ] }
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        by: list[str] = self.config.params["by"]
+        agg_specs: list[dict] = self.config.params["agg"]
+
+        agg_exprs = []
+        for spec in agg_specs:
+            func_name = spec["func"].lower()
+            func = _AGG_FUNCTIONS.get(func_name)
+            if func is None:
+                raise ValueError(
+                    f"Função de agregação '{func_name}' não suportada. "
+                    f"Disponíveis: {sorted(_AGG_FUNCTIONS)}"
+                )
+            col = spec.get("column")
+            alias = spec.get("alias")
+
+            expr = func(F.col(col)) if col else func("*")
+            if alias:
+                expr = expr.alias(alias)
+            agg_exprs.append(expr)
+
+        return df.groupBy(*by).agg(*agg_exprs)
+
+
 _VALID_JOIN_TYPES = {
     "inner", "cross",
     "outer", "full", "fullouter", "full_outer",
