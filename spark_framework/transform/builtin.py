@@ -48,14 +48,21 @@ class CastTransformation(BaseTransformation):
         return result
 
 
-class AddColumnTransformation(BaseTransformation):
-    """Adds a new column computed from a SQL expression."""
+class WithColumnTransformation(BaseTransformation):
+    """Adds or replaces a column computed from a SQL expression.
+
+    JSON: { "type": "with_column", "name": "col", "expression": "SQL expr" }
+    """
 
     def apply(self, df: DataFrame) -> DataFrame:
         return df.withColumn(
             self.config.params["name"],
             F.expr(self.config.params["expression"]),
         )
+
+
+# Backward-compatible alias — use "with_column" in new configs
+AddColumnTransformation = WithColumnTransformation
 
 
 class DropDuplicatesTransformation(BaseTransformation):
@@ -104,27 +111,32 @@ class SortTransformation(BaseTransformation):
         return df.orderBy(*order_cols)
 
 
-class WithTimestampTransformation(BaseTransformation):
-    """Appends an ingestion timestamp column."""
-
-    def apply(self, df: DataFrame) -> DataFrame:
-        col_name = self.config.params.get("column_name", "ingestion_timestamp")
-        return df.withColumn(col_name, F.current_timestamp())
+_VALID_JOIN_TYPES = {
+    "inner", "cross",
+    "outer", "full", "fullouter", "full_outer",
+    "left", "leftouter", "left_outer",
+    "right", "rightouter", "right_outer",
+    "semi", "leftsemi", "left_semi",
+    "anti", "leftanti", "left_anti",
+}
 
 
 class JoinTransformation(BaseTransformation):
     """Joins the main DataFrame with a second source.
 
+    Supports all Spark join types: inner, cross, left, right, full/outer,
+    semi/leftsemi, anti/leftanti and their underscore variants.
+
     JSON params:
       with   – source config (format + path + options)
       on     – column name (str) or list of column names
-      how    – join type: inner | left | right | full (default: inner)
+      how    – join type (default: inner)
 
     Example:
       { "type": "join",
         "with": { "format": "parquet", "path": "/ref/products" },
         "on": "product_id",
-        "how": "left" }
+        "how": "leftanti" }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
@@ -134,7 +146,13 @@ class JoinTransformation(BaseTransformation):
         other = ReaderFactory.create(df.sparkSession, source_cfg).read()
 
         on = self.config.params["on"]
-        how: str = self.config.params.get("how", "inner")
+        how: str = self.config.params.get("how", "inner").lower()
+
+        if how not in _VALID_JOIN_TYPES:
+            raise ValueError(
+                f"Tipo de join '{how}' invalido. "
+                f"Opcoes: {sorted(_VALID_JOIN_TYPES)}"
+            )
         return df.join(other, on, how)
 
 
