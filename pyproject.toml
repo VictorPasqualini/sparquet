@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "JSON-driven Spark pipeline framework for ingestion, transformation, and data quality"
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"
+license = { text = "MIT" }
 authors = [{ name = "STech" }]
 classifiers = [
     "Programming Language :: Python :: 3",
