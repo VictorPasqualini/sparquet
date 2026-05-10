@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-framework"
@@ -8,19 +8,27 @@ version = "0.2.0"
 description = "JSON-driven Spark pipeline framework for ingestion, transformation, and data quality"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+authors = [{ name = "STech" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "pyspark>=3.4.0",
 ]
 
 [project.optional-dependencies]
-# Instala suporte a Delta Lake fora do Databricks (OSS)
-# pip install spark-framework[delta]
+# pip install spark-framework[delta]  →  OSS Delta fora do Databricks
 delta = ["delta-spark>=3.0.0"]
 all   = ["delta-spark>=3.0.0"]
 
 [project.scripts]
-spark-framework = "main:main"
+spark-framework = "spark_framework.cli:main"
 
 [tool.setuptools.packages.find]
 exclude = ["tests*", "examples*", "docs*"]
