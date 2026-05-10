@@ -37,6 +37,9 @@
         {
           "type": "join",
           "with": { "format": "delta", "path": "lastros.silver_status_criterios_contratos" },
+          "with_transformations": [
+            { "type": "select", "columns": ["id_cessao", "id_operacao", "numero_contrato", "status_criterio"] }
+          ],
           "on":   ["id_cessao", "id_operacao", "numero_contrato"],
           "how":  "left"
         },

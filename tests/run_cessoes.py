@@ -8,7 +8,8 @@
 #             (com critérios avaliados via with_transformations) e tipo_contrato
 #   2. Enriquecimento Python    (multi_ativos, params de job, anti-join de controle)
 #   3. Loop por fluxo           (tipo_ativo × registradora × tipo_fluxo)
-#        → funções customizadas de payload
+#        → fw.run(config, input_df, columns) filtra e enriquece via conf JSON
+#        → funcao_construcao_payload monta o payload e retorna df_envio + df_estrutura
 #        → escrita Kafka + tabelas Delta
 #
 # Instalação:
@@ -18,7 +19,13 @@
 #   org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1
 # =============================================================================
 
+import traceback
+from typing import Any, Tuple
+
 from pyspark.sql import functions as F
+from pyspark.sql import DataFrame
+from pyspark.sql.window import Window
+
 from spark_framework import SparkFramework
 
 # ---------------------------------------------------------------------------
@@ -29,14 +36,18 @@ KAFKA_BROKER = "BROKER1:9092,BROKER2:9092"
 ENVIADO      = 1
 
 # Mapeamento de fluxos de operação por (tipo_ativo, registradora).
-# Cada fluxo define: funcao_preparacao_objeto, funcao_construcao_payload, topico.
+# Cada fluxo define:
+#   config                   – arquivo JSON que filtra e enriquece o df (recebe input_df + params)
+#   funcao_construcao_payload – função Python que recebe df_registro e retorna (df_envio, df_estrutura)
+#   topico                   – tópico Kafka de destino
+#
 # Exemplo:
 #   FLUXOS_OPERACOES = {
-#       ("CCB", "CERC"): {
+#       ("NC", "CERC"): {
 #           "EMISSAO_E_REGISTRO": {
-#               "funcao_preparacao_objeto": preparar_ccb_cerc,
-#               "funcao_construcao_payload": construir_payload_ccb_cerc,
-#               "topico": "topico-ccb-cerc",
+#               "config":                    "cessoes_nota_comercial.json",
+#               "funcao_construcao_payload": cessao_registro_lastro_nota_comercial,
+#               "topico":                    "topico-nc-cerc",
 #           }
 #       },
 #   }
@@ -139,7 +150,6 @@ if processar_somente_cessoes_pendentes:
     )
 
 df.cache()
-df.createOrReplaceTempView("cessoes_para_processar")
 df_nao_processadas = df
 
 
@@ -149,33 +159,38 @@ df_nao_processadas = df
 for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
     for tipo_fluxo, atributos_fluxo in fluxo_operacao.items():
 
-        df_registro = df.filter(
-            (F.col("tipo_ativo")       == tipo_ativo)
-            & (F.col("registradora")   == registradora)
-            & (F.col("fluxo_operacao") == tipo_fluxo)
-            & (
-                ((F.col("tipo_contrato") == tipo_ativo) & F.col("multi_ativos"))
-                | (~F.col("multi_ativos"))
-            )
+        print(f"\n⌛ PROCESSANDO: {tipo_ativo}-{registradora} ({tipo_fluxo})")
+
+        # A conf é responsável por filtrar e enriquecer; os params são injetados como colunas literais
+        r = fw.run(
+            f"{BASE_PATH}/{atributos_fluxo['config']}",
+            input_df=df,
+            columns={
+                "param_tipo_ativo":     tipo_ativo,
+                "param_registradora":   registradora,
+                "param_fluxo_operacao": tipo_fluxo,
+            },
         )
+
+        if not r.success:
+            print(f"❌ Erro na conf — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{r.error}")
+            continue
+
+        df_registro = r.output_df
 
         df_nao_processadas = df_nao_processadas.join(
             df_registro.select("id_cessao").distinct(),
             on=["id_cessao"],
-            how="leftanti"
+            how="leftanti",
         )
-
-        print(f"\n⌛ PROCESSANDO: {tipo_ativo}-{registradora} ({tipo_fluxo})")
 
         if df_registro.isEmpty():
             print(f"ℹ️ Sem cessões pendentes — {tipo_ativo}-{registradora} ({tipo_fluxo})")
             continue
 
         try:
-            objeto_preparacao              = atributos_fluxo["funcao_preparacao_objeto"](df_registro)
-            df_envio_registro, df_registro_estrutura = atributos_fluxo["funcao_construcao_payload"](obj=objeto_preparacao)
+            df_envio_registro, df_registro_estrutura = atributos_fluxo["funcao_construcao_payload"](df_registro)
         except Exception:
-            import traceback
             print(f"❌ Erro no processamento — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{traceback.format_exc()}")
             continue
 
@@ -233,7 +248,6 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
             )
 
         except Exception:
-            import traceback
             print(f"❌ Erro Kafka/persistência — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{traceback.format_exc()}")
             continue
 
@@ -252,3 +266,144 @@ else:
     df_nao_processadas.select("id_operacao").dropDuplicates().display()
 
 fw.stop()
+
+
+# =============================================================================
+# Funções de construção de payload — Nota Comercial / CERC
+# =============================================================================
+
+def _montar_estrutura_registro_nota_comercial(window: Window):
+    return F.struct(
+        F.col("id_vert").alias("id_externo"),
+        F.struct(
+            F.struct(
+                F.lit("N").alias("ncEmissionTypeCode"),
+                F.lit("55639.40-2").alias("otcIssuerAccountCode"),
+                F.col("codigo_tipo_emissao").alias("issueTypeCode"),
+                F.col("codigo_conta_contabil_otc").alias("otcBookkeeperAccountCode"),
+                F.col("informacoes_adicionais.numero_da_emissao").cast("int").alias("issueNumber"),
+                F.col("informacoes_adicionais.numero_da_serie").alias("serieNumber"),
+                F.col("data_emissao_contrato").alias("issueDate"),
+                F.col("max_data_vencimento_parcela").alias("maturityDate"),
+                F.col("data_referencia").alias("profitabilityStartDate"),
+                F.col("informacoes_adicionais.quantidade_emitida").cast("int").alias("issuedQuantity"),
+                F.col("informacoes_adicionais.valor_da_unidade_de_emissao").cast("double").alias("unitIssueValue"),
+                (
+                    F.col("informacoes_adicionais.quantidade_emitida").cast("double")
+                    * F.col("informacoes_adicionais.valor_da_unidade_de_emissao").cast("double")
+                ).cast("double").alias("issueFinancialValue"),
+                F.col("codigo_regime_tributario").alias("regimeTypeCode"),
+                F.col("indicador_processamento_cetip").alias("cetipEventAttendedIndicator"),
+                F.lit("PRIVADAVERT").alias("cvmRegistrationNumber"),
+                F.lit(1).alias("cvmSequentialNumber"),
+                F.lit("2026-01-12").alias("cvmRegistrationDate"),
+                F.col("indicador_resgate_antecipado_unilateral").alias("unilateralEarlyRedemptionIndicator"),
+                F.col("informacoes_adicionais.nome_fiador").alias("guarantorName"),
+                F.col("indicador_presenca_agente_fiduciario").alias("fiduciaryAgentIndicator"),
+                F.col("nome_sacado").alias("issuerName"),
+                F.col("documento_sacado").alias("issuerDocumentNumber"),
+                F.col("informacoes_adicionais.codigo_tipo_garantia").cast("int").alias("guaranteeTypeCode"),
+                F.struct(
+                    F.lpad(F.col("informacoes_adicionais.codigo_metodo_pagamento"), 2, "0").alias("paymentMethodCode"),
+                    F.lpad(F.col("informacoes_adicionais.codigo_do_indexador"), 4, "0").alias("indexCode"),
+                    F.when(
+                        F.col("informacoes_adicionais.codigo_do_indexador").cast("int").isin(20, 99),
+                        F.lit(None),
+                    ).otherwise(F.col("percentual_taxa_variavel").cast("float")).alias("rateFloatingPercentage"),
+                    F.col("informacoes_adicionais.taxa_contrato").cast("int").alias("interestRateSpread"),
+                    F.col("codigo_criterio_calculo_juros").alias("interestCalculationCriteriaCode"),
+                ).alias("paymentMethod"),
+            ).alias("nc")
+        ).alias("data"),
+    ).alias("payload")
+
+
+def cessao_registro_lastro_nota_comercial(df_registro: DataFrame) -> Tuple[Any, Any]:
+    """Monta o payload de registro de Nota Comercial.
+
+    Recebe o df já filtrado e enriquecido com colunas da remessa
+    (join feito pela conf cessoes_nota_comercial.json).
+    """
+    try:
+        window_contrato = Window.partitionBy("numero_contrato")
+        window_max_vencimento = Window.partitionBy("id_cessao", "numero_contrato")
+
+        df_parcelas_struct = (
+            df_registro
+            .select("numero_contrato")
+            .groupBy("numero_contrato")
+            .agg(
+                F.collect_list(
+                    F.struct(
+                        F.concat(F.col("numero_contrato"), F.lit("1")).alias("codigo_controle_parcela_contrato_if"),
+                        F.lit(1).alias("numero_parcela"),
+                    )
+                ).alias("parcelas")
+            )
+        )
+
+    except Exception as e:
+        raise RuntimeError(
+            "Falha na preparação dos dataframes em 'cessao_registro_lastro_nota_comercial()'"
+        ) from e
+
+    try:
+        tipo_struct = _montar_estrutura_registro_nota_comercial(window_contrato)
+
+        df_registro_struct = (
+            df_registro
+            .withColumn("uuid_temp", F.expr("uuid()"))
+            .withColumn("id_vert", F.first("uuid_temp").over(window_contrato))
+            .drop("uuid_temp")
+            .withColumn("informacoes_adicionais", F.regexp_replace("informacoes_adicionais", "'", '"'))
+            .withColumn("max_data_vencimento_parcela", F.max("data_vencimento_parcela").over(window_max_vencimento))
+            .withColumn(
+                "informacoes_adicionais",
+                F.from_json(
+                    "informacoes_adicionais",
+                    """
+                    STRUCT<
+                        numero_da_emissao: STRING,
+                        numero_da_serie: STRING,
+                        quantidade_emitida: STRING,
+                        valor_da_unidade_de_emissao: STRING,
+                        nome_fiador: STRING,
+                        codigo_tipo_garantia: STRING,
+                        codigo_metodo_pagamento: STRING,
+                        codigo_do_indexador: STRING,
+                        taxa_contrato: STRING
+                    >
+                    """,
+                ),
+            )
+            .select("id_operacao", "id_vert", "id_cessao", "numero_contrato", tipo_struct)
+            .dropDuplicates(["id_cessao", "numero_contrato"])
+            .join(df_parcelas_struct, on=["numero_contrato"], how="inner")
+            .withColumn("status", F.lit(""))
+        )
+
+        df_registro_struct = df_registro_struct.localCheckpoint()
+        df_registro_struct.count()
+
+        headers = F.array(
+            F.struct(F.lit("type").alias("key"), F.lit("REGISTRO").cast("binary").alias("value")),
+            F.struct(F.lit("kind").alias("key"), F.lit("ENVIO").cast("binary").alias("value")),
+        )
+
+    except Exception as e:
+        raise RuntimeError(
+            "Falha na montagem do payload em 'cessao_registro_lastro_nota_comercial()'"
+        ) from e
+
+    try:
+        df_envio_registro = (
+            df_registro_struct
+            .withColumn("value", F.to_json("payload"))
+            .select("value", headers.alias("headers"))
+        )
+        return df_envio_registro, df_registro_struct
+
+    except Exception as e:
+        raise RuntimeError(
+            "Falha no parsing do payload para JSON em 'cessao_registro_lastro_nota_comercial()'"
+        ) from e

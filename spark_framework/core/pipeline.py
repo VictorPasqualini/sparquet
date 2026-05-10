@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -23,6 +23,7 @@ class PipelineResult:
     rows_written: int = 0
     validation_results: List[ValidationResult] = field(default_factory=list)
     error: Optional[str] = None
+    output_df: Optional[DataFrame] = None  # df após transformações; disponível quando input_df é injetado
 
     def summary(self) -> str:
         if not self.success:
@@ -45,10 +46,14 @@ class Pipeline:
         config: PipelineConfig,
         transform_engine: Optional[TransformationEngine] = None,
         validation_engine: Optional[ValidationEngine] = None,
+        input_df: Optional[DataFrame] = None,
+        columns: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.config = config
         self._transform_engine = transform_engine or TransformationEngine()
         self._validation_engine = validation_engine or ValidationEngine()
+        self._input_df = input_df
+        self._columns: Dict[str, Any] = columns or {}
 
     @classmethod
     def from_file(cls, path: str) -> Pipeline:
@@ -65,14 +70,24 @@ class Pipeline:
         try:
             spark = SparkContextManager.get_or_create(self.config.spark)
 
-            df = ReaderFactory.create(spark, self.config.input).read()
-            df = df.withColumn("ingestion_ts", F.current_timestamp())
-            rows_read = df.count()
-            log.info(
-                "Leitura concluida",
-                linhas=rows_read,
-                formato=self.config.input.format,
-            )
+            if self._input_df is not None:
+                df = self._input_df
+                rows_read = 0
+                log.info("Input df injetado externamente", colunas=len(df.columns))
+            else:
+                df = ReaderFactory.create(spark, self.config.input).read()
+                df = df.withColumn("ingestion_ts", F.current_timestamp())
+                rows_read = df.count()
+                log.info(
+                    "Leitura concluida",
+                    linhas=rows_read,
+                    formato=self.config.input.format,
+                )
+
+            for col_name, value in self._columns.items():
+                df = df.withColumn(col_name, F.lit(value))
+            if self._columns:
+                log.info("Colunas injetadas", colunas=list(self._columns))
 
             df = self._transform_engine.apply(df, self.config.transformations)
             log.info("Transformacoes aplicadas")
@@ -91,6 +106,7 @@ class Pipeline:
                 rows_read=rows_read,
                 rows_written=rows_written,
                 validation_results=validation_results,
+                output_df=df,
             )
 
         except Exception as exc:
