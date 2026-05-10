@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from pyspark.sql import DataFrame
 
 from spark_framework.core.config import PipelineConfig, SparkConfig
 from spark_framework.core.context import SparkContextManager
@@ -46,17 +47,36 @@ class SparkFramework:
     # Execução de pipelines
     # ------------------------------------------------------------------
 
-    def run(self, config_path: str) -> PipelineResult:
-        """Executa um pipeline a partir de um arquivo JSON."""
+    def run(
+        self,
+        config_path: str,
+        input_df: Optional[DataFrame] = None,
+        columns: Optional[Dict[str, Any]] = None,
+    ) -> PipelineResult:
+        """Executa um pipeline a partir de um arquivo JSON.
+
+        Args:
+            config_path: caminho para o JSON de configuração.
+            input_df:    DataFrame de entrada; quando fornecido substitui o 'input'
+                         declarado no JSON e não adiciona ingestion_ts automaticamente.
+            columns:     Colunas literais a injetar no df antes das transformações,
+                         ex: {"param_tipo_ativo": "NC", "param_registradora": "CERC"}.
+                         Permitem que filtros na conf referenciem valores de runtime.
+        """
         config = PipelineConfig.from_file(config_path)
         self._apply_spark_override(config)
-        return self._execute(config)
+        return self._execute(config, input_df=input_df, columns=columns)
 
-    def run_from_dict(self, config: Dict[str, Any]) -> PipelineResult:
+    def run_from_dict(
+        self,
+        config: Dict[str, Any],
+        input_df: Optional[DataFrame] = None,
+        columns: Optional[Dict[str, Any]] = None,
+    ) -> PipelineResult:
         """Executa um pipeline a partir de um dicionário Python."""
         pipeline_config = PipelineConfig.from_dict(config)
         self._apply_spark_override(pipeline_config)
-        return self._execute(pipeline_config)
+        return self._execute(pipeline_config, input_df=input_df, columns=columns)
 
     # ------------------------------------------------------------------
     # Registro de extensões
@@ -94,11 +114,18 @@ class SparkFramework:
     # Interno
     # ------------------------------------------------------------------
 
-    def _execute(self, config: PipelineConfig) -> PipelineResult:
+    def _execute(
+        self,
+        config: PipelineConfig,
+        input_df: Optional[DataFrame] = None,
+        columns: Optional[Dict[str, Any]] = None,
+    ) -> PipelineResult:
         pipeline = Pipeline(
             config,
             transform_engine=self._transform_engine,
             validation_engine=self._validation_engine,
+            input_df=input_df,
+            columns=columns,
         )
         return pipeline.run()
 
