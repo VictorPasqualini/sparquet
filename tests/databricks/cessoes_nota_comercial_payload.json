@@ -45,25 +45,22 @@
     },
 
     {
-      "type":       "with_column",
-      "name":       "payload",
-      "expression": "to_json(payload_nc)"
-    },
-
-    {
-      "type":       "with_column",
-      "name":       "headers",
-      "expression": "array(named_struct('key', 'type', 'value', CAST('REGISTRO' AS BINARY)), named_struct('key', 'kind', 'value', CAST('ENVIO' AS BINARY)))"
-    },
-
-    { "type": "with_column", "name": "status",           "expression": "CAST(1 AS INT)"      },
-    { "type": "with_column", "name": "data_atualizacao", "expression": "CAST(NULL AS DATE)"   },
-    { "type": "with_column", "name": "id_registro",      "expression": "CAST(NULL AS STRING)" },
-    { "type": "with_column", "name": "id",               "expression": "CAST(NULL AS BIGINT)" },
-
-    {
-      "type":    "drop",
-      "columns": ["payload_nc", "parcelas"]
+      "type": "select",
+      "columns": [
+        "id_operacao",
+        "id_vert",
+        "id_cessao",
+        "numero_contrato",
+        "data_envio",
+        "param_registradora",
+        "param_tipo_ativo",
+        "to_json(payload_nc) AS payload",
+        "array(struct('type' AS key, CAST('REGISTRO' AS BINARY) AS value), struct('kind' AS key, CAST('ENVIO' AS BINARY) AS value)) AS headers",
+        "CAST(1 AS INT)    AS status",
+        "CAST(NULL AS DATE)   AS data_atualizacao",
+        "CAST(NULL AS STRING) AS id_registro",
+        "CAST(NULL AS BIGINT) AS id"
+      ]
     }
 
   ],
