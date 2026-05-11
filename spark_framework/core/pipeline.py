@@ -48,12 +48,14 @@ class Pipeline:
         validation_engine: Optional[ValidationEngine] = None,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.config = config
         self._transform_engine = transform_engine or TransformationEngine()
         self._validation_engine = validation_engine or ValidationEngine()
         self._input_df = input_df
         self._columns: Dict[str, Any] = columns or {}
+        self._params: Dict[str, Any] = params or {}
 
     @classmethod
     def from_file(cls, path: str) -> Pipeline:
@@ -89,7 +91,7 @@ class Pipeline:
             if self._columns:
                 log.info("Colunas injetadas", colunas=list(self._columns))
 
-            df = self._transform_engine.apply(df, self.config.transformations)
+            df = self._transform_engine.apply(df, self.config.transformations, self._params)
             log.info("Transformacoes aplicadas")
 
             validation_results = self._validation_engine.validate(

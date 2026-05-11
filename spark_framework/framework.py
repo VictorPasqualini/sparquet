@@ -52,6 +52,7 @@ class SparkFramework:
         config_path: str,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um arquivo JSON.
 
@@ -62,21 +63,25 @@ class SparkFramework:
             columns:     Colunas literais a injetar no df antes das transformações,
                          ex: {"param_tipo_ativo": "NC", "param_registradora": "CERC"}.
                          Permitem que filtros na conf referenciem valores de runtime.
+            params:      Objetos Python arbitrários (listas, booleanos) acessíveis pelas
+                         transformações filter_in e skip_if_false. Não são injetados como
+                         colunas no df — ficam disponíveis apenas durante as transformações.
         """
         config = PipelineConfig.from_file(config_path)
         self._apply_spark_override(config)
-        return self._execute(config, input_df=input_df, columns=columns)
+        return self._execute(config, input_df=input_df, columns=columns, params=params)
 
     def run_from_dict(
         self,
         config: Dict[str, Any],
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um dicionário Python."""
         pipeline_config = PipelineConfig.from_dict(config)
         self._apply_spark_override(pipeline_config)
-        return self._execute(pipeline_config, input_df=input_df, columns=columns)
+        return self._execute(pipeline_config, input_df=input_df, columns=columns, params=params)
 
     # ------------------------------------------------------------------
     # Registro de extensões
@@ -119,6 +124,7 @@ class SparkFramework:
         config: PipelineConfig,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         pipeline = Pipeline(
             config,
@@ -126,6 +132,7 @@ class SparkFramework:
             validation_engine=self._validation_engine,
             input_df=input_df,
             columns=columns,
+            params=params,
         )
         return pipeline.run()
 

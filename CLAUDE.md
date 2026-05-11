@@ -43,7 +43,8 @@ fw.stop()
 
 **`input_df`**: substitui a leitura do `input` — o pipeline começa a partir do DataFrame fornecido.  
 **`columns`**: injeta colunas literais (`F.lit(value)`) antes das transformações, sem alterar o JSON.  
-**`result.output_df`**: quando `input_df` é passado, o DataFrame resultante fica disponível em `PipelineResult.output_df`.
+**`params`**: objetos Python arbitrários (listas, booleanos) acessíveis pelas transformações `filter_in` e `skip_if_false`. Não são injetados como colunas no df.  
+**`result.output_df`**: DataFrame após todas as transformações, disponível no resultado.
 
 ### Uso direto de Pipeline
 
@@ -131,6 +132,8 @@ JSON/dict → PipelineConfig → Pipeline.run()
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
+    // filter_in: isin com lista de runtime_params; auto-skip se lista vazia
+    { "type": "filter_in", "column": "id_cessao", "param": "lista_cessoes" },
     {
       "type": "debug",                          // não modifica o df — apenas inspeciona
       "label": "após join contratos",           // opcional, aparece no separador
@@ -155,6 +158,7 @@ JSON/dict → PipelineConfig → Pipeline.run()
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
       "how": "inner|left|right|full|cross|leftsemi|leftanti|...",
+      "skip_if_false": "nome_do_param",   // opcional: pula o join se runtime_params[nome] for falsy
       // with_transformations: aplica transformações no df da direita antes do join
       // df esquerdo (principal) é alias 'l'; df direito é alias 'r'.
       "with_transformations": [

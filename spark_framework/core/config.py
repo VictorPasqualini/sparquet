@@ -38,16 +38,21 @@ class InputConfig:
         )
 
 
+_TRANSFORMATION_META_KEYS = {"type", "skip_if_false"}
+
+
 @dataclass
 class TransformationConfig:
     type: str
     params: Dict[str, Any] = field(default_factory=dict)
+    skip_if_false: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> TransformationConfig:
         return cls(
             type=data["type"],
-            params={k: v for k, v in data.items() if k != "type"},
+            skip_if_false=data.get("skip_if_false"),
+            params={k: v for k, v in data.items() if k not in _TRANSFORMATION_META_KEYS},
         )
 
 
