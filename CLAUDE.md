@@ -8,7 +8,7 @@ Objetivo: produto reutilizável para qualquer caso de ingestão, transformação
 ## Uso como biblioteca (ponto de entrada principal)
 
 ```python
-from spark_framework import SparkFramework
+from spark_framework import SparkFramework, Pipeline, PipelineResult, PipelineConfig
 
 fw = SparkFramework(spark={"app_name": "MeuJob", "master": "yarn"})
 
@@ -16,10 +16,46 @@ r1 = fw.run("pipeline_clientes.json")
 r2 = fw.run("pipeline_pedidos.json")
 r3 = fw.run_from_dict({"name": "inline", "input": {...}, "output": {...}})
 
+# Injeção de DataFrame externo e colunas de runtime
+r4 = fw.run("pipeline.json", input_df=df_existente, columns={"dt_ref": "2025-01-01"})
+
 fw.stop()
 ```
 
 `SparkFramework` em `framework.py` gerencia o singleton de SparkSession e compartilha os engines de transformação/validação entre todas as execuções.
+
+### API pública completa
+
+```python
+# Execução
+fw.run(config_path: str, input_df=None, columns=None) → PipelineResult
+fw.run_from_dict(config: dict, input_df=None, columns=None) → PipelineResult
+
+# Extensão
+fw.register_reader(format_name: str, reader_cls)
+fw.register_writer(format_name: str, writer_cls)
+fw.register_transformation(name: str, transformation_cls)
+fw.register_validator(name: str, validator_cls)
+
+# Ciclo de vida
+fw.stop()
+```
+
+**`input_df`**: substitui a leitura do `input` — o pipeline começa a partir do DataFrame fornecido.  
+**`columns`**: injeta colunas literais (`F.lit(value)`) antes das transformações, sem alterar o JSON.  
+**`result.output_df`**: quando `input_df` é passado, o DataFrame resultante fica disponível em `PipelineResult.output_df`.
+
+### Uso direto de Pipeline
+
+```python
+from spark_framework import Pipeline
+
+p = Pipeline.from_file("meu_pipeline.json")
+result = p.run()
+
+p2 = Pipeline.from_dict({...})
+result2 = p2.run()
+```
 
 ---
 
@@ -29,6 +65,7 @@ fw.stop()
 JSON/dict → PipelineConfig → Pipeline.run()
                                  │
                                  ├─► ReaderFactory(input)  → DataFrame
+                                 ├─► injeção de columns (F.lit)
                                  ├─► TransformationEngine   → DataFrame
                                  ├─► ValidationEngine       → ValidationResult[]
                                  └─► para cada output em outputs:
@@ -41,13 +78,18 @@ JSON/dict → PipelineConfig → Pipeline.run()
 | Módulo | Arquivo | Responsabilidade |
 |--------|---------|-----------------|
 | `SparkFramework` | `framework.py` | Entry point como lib |
+| `cli` | `cli.py` | Entry point de linha de comando |
 | `PipelineConfig` | `core/config.py` | Deserializa JSON em dataclasses |
-| `SparkContextManager` | `core/context.py` | Singleton do SparkSession |
+| `SparkContextManager` | `core/context.py` | Singleton do SparkSession; detecta Databricks/EMR/Dataproc/Synapse/local |
 | `Pipeline` | `core/pipeline.py` | Orquestrador; `run() → PipelineResult` |
 | `BaseReader/Writer` | `io/base.py` | Contratos abstratos para IO |
 | `ParquetReader/Writer` | `io/parquet.py` | Implementação Parquet |
 | `IcebergReader/Writer` | `io/iceberg.py` | Implementação Iceberg (com MERGE INTO) |
+| `DeltaReader/Writer` | `io/delta.py` | Implementação Delta Lake (com MERGE, time travel) |
 | `CsvReader/Writer` | `io/csv.py` | Implementação CSV com defaults de header/encoding |
+| `TxtReader/Writer` | `io/txt.py` | Arquivos texto plano (coluna `value`) |
+| `KafkaWriter` | `io/kafka.py` | Publicação batch em tópico Kafka |
+| `ViewReader/Writer` | `io/view.py` | Spark temp views (auto-cache) |
 | `ReaderFactory/WriterFactory` | `io/factory.py` | Registry de formatos; extensível |
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
@@ -68,10 +110,14 @@ JSON/dict → PipelineConfig → Pipeline.run()
     "configs": { "spark.sql.*": "valor" }
   },
 
-  "input": {                            // obrigatório — fonte principal
-    "format": "csv|parquet|iceberg",
+  "input": {                            // obrigatório (ignorado quando input_df é injetado)
+    "format": "csv|parquet|iceberg|delta|txt|view",
     "path": "string",
-    "options": {}
+    // Delta: suporta time travel via options
+    "options": {
+      "versionAsOf": "5",
+      "timestampAsOf": "2025-05-10T10:00:00Z"
+    }
   },
 
   "transformations": [                  // opcional — aplicadas em ordem
@@ -80,7 +126,7 @@ JSON/dict → PipelineConfig → Pipeline.run()
     { "type": "drop", "columns": ["x"] },
     { "type": "rename", "mappings": {"old": "new"} },
     { "type": "cast", "columns": {"col": "type"} },
-    { "type": "add_column", "name": "col", "expression": "SQL expr" },
+    { "type": "with_column", "name": "col", "expression": "SQL expr" },  // add_column também aceito
     { "type": "drop_duplicates", "columns": ["id"] },
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
@@ -99,10 +145,9 @@ JSON/dict → PipelineConfig → Pipeline.run()
       "type": "join",
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
-      "how": "inner|left|right|full|leftanti|leftsemi|...",
+      "how": "inner|left|right|full|cross|leftsemi|leftanti|...",
       // with_transformations: aplica transformações no df da direita antes do join
-      // Suporta agregações, filtros, selects — qualquer tipo builtin.
-      // O df esquerdo (principal) é alias 'l'; o da direita é alias 'r'.
+      // df esquerdo (principal) é alias 'l'; df direito é alias 'r'.
       "with_transformations": [
         { "type": "filter", "condition": "status = 1" },
         { "type": "sql", "view_name": "v", "query": "SELECT id, MIN(val) AS val FROM v GROUP BY id" },
@@ -134,15 +179,20 @@ JSON/dict → PipelineConfig → Pipeline.run()
 
   // Saída única (shorthand):
   "output": {
-    "format": "csv|parquet|iceberg",
+    "format": "csv|parquet|iceberg|delta|txt|kafka|view",
     "path": "string",
     "mode": "overwrite|append|merge",
     "partition_by": ["col"],
     "columns": ["col_a", "col_b"],    // opcional: projeta só essas colunas
-    // merge: T = target (tabela destino), S = source (DataFrame sendo escrito)
+    // merge (Delta/Iceberg): T = target (tabela destino), S = source (DataFrame)
     "options": {
       "merge_keys": ["id"],
-      "merge_condition": "T.deleted = FALSE"   // condição SQL extra — usa T./S.
+      "merge_condition": "T.deleted = FALSE",   // condição SQL extra — usa T./S.
+      // Kafka:
+      "bootstrap_servers": "broker:9092",
+      "topic": "meu-topico",
+      "value_column": "payload",   // default: "value"
+      "key_column": "header"       // default: "key"
     }
   },
 
@@ -152,7 +202,6 @@ JSON/dict → PipelineConfig → Pipeline.run()
       "format": "parquet",
       "path": "/data/full",
       "mode": "overwrite"
-                                      // sem "columns" = escreve tudo
     },
     {
       "format": "parquet",
@@ -170,6 +219,20 @@ JSON/dict → PipelineConfig → Pipeline.run()
 
 ---
 
+## Formatos IO suportados
+
+| Formato | Leitura | Escrita | Notas |
+|---------|---------|---------|-------|
+| `parquet` | sim | sim | Parquet nativo Spark |
+| `csv` | sim | sim | Defaults: `header=true`, `inferSchema=true` |
+| `delta` | sim | sim | Unity Catalog ou path; time travel; MERGE |
+| `iceberg` | sim | sim | MERGE INTO nativo |
+| `txt` | sim | sim | Texto plano; coluna `value` |
+| `view` | sim | sim | Spark temp views; auto-cache |
+| `kafka` | não | sim | Publicação batch; requer conector Kafka no classpath |
+
+---
+
 ## Validações vs Transformações — quando usar cada um
 
 | Necessidade | Use |
@@ -183,6 +246,26 @@ JSON/dict → PipelineConfig → Pipeline.run()
 
 Transformações **mudam** os dados. Validações **reportam** sobre eles sem modificá-los.  
 O `PipelineResult.validation_results` expõe `failed_count` e mensagem por regra — útil para dashboards de qualidade.
+
+---
+
+## PipelineResult
+
+```python
+@dataclass
+class PipelineResult:
+    pipeline_name: str
+    success: bool
+    rows_read: int = 0
+    rows_written: int = 0
+    validation_results: List[ValidationResult] = []
+    error: Optional[str] = None
+    output_df: Optional[DataFrame] = None  # preenchido quando input_df é injetado
+
+    def summary() -> str  # linha de status legível
+```
+
+`PipelineResult` nunca lança exceção — erros ficam em `result.error`.
 
 ---
 
@@ -208,8 +291,8 @@ A projeção é feita em `Pipeline._project_columns()` — o DataFrame principal
 
 ```python
 fw = SparkFramework()
-fw.register_reader("delta", DeltaReader)   # class DeltaReader(BaseReader)
-fw.register_writer("delta", DeltaWriter)   # class DeltaWriter(BaseWriter)
+fw.register_reader("meu_formato", MeuReader)   # class MeuReader(BaseReader)
+fw.register_writer("meu_formato", MeuWriter)   # class MeuWriter(BaseWriter)
 ```
 
 ### Nova transformação
@@ -249,6 +332,7 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 - `Pipeline` recebe engines injetáveis — útil para testes ou para injetar engines com transformações customizadas.
 - `PipelineResult` nunca lança exceção — erros ficam em `result.error`.
 - Logger sempre JSON estruturado (`utils/logger.py`).
+- `SparkContextManager` detecta o ambiente automaticamente (Databricks reusa sessão ativa; outros criam via builder).
 
 ---
 
@@ -258,6 +342,8 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 |--------|--------|-----------|
 | `tests/run_ingestion.py` | `tests/ingestion_csv_to_parquet.json` | CSV de clientes → Parquet |
 | `tests/run_join.py` | `tests/join_orders_products.json` | JOIN orders×products → 3 outputs |
+| `tests/run_databricks.py` | `tests/databricks/` | Testes específicos para Databricks |
+| `tests/run_cessoes.py` | — | Pipeline de cessões |
 
 Dados em `tests/csv/`: `customers.csv`, `orders.csv`, `products.csv`.
 
@@ -265,7 +351,6 @@ Dados em `tests/csv/`: `customers.csv`, `orders.csv`, `products.csv`.
 
 ## Roadmap pendente
 
-- Delta Lake como formato nativo
 - Modo dry-run (valida config sem executar)
 - Testes unitários com dados mock
 - Variáveis de runtime no JSON (`${ENV_VAR}`)
