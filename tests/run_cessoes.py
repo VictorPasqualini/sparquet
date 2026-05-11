@@ -93,14 +93,6 @@ if not r_cessoes.success:
 # =============================================================================
 df = spark.table("cessoes_base")
 
-# --- multi_ativos: flag True quando a operação tem mais de 1 (tipo_ativo, registradora) ---
-df_multi = (
-    df.select("id_operacao", "tipo_ativo", "registradora").distinct()
-    .groupBy("id_operacao")
-    .agg((F.countDistinct(F.struct("tipo_ativo", "registradora")) > 1).alias("multi_ativos"))
-)
-df = df.join(df_multi.select("id_operacao", "multi_ativos"), on=["id_operacao"], how="left")
-
 # --- Parâmetros do job ---
 processar_somente_cessoes_pendentes = True
 
@@ -207,15 +199,8 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
                 .save()
             )
 
-            # Controle de cessões enviadas
-            (
-                df_registro.select("id_cessao", "id_operacao").distinct()
-                .withColumn("data_envio", F.current_timestamp())
-                .write.mode("append").option("mergeSchema", "true")
-                .saveAsTable("lastros.silver_controle_registro_cessoes")
-            )
-
             # Estrutura de monitoramento
+            # (controle de cessões enviadas movido para cessoes_nota_comercial.json)
             (
                 df_registro_estrutura
                 .withColumn("payload",          F.to_json(F.col("payload")))
