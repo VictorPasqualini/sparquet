@@ -14,6 +14,12 @@
     },
 
     {
+      "type":       "with_column",
+      "name":       "data_envio",
+      "expression": "current_timestamp()"
+    },
+
+    {
       "type": "join",
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
       "with_transformations": [
@@ -29,10 +35,19 @@
     }
   ],
 
-  "output": {
-    "format": "view",
-    "path":   "cessoes_nota_comercial_reg",
-    "mode":   "overwrite",
-    "options": { "cache": "false" }
-  }
+  "outputs": [
+    {
+      "format": "view",
+      "path":   "cessoes_nota_comercial_reg",
+      "mode":   "overwrite",
+      "options": { "cache": "false" }
+    },
+    {
+      "format":  "delta",
+      "path":    "lastros.silver_controle_registro_cessoes",
+      "mode":    "merge",
+      "columns": ["id_cessao", "id_operacao", "data_envio"],
+      "options": { "merge_keys": ["id_cessao"] }
+    }
+  ]
 }
