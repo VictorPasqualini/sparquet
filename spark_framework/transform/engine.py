@@ -13,6 +13,7 @@ from spark_framework.transform.builtin import (
     DropDuplicatesTransformation,
     DropTransformation,
     FillNaTransformation,
+    FilterInTransformation,
     FilterTransformation,
     GroupByTransformation,
     JoinTransformation,
@@ -26,7 +27,8 @@ from spark_framework.transform.builtin import (
 from spark_framework.utils.logger import logger
 
 _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
-    "filter": FilterTransformation,
+    "filter":    FilterTransformation,
+    "filter_in": FilterInTransformation,
     "select": SelectTransformation,
     "drop": DropTransformation,
     "rename": RenameTransformation,
@@ -58,8 +60,21 @@ class TransformationEngine:
     def register(self, name: str, cls: Type[BaseTransformation]) -> None:
         self._registry[name] = cls
 
-    def apply(self, df: DataFrame, configs: List[TransformationConfig]) -> DataFrame:
+    def apply(
+        self,
+        df: DataFrame,
+        configs: List[TransformationConfig],
+        runtime_params: dict | None = None,
+    ) -> DataFrame:
+        _runtime = runtime_params or {}
         for config in configs:
+            if config.skip_if_false and not _runtime.get(config.skip_if_false):
+                logger.info(
+                    "Transformacao pulada",
+                    type=config.type,
+                    skip_if_false=config.skip_if_false,
+                )
+                continue
             cls = self._registry.get(config.type)
             if cls is None:
                 raise ValueError(
@@ -67,7 +82,7 @@ class TransformationEngine:
                     f"Available: {sorted(self._registry)}"
                 )
             logger.info("Applying transformation", type=config.type)
-            df = cls(config).apply(df)
+            df = cls(config, _runtime).apply(df)
         return df
 
     @property

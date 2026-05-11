@@ -93,31 +93,18 @@ if not r_cessoes.success:
 # ETAPA 2 — Filtragem e seleção de fluxo
 # =============================================================================
 
-# --- Parâmetros do job ---
-processar_somente_cessoes_pendentes = True
-
+# --- Parâmetros do job (leitura de widgets — único trecho que exige Python) ---
 param_lista_contratos = validar_param_lista("contratos_lista_string", str)
 param_lista_cessoes   = validar_param_lista("cessoes_lista_string",   str)
 param_lista_operacoes = validar_param_lista("operacoes_lista_int",    int)
 param_tipo_ativo      = validar_param_unico("tipo_ativo_string",      str)
 param_registradora    = validar_param_unico("registradora_string",    str)
 
-if param_lista_contratos:
-    processar_somente_cessoes_pendentes = False
-    print("✅ CONTRATOS FILTRADOS:", param_lista_contratos)
-else:
-    print("ℹ️ Sem filtros para contratos")
+processar_pendentes = not any([param_lista_contratos, param_lista_cessoes])
 
-if param_lista_cessoes:
-    processar_somente_cessoes_pendentes = False
-    print("✅ CESSÕES FILTRADAS:", param_lista_cessoes)
-else:
-    print("ℹ️ Sem filtros para cessões")
-
-if param_lista_operacoes:
-    print("✅ OPERAÇÕES FILTRADAS:", param_lista_operacoes)
-else:
-    print("ℹ️ Sem filtros para operações")
+print("✅ CONTRATOS FILTRADOS:",  param_lista_contratos) if param_lista_contratos else print("ℹ️ Sem filtros para contratos")
+print("✅ CESSÕES FILTRADAS:",    param_lista_cessoes)   if param_lista_cessoes   else print("ℹ️ Sem filtros para cessões")
+print("✅ OPERAÇÕES FILTRADAS:",  param_lista_operacoes) if param_lista_operacoes else print("ℹ️ Sem filtros para operações")
 
 # --- Resolve fluxos ativos ---
 if param_tipo_ativo and param_registradora:
@@ -130,23 +117,20 @@ else:
     fluxos_ativos = FLUXOS_OPERACOES
     print("ℹ️ Sem filtros para tipo_ativo/registradora — todos os fluxos")
 
-# --- Seleciona base: pendentes (com anti-join) ou reprocessamento (sem anti-join) ---
-if processar_somente_cessoes_pendentes:
-    fw.run(f"{BASE_PATH}/cessoes_pendentes.json")
-else:
-    fw.run(f"{BASE_PATH}/cessoes_reprocessamento.json")
+# --- Filtragem e anti-join declarativos via conf ---
+fw.run(
+    f"{BASE_PATH}/cessoes_para_processar.json",
+    params={
+        "processar_pendentes": processar_pendentes,
+        "lista_contratos":     param_lista_contratos or [],
+        "lista_cessoes":       param_lista_cessoes   or [],
+        "lista_operacoes":     param_lista_operacoes or [],
+    },
+)
 
-# --- Filtros por lista de runtime (não expressáveis em JSON — parâmetros como listas) ---
 df = spark.table("cessoes_para_processar")
-if param_lista_contratos:
-    df = df.filter(F.col("numero_contrato").isin(param_lista_contratos))
-if param_lista_cessoes:
-    df = df.filter(F.col("id_cessao").isin(param_lista_cessoes))
-if param_lista_operacoes:
-    df = df.filter(F.col("id_operacao").isin(param_lista_operacoes))
-
 df.cache()
-df.createOrReplaceTempView("cessoes_para_processar")  # re-registra com df cacheado (e filtrado, se aplicável)
+df.createOrReplaceTempView("cessoes_para_processar")
 df_nao_processadas = df
 
 

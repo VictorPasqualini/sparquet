@@ -1,0 +1,32 @@
+{
+  "name": "cessoes_para_processar",
+  "description": "A partir de cessoes_base, aplica filtros de lista e — quando processar_pendentes for verdadeiro — descarta cessões já registradas via anti-join. Recebe runtime_params com: processar_pendentes (bool), lista_contratos, lista_cessoes, lista_operacoes (listas, auto-skip se vazias).",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_base"
+  },
+
+  "transformations": [
+    { "type": "filter_in", "column": "numero_contrato", "param": "lista_contratos" },
+    { "type": "filter_in", "column": "id_cessao",       "param": "lista_cessoes"   },
+    { "type": "filter_in", "column": "id_operacao",     "param": "lista_operacoes" },
+    {
+      "type":           "join",
+      "skip_if_false":  "processar_pendentes",
+      "with":           { "format": "delta", "path": "lastros.silver_controle_registro_cessoes" },
+      "with_transformations": [
+        { "type": "select", "columns": ["id_cessao"] }
+      ],
+      "on":  "id_cessao",
+      "how": "leftanti"
+    }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_para_processar",
+    "mode":   "overwrite",
+    "options": { "cache": "false" }
+  }
+}
