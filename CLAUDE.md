@@ -132,6 +132,15 @@ JSON/dict → PipelineConfig → Pipeline.run()
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
     {
+      "type": "debug",                          // não modifica o df — apenas inspeciona
+      "label": "após join contratos",           // opcional, aparece no separador
+      "actions": ["count", "print_schema", "show", "explain", "columns", "dtypes"],
+      "show_rows": 20,                          // linhas para show (default: 20)
+      "truncate": true,                         // truncar show (default: true)
+      "vertical": false,                        // layout vertical no show (default: false)
+      "extended": false                         // plano estendido no explain (default: false)
+    },
+    {
       "type": "group_by",
       "by": ["col1", "col2"],
       "agg": [

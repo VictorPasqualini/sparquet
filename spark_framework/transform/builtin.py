@@ -250,6 +250,63 @@ class JoinTransformation(BaseTransformation):
         return left.join(right, on, how)
 
 
+class DebugTransformation(BaseTransformation):
+    """Executes inspection actions on the DataFrame without modifying it.
+
+    JSON params:
+      actions    – list of actions to run (default: ["show", "print_schema"])
+      label      – optional label shown in the separator line
+      show_rows  – rows for show (default: 20)
+      truncate   – truncate show output (default: true)
+      vertical   – vertical layout for show (default: false)
+      extended   – extended plan for explain (default: false)
+
+    Supported actions:
+      show, print_schema, count, explain, columns, dtypes
+
+    Example:
+      { "type": "debug", "label": "após join contratos", "actions": ["count", "print_schema", "show"] }
+      { "type": "debug", "actions": ["show"], "show_rows": 5, "truncate": false }
+    """
+
+    _SUPPORTED_ACTIONS = {"show", "print_schema", "count", "explain", "columns", "dtypes"}
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        params = self.config.params
+        label = params.get("label", "")
+        actions: list[str] = params.get("actions", ["show", "print_schema"])
+
+        header = f"[DEBUG{f' — {label}' if label else ''}]"
+        print(f"\n{'─' * 60}\n{header}\n{'─' * 60}")
+
+        for raw in actions:
+            action = raw.lower().replace("-", "_").replace("printschema", "print_schema")
+            if action == "show":
+                df.show(
+                    n=params.get("show_rows", 20),
+                    truncate=params.get("truncate", True),
+                    vertical=params.get("vertical", False),
+                )
+            elif action == "print_schema":
+                df.printSchema()
+            elif action == "count":
+                print(f"count: {df.count()}")
+            elif action == "explain":
+                df.explain(extended=params.get("extended", False))
+            elif action == "columns":
+                print(f"columns: {df.columns}")
+            elif action == "dtypes":
+                print(f"dtypes: {df.dtypes}")
+            else:
+                print(
+                    f"⚠️  ação desconhecida: '{raw}'. "
+                    f"Disponíveis: {sorted(self._SUPPORTED_ACTIONS)}"
+                )
+
+        print(f"{'─' * 60}\n")
+        return df
+
+
 class UnionTransformation(BaseTransformation):
     """Appends rows from a second source to the main DataFrame.
 
