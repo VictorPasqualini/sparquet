@@ -1,0 +1,92 @@
+{
+  "name": "cessoes_nota_comercial_payload",
+  "description": "Constrói payload de registro de Nota Comercial a partir da view cessoes_nota_comercial_reg, publica em Kafka e persiste estrutura em Delta. Recebe params com topico_kafka e kafka_broker.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_nota_comercial_reg"
+  },
+
+  "transformations": [
+
+    {
+      "type":       "with_column",
+      "name":       "id_vert",
+      "expression": "first(uuid()) OVER (PARTITION BY numero_contrato)"
+    },
+
+    {
+      "type":       "with_column",
+      "name":       "max_data_vencimento_parcela",
+      "expression": "max(data_vencimento_parcela) OVER (PARTITION BY id_cessao, numero_contrato)"
+    },
+
+    {
+      "type":       "with_column",
+      "name":       "informacoes_adicionais",
+      "expression": "from_json(regexp_replace(informacoes_adicionais, chr(39), chr(34)), 'STRUCT<numero_da_emissao:STRING,numero_da_serie:STRING,quantidade_emitida:STRING,valor_da_unidade_de_emissao:STRING,nome_fiador:STRING,codigo_tipo_garantia:STRING,codigo_metodo_pagamento:STRING,codigo_do_indexador:STRING,taxa_contrato:STRING>')"
+    },
+
+    {
+      "type":    "drop_duplicates",
+      "columns": ["id_cessao", "numero_contrato"]
+    },
+
+    {
+      "type":      "sql",
+      "view_name": "registros",
+      "query":     "SELECT l.*, r.parcelas FROM registros l INNER JOIN (SELECT numero_contrato, collect_list(struct(concat(numero_contrato, '1') AS codigo_controle_parcela_contrato_if, 1 AS numero_parcela)) AS parcelas FROM registros GROUP BY numero_contrato) r ON l.numero_contrato = r.numero_contrato"
+    },
+
+    {
+      "type":       "with_column",
+      "name":       "payload_nc",
+      "expression": "struct(id_vert AS id_externo, struct(struct('N' AS ncEmissionTypeCode, '55639.40-2' AS otcIssuerAccountCode, codigo_tipo_emissao AS issueTypeCode, codigo_conta_contabil_otc AS otcBookkeeperAccountCode, CAST(informacoes_adicionais.numero_da_emissao AS INT) AS issueNumber, informacoes_adicionais.numero_da_serie AS serieNumber, data_emissao_contrato AS issueDate, max_data_vencimento_parcela AS maturityDate, data_referencia AS profitabilityStartDate, CAST(informacoes_adicionais.quantidade_emitida AS INT) AS issuedQuantity, CAST(informacoes_adicionais.valor_da_unidade_de_emissao AS DOUBLE) AS unitIssueValue, CAST(CAST(informacoes_adicionais.quantidade_emitida AS DOUBLE) * CAST(informacoes_adicionais.valor_da_unidade_de_emissao AS DOUBLE) AS DOUBLE) AS issueFinancialValue, codigo_regime_tributario AS regimeTypeCode, indicador_processamento_cetip AS cetipEventAttendedIndicator, 'PRIVADAVERT' AS cvmRegistrationNumber, 1 AS cvmSequentialNumber, '2026-01-12' AS cvmRegistrationDate, indicador_resgate_antecipado_unilateral AS unilateralEarlyRedemptionIndicator, informacoes_adicionais.nome_fiador AS guarantorName, indicador_presenca_agente_fiduciario AS fiduciaryAgentIndicator, nome_sacado AS issuerName, documento_sacado AS issuerDocumentNumber, CAST(informacoes_adicionais.codigo_tipo_garantia AS INT) AS guaranteeTypeCode, struct(lpad(informacoes_adicionais.codigo_metodo_pagamento, 2, '0') AS paymentMethodCode, lpad(informacoes_adicionais.codigo_do_indexador, 4, '0') AS indexCode, CASE WHEN CAST(informacoes_adicionais.codigo_do_indexador AS INT) IN (20, 99) THEN NULL ELSE CAST(percentual_taxa_variavel AS FLOAT) END AS rateFloatingPercentage, CAST(informacoes_adicionais.taxa_contrato AS INT) AS interestRateSpread, codigo_criterio_calculo_juros AS interestCalculationCriteriaCode) AS paymentMethod) AS nc) AS data)"
+    },
+
+    {
+      "type":       "with_column",
+      "name":       "payload",
+      "expression": "to_json(payload_nc)"
+    },
+
+    {
+      "type":       "with_column",
+      "name":       "headers",
+      "expression": "array(named_struct('key', 'type', 'value', CAST('REGISTRO' AS BINARY)), named_struct('key', 'kind', 'value', CAST('ENVIO' AS BINARY)))"
+    },
+
+    { "type": "with_column", "name": "status",           "expression": "CAST(1 AS INT)"      },
+    { "type": "with_column", "name": "data_atualizacao", "expression": "CAST(NULL AS DATE)"   },
+    { "type": "with_column", "name": "id_registro",      "expression": "CAST(NULL AS STRING)" },
+    { "type": "with_column", "name": "id",               "expression": "CAST(NULL AS BIGINT)" },
+
+    {
+      "type":    "drop",
+      "columns": ["payload_nc", "parcelas"]
+    }
+
+  ],
+
+  "outputs": [
+    {
+      "format":  "kafka",
+      "path":    "{topico_kafka}",
+      "mode":    "append",
+      "columns": ["payload", "headers"],
+      "options": {
+        "bootstrap_servers":      "{kafka_broker}",
+        "kafka.max.request.size": "4194304"
+      }
+    },
+    {
+      "format":  "delta",
+      "path":    "lastros.silver_registro_contratos",
+      "mode":    "append",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato", "payload", "status",
+                  "data_atualizacao", "data_envio", "id_registro", "id",
+                  "param_registradora", "param_tipo_ativo"],
+      "options": { "mergeSchema": "true" }
+    }
+  ]
+}

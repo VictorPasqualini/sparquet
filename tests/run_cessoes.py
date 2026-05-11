@@ -6,11 +6,10 @@
 #        cessoes_base.json → view 'cessoes_base'
 #          └─ inclui: filtro por status, join parametrizacao, join contratos
 #             (com critérios avaliados via with_transformations) e tipo_contrato
-#   2. Enriquecimento Python    (multi_ativos, params de job, anti-join de controle)
-#   3. Loop por fluxo           (tipo_ativo × registradora × tipo_fluxo)
-#        → fw.run(config, input_df, columns) filtra e enriquece via conf JSON
-#        → funcao_construcao_payload monta o payload e retorna df_envio + df_estrutura
-#        → escrita Kafka + tabelas Delta
+#   2. Filtragem Python          (params de job lidos de widgets, anti-join declarativo)
+#   3. Loop por fluxo            (tipo_ativo × registradora × tipo_fluxo)
+#        → fw.run(config, columns)         filtra e enriquece via conf JSON
+#        → fw.run(payload_config, params)  monta payload, publica Kafka e persiste Delta
 #
 # Instalação:
 #   %pip install git+https://github.com/VictorPasqualini/sparquet.git
@@ -20,11 +19,9 @@
 # =============================================================================
 
 import traceback
-from typing import Any, Tuple
 
 from pyspark.sql import functions as F
 from pyspark.sql import DataFrame
-from pyspark.sql.window import Window
 
 from spark_framework import SparkFramework
 
@@ -37,18 +34,19 @@ ENVIADO      = 1
 
 # Mapeamento de fluxos de operação por (tipo_ativo, registradora).
 # Cada fluxo define:
-#   config                   – arquivo JSON que filtra e enriquece o df (recebe input_df + params)
-#   funcao_construcao_payload – função Python que recebe df_registro e retorna (df_envio, df_estrutura)
-#   topico                   – tópico Kafka de destino
+#   config         – conf JSON que filtra e enriquece o df (lê cessoes_para_processar)
+#   view           – nome da temp view escrita pela conf acima
+#   payload_config – conf JSON que monta o payload, publica Kafka e persiste Delta
+#   topico         – tópico Kafka de destino
 #
 # Exemplo:
 #   FLUXOS_OPERACOES = {
 #       ("NC", "CERC"): {
 #           "EMISSAO_E_REGISTRO": {
-#               "config":                    "cessoes_nota_comercial.json",
-#               "view":                      "cessoes_nota_comercial_reg",
-#               "funcao_construcao_payload": cessao_registro_lastro_nota_comercial,
-#               "topico":                    "topico-nc-cerc",
+#               "config":         "cessoes_nota_comercial.json",
+#               "view":           "cessoes_nota_comercial_reg",
+#               "payload_config": "cessoes_nota_comercial_payload.json",
+#               "topico":         "topico-nc-cerc",
 #           }
 #       },
 #   }
@@ -170,65 +168,20 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
             print(f"ℹ️ Sem cessões pendentes — {tipo_ativo}-{registradora} ({tipo_fluxo})")
             continue
 
-        try:
-            df_envio_registro, df_registro_estrutura = atributos_fluxo["funcao_construcao_payload"](df_registro)
-        except Exception:
-            print(f"❌ Erro no processamento — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{traceback.format_exc()}")
+        # Monta payload, publica Kafka e persiste Delta via conf declarativa
+        r_payload = fw.run(
+            f"{BASE_PATH}/{atributos_fluxo['payload_config']}",
+            params={
+                "topico_kafka": atributos_fluxo["topico"],
+                "kafka_broker": KAFKA_BROKER,
+            },
+        )
+
+        if not r_payload.success:
+            print(f"❌ Erro payload — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{r_payload.error}")
             continue
 
-        topico_kafka = atributos_fluxo["topico"]
-
-        try:
-            # Publica no Kafka
-            (
-                df_envio_registro.write
-                .format("kafka")
-                .option("kafka.bootstrap.servers", KAFKA_BROKER)
-                .option("topic", topico_kafka)
-                .option("kafka.max.request.size", "4194304")
-                .save()
-            )
-
-            # Estrutura de monitoramento
-            # (controle de cessões enviadas movido para cessoes_nota_comercial.json)
-            (
-                df_registro_estrutura
-                .withColumn("payload",          F.to_json(F.col("payload")))
-                .withColumn("status",           F.lit(ENVIADO))
-                .withColumn("data_atualizacao", F.lit(None).cast("date"))
-                .withColumn("data_envio",       F.current_timestamp())
-                .withColumn("id_registro",      F.lit(None).cast("string"))
-                .withColumn("id",               F.lit(None).cast("bigint"))
-                .withColumn("registradora",     F.lit(registradora))
-                .withColumn("tipo_ativo",       F.lit(tipo_ativo))
-                .drop("parcelas")
-                .write.mode("append").option("mergeSchema", "true")
-                .saveAsTable("lastros.silver_registro_contratos")
-            )
-
-            # Parcelas
-            (
-                df_registro_estrutura
-                .withColumn("parcela", F.explode("parcelas"))
-                .select(
-                    "id_operacao", "id_vert", "id_cessao", "numero_contrato",
-                    F.col("parcela.codigo_controle_parcela_contrato_if").alias("identificador_parcela"),
-                    F.col("parcela.numero_parcela").alias("numero_parcela"),
-                    F.lit(ENVIADO).alias("status_parcela"),
-                )
-                .withColumn("data_baixa", F.lit(None).cast("date"))
-                .drop("parcelas")
-                .write.mode("append").option("mergeSchema", "true")
-                .saveAsTable("lastros.silver_registro_parcelas")
-            )
-
-        except Exception:
-            print(f"❌ Erro Kafka/persistência — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{traceback.format_exc()}")
-            continue
-
-        finally:
-            df_registro_estrutura.unpersist()
-            df_envio_registro.unpersist()
+        print(f"✅ {r_payload.rows_written} registros enviados — {tipo_ativo}-{registradora} ({tipo_fluxo})")
 
 
 # =============================================================================
@@ -245,9 +198,10 @@ fw.stop()
 
 # =============================================================================
 # Funções de construção de payload — Nota Comercial / CERC
+# NOTA: lógica movida para cessoes_nota_comercial_payload.json
 # =============================================================================
 
-def _montar_estrutura_registro_nota_comercial(window: Window):
+def _montar_estrutura_registro_nota_comercial(window):
     return F.struct(
         F.col("id_vert").alias("id_externo"),
         F.struct(
