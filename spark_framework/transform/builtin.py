@@ -283,11 +283,14 @@ class DebugTransformation(BaseTransformation):
         for raw in actions:
             action = raw.lower().replace("-", "_").replace("printschema", "print_schema")
             if action == "show":
-                df.show(
-                    n=params.get("show_rows", 20),
-                    truncate=params.get("truncate", True),
-                    vertical=params.get("vertical", False),
-                )
+                try:
+                    display(df)  # noqa: F821 — disponível no Databricks
+                except NameError:
+                    df.show(
+                        n=params.get("show_rows", 20),
+                        truncate=params.get("truncate", True),
+                        vertical=params.get("vertical", False),
+                    )
             elif action == "print_schema":
                 df.printSchema()
             elif action == "count":
