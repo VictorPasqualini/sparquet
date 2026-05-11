@@ -230,7 +230,7 @@ class JoinTransformation(BaseTransformation):
             from spark_framework.transform.engine import TransformationEngine
             engine = TransformationEngine()
             cfgs = [TransformationConfig.from_dict(t) for t in raw_transforms]
-            other = engine.apply(other, cfgs, self.runtime_params)
+            other = engine.apply(other, cfgs)
 
         on = self.config.params["on"]
         how: str = self.config.params.get("how", "inner").lower()
@@ -249,28 +249,6 @@ class JoinTransformation(BaseTransformation):
             return left.join(right, F.expr(on), how)
         return left.join(right, on, how)
 
-
-class FilterInTransformation(BaseTransformation):
-    """Filtra linhas cujo valor de coluna está em uma lista vinda de runtime_params.
-
-    Auto-skip quando a lista estiver vazia — o df é retornado sem alteração.
-
-    JSON params:
-      column – coluna a filtrar
-      param  – chave em runtime_params cujo valor é a lista de valores permitidos
-
-    Example:
-      { "type": "filter_in", "column": "id_cessao", "param": "lista_cessoes" }
-      { "type": "filter_in", "column": "id_operacao", "param": "lista_operacoes" }
-    """
-
-    def apply(self, df: DataFrame) -> DataFrame:
-        column = self.config.params["column"]
-        param_name = self.config.params["param"]
-        values: list = self.runtime_params.get(param_name, [])
-        if not values:
-            return df
-        return df.filter(F.col(column).isin(values))
 
 
 class DebugTransformation(BaseTransformation):

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, Optional
+
 from pyspark.sql import DataFrame
 
 from spark_framework.core.config import PipelineConfig, SparkConfig
+from spark_framework.utils.template import apply_template
 from spark_framework.core.context import SparkContextManager
 from spark_framework.core.pipeline import Pipeline, PipelineResult
 from spark_framework.io.factory import ReaderFactory, WriterFactory
@@ -62,14 +66,13 @@ class SparkFramework:
                          declarado no JSON e não adiciona ingestion_ts automaticamente.
             columns:     Colunas literais a injetar no df antes das transformações,
                          ex: {"param_tipo_ativo": "NC", "param_registradora": "CERC"}.
-                         Permitem que filtros na conf referenciem valores de runtime.
-            params:      Objetos Python arbitrários (listas, booleanos) acessíveis pelas
-                         transformações filter_in e skip_if_false. Não são injetados como
-                         colunas no df — ficam disponíveis apenas durante as transformações.
+            params:      Valores de runtime substituídos como {chave} no JSON antes do
+                         parse. Listas viram SQL IN (ex: 'a', 'b'); booleanos viram
+                         "true"/"" (vazio = falsy dispara skip_if_false).
         """
-        config = PipelineConfig.from_file(config_path)
+        config = self._load_config(config_path, params)
         self._apply_spark_override(config)
-        return self._execute(config, input_df=input_df, columns=columns, params=params)
+        return self._execute(config, input_df=input_df, columns=columns)
 
     def run_from_dict(
         self,
@@ -79,9 +82,9 @@ class SparkFramework:
         params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um dicionário Python."""
-        pipeline_config = PipelineConfig.from_dict(config)
+        pipeline_config = self._load_config_from_dict(config, params)
         self._apply_spark_override(pipeline_config)
-        return self._execute(pipeline_config, input_df=input_df, columns=columns, params=params)
+        return self._execute(pipeline_config, input_df=input_df, columns=columns)
 
     # ------------------------------------------------------------------
     # Registro de extensões
@@ -124,7 +127,6 @@ class SparkFramework:
         config: PipelineConfig,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         pipeline = Pipeline(
             config,
@@ -132,9 +134,22 @@ class SparkFramework:
             validation_engine=self._validation_engine,
             input_df=input_df,
             columns=columns,
-            params=params,
         )
         return pipeline.run()
+
+    def _load_config(self, path: str, params: Optional[Dict[str, Any]]) -> PipelineConfig:
+        raw = Path(path).read_text(encoding="utf-8")
+        if params:
+            raw = apply_template(raw, params)
+        return PipelineConfig.from_dict(json.loads(raw))
+
+    def _load_config_from_dict(
+        self, config: Dict[str, Any], params: Optional[Dict[str, Any]]
+    ) -> PipelineConfig:
+        if params:
+            raw = apply_template(json.dumps(config), params)
+            config = json.loads(raw)
+        return PipelineConfig.from_dict(config)
 
     def _apply_spark_override(self, config: PipelineConfig) -> None:
         """Garante que configs Spark do framework prevalecem sobre o JSON."""

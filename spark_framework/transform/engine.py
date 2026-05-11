@@ -13,7 +13,6 @@ from spark_framework.transform.builtin import (
     DropDuplicatesTransformation,
     DropTransformation,
     FillNaTransformation,
-    FilterInTransformation,
     FilterTransformation,
     GroupByTransformation,
     JoinTransformation,
@@ -27,8 +26,7 @@ from spark_framework.transform.builtin import (
 from spark_framework.utils.logger import logger
 
 _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
-    "filter":    FilterTransformation,
-    "filter_in": FilterInTransformation,
+    "filter":  FilterTransformation,
     "select": SelectTransformation,
     "drop": DropTransformation,
     "rename": RenameTransformation,
@@ -64,11 +62,9 @@ class TransformationEngine:
         self,
         df: DataFrame,
         configs: List[TransformationConfig],
-        runtime_params: dict | None = None,
     ) -> DataFrame:
-        _runtime = runtime_params or {}
         for config in configs:
-            if config.skip_if_false and not _runtime.get(config.skip_if_false):
+            if config.skip_if_false is not None and not config.skip_if_false:
                 logger.info(
                     "Transformacao pulada",
                     type=config.type,
@@ -82,7 +78,7 @@ class TransformationEngine:
                     f"Available: {sorted(self._registry)}"
                 )
             logger.info("Applying transformation", type=config.type)
-            df = cls(config, _runtime).apply(df)
+            df = cls(config).apply(df)
         return df
 
     @property
