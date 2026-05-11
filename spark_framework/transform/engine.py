@@ -9,6 +9,7 @@ from spark_framework.transform.base import BaseTransformation
 from spark_framework.transform.builtin import (
     AddColumnTransformation,
     CastTransformation,
+    DebugTransformation,
     DropDuplicatesTransformation,
     DropTransformation,
     FillNaTransformation,
@@ -39,6 +40,7 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "sort": SortTransformation,
     "join": JoinTransformation,
     "union": UnionTransformation,
+    "debug": DebugTransformation,
 }
 
 
