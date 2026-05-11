@@ -79,9 +79,9 @@
     },
 
     {
-      "type":  "sql",
-      "view_name": "_df",
-      "query": "SELECT _df.*, _agg.multi_ativos FROM _df LEFT JOIN (SELECT id_operacao, COUNT(DISTINCT tipo_ativo, registradora) > 1 AS multi_ativos FROM _df GROUP BY id_operacao) _agg ON _df.id_operacao = _agg.id_operacao"
+      "type":      "sql",
+      "view_name": "cessoes",
+      "query":     "SELECT cessoes.*, por_operacao.multi_ativos FROM cessoes LEFT JOIN (SELECT id_operacao, COUNT(DISTINCT tipo_ativo, registradora) > 1 AS multi_ativos FROM cessoes GROUP BY id_operacao) por_operacao ON cessoes.id_operacao = por_operacao.id_operacao"
     }
   ],
 

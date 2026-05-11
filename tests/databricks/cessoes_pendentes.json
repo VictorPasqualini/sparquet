@@ -1,0 +1,28 @@
+{
+  "name": "cessoes_pendentes",
+  "description": "A partir de cessoes_base, descarta cessões já registradas via anti-join com a tabela de controle. Executado apenas quando nenhuma lista explícita de contratos/cessões foi fornecida (reprocessamento). Produz a view cessoes_para_processar.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_base"
+  },
+
+  "transformations": [
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_controle_registro_cessoes" },
+      "with_transformations": [
+        { "type": "select", "columns": ["id_cessao"] }
+      ],
+      "on":  "id_cessao",
+      "how": "leftanti"
+    }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_para_processar",
+    "mode":   "overwrite",
+    "options": { "cache": "false" }
+  }
+}

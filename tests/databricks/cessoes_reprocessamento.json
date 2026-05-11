@@ -1,0 +1,16 @@
+{
+  "name": "cessoes_reprocessamento",
+  "description": "Passa cessoes_base para a view cessoes_para_processar sem anti-join. Usado quando cessões ou contratos são informados explicitamente por parâmetro — o objetivo é reprocessar registros já enviados.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_base"
+  },
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_para_processar",
+    "mode":   "overwrite",
+    "options": { "cache": "false" }
+  }
+}
