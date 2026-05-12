@@ -258,10 +258,15 @@ class JoinTransformation(BaseTransformation):
 class DebugTransformation(BaseTransformation):
     """Executes inspection actions on the DataFrame without modifying it.
 
+    The "show" action uses display(df) when DATABRICKS_RUNTIME_VERSION is set
+    (Databricks notebook built-in), and df.show() everywhere else. The env-var
+    check avoids IPython's display(), which renders DataFrame.__repr__() — the
+    schema string — instead of the actual rows.
+
     JSON params:
       actions    – list of actions to run (default: ["show", "print_schema"])
       label      – optional label shown in the separator line
-      show_rows  – rows for show (default: 20)
+      show_rows  – rows for show/display (default: 20)
       truncate   – truncate show output (default: true)
       vertical   – vertical layout for show (default: false)
       extended   – extended plan for explain (default: false)
@@ -270,7 +275,7 @@ class DebugTransformation(BaseTransformation):
       show, print_schema, count, explain, columns, dtypes
 
     Example:
-      { "type": "debug", "label": "após join contratos", "actions": ["count", "print_schema", "show"] }
+      { "type": "debug", "label": "após join", "actions": ["count", "print_schema", "show"] }
       { "type": "debug", "actions": ["show"], "show_rows": 5, "truncate": false }
     """
 
@@ -287,9 +292,10 @@ class DebugTransformation(BaseTransformation):
         for raw in actions:
             action = raw.lower().replace("-", "_").replace("printschema", "print_schema")
             if action == "show":
-                try:
-                    display(df)  # noqa: F821 — disponível no Databricks
-                except NameError:
+                import os
+                if "DATABRICKS_RUNTIME_VERSION" in os.environ:
+                    display(df)  # noqa: F821 — Databricks notebook built-in
+                else:
                     df.show(
                         n=params.get("show_rows", 20),
                         truncate=params.get("truncate", True),

@@ -17,14 +17,16 @@ def _format_value(value: Any) -> str:
 
 
 def apply_template(raw: str, params: Dict[str, Any]) -> str:
-    """Substitui {chave} no texto pelos valores formatados de params.
+    """Substitui {chave} no texto bruto pelos valores formatados de params.
+
+    Chaves sem correspondência em params ficam literais — não causam erro.
 
     Regras de formatação:
-      bool True  → "true"          (truthy — não dispara skip_if_false)
-      bool False → ""              (falsy  — dispara skip_if_false)
-      list vazia → ""              (falsy  — dispara skip_if_false)
-      list str   → "'a', 'b'"     (pronto para IN (...) no SQL)
-      list num   → "1, 2"         (pronto para IN (...) no SQL)
+      bool True  → "true"       truthy — não dispara skip_if_false
+      bool False → ""           falsy  — dispara skip_if_false
+      list vazia → ""           falsy  — dispara skip_if_false ou filtro vazio
+      list str   → "'a', 'b'"  pronto para IN (...) no SQL
+      list num   → "1, 2"      pronto para IN (...) no SQL
       outros     → str(value)
     """
 

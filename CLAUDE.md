@@ -16,8 +16,9 @@ r1 = fw.run("pipeline_clientes.json")
 r2 = fw.run("pipeline_pedidos.json")
 r3 = fw.run_from_dict({"name": "inline", "input": {...}, "output": {...}})
 
-# Injeção de DataFrame externo e colunas de runtime
+# Injeção de DataFrame externo, colunas de runtime e parâmetros de template
 r4 = fw.run("pipeline.json", input_df=df_existente, columns={"dt_ref": "2025-01-01"})
+r5 = fw.run("pipeline.json", params={"tipo_ativo": "NC", "ids": ["A1", "A2"], "aplicar_filtro": True})
 
 fw.stop()
 ```
@@ -28,8 +29,8 @@ fw.stop()
 
 ```python
 # Execução
-fw.run(config_path: str, input_df=None, columns=None) → PipelineResult
-fw.run_from_dict(config: dict, input_df=None, columns=None) → PipelineResult
+fw.run(config_path: str, input_df=None, columns=None, params=None) → PipelineResult
+fw.run_from_dict(config: dict, input_df=None, columns=None, params=None) → PipelineResult
 
 # Extensão
 fw.register_reader(format_name: str, reader_cls)
@@ -43,7 +44,7 @@ fw.stop()
 
 **`input_df`**: substitui a leitura do `input` — o pipeline começa a partir do DataFrame fornecido.  
 **`columns`**: injeta colunas literais (`F.lit(value)`) antes das transformações, sem alterar o JSON.  
-**`params`**: objetos Python arbitrários (listas, booleanos) acessíveis pelas transformações `filter_in` e `skip_if_false`. Não são injetados como colunas no df.  
+**`params`**: substitui placeholders `{chave}` no texto bruto do JSON antes do parse. Listas viram SQL IN (`'a', 'b'`); `True` → `"true"`; `False`/lista vazia → `""` (falsy, dispara `skip_if_false`).  
 **`result.output_df`**: DataFrame após todas as transformações, disponível no resultado.
 
 ### Uso direto de Pipeline
@@ -63,15 +64,15 @@ result2 = p2.run()
 ## Arquitetura
 
 ```
-JSON/dict → PipelineConfig → Pipeline.run()
-                                 │
-                                 ├─► ReaderFactory(input)  → DataFrame
-                                 ├─► injeção de columns (F.lit)
-                                 ├─► TransformationEngine   → DataFrame
-                                 ├─► ValidationEngine       → ValidationResult[]
-                                 └─► para cada output em outputs:
-                                         _project_columns(df, output)
-                                         WriterFactory(output).write(df_projetado)
+JSON/dict → apply_template(params) → resolve_includes → PipelineConfig → Pipeline.run()
+                                                                               │
+                                                                               ├─► ReaderFactory(input)  → DataFrame
+                                                                               ├─► injeção de columns (F.lit)
+                                                                               ├─► TransformationEngine   → DataFrame
+                                                                               ├─► ValidationEngine       → ValidationResult[]
+                                                                               └─► para cada output em outputs:
+                                                                                       _project_columns(df, output)
+                                                                                       WriterFactory(output).write(df_projetado)
 ```
 
 ### Módulos
@@ -96,6 +97,74 @@ JSON/dict → PipelineConfig → Pipeline.run()
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
 | `ValidationEngine` | `validation/engine.py` | Roda validators; respeita `on_failure` |
 | Validators nativos | `validation/builtin.py` | Ver lista abaixo |
+| `apply_template` | `utils/template.py` | Substitui `{chave}` no JSON bruto antes do parse; formata listas/booleanos para SQL |
+| `resolve_includes` | `utils/includes.py` | Expande diretivas `$include` em transformations |
+
+---
+
+## Template de variáveis no JSON (`params`)
+
+Qualquer valor `{chave}` no JSON é substituído antes do parse quando `params` é passado para `fw.run()`.
+
+```python
+fw.run("pipeline.json", params={
+    "tipo_ativo":   "NC",
+    "registradora": "CERC",
+    "ids_cessao":   ["C1", "C2", "C3"],   # lista → "'C1', 'C2', 'C3'"
+    "aplicar_join": True,                  # bool True  → "true"
+    "filtro_extra": False,                 # bool False → ""  (falsy)
+})
+```
+
+Regras de formatação:
+
+| Tipo Python | Resultado no JSON | Uso típico |
+|-------------|-------------------|-----------|
+| `str` / `int` / `float` | `str(value)` | caminho, nome, número |
+| `bool True` | `"true"` | mantém a transformação (`skip_if_false`) |
+| `bool False` | `""` | pula a transformação (`skip_if_false`) |
+| `list` de strings | `"'a', 'b', 'c'"` | cláusula `IN (...)` no SQL |
+| `list` de números | `"1, 2, 3"` | cláusula `IN (...)` no SQL |
+| `list` vazia | `""` | falsy — pula transformação ou filtro vazio |
+
+Chaves sem correspondência em `params` ficam literais no JSON — não causam erro.
+
+### `skip_if_false`
+
+Qualquer transformação aceita `"skip_if_false": "{chave}"`. Após substituição, se o valor resultante for string vazia a transformação é ignorada; qualquer outro valor a executa normalmente.
+
+```jsonc
+// Pula o join inteiro se params["aplicar_join"] == False
+{ "type": "join", "skip_if_false": "{aplicar_join}", "with": {...}, "on": "id" }
+
+// Filtro só aplicado se params["registradora"] != ""
+{ "type": "filter", "skip_if_false": "{registradora}", "condition": "registradora = '{registradora}'" }
+```
+
+---
+
+## Reutilização de transformações com `$include`
+
+Um item `{ "$include": "caminho/arquivo.json" }` na lista de `transformations` é substituído inline pelo conteúdo do arquivo referenciado. O caminho é relativo ao diretório do JSON principal.
+
+O arquivo incluído pode ser um único objeto de transformação ou uma lista. Template `params` é aplicado antes do parse, então variáveis como `{tipo_ativo}` funcionam normalmente em arquivos compartilhados.
+
+```jsonc
+// pipeline_nc.json
+{
+  "transformations": [
+    { "$include": "shared/filtro_tipo_ativo.json" },   // expande inline
+    { "type": "with_column", "name": "payload", "expression": "..." }
+  ]
+}
+
+// shared/filtro_tipo_ativo.json — objeto único ou lista
+[
+  { "type": "filter", "condition": "tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}'" }
+]
+```
+
+Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são suportadas.
 
 ---
 
@@ -123,7 +192,8 @@ JSON/dict → PipelineConfig → Pipeline.run()
 
   "transformations": [                  // opcional — aplicadas em ordem
     { "type": "filter", "condition": "SQL expr" },
-    { "type": "select", "columns": ["a", "b"] },
+    // select: nomes simples ou expressões SQL completas com alias
+    { "type": "select", "columns": ["a", "b", "to_json(payload) AS value", "CAST(1 AS INT) AS status"] },
     { "type": "drop", "columns": ["x"] },
     { "type": "rename", "mappings": {"old": "new"} },
     { "type": "cast", "columns": {"col": "type"} },
@@ -132,11 +202,12 @@ JSON/dict → PipelineConfig → Pipeline.run()
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
-    // filter_in: isin com lista de runtime_params; auto-skip se lista vazia
-    { "type": "filter_in", "column": "id_cessao", "param": "lista_cessoes" },
+    // $include: expande inline o conteúdo de um arquivo JSON (caminho relativo ao pipeline)
+    { "$include": "shared/filtro_tipo_ativo.json" },
     {
       "type": "debug",                          // não modifica o df — apenas inspeciona
       "label": "após join contratos",           // opcional, aparece no separador
+      // show usa display(df) no Databricks; faz df.show() localmente
       "actions": ["count", "print_schema", "show", "explain", "columns", "dtypes"],
       "show_rows": 20,                          // linhas para show (default: 20)
       "truncate": true,                         // truncar show (default: true)
@@ -158,7 +229,7 @@ JSON/dict → PipelineConfig → Pipeline.run()
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
       "how": "inner|left|right|full|cross|leftsemi|leftanti|...",
-      "skip_if_false": "nome_do_param",   // opcional: pula o join se runtime_params[nome] for falsy
+      "skip_if_false": "{meu_param}",   // opcional: pula o join se o valor pós-substituição for ""
       // with_transformations: aplica transformações no df da direita antes do join
       // df esquerdo (principal) é alias 'l'; df direito é alias 'r'.
       "with_transformations": [
@@ -366,6 +437,5 @@ Dados em `tests/csv/`: `customers.csv`, `orders.csv`, `products.csv`.
 
 - Modo dry-run (valida config sem executar)
 - Testes unitários com dados mock
-- Variáveis de runtime no JSON (`${ENV_VAR}`)
 - Métricas de tempo de execução por etapa
 - Suporte a perfis (dev/staging/prod) no mesmo JSON
