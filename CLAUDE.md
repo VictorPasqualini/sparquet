@@ -207,7 +207,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     {
       "type": "debug",                          // não modifica o df — apenas inspeciona
       "label": "após join contratos",           // opcional, aparece no separador
-      // show usa display(df) no Databricks; faz df.show() localmente
+      // show usa df.show() — display() do Databricks só funciona chamado diretamente na célula
       "actions": ["count", "print_schema", "show", "explain", "columns", "dtypes"],
       "show_rows": 20,                          // linhas para show (default: 20)
       "truncate": true,                         // truncar show (default: true)
