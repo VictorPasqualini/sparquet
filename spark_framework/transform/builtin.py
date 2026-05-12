@@ -15,10 +15,14 @@ class FilterTransformation(BaseTransformation):
 
 
 class SelectTransformation(BaseTransformation):
-    """Projects a subset of columns."""
+    """Projects a subset of columns or SQL expressions.
+
+    Cada item pode ser um nome de coluna simples ou uma expressão SQL completa
+    com alias, ex: "to_json(payload) AS value", "CAST(id AS STRING) AS id_str".
+    """
 
     def apply(self, df: DataFrame) -> DataFrame:
-        return df.select(*self.config.params["columns"])
+        return df.select(*[F.expr(c) for c in self.config.params["columns"]])
 
 
 class DropTransformation(BaseTransformation):
