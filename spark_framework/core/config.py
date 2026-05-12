@@ -122,8 +122,11 @@ class PipelineConfig:
 
     @classmethod
     def from_file(cls, path: str) -> PipelineConfig:
+        from spark_framework.utils.includes import resolve_includes
         content = Path(path).read_text(encoding="utf-8")
-        return cls.from_dict(json.loads(content))
+        data = json.loads(content)
+        data = resolve_includes(data, Path(path).parent)
+        return cls.from_dict(data)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PipelineConfig:

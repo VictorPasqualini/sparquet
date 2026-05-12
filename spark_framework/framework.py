@@ -8,6 +8,7 @@ from pyspark.sql import DataFrame
 
 from spark_framework.core.config import PipelineConfig, SparkConfig
 from spark_framework.utils.template import apply_template
+from spark_framework.utils.includes import resolve_includes
 from spark_framework.core.context import SparkContextManager
 from spark_framework.core.pipeline import Pipeline, PipelineResult
 from spark_framework.io.factory import ReaderFactory, WriterFactory
@@ -141,7 +142,9 @@ class SparkFramework:
         raw = Path(path).read_text(encoding="utf-8")
         if params:
             raw = apply_template(raw, params)
-        return PipelineConfig.from_dict(json.loads(raw))
+        data = json.loads(raw)
+        data = resolve_includes(data, Path(path).parent, params)
+        return PipelineConfig.from_dict(data)
 
     def _load_config_from_dict(
         self, config: Dict[str, Any], params: Optional[Dict[str, Any]]
@@ -149,6 +152,7 @@ class SparkFramework:
         if params:
             raw = apply_template(json.dumps(config), params)
             config = json.loads(raw)
+        config = resolve_includes(config, Path.cwd(), params)
         return PipelineConfig.from_dict(config)
 
     def _apply_spark_override(self, config: PipelineConfig) -> None:
