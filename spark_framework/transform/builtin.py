@@ -258,10 +258,10 @@ class JoinTransformation(BaseTransformation):
 class DebugTransformation(BaseTransformation):
     """Executes inspection actions on the DataFrame without modifying it.
 
-    The "show" action uses display(df) when DATABRICKS_RUNTIME_VERSION is set
-    (Databricks notebook built-in), and df.show() everywhere else. The env-var
-    check avoids IPython's display(), which renders DataFrame.__repr__() — the
-    schema string — instead of the actual rows.
+    The "show" action always uses df.show(). Databricks' display() is a notebook
+    widget and only works reliably when called directly in a cell — from an
+    imported module it emits DataFrame.__repr__() (the schema string) to stdout
+    instead of the actual rows.
 
     JSON params:
       actions    – list of actions to run (default: ["show", "print_schema"])
@@ -292,15 +292,11 @@ class DebugTransformation(BaseTransformation):
         for raw in actions:
             action = raw.lower().replace("-", "_").replace("printschema", "print_schema")
             if action == "show":
-                import os
-                if "DATABRICKS_RUNTIME_VERSION" in os.environ:
-                    display(df)  # noqa: F821 — Databricks notebook built-in
-                else:
-                    df.show(
-                        n=params.get("show_rows", 20),
-                        truncate=params.get("truncate", True),
-                        vertical=params.get("vertical", False),
-                    )
+                df.show(
+                    n=params.get("show_rows", 20),
+                    truncate=params.get("truncate", True),
+                    vertical=params.get("vertical", False),
+                )
             elif action == "print_schema":
                 df.printSchema()
             elif action == "count":
