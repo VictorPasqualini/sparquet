@@ -10,18 +10,18 @@ def resolve_includes(
     base_dir: Path,
     params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Expande directivas $include na lista de transformations.
+    """Expande diretivas $include na lista de transformations.
 
-    Cada item { "$include": "caminho/arquivo.json" } é substituído pelas
-    transformations do arquivo referenciado. O arquivo pode conter um único
-    objeto de transformação ou uma lista de objetos.
+    Cada item { "$include": "caminho/arquivo.json" } é substituído inline
+    pelo conteúdo do arquivo referenciado. O caminho é relativo a base_dir
+    (diretório do JSON principal). O arquivo pode ser um único objeto de
+    transformação ou uma lista de objetos.
 
-    Template substitution (params) é aplicado ao arquivo incluído antes do
-    parse, usando os mesmos params do pipeline principal — assim variáveis
-    como {tipo_ativo} em arquivos compartilhados são resolvidas normalmente.
+    Quando params é fornecido, apply_template é aplicado ao arquivo incluído
+    antes do parse — variáveis como {tipo_ativo} em arquivos compartilhados
+    são resolvidas com os mesmos params do pipeline principal.
 
-    Inclusions aninhadas ($include dentro de arquivo incluído) não são
-    suportadas.
+    Inclusions aninhadas não são suportadas.
     """
     raw_transformations: List[Dict[str, Any]] = data.get("transformations", [])
     if not any("$include" in t for t in raw_transformations):
