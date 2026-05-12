@@ -1,0 +1,6 @@
+[
+  {
+    "type":      "filter",
+    "condition": "tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}' AND fluxo_operacao = '{fluxo_operacao}' AND ((tipo_contrato = '{tipo_ativo}' AND multi_ativos) OR NOT multi_ativos)"
+  }
+]
