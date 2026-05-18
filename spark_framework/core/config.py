@@ -7,37 +7,89 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-_PARAM_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# ${name} ou ${name!modifier} (modifier opcional: 'raw')
+_PARAM_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?:!(\w+))?\}")
 
 
-def substitute_params(data: Any, columns: Dict[str, Any]) -> Any:
-    """Substitui ocorrências de ${param_name} em strings do dict de configuração.
+def _format_sql_value(value: Any) -> str:
+    """Formata um valor Python como literal SQL adequado para uso em expressões.
 
-    Aplicado recursivamente em dicts, lists e strings. Útil para parametrizar
-    paths e options da conf via valores de runtime — ex: tópico Kafka que
-    muda por fluxo.
+    Mapping:
+      None              → NULL
+      bool              → true | false
+      int/float         → 123  (sem aspas)
+      str               → 'value'  (com aspas, escapando aspas internas)
+      list/tuple não-vazia → array(item1, item2, ...)  (cada item formatado SQL)
+      list/tuple vazia  → NULL
 
-    Substituição é literal (str(value)); listas/dicts em columns não são
-    suportados como valores de substituição (use F.lit/array via 'columns'
-    para isso, não substituição de string).
+    Útil para uso direto em transformations:
+      "condition": "tipo = ${param_tipo}"         → tipo = 'NC'
+      "condition": "array_contains(${param_lista}, id)" → array_contains(array('a','b'), id)
+      "skip_if":   "${param_lista} IS NULL"       → array(...) IS NULL  (false → não skipa)
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return "NULL"
+        return "array(" + ", ".join(_format_sql_value(v) for v in value) + ")"
+    # fallback: trata como string
+    return _format_sql_value(str(value))
 
-    Ex:
-      "path": "${param_topico}" + columns={"param_topico": "abc"}
-      → "path": "abc"
+
+def _format_raw_value(value: Any) -> str:
+    """Formata um valor como literal raw (sem escape SQL).
+
+    Útil para uso em paths, options e outros campos não-SQL:
+      "path": "${param_topico!raw}"  + param_topico="vertc-topic" → "vertc-topic"
+
+    Listas são joined com vírgula (raro, mas suportado).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ",".join(_format_raw_value(v) for v in value)
+    return str(value)
+
+
+def substitute_params(data: Any, params: Dict[str, Any]) -> Any:
+    """Substitui ocorrências de ${name} (e ${name!raw}) em strings do dict.
+
+    Aplicado recursivamente em dicts, lists e strings.
+
+    Sintaxe:
+      ${name}      → SQL value escapado (default, para uso em expressions)
+      ${name!raw}  → valor literal sem escape (para paths/options)
+
+    Se o param não está em 'params', mantém o placeholder literal (não substitui).
     """
     if isinstance(data, dict):
-        return {k: substitute_params(v, columns) for k, v in data.items()}
+        return {k: substitute_params(v, params) for k, v in data.items()}
     if isinstance(data, list):
-        return [substitute_params(item, columns) for item in data]
+        return [substitute_params(item, params) for item in data]
     if isinstance(data, str):
         def _replace(match: "re.Match[str]") -> str:
             name = match.group(1)
-            if name not in columns:
-                return match.group(0)  # mantém literal se não encontrar
-            value = columns[name]
-            if isinstance(value, (list, dict)):
-                return match.group(0)  # não substitui listas/dicts
-            return str(value) if value is not None else ""
+            modifier = match.group(2)
+            if name not in params:
+                return match.group(0)
+            value = params[name]
+            if modifier == "raw":
+                return _format_raw_value(value)
+            return _format_sql_value(value)
         return _PARAM_PATTERN.sub(_replace, data)
     return data
 

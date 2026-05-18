@@ -128,12 +128,12 @@ def run_conf(fw: SparkFramework):
 
     Uso:
         result = run_conf("nota_comercial_b3/cessoes_pendentes.json",
-                          columns={"param_tipo_ativo": "NOTA_COMERCIAL", ...})
+                          params={"param_tipo_ativo": "NOTA_COMERCIAL", ...})
 
     NÃO faz a escrita em Kafka real — o teste deve usar uma conf intermediária
     que termine numa view (cessoes_pendentes) ou usar mocks para Kafka.
     """
-    def _run(conf_relative_path: str, columns: dict = None):
+    def _run(conf_relative_path: str, params: dict = None):
         conf_path = CONFS_DIR / conf_relative_path
         raw = json.loads(conf_path.read_text(encoding="utf-8"))
         raw = _convert_delta_to_view(raw)
@@ -148,7 +148,7 @@ def run_conf(fw: SparkFramework):
             if raw["output"].get("format") != "view":
                 raise ValueError(f"Conf {conf_relative_path} não tem output view para teste")
 
-        return fw.run_from_dict(raw, columns=columns or {})
+        return fw.run_from_dict(raw, params=params or {})
 
     return _run
 

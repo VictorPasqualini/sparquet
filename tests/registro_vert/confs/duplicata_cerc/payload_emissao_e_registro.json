@@ -86,11 +86,11 @@
       "format":  "view",
       "path":    "duplicata_cerc_payload",
       "mode":    "overwrite",
-      "options": { "checkpoint": "true" }
+      "options": {}
     },
     {
       "format":  "kafka",
-      "path":    "${param_topico}",
+      "path":    "${param_topico!raw}",
       "transformations": [
         { "type": "with_column", "name": "value", "expression": "to_json(payload)" },
         { "type": "with_column", "name": "headers",
@@ -98,7 +98,7 @@
       ],
       "columns": ["value", "headers"],
       "options": {
-        "bootstrap_servers":      "${param_kafka_broker}",
+        "bootstrap_servers":      "${param_kafka_broker!raw}",
         "value_column":           "value",
         "key_column":             null,
         "kafka.max.request.size": "4194304"
@@ -128,8 +128,8 @@
             { "name": "data_envio",       "expression": "current_timestamp()" },
             { "name": "id_registro",      "expression": "cast(NULL as string)" },
             { "name": "id",               "expression": "cast(NULL as bigint)" },
-            { "name": "registradora",     "expression": "param_registradora" },
-            { "name": "tipo_ativo",       "expression": "param_tipo_ativo" }
+            { "name": "registradora",     "expression": "${param_registradora}" },
+            { "name": "tipo_ativo",       "expression": "${param_tipo_ativo}" }
           ] },
         { "type": "drop", "columns": ["parcelas"] }
       ],

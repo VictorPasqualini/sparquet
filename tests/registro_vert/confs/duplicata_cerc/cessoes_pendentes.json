@@ -15,15 +15,15 @@
 
   "transformations": [
     { "type": "filter",
-      "condition": "tipo_ativo = param_tipo_ativo AND registradora = param_registradora AND ((tipo_contrato = '1' AND multi_ativos) OR NOT multi_ativos)" },
+      "condition": "tipo_ativo = ${param_tipo_ativo} AND registradora = ${param_registradora} AND ((tipo_contrato = '1' AND multi_ativos) OR NOT multi_ativos)" },
 
     {
       "type": "join",
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
       "with_transformations": [
         { "type": "filter",
-          "skip_if_null": "param_lista_cessoes_pendentes",
-          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
         { "type": "select",
           "columns": ["id_cessao", "numero_contrato", "nome_sacado", "documento_sacado",
                       "tipo_pessoa_sacado", "municipio_sacado", "nome_cedente",
@@ -63,8 +63,8 @@
       "with": { "format": "delta", "path": "lastros.silver_parcela" },
       "with_transformations": [
         { "type": "filter",
-          "skip_if_null": "param_lista_cessoes_pendentes",
-          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
         { "type": "sort", "columns": ["numero_contrato", "numero_parcela"] },
         { "type": "group_by",
           "by": ["id_cessao", "numero_contrato"],
@@ -76,13 +76,14 @@
       ],
       "on":  ["id_cessao", "numero_contrato"],
       "how": "left"
-    }
+    },
+
+    { "type": "checkpoint" }
   ],
 
   "output": {
-    "format":  "view",
-    "path":    "duplicata_cerc_pendentes",
-    "mode":    "overwrite",
-    "options": { "checkpoint": "true" }
+    "format": "view",
+    "path":   "duplicata_cerc_pendentes",
+    "mode":   "overwrite"
   }
 }

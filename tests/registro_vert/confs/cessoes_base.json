@@ -1,6 +1,6 @@
 {
   "name": "cessoes_base",
-  "description": "Monta a base completa de cessões pendentes de registro em um único passo declarativo: filtra status elegível, junta parametrização + contratos com critérios + tipo_contrato + multi_ativos (via self-join + count distinct) + anti-join opcional com tabela de controle. Aplica também filtros opcionais por listas de id_cessao/operacao/contrato. Materializa via localCheckpoint para uso em todos os fluxos.",
+  "description": "Monta a base completa de cessões pendentes de registro em um único passo declarativo. multi_ativos é calculado via window function (collect_set + size) — mais eficiente que self-join. Filtros opcionais (cessoes/operacoes/contratos) são aplicados via array_contains com skip_if quando o param está vazio. Anti-join opcional com a tabela de controle. Materializa via checkpoint para uso pelo loop por fluxo.",
 
   "params": [
     "param_lista_cessoes",
@@ -78,44 +78,23 @@
       "how": "left"
     },
 
-    {
-      "type": "join",
-      "with": "self",
-      "with_transformations": [
-        { "type": "select", "columns": ["id_operacao", "tipo_ativo", "registradora"] },
-        { "type": "drop_duplicates" },
-        { "type": "group_by",
-          "by": ["id_operacao"],
-          "agg": [
-            { "func": "expr",
-              "expression": "count(distinct struct(tipo_ativo, registradora)) > 1",
-              "alias": "multi_ativos" }
-          ] },
-        { "type": "select", "columns": ["id_operacao", "multi_ativos"] }
-      ],
-      "on":  ["id_operacao"],
-      "how": "left"
-    },
+    { "type": "with_column",
+      "name": "multi_ativos",
+      "expression": "size(collect_set(struct(tipo_ativo, registradora)) over (partition by id_operacao)) > 1" },
 
-    {
-      "type": "filter",
-      "skip_if_null": "param_lista_cessoes",
-      "condition": "array_contains(param_lista_cessoes, id_cessao)"
-    },
-    {
-      "type": "filter",
-      "skip_if_null": "param_lista_operacoes",
-      "condition": "array_contains(param_lista_operacoes, id_operacao)"
-    },
-    {
-      "type": "filter",
-      "skip_if_null": "param_lista_contratos",
-      "condition": "array_contains(param_lista_contratos, numero_contrato)"
-    },
+    { "type": "filter",
+      "skip_if":   "${param_lista_cessoes} IS NULL",
+      "condition": "array_contains(${param_lista_cessoes}, id_cessao)" },
+    { "type": "filter",
+      "skip_if":   "${param_lista_operacoes} IS NULL",
+      "condition": "array_contains(${param_lista_operacoes}, id_operacao)" },
+    { "type": "filter",
+      "skip_if":   "${param_lista_contratos} IS NULL",
+      "condition": "array_contains(${param_lista_contratos}, numero_contrato)" },
 
     {
       "type": "join",
-      "skip_if_null": "param_processar_somente_pendentes",
+      "skip_if": "${param_processar_somente_pendentes} IS NULL OR ${param_processar_somente_pendentes} = false",
       "with": { "format": "delta", "path": "lastros.silver_controle_registro_cessoes" },
       "with_transformations": [
         { "type": "select", "columns": ["id_cessao"] },
@@ -123,13 +102,14 @@
       ],
       "on":  ["id_cessao"],
       "how": "leftanti"
-    }
+    },
+
+    { "type": "checkpoint" }
   ],
 
   "output": {
-    "format":  "view",
-    "path":    "cessoes_base",
-    "mode":    "overwrite",
-    "options": { "checkpoint": "true" }
+    "format": "view",
+    "path":   "cessoes_base",
+    "mode":   "overwrite"
   }
 }

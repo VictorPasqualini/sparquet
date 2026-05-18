@@ -8,7 +8,9 @@ from spark_framework.core.config import TransformationConfig
 from spark_framework.transform.base import BaseTransformation
 from spark_framework.transform.builtin import (
     AddColumnTransformation,
+    CacheTransformation,
     CastTransformation,
+    CheckpointTransformation,
     DropDuplicatesTransformation,
     DropTransformation,
     FillNaTransformation,
@@ -41,38 +43,49 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "sort": SortTransformation,
     "join": JoinTransformation,
     "union": UnionTransformation,
+    "checkpoint": CheckpointTransformation,
+    "cache": CacheTransformation,
 }
 
 
-def _should_skip(config: TransformationConfig, columns: Dict[str, Any]) -> Optional[str]:
-    """Avalia 'skip_if_null' na config e retorna o nome do param vazio (ou None).
+def _evaluate_skip_if(df: DataFrame, expression: str) -> bool:
+    """Avalia uma expressão SQL e retorna True quando a transformação deve ser skipada.
 
-    A condição é avaliada contra o dicionário 'columns' (params de runtime do
-    Pipeline), NÃO contra valores do DataFrame. Isso permite skipar uma
-    transformação inteira quando o param está ausente/None/vazio, sem ter
-    que filtrar linha-a-linha.
+    A expressão é avaliada via spark.sql() em uma linha sintética (sem df de
+    entrada — uso típico é checar params de runtime já substituídos).
 
-    Aceita um único nome de param (string) ou uma lista — a transformação é
-    skipada quando QUALQUER um dos params estiver vazio.
+    Skipa quando o resultado é FALSE ou NULL (semântica "se NÃO der true, pula").
+
+    Ex:
+      skip_if: "${param_lista_cessoes} IS NULL"
+        - param ausente / None / lista vazia → ${param} vira NULL → "NULL IS NULL" → TRUE → skipa
+        - param com valor → ${param} vira array(...) ou 'string' → IS NULL → FALSE → não skipa
     """
-    skip_if = config.params.get("skip_if_null")
-    if skip_if is None:
-        return None
-
-    names = [skip_if] if isinstance(skip_if, str) else list(skip_if)
-    for name in names:
-        value = columns.get(name)
-        if value is None:
-            return name
-        if isinstance(value, (list, tuple, dict, str)) and len(value) == 0:
-            return name
-    return None
+    try:
+        spark = df.sparkSession
+        result = spark.sql(f"SELECT ({expression}) AS _skip_check").first()[0]
+    except Exception as exc:
+        logger.warning(
+            "Erro avaliando skip_if — skipando por seguranca",
+            expression=expression,
+            error=str(exc),
+        )
+        return True
+    return result is None or result is False
 
 
 class TransformationEngine:
     """Applies a sequence of transformations to a DataFrame.
 
     Supports registering custom transformations at runtime via `register()`.
+
+    Cada transformação suporta o campo opcional `skip_if`: uma expressão SQL
+    avaliada antes da execução. Se retornar FALSE ou NULL, a transformação é
+    skipada. Combinado com substituição ${param} permite condicionais elegantes:
+
+      { "type": "filter",
+        "skip_if": "${param_lista_cessoes} IS NULL",
+        "condition": "array_contains(${param_lista_cessoes}, id_cessao)" }
     """
 
     def __init__(self) -> None:
@@ -87,9 +100,7 @@ class TransformationEngine:
         self,
         df: DataFrame,
         configs: List[TransformationConfig],
-        columns: Optional[Dict[str, Any]] = None,
     ) -> DataFrame:
-        runtime_columns: Dict[str, Any] = columns or {}
         for config in configs:
             cls = self._registry.get(config.type)
             if cls is None:
@@ -98,12 +109,12 @@ class TransformationEngine:
                     f"Available: {sorted(self._registry)}"
                 )
 
-            skipped_param = _should_skip(config, runtime_columns)
-            if skipped_param is not None:
+            skip_expression = config.params.get("skip_if")
+            if skip_expression and _evaluate_skip_if(df, skip_expression):
                 logger.info(
-                    "Transformation skipada (param vazio)",
+                    "Transformation skipada (skip_if falso)",
                     type=config.type,
-                    param=skipped_param,
+                    expression=skip_expression,
                 )
                 continue
 

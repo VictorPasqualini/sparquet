@@ -28,7 +28,7 @@ def test_cessoes_base_filtra_e_aplica_multi_ativos(register_fixtures, run_conf, 
     (cada id_operacao tem apenas 1 par tipo_ativo/registradora nas fixtures)."""
     register_fixtures(FIXTURES_BASICAS)
 
-    result = run_conf("cessoes_base.json", columns={
+    result = run_conf("cessoes_base.json", params={
         "param_processar_somente_pendentes": True,
     })
     assert result.success, result.error
@@ -52,7 +52,7 @@ def test_cessoes_base_filtra_lista_cessoes(register_fixtures, run_conf, spark):
     """Quando param_lista_cessoes é fornecido, filtra apenas essas cessões."""
     register_fixtures(FIXTURES_BASICAS)
 
-    result = run_conf("cessoes_base.json", columns={
+    result = run_conf("cessoes_base.json", params={
         "param_lista_cessoes": ["CESS001"],
     })
     assert result.success, result.error
@@ -68,7 +68,7 @@ def test_cessoes_base_anti_join_controle(register_fixtures, run_conf, spark):
     rodar sem erro)."""
     register_fixtures(FIXTURES_BASICAS)
 
-    result = run_conf("cessoes_base.json", columns={
+    result = run_conf("cessoes_base.json", params={
         "param_processar_somente_pendentes": True,
     })
     assert result.success, result.error
@@ -80,7 +80,7 @@ def test_cessoes_base_skip_anti_join_quando_lista_explicita(register_fixtures, r
     (skip_if_null em param_processar_somente_pendentes=None)."""
     register_fixtures(FIXTURES_BASICAS)
 
-    result = run_conf("cessoes_base.json", columns={
+    result = run_conf("cessoes_base.json", params={
         "param_lista_cessoes":               ["CESS001", "CESS002", "CESS003"],
         "param_processar_somente_pendentes": None,
     })
@@ -96,11 +96,11 @@ def test_nc_cessoes_pendentes_filtra_por_tipo_e_registradora(
     register_fixtures(FIXTURES_BASICAS)
 
     # Roda cessoes_base primeiro
-    r = run_conf("cessoes_base.json", columns={"param_processar_somente_pendentes": True})
+    r = run_conf("cessoes_base.json", params={"param_processar_somente_pendentes": True})
     assert r.success
 
     # Agora cessoes_pendentes do NC
-    r = run_conf("nota_comercial_b3/cessoes_pendentes.json", columns={
+    r = run_conf("nota_comercial_b3/cessoes_pendentes.json", params={
         "param_tipo_ativo":              "NOTA_COMERCIAL",
         "param_registradora":            "B3",
         "param_fluxo_operacao":          "REGISTRO",
@@ -127,8 +127,8 @@ def test_nc_cessoes_pendentes_filtra_por_tipo_e_registradora(
 def test_nc_cessoes_pendentes_max_data_vencimento(register_fixtures, run_conf, spark):
     """A coluna max_data_vencimento_parcela deve ser calculada via window."""
     register_fixtures(FIXTURES_BASICAS)
-    run_conf("cessoes_base.json", columns={"param_processar_somente_pendentes": True})
-    r = run_conf("nota_comercial_b3/cessoes_pendentes.json", columns={
+    run_conf("cessoes_base.json", params={"param_processar_somente_pendentes": True})
+    r = run_conf("nota_comercial_b3/cessoes_pendentes.json", params={
         "param_tipo_ativo":     "NOTA_COMERCIAL",
         "param_registradora":   "B3",
         "param_fluxo_operacao": "REGISTRO",

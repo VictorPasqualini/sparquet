@@ -37,43 +37,23 @@ class PipelineResult:
         )
 
 
-def _is_empty_param(value: Any) -> bool:
-    """Determina se um parâmetro de runtime deve ser tratado como vazio.
-
-    Usado por `skip_if_null` nas transformações e pela injeção de colunas
-    (valores vazios não viram coluna literal — a transformação dependente skipa).
-    """
-    if value is None:
-        return True
-    if isinstance(value, (list, tuple, dict, str)) and len(value) == 0:
-        return True
-    return False
-
-
-def _inject_column(df: DataFrame, name: str, value: Any) -> DataFrame:
-    """Injeta um valor de runtime como coluna literal.
-
-    Escalares → F.lit(value). Listas/tuplas → F.array(F.lit(...), ...).
-    """
-    if isinstance(value, (list, tuple)):
-        return df.withColumn(name, F.array(*[F.lit(v) for v in value]))
-    return df.withColumn(name, F.lit(value))
-
-
 class Pipeline:
-    """Orquestra o fluxo: leitura → transformação → validação → escrita."""
+    """Orquestra o fluxo: leitura → transformação → validação → escrita.
+
+    Os params de runtime são aplicados ANTES da deserialização do JSON (em
+    SparkFramework.run), substituindo ${param} pelas expressões SQL adequadas.
+    O Pipeline em si não recebe params — toda parametrização já foi resolvida.
+    """
 
     def __init__(
         self,
         config: PipelineConfig,
         transform_engine: Optional[TransformationEngine] = None,
         validation_engine: Optional[ValidationEngine] = None,
-        columns: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.config = config
         self._transform_engine = transform_engine or TransformationEngine()
         self._validation_engine = validation_engine or ValidationEngine()
-        self._columns: Dict[str, Any] = columns or {}
 
     @classmethod
     def from_file(cls, path: str) -> Pipeline:
@@ -90,16 +70,6 @@ class Pipeline:
         try:
             spark = SparkContextManager.get_or_create(self.config.spark)
 
-            # Validação declarativa de params: warning quando faltam params
-            # declarados no campo "params" da conf
-            if self.config.params:
-                missing = [
-                    p for p in self.config.params
-                    if p not in self._columns or _is_empty_param(self._columns.get(p))
-                ]
-                if missing:
-                    log.warning("Params declarados sem valor", faltando=missing)
-
             df = ReaderFactory.create(spark, self.config.input).read()
             df = df.withColumn("ingestion_ts", F.current_timestamp())
             rows_read = df.count()
@@ -109,18 +79,7 @@ class Pipeline:
                 formato=self.config.input.format,
             )
 
-            injected: List[str] = []
-            for col_name, value in self._columns.items():
-                if _is_empty_param(value):
-                    continue  # transformações com skip_if_null cuidam disso
-                df = _inject_column(df, col_name, value)
-                injected.append(col_name)
-            if injected:
-                log.info("Colunas injetadas", colunas=injected)
-
-            df = self._transform_engine.apply(
-                df, self.config.transformations, columns=self._columns
-            )
+            df = self._transform_engine.apply(df, self.config.transformations)
             log.info("Transformacoes aplicadas")
 
             validation_results = self._validation_engine.validate(
@@ -154,9 +113,8 @@ class Pipeline:
             output_df = df
             if output.transformations:
                 # Aplica transformações específicas do output (não afeta os demais)
-                # — mesmo dicionário de columns vale aqui (skip_if_null funciona).
                 output_df = self._transform_engine.apply(
-                    output_df, output.transformations, columns=self._columns
+                    output_df, output.transformations
                 )
             output_df = self._project_columns(output_df, output)
             log.info(

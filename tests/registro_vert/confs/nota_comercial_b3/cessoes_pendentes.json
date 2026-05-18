@@ -1,6 +1,6 @@
 {
   "name": "nota_comercial_b3_cessoes_pendentes",
-  "description": "Filtra cessoes_base para o fluxo Nota Comercial / B3 e enriquece com dados de bronze_remessa específicos do tipo (numero_parcela, sacado, datas, informacoes_adicionais). Otimiza a leitura de bronze_remessa filtrando por param_lista_cessoes_pendentes (recebida do orquestrador após cessoes_base). Materializa via localCheckpoint.",
+  "description": "Filtra cessoes_base para Nota Comercial/B3 e enriquece com bronze_remessa (sacado, datas, informacoes_adicionais via from_json). Otimiza leitura via param_lista_cessoes_pendentes. Calcula max_data_vencimento_parcela via window function. Materializa via checkpoint.",
 
   "params": [
     "param_tipo_ativo",
@@ -16,15 +16,15 @@
 
   "transformations": [
     { "type": "filter",
-      "condition": "tipo_ativo = param_tipo_ativo AND registradora = param_registradora AND fluxo_operacao = param_fluxo_operacao AND ((tipo_contrato = '8' AND multi_ativos) OR NOT multi_ativos)" },
+      "condition": "tipo_ativo = ${param_tipo_ativo} AND registradora = ${param_registradora} AND fluxo_operacao = ${param_fluxo_operacao} AND ((tipo_contrato = '8' AND multi_ativos) OR NOT multi_ativos)" },
 
     {
       "type": "join",
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
       "with_transformations": [
         { "type": "filter",
-          "skip_if_null": "param_lista_cessoes_pendentes",
-          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
         { "type": "select",
           "columns": ["id_cessao", "numero_contrato", "numero_parcela", "nome_sacado",
                       "documento_sacado", "data_emissao_contrato", "data_vencimento_parcela",
@@ -34,23 +34,24 @@
       "how": "inner"
     },
 
-    { "type": "with_column",
-      "name": "max_data_vencimento_parcela",
-      "expression": "max(data_vencimento_parcela) over (partition by id_cessao, numero_contrato)" },
+    { "type": "with_columns",
+      "columns": [
+        { "name": "max_data_vencimento_parcela",
+          "expression": "max(data_vencimento_parcela) over (partition by id_cessao, numero_contrato)" },
+        { "name": "informacoes_adicionais",
+          "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" }
+      ] },
 
     { "type": "with_column",
       "name": "informacoes_adicionais",
-      "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" },
+      "expression": "from_json(informacoes_adicionais, 'STRUCT<numero_da_emissao: STRING, numero_da_serie: STRING, quantidade_emitida: STRING, valor_da_unidade_de_emissao: STRING, nome_fiador: STRING, codigo_tipo_garantia: STRING, codigo_metodo_pagamento: STRING, codigo_do_indexador: STRING, taxa_contrato: STRING>')" },
 
-    { "type": "with_column",
-      "name": "informacoes_adicionais",
-      "expression": "from_json(informacoes_adicionais, 'STRUCT<numero_da_emissao: STRING, numero_da_serie: STRING, quantidade_emitida: STRING, valor_da_unidade_de_emissao: STRING, nome_fiador: STRING, codigo_tipo_garantia: STRING, codigo_metodo_pagamento: STRING, codigo_do_indexador: STRING, taxa_contrato: STRING>')" }
+    { "type": "checkpoint" }
   ],
 
   "output": {
-    "format":  "view",
-    "path":    "nota_comercial_b3_pendentes",
-    "mode":    "overwrite",
-    "options": { "checkpoint": "true" }
+    "format": "view",
+    "path":   "nota_comercial_b3_pendentes",
+    "mode":   "overwrite"
   }
 }

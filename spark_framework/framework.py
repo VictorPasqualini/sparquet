@@ -50,46 +50,70 @@ class SparkFramework:
     def run(
         self,
         config_path: str,
-        columns: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um arquivo JSON.
 
         Args:
             config_path: caminho para o JSON de configuração.
-            columns:     Valores literais de runtime injetados como colunas no df
-                         logo após a leitura, antes das transformações.
-                         Escalares viram F.lit; listas viram F.array(F.lit, ...).
-                         Valores None/[] não são injetados — transformações que
-                         dependem deles devem usar "skip_if_null".
-                         Strings escalares em columns também substituem ocorrências
-                         de ${param_name} em paths e options do JSON.
-                         Ex: {"param_tipo_ativo": "NC", "param_lista_cessoes": ["a","b"]}.
+            params:      Valores de runtime que substituem ${param_name} nas
+                         strings da conf ANTES da execução. Não injeta colunas
+                         no DataFrame; quem precisa de coluna deve usar
+                         with_column com a expressão substituída.
+
+                         Sintaxe:
+                           ${param_name}       → valor SQL escapado (default):
+                                                  string → 'value' com aspas,
+                                                  número → 123,
+                                                  bool   → true/false,
+                                                  lista  → array(item1, item2),
+                                                  None / lista vazia → NULL
+                           ${param_name!raw}   → valor literal sem escape
+                                                  (use em paths, nomes de view,
+                                                   options de conexão)
+
+                         Ex:
+                           {
+                             "param_tipo_ativo":   "NC",
+                             "param_lista_cessoes": ["a", "b"],
+                             "param_topico":       "vertc-topic"
+                           }
+                         Substitui:
+                           "condition": "tipo = ${param_tipo_ativo}"
+                             → "tipo = 'NC'"
+                           "condition": "array_contains(${param_lista_cessoes}, id)"
+                             → "array_contains(array('a','b'), id)"
+                           "path": "${param_topico!raw}"
+                             → "vertc-topic"
         """
         import json
         from pathlib import Path
         from spark_framework.core.config import substitute_params
 
         raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
-        if columns:
-            raw = substitute_params(raw, columns)
+        if params:
+            raw = substitute_params(raw, params)
 
         config = PipelineConfig.from_dict(raw)
         self._apply_spark_override(config)
-        return self._execute(config, columns=columns)
+        return self._execute(config)
 
     def run_from_dict(
         self,
         config: Dict[str, Any],
-        columns: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
-        """Executa um pipeline a partir de um dicionário Python."""
+        """Executa um pipeline a partir de um dicionário Python.
+
+        Mesma semântica de fw.run() para params (ver docstring lá).
+        """
         from spark_framework.core.config import substitute_params
 
-        if columns:
-            config = substitute_params(config, columns)
+        if params:
+            config = substitute_params(config, params)
         pipeline_config = PipelineConfig.from_dict(config)
         self._apply_spark_override(pipeline_config)
-        return self._execute(pipeline_config, columns=columns)
+        return self._execute(pipeline_config)
 
     # ------------------------------------------------------------------
     # Registro de extensões
@@ -156,16 +180,11 @@ class SparkFramework:
     # Interno
     # ------------------------------------------------------------------
 
-    def _execute(
-        self,
-        config: PipelineConfig,
-        columns: Optional[Dict[str, Any]] = None,
-    ) -> PipelineResult:
+    def _execute(self, config: PipelineConfig) -> PipelineResult:
         pipeline = Pipeline(
             config,
             transform_engine=self._transform_engine,
             validation_engine=self._validation_engine,
-            columns=columns,
         )
         return pipeline.run()
 

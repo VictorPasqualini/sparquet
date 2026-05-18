@@ -16,15 +16,15 @@
 
   "transformations": [
     { "type": "filter",
-      "condition": "tipo_ativo = param_tipo_ativo AND registradora = param_registradora AND fluxo_operacao = param_fluxo_operacao AND ((tipo_contrato = '4' AND multi_ativos) OR NOT multi_ativos)" },
+      "condition": "tipo_ativo = ${param_tipo_ativo} AND registradora = ${param_registradora} AND fluxo_operacao = ${param_fluxo_operacao} AND ((tipo_contrato = '4' AND multi_ativos) OR NOT multi_ativos)" },
 
     {
       "type": "join",
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
       "with_transformations": [
         { "type": "filter",
-          "skip_if_null": "param_lista_cessoes_pendentes",
-          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
         { "type": "select",
           "columns": ["id_cessao", "numero_contrato", "nome_sacado", "documento_sacado",
                       "tipo_pessoa_sacado", "municipio_sacado", "nome_cedente",
@@ -49,13 +49,14 @@
     },
 
     { "type": "with_column", "name": "dados_auxiliares",
-      "expression": "explode(informacoes_adicionais)" }
+      "expression": "explode(informacoes_adicionais)" },
+
+    { "type": "checkpoint" }
   ],
 
   "output": {
-    "format":  "view",
-    "path":    "cpr_b3_pendentes",
-    "mode":    "overwrite",
-    "options": { "checkpoint": "true" }
+    "format": "view",
+    "path":   "cpr_b3_pendentes",
+    "mode":   "overwrite"
   }
 }

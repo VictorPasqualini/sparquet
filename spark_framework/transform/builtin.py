@@ -15,10 +15,40 @@ class FilterTransformation(BaseTransformation):
 
 
 class SelectTransformation(BaseTransformation):
-    """Projects a subset of columns."""
+    """Projects a subset of columns, optionally creating new ones via expressions.
+
+    Cada item em `columns` pode ser:
+      - string  → nome de coluna existente (mantém-se inalterada)
+      - dict    → { "name": "...", "expression": "SQL expr" } cria uma coluna
+                  computada já dentro do select (mais compacto que with_column
+                  quando há várias projeções correlatas).
+
+    Ex (combinando referência simples + colunas computadas):
+      { "type": "select",
+        "columns": [
+          "id_operacao",
+          "id_cessao",
+          { "name": "data_envio",   "expression": "current_timestamp()" },
+          { "name": "documento_norm",
+            "expression": "lpad(regexp_replace(documento, '\\\\D', ''), 14, '0')" }
+        ] }
+    """
 
     def apply(self, df: DataFrame) -> DataFrame:
-        return df.select(*self.config.params["columns"])
+        exprs = []
+        for item in self.config.params["columns"]:
+            if isinstance(item, str):
+                exprs.append(F.col(item))
+            elif isinstance(item, dict):
+                name = item["name"]
+                expression = item["expression"]
+                exprs.append(F.expr(expression).alias(name))
+            else:
+                raise ValueError(
+                    f"select columns item invalido: {item!r}. "
+                    f"Use string (nome) ou {{'name': ..., 'expression': ...}}."
+                )
+        return df.select(*exprs)
 
 
 class DropTransformation(BaseTransformation):
@@ -242,9 +272,17 @@ class JoinTransformation(BaseTransformation):
 
     JSON params:
       with                 – source config (format + path + options) OR the
-                             string "self" to reuse the current DataFrame as
-                             the right-side base (útil para criar colunas
-                             agregadas via auto-join, ex: multi_ativos)
+                             string "self" para reusar o df corrente como
+                             right-side. **CUIDADO**: self-join causa shuffle
+                             em ambos os lados pela join key — caro em datasets
+                             grandes. Prefira window functions com with_column
+                             quando o objetivo é apenas criar coluna agregada:
+                               size(collect_set(struct(a, b)) over (partition by k)) > 1
+                             em vez de:
+                               self-join + group_by(expr count distinct struct...)
+                             O self-join é útil quando você precisa de filtros
+                             cruzados que window não cobre (ex: anti-join contra
+                             versão filtrada do mesmo df).
       on                   – column name, list of column names, or SQL expression
                              (SQL expressions containing spaces use l./r. aliases)
       how                  – join type (default: inner)
@@ -257,22 +295,15 @@ class JoinTransformation(BaseTransformation):
         "on": "product_id",
         "how": "leftanti" }
 
+      // Self-join — use com cautela (window é mais barato)
       { "type": "join",
         "with": "self",
         "with_transformations": [
-          { "type": "select", "columns": ["id_operacao", "tipo_ativo", "registradora"] },
-          { "type": "drop_duplicates" },
-          { "type": "group_by",
-            "by": ["id_operacao"],
-            "agg": [
-              { "func": "expr",
-                "expression": "count(distinct struct(tipo_ativo, registradora)) > 1",
-                "alias": "multi_ativos" }
-            ] },
-          { "type": "select", "columns": ["id_operacao", "multi_ativos"] }
+          { "type": "select", "columns": ["id", "categoria"] },
+          { "type": "filter", "condition": "categoria = 'A'" }
         ],
-        "on": ["id_operacao"],
-        "how": "left" }
+        "on":  ["id"],
+        "how": "leftanti" }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
@@ -336,3 +367,44 @@ class UnionTransformation(BaseTransformation):
         if self.config.params.get("allow_missing_columns", False):
             return df.unionByName(other, allowMissingColumns=True)
         return df.union(other)
+
+
+class CheckpointTransformation(BaseTransformation):
+    """Materializa o DataFrame e QUEBRA a lineage (localCheckpoint).
+
+    Pode ser usado em qualquer ponto da lista de transformations — por
+    exemplo, logo após um join pesado para evitar que o Catalyst tenha que
+    re-otimizar uma DAG enorme em transformações subsequentes.
+
+    Suporta também `eager` (default true — força execução imediata).
+
+    JSON:
+      { "type": "checkpoint" }
+      { "type": "checkpoint", "eager": false }   // checkpoint lazy
+
+    Nota: requer setCheckpointDir configurado na SparkSession (Spark faz
+    automaticamente para localCheckpoint em disco local, sem precisar).
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        eager = bool(self.config.params.get("eager", True))
+        return df.localCheckpoint(eager=eager)
+
+
+class CacheTransformation(BaseTransformation):
+    """Cache o DataFrame em memória (e disco se necessário) — MANTÉM a lineage.
+
+    Útil quando o df será reusado várias vezes nas transformações seguintes
+    OU em outputs múltiplos. Diferente de checkpoint: a lineage NÃO é quebrada,
+    apenas o resultado é cacheado.
+
+    Materializa imediatamente via df.count() para evitar lazy cache.
+
+    JSON:
+      { "type": "cache" }
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        df.cache()
+        df.count()  # força materialização
+        return df

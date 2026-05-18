@@ -16,7 +16,7 @@
 
   "transformations": [
     { "type": "filter",
-      "condition": "tipo_ativo = param_tipo_ativo AND registradora = param_registradora AND fluxo_operacao = param_fluxo_operacao AND ((tipo_contrato = '0' AND multi_ativos) OR NOT multi_ativos)" },
+      "condition": "tipo_ativo = ${param_tipo_ativo} AND registradora = ${param_registradora} AND fluxo_operacao = ${param_fluxo_operacao} AND ((tipo_contrato = '0' AND multi_ativos) OR NOT multi_ativos)" },
 
     {
       "type": "join",
@@ -35,8 +35,8 @@
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
       "with_transformations": [
         { "type": "filter",
-          "skip_if_null": "param_lista_cessoes_pendentes",
-          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
         { "type": "select",
           "columns": ["id_cessao", "numero_contrato", "identificador_unico_registradora",
                       "cnpj_originador", "nome_originador", "nome_cedente",
@@ -103,8 +103,8 @@
       "with": { "format": "delta", "path": "lastros.silver_parcela" },
       "with_transformations": [
         { "type": "filter",
-          "skip_if_null": "param_lista_cessoes_pendentes",
-          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
         { "type": "select",
           "columns": ["id_cessao", "numero_contrato", "numero_parcela",
                       "valor_face_parcela", "valor_principal_parcela"] },
@@ -170,13 +170,14 @@
         { "name": "api_identificacao_padronizada_operacao_credito_checked",
           "expression": "CASE WHEN api_identificacao_padronizada_operacao_credito IS NULL OR api_identificacao_padronizada_operacao_credito = '' OR cast(api_identificacao_padronizada_operacao_credito as string) = '0' THEN concat(substring(numero_documento_emissor_checked, 1, 8), substring(api_codigo_modalidade_operacao_credito_checked, 1, 2), substring(api_codigo_sub_checked, 1, 2), cast(tipo_pessoa_sacado_checked as string), CASE WHEN tipo_pessoa_sacado_checked = 1 THEN substring(documento_sacado_checked, 1, 11) WHEN tipo_pessoa_sacado_checked = 2 THEN substring(documento_sacado_checked, 1, 8) ELSE lpad(documento_sacado_checked, 14, '0') END, substring(numero_contrato, 1, 40)) ELSE api_identificacao_padronizada_operacao_credito END" }
       ]
-    }
+    },
+
+    { "type": "checkpoint" }
   ],
 
   "output": {
-    "format":  "view",
-    "path":    "ccb_cerc_pendentes",
-    "mode":    "overwrite",
-    "options": { "checkpoint": "true" }
+    "format": "view",
+    "path":   "ccb_cerc_pendentes",
+    "mode":   "overwrite"
   }
 }

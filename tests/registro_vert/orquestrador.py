@@ -59,11 +59,11 @@ except Exception:
 # ---------------------------------------------------------------------------
 r = fw.run(
     f"{BASE_PATH}/cessoes_base.json",
-    columns={
+    params={
         "param_lista_cessoes":               param_lista_cessoes,
         "param_lista_operacoes":             param_lista_operacoes,
         "param_lista_contratos":             param_lista_contratos,
-        "param_processar_somente_pendentes": True if processar_somente_pendentes else None,
+        "param_processar_somente_pendentes": processar_somente_pendentes,
     },
 )
 print(r.summary())
@@ -98,7 +98,7 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
     for tipo_fluxo, attrs in fluxo_operacao.items():
         print(f"\n⌛ {tipo_ativo}-{registradora} ({tipo_fluxo})")
 
-        params = {
+        runtime_params = {
             "param_tipo_ativo":             tipo_ativo,
             "param_registradora":           registradora,
             "param_fluxo_operacao":         tipo_fluxo,
@@ -108,7 +108,7 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
         }
 
         # --- 1. Cessões pendentes do ativo (filter + joins específicos) ---
-        r_pend = fw.run(f"{BASE_PATH}/{attrs['conf_cessoes_pendentes']}", columns=params)
+        r_pend = fw.run(f"{BASE_PATH}/{attrs['conf_cessoes_pendentes']}", params=runtime_params)
         if not r_pend.success:
             print(f"❌ cessoes_pendentes — {r_pend.error}")
             continue
@@ -117,7 +117,7 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
             continue
 
         # --- 2. Payload + Kafka + 3 Deltas (output múltiplo) ---
-        r_payload = fw.run(f"{BASE_PATH}/{attrs['conf_payload']}", columns=params)
+        r_payload = fw.run(f"{BASE_PATH}/{attrs['conf_payload']}", params=runtime_params)
         if not r_payload.success:
             print(f"❌ payload — {r_payload.error}")
             continue
