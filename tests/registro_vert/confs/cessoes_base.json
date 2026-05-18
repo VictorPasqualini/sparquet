@@ -1,6 +1,13 @@
 {
   "name": "cessoes_base",
-  "description": "Base de cessões aprovadas para registro: filtra status elegível, junta parametrização, contratos aprovados (com critérios) e tipo_contrato da remessa. Aceita filtros opcionais por listas de id_cessao, id_operacao e numero_contrato via params de runtime.",
+  "description": "Monta a base completa de cessões pendentes de registro em um único passo declarativo: filtra status elegível, junta parametrização + contratos com critérios + tipo_contrato + multi_ativos (via self-join + count distinct) + anti-join opcional com tabela de controle. Aplica também filtros opcionais por listas de id_cessao/operacao/contrato. Materializa via localCheckpoint para uso em todos os fluxos.",
+
+  "params": [
+    "param_lista_cessoes",
+    "param_lista_operacoes",
+    "param_lista_contratos",
+    "param_processar_somente_pendentes"
+  ],
 
   "input": {
     "format": "delta",
@@ -35,7 +42,8 @@
           "type": "join",
           "with": { "format": "delta", "path": "lastros.silver_status_criterios_contratos" },
           "with_transformations": [
-            { "type": "select", "columns": ["id_cessao", "id_operacao", "numero_contrato", "status_criterio"] }
+            { "type": "select",
+              "columns": ["id_cessao", "id_operacao", "numero_contrato", "status_criterio"] }
           ],
           "on":   ["id_cessao", "id_operacao", "numero_contrato"],
           "how":  "left"
@@ -71,6 +79,25 @@
     },
 
     {
+      "type": "join",
+      "with": "self",
+      "with_transformations": [
+        { "type": "select", "columns": ["id_operacao", "tipo_ativo", "registradora"] },
+        { "type": "drop_duplicates" },
+        { "type": "group_by",
+          "by": ["id_operacao"],
+          "agg": [
+            { "func": "expr",
+              "expression": "count(distinct struct(tipo_ativo, registradora)) > 1",
+              "alias": "multi_ativos" }
+          ] },
+        { "type": "select", "columns": ["id_operacao", "multi_ativos"] }
+      ],
+      "on":  ["id_operacao"],
+      "how": "left"
+    },
+
+    {
       "type": "filter",
       "skip_if_null": "param_lista_cessoes",
       "condition": "array_contains(param_lista_cessoes, id_cessao)"
@@ -84,13 +111,25 @@
       "type": "filter",
       "skip_if_null": "param_lista_contratos",
       "condition": "array_contains(param_lista_contratos, numero_contrato)"
+    },
+
+    {
+      "type": "join",
+      "skip_if_null": "param_processar_somente_pendentes",
+      "with": { "format": "delta", "path": "lastros.silver_controle_registro_cessoes" },
+      "with_transformations": [
+        { "type": "select", "columns": ["id_cessao"] },
+        { "type": "drop_duplicates" }
+      ],
+      "on":  ["id_cessao"],
+      "how": "leftanti"
     }
   ],
 
   "output": {
-    "format": "view",
-    "path":   "cessoes_base",
-    "mode":   "overwrite",
-    "options": { "cache": "false" }
+    "format":  "view",
+    "path":    "cessoes_base",
+    "mode":    "overwrite",
+    "options": { "checkpoint": "true" }
   }
 }

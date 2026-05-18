@@ -1,19 +1,19 @@
 # =============================================================================
 # Orquestrador de registro de cessões — CERC / B3 (Python = só orquestração)
 #
-# Toda a lógica de transformação, montagem de payload e escrita está em JSON.
+# Todas as transformações, montagem de payload e escritas estão em JSON.
 # Este script apenas:
 #   1. Lê widgets do Databricks Jobs e valida parâmetros
-#   2. Resolve quais fluxos serão executados
-#   3. Roda as confs: base → para_processar → (por fluxo) enriquecimento +
-#      payload + envio
-#   4. Faz cleanup de temp views ao final
+#   2. Roda cessoes_base.json (base materializada via localCheckpoint)
+#   3. Coleta a lista de id_cessao pendentes (passada como param para os
+#      próximos pipelines, otimizando a leitura das tabelas de cada ativo)
+#   4. Para cada fluxo (tipo_ativo, registradora, tipo_fluxo):
+#        - cessoes_pendentes.json: enriquece com tabelas específicas do ativo
+#        - payload.json:           monta struct + Kafka + 3 Deltas (output múltiplo)
+#   5. Cleanup de temp views
 #
 # Instalação no Databricks:
 #   %pip install git+https://github.com/VictorPasqualini/sparquet.git
-#
-# Dependências Spark no cluster:
-#   org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1
 # =============================================================================
 from __future__ import annotations
 
@@ -22,25 +22,16 @@ import traceback
 from spark_framework import SparkFramework
 from spark_framework.core.context import SparkContextManager
 
-from constants import (  # noqa: E402
-    FLUXOS_OPERACOES,
-    KAFKA_BROKER,
-    VIEWS_INTERMEDIARIAS,
-)
-from validacao_parametros import (  # noqa: E402
-    validar_param_lista,
-    validar_param_unico,
-)
+from constants import FLUXOS_OPERACOES, KAFKA_BROKER, VIEWS_INTERMEDIARIAS  # noqa: E402
+from validacao_parametros import validar_param_lista, validar_param_unico  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Configuração
-# ---------------------------------------------------------------------------
 BASE_PATH = "/Workspace/Repos/SEU_USUARIO/sparquet/tests/registro_vert/confs"
 
 fw = SparkFramework()
+spark = SparkContextManager.get_or_create(fw._spark_config)
 
 # ---------------------------------------------------------------------------
-# ETAPA 1 — Leitura e validação de parâmetros do job
+# ETAPA 1 — Params do job
 # ---------------------------------------------------------------------------
 try:
     param_lista_cessoes   = validar_param_lista("cessoes_lista_string", str)   or []
@@ -49,42 +40,30 @@ try:
     param_tipo_ativo      = validar_param_unico("tipo_ativo_string", str)
     param_registradora    = validar_param_unico("registradora_string", str)
 
-    # Se foi passada uma lista explícita de cessões/contratos, não filtra por
-    # cessões já registradas — o usuário quer reprocessar especificamente.
     processar_somente_pendentes = not (param_lista_cessoes or param_lista_contratos)
 
-    # Resolve fluxos a executar (todos ou apenas o (tipo_ativo, registradora) informado)
     if param_tipo_ativo and param_registradora:
         chave = (param_tipo_ativo, param_registradora)
         if chave not in FLUXOS_OPERACOES:
-            raise ValueError(
-                f"Sem fluxos mapeados para {param_tipo_ativo}-{param_registradora}"
-            )
+            raise ValueError(f"Sem fluxos mapeados para {param_tipo_ativo}-{param_registradora}")
         fluxos_ativos = {chave: FLUXOS_OPERACOES[chave]}
-        print(f"✅ Filtro de fluxo: {param_tipo_ativo}-{param_registradora}")
     else:
         fluxos_ativos = FLUXOS_OPERACOES
-        print("ℹ️ Sem filtros para tipo_ativo/registradora — todos os fluxos")
 
-except Exception as e:
-    raise RuntimeError(f"ERRO ETAPA 1 — params do job\n{traceback.format_exc()}") from e
+except Exception:
+    raise RuntimeError(f"ERRO params\n{traceback.format_exc()}")
 
 
 # ---------------------------------------------------------------------------
-# ETAPA 2 — Base de cessões aprovadas (declarativo)
+# ETAPA 2 — Base de cessões (declarativo, com filtros opcionais + multi_ativos)
 # ---------------------------------------------------------------------------
-# cessoes_base.json:
-#   - silver_cessao + silver_cessoes_status(1,10,11) + silver_parametrizacao
-#   - join silver_contrato com critérios validados (via with_transformations)
-#   - join bronze_remessa para tipo_contrato
-#   - filtros opcionais por listas (param_lista_*) via skip_if_null
-#   → grava view 'cessoes_base'
 r = fw.run(
     f"{BASE_PATH}/cessoes_base.json",
     columns={
-        "param_lista_cessoes":   param_lista_cessoes,
-        "param_lista_operacoes": param_lista_operacoes,
-        "param_lista_contratos": param_lista_contratos,
+        "param_lista_cessoes":               param_lista_cessoes,
+        "param_lista_operacoes":             param_lista_operacoes,
+        "param_lista_contratos":             param_lista_contratos,
+        "param_processar_somente_pendentes": True if processar_somente_pendentes else None,
     },
 )
 print(r.summary())
@@ -93,88 +72,60 @@ if not r.success:
 
 
 # ---------------------------------------------------------------------------
-# ETAPA 3 — Cessões prontas para processar (multi_ativos + anti-join controle)
+# ETAPA 3 — Coleta lista de id_cessao pendentes (otimiza leitura por ativo)
 # ---------------------------------------------------------------------------
-# cessoes_para_processar.json:
-#   - lê view 'cessoes_base'
-#   - self-join + group_by(expr) para criar coluna 'multi_ativos'
-#   - anti-join com silver_controle_registro_cessoes (skipável)
-#   → grava view 'cessoes_para_processar' (cached)
-r = fw.run(
-    f"{BASE_PATH}/cessoes_para_processar.json",
-    columns={
-        # bool → escalar; quando False, o anti-join é skipado via skip_if_null
-        # (None / [] / False são todos tratados como "skip")
-        "param_processar_somente_pendentes": True if processar_somente_pendentes else None,
-    },
-)
-print(r.summary())
-if not r.success:
-    raise RuntimeError(f"Falha em cessoes_para_processar.json: {r.error}")
+# Esta lista é injetada via param em cada conf de ativo para reduzir o
+# volume lido de bronze_remessa / silver_contrato / silver_parcela etc.
+lista_cessoes_pendentes = [
+    r.id_cessao
+    for r in spark.table("cessoes_base").select("id_cessao").distinct().collect()
+]
+
+if not lista_cessoes_pendentes:
+    print("ℹ️ Sem cessões pendentes — encerrando.")
+    fw.drop_views(VIEWS_INTERMEDIARIAS)
+    fw.stop()
+    raise SystemExit(0)
+
+print(f"ℹ️ {len(lista_cessoes_pendentes)} cessões pendentes")
+df_nao_processadas = spark.table("cessoes_base")
 
 
 # ---------------------------------------------------------------------------
-# ETAPA 4 — Loop por fluxo (enriquecimento + payload + envio)
+# ETAPA 4 — Loop por fluxo (cessoes_pendentes + payload com 4 outputs)
 # ---------------------------------------------------------------------------
-spark = SparkContextManager.get_or_create(fw._spark_config)
-df_nao_processadas = spark.table("cessoes_para_processar")
-
 for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
     for tipo_fluxo, attrs in fluxo_operacao.items():
         print(f"\n⌛ {tipo_ativo}-{registradora} ({tipo_fluxo})")
 
-        params_fluxo = {
-            "param_tipo_ativo":     tipo_ativo,
-            "param_registradora":   registradora,
-            "param_fluxo_operacao": tipo_fluxo,
+        params = {
+            "param_tipo_ativo":             tipo_ativo,
+            "param_registradora":           registradora,
+            "param_fluxo_operacao":         tipo_fluxo,
+            "param_lista_cessoes_pendentes": lista_cessoes_pendentes,
+            "param_topico":                 attrs["topico"],
+            "param_kafka_broker":           KAFKA_BROKER,
         }
 
-        # --- Enriquecimento (JSON) ---
-        r_enriq = fw.run(f"{BASE_PATH}/{attrs['conf_enriquecimento']}", columns=params_fluxo)
-        if not r_enriq.success:
-            print(f"❌ enriquecimento — {r_enriq.error}")
+        # --- 1. Cessões pendentes do ativo (filter + joins específicos) ---
+        r_pend = fw.run(f"{BASE_PATH}/{attrs['conf_cessoes_pendentes']}", columns=params)
+        if not r_pend.success:
+            print(f"❌ cessoes_pendentes — {r_pend.error}")
             continue
-        if r_enriq.rows_written == 0:
-            print(f"ℹ️ sem cessões para {tipo_ativo}-{registradora} ({tipo_fluxo})")
+        if r_pend.rows_written == 0:
+            print(f"ℹ️ sem cessões para este fluxo")
             continue
 
-        # --- Montagem do payload (JSON) ---
-        r_payload = fw.run(f"{BASE_PATH}/{attrs['conf_payload']}", columns=params_fluxo)
+        # --- 2. Payload + Kafka + 3 Deltas (output múltiplo) ---
+        r_payload = fw.run(f"{BASE_PATH}/{attrs['conf_payload']}", columns=params)
         if not r_payload.success:
             print(f"❌ payload — {r_payload.error}")
             continue
 
-        # --- Envio em 4 etapas declarativas (JSON) ---
-        # Cada conf de envio tem sua transformação específica (Kafka usa to_json,
-        # parcelas faz explode, controle faz distinct, contratos drop parcelas)
-        # — não dá para empilhar tudo numa conf só pois mudam a cardinalidade.
-        envio_cols = {
-            **params_fluxo,
-            "param_topico":        attrs["topico"],
-            "param_kafka_broker":  KAFKA_BROKER,
-            "param_view_payload":  attrs["view_payload"],
-        }
-
-        falhou = False
-        for conf_envio in [
-            "envio_kafka.json",
-            "envio_delta_controle.json",
-            "envio_delta_contratos.json",
-            "envio_delta_parcelas.json",
-        ]:
-            r_envio = fw.run(f"{BASE_PATH}/{conf_envio}", columns=envio_cols)
-            if not r_envio.success:
-                print(f"❌ {conf_envio} — {r_envio.error}")
-                falhou = True
-                break
-
-        if falhou:
-            continue
-
-        # Atualiza controle de cessões não processadas
+        # Atualiza o controle de não-processadas
         df_proc = spark.table(attrs["view_payload"]).select("id_cessao").distinct()
         df_nao_processadas = df_nao_processadas.join(df_proc, on=["id_cessao"], how="leftanti")
-        print(f"✅ enviado: {tipo_ativo}-{registradora} ({tipo_fluxo})")
+        print(f"✅ enviado: {r_payload.rows_written} mensagens Kafka")
 
 
 # ---------------------------------------------------------------------------

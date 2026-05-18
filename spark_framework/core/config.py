@@ -117,9 +117,16 @@ class ValidationConfig:
 class OutputConfig:
     """Configuração de um destino de escrita do pipeline.
 
-    O campo `columns` permite selecionar quais colunas serão escritas
-    neste destino específico, sem alterar o DataFrame das demais saídas.
-    Se omitido, todas as colunas são escritas.
+    Campos opcionais para projeção/transformação por output:
+      columns         – projeta apenas estas colunas (após transformations).
+      transformations – lista de transformações aplicadas ao df ANTES de
+                        escrever neste destino. Útil quando o mesmo pipeline
+                        grava em destinos com granularidades diferentes (ex:
+                        Kafka 1-msg-por-contrato + Delta parcelas via explode).
+                        As transformações suportam todos os types builtin
+                        (filter, with_column, select, drop, explode-via-with_column, etc.)
+                        e são aplicadas em um clone do df principal, sem
+                        afetar outros outputs.
     """
 
     format: str
@@ -128,6 +135,7 @@ class OutputConfig:
     partition_by: List[str] = field(default_factory=list)
     columns: Optional[List[str]] = None
     options: Dict[str, Any] = field(default_factory=dict)
+    transformations: List["TransformationConfig"] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> OutputConfig:
@@ -138,6 +146,10 @@ class OutputConfig:
             partition_by=data.get("partition_by", []),
             columns=data.get("columns"),
             options=data.get("options", {}),
+            transformations=[
+                TransformationConfig.from_dict(t)
+                for t in data.get("transformations", [])
+            ],
         )
 
 
@@ -150,6 +162,12 @@ class PipelineConfig:
     spark: SparkConfig = field(default_factory=SparkConfig)
     transformations: List[TransformationConfig] = field(default_factory=list)
     validations: ValidationConfig = field(default_factory=ValidationConfig)
+    params: List[str] = field(default_factory=list)
+    """Lista declarativa de params de runtime esperados (recebidos via columns={}).
+
+    Quando definido, o framework valida que todos os params declarados foram
+    fornecidos (com warning se algum estiver faltando). Documenta a interface
+    da conf — quem chama sabe que params precisa passar."""
 
     @classmethod
     def from_file(cls, path: str) -> PipelineConfig:
@@ -179,4 +197,5 @@ class PipelineConfig:
             ],
             validations=ValidationConfig.from_dict(data.get("validations", {})),
             outputs=outputs,
+            params=list(data.get("params", [])),
         )

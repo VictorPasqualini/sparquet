@@ -1,27 +1,32 @@
 {
-  "name": "cessoes_nota_comercial_b3_payload",
-  "description": "Monta o struct 'payload' do registro Nota Comercial/B3 em camadas with_column (legibilidade). Gera id_vert (uuid first por contrato), monta paymentMethod, nc, data, payload, e adiciona array 'parcelas' via self-join + group_by.",
+  "name": "nota_comercial_b3_payload",
+  "description": "Monta o struct 'payload' do registro Nota Comercial / B3 em camadas with_column legíveis, agrega 'parcelas' via self-join + group_by, e escreve simultaneamente em 4 destinos: Kafka (topico via param), silver_controle_registro_cessoes (controle de envio), silver_registro_contratos (1 linha por contrato), silver_registro_parcelas (explode do array parcelas). Cada output tem suas próprias transformações específicas para lidar com a diferença de granularidade.",
+
+  "params": [
+    "param_tipo_ativo",
+    "param_registradora",
+    "param_topico",
+    "param_kafka_broker"
+  ],
 
   "input": {
     "format": "view",
-    "path":   "cessoes_nota_comercial_b3_enriquecido"
+    "path":   "nota_comercial_b3_pendentes"
   },
 
   "transformations": [
     { "type": "with_column", "name": "uuid_temp", "expression": "uuid()" },
-    { "type": "with_column", "name": "id_vert",   "expression": "first(uuid_temp) over (partition by numero_contrato)" },
+    { "type": "with_column", "name": "id_vert",
+      "expression": "first(uuid_temp) over (partition by numero_contrato)" },
     { "type": "drop", "columns": ["uuid_temp"] },
 
-    { "type": "with_column",
-      "name": "payment_method",
+    { "type": "with_column", "name": "payment_method",
       "expression": "struct(lpad(informacoes_adicionais.codigo_metodo_pagamento, 2, '0') as paymentMethodCode, lpad(informacoes_adicionais.codigo_do_indexador, 4, '0') as indexCode, CASE WHEN cast(informacoes_adicionais.codigo_do_indexador as int) IN (20, 99) THEN NULL ELSE cast(percentual_taxa_variavel as float) END as rateFloatingPercentage, cast(informacoes_adicionais.taxa_contrato as int) as interestRateSpread, codigo_criterio_calculo_juros as interestCalculationCriteriaCode)" },
 
-    { "type": "with_column",
-      "name": "nc_data",
-      "expression": "struct('N' as ncEmissionTypeCode, '55639.40-2' as otcIssuerAccountCode, codigo_tipo_emissao as issueTypeCode, codigo_conta_contabil_otc as otcBookkeeperAccountCode, cast(informacoes_adicionais.numero_da_emissao as int) as issueNumber, informacoes_adicionais.numero_da_serie as serieNumber, data_emissao_contrato as issueDate, max_data_vencimento_parcela as maturityDate, data_referencia as profitabilityStartDate, cast(informacoes_adicionais.quantidade_emitida as int) as issuedQuantity, cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as unitIssueValue, cast(cast(informacoes_adicionais.quantidade_emitida as double) * cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as double) as issueFinancialValue, codigo_regime_tributario as regimeTypeCode, indicador_processamento_cetip as cetipEventAttendedIndicator, 'PRIVADAVERT' as cvmRegistrationNumber, 1 as cvmSequentialNumber, '2026-01-12' as cvmRegistrationDate, indicador_resgate_antecipado_unilateral as unilateralEarlyRedemptionIndicator, informacoes_adicionais.nome_fiador as guarantorName, indicador_presenca_agente_fiduciario as fiduciaryAgentIndicator, nome_sacado as issuerName, documento_sacado as issuerDocumentNumber, cast(informacoes_adicionais.codigo_tipo_garantia as int) as guaranteeTypeCode, payment_method as paymentMethod)" },
+    { "type": "with_column", "name": "nc_data",
+      "expression": "struct('N' as ncEmissionTypeCode, '55639.40-2' as otcIssuerAccountCode, codigo_tipo_emissao as issueTypeCode, codigo_conta_contabil_otc as otcBookkeeperAccountCode, cast(informacoes_adicionais.numero_da_emissao as int) as issueNumber, informacoes_adicionais.numero_da_serie as serieNumber, data_emissao_contrato as issueDate, max_data_vencimento_parcela as maturityDate, data_referencia as profitabilityStartDate, cast(informacoes_adicionais.quantidade_emitida as int) as issuedQuantity, cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as unitIssueValue, cast(cast(informacoes_adicionais.quantidade_emitida as double) * cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as double) as issueFinancialValue, codigo_regime_tributario as regimeTypeCode, indicador_processamento_cetip as cetipEventAttendedIndicator, 'PRIVADAVERT' as cvmRegistrationNumber, 1 as cvmSequentialNumber, cast('2026-01-12' as date) as cvmRegistrationDate, indicador_resgate_antecipado_unilateral as unilateralEarlyRedemptionIndicator, informacoes_adicionais.nome_fiador as guarantorName, indicador_presenca_agente_fiduciario as fiduciaryAgentIndicator, nome_sacado as issuerName, documento_sacado as issuerDocumentNumber, cast(informacoes_adicionais.codigo_tipo_garantia as int) as guaranteeTypeCode, payment_method as paymentMethod)" },
 
-    { "type": "with_column",
-      "name": "payload",
+    { "type": "with_column", "name": "payload",
       "expression": "struct(id_vert as id_externo, struct(nc_data as nc) as data)" },
 
     { "type": "select",
@@ -47,10 +52,79 @@
     }
   ],
 
-  "output": {
-    "format": "view",
-    "path":   "cessoes_nota_comercial_b3_payload",
-    "mode":   "overwrite",
-    "options": { "cache": "true" }
-  }
+  "outputs": [
+    {
+      "format":  "view",
+      "path":    "nota_comercial_b3_payload",
+      "mode":    "overwrite",
+      "options": { "checkpoint": "true" }
+    },
+
+    {
+      "format":  "kafka",
+      "path":    "${param_topico}",
+      "transformations": [
+        { "type": "with_column", "name": "value", "expression": "to_json(payload)" },
+        { "type": "with_column", "name": "headers",
+          "expression": "array(struct(cast('type' as string) as key, cast('REGISTRO' as binary) as value), struct(cast('kind' as string) as key, cast('ENVIO' as binary) as value))" }
+      ],
+      "columns": ["value", "headers"],
+      "options": {
+        "bootstrap_servers":      "${param_kafka_broker}",
+        "value_column":           "value",
+        "key_column":             null,
+        "kafka.max.request.size": "4194304"
+      }
+    },
+
+    {
+      "format": "delta",
+      "path":   "lastros.silver_controle_registro_cessoes",
+      "mode":   "append",
+      "transformations": [
+        { "type": "select", "columns": ["id_cessao", "id_operacao"] },
+        { "type": "drop_duplicates" },
+        { "type": "with_column", "name": "data_envio", "expression": "current_timestamp()" }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+
+    {
+      "format": "delta",
+      "path":   "lastros.silver_registro_contratos",
+      "mode":   "append",
+      "transformations": [
+        { "type": "with_column", "name": "payload",          "expression": "to_json(payload)" },
+        { "type": "with_column", "name": "status",           "expression": "'ENVIADO_PARA_REGISTRO'" },
+        { "type": "with_column", "name": "data_atualizacao", "expression": "cast(NULL as date)" },
+        { "type": "with_column", "name": "data_envio",       "expression": "current_timestamp()" },
+        { "type": "with_column", "name": "id_registro",      "expression": "cast(NULL as string)" },
+        { "type": "with_column", "name": "id",               "expression": "cast(NULL as bigint)" },
+        { "type": "with_column", "name": "registradora",     "expression": "param_registradora" },
+        { "type": "with_column", "name": "tipo_ativo",       "expression": "param_tipo_ativo" },
+        { "type": "drop", "columns": ["parcelas"] }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+
+    {
+      "format": "delta",
+      "path":   "lastros.silver_registro_parcelas",
+      "mode":   "append",
+      "transformations": [
+        { "type": "with_column", "name": "parcela", "expression": "explode(parcelas)" },
+        { "type": "with_column", "name": "identificador_parcela",
+          "expression": "parcela.codigo_controle_parcela_contrato_if" },
+        { "type": "with_column", "name": "numero_parcela",
+          "expression": "parcela.numero_parcela" },
+        { "type": "with_column", "name": "status_parcela",
+          "expression": "'ENVIADO_PARA_REGISTRO'" },
+        { "type": "with_column", "name": "data_baixa",
+          "expression": "cast(NULL as date)" }
+      ],
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato",
+                  "identificador_parcela", "numero_parcela", "status_parcela", "data_baixa"],
+      "options": { "mergeSchema": "true" }
+    }
+  ]
 }

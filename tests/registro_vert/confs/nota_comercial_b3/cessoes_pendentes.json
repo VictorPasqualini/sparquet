@@ -1,10 +1,17 @@
 {
-  "name": "cessoes_nota_comercial_b3_enriquecimento",
-  "description": "Enriquece cessões de Nota Comercial/B3 com colunas da remessa, faz parsing de informacoes_adicionais (struct JSON) e calcula max_data_vencimento_parcela via window. Grava view 'cessoes_nota_comercial_b3_enriquecido'.",
+  "name": "nota_comercial_b3_cessoes_pendentes",
+  "description": "Filtra cessoes_base para o fluxo Nota Comercial / B3 e enriquece com dados de bronze_remessa específicos do tipo (numero_parcela, sacado, datas, informacoes_adicionais). Otimiza a leitura de bronze_remessa filtrando por param_lista_cessoes_pendentes (recebida do orquestrador após cessoes_base). Materializa via localCheckpoint.",
+
+  "params": [
+    "param_tipo_ativo",
+    "param_registradora",
+    "param_fluxo_operacao",
+    "param_lista_cessoes_pendentes"
+  ],
 
   "input": {
     "format": "view",
-    "path":   "cessoes_para_processar"
+    "path":   "cessoes_base"
   },
 
   "transformations": [
@@ -15,6 +22,9 @@
       "type": "join",
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
       "with_transformations": [
+        { "type": "filter",
+          "skip_if_null": "param_lista_cessoes_pendentes",
+          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
         { "type": "select",
           "columns": ["id_cessao", "numero_contrato", "numero_parcela", "nome_sacado",
                       "documento_sacado", "data_emissao_contrato", "data_vencimento_parcela",
@@ -38,9 +48,9 @@
   ],
 
   "output": {
-    "format": "view",
-    "path":   "cessoes_nota_comercial_b3_enriquecido",
-    "mode":   "overwrite",
-    "options": { "cache": "false" }
+    "format":  "view",
+    "path":    "nota_comercial_b3_pendentes",
+    "mode":    "overwrite",
+    "options": { "checkpoint": "true" }
   }
 }

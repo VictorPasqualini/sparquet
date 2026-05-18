@@ -143,7 +143,7 @@ class SparkFramework:
                 spark.catalog.dropTempView(name)
                 removed.append(name)
             except Exception as exc:
-                logger.warn("Falha ao remover temp view", view=name, error=str(exc))
+                logger.warning("Falha ao remover temp view", view=name, error=str(exc))
         if removed:
             logger.info("Temp views removidas", views=removed)
         return removed

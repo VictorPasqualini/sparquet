@@ -90,6 +90,16 @@ class Pipeline:
         try:
             spark = SparkContextManager.get_or_create(self.config.spark)
 
+            # Validação declarativa de params: warning quando faltam params
+            # declarados no campo "params" da conf
+            if self.config.params:
+                missing = [
+                    p for p in self.config.params
+                    if p not in self._columns or _is_empty_param(self._columns.get(p))
+                ]
+                if missing:
+                    log.warning("Params declarados sem valor", faltando=missing)
+
             df = ReaderFactory.create(spark, self.config.input).read()
             df = df.withColumn("ingestion_ts", F.current_timestamp())
             rows_read = df.count()
@@ -141,13 +151,21 @@ class Pipeline:
         self, spark: SparkSession, df: DataFrame, log
     ) -> None:
         for output in self.config.outputs:
-            output_df = self._project_columns(df, output)
+            output_df = df
+            if output.transformations:
+                # Aplica transformações específicas do output (não afeta os demais)
+                # — mesmo dicionário de columns vale aqui (skip_if_null funciona).
+                output_df = self._transform_engine.apply(
+                    output_df, output.transformations, columns=self._columns
+                )
+            output_df = self._project_columns(output_df, output)
             log.info(
                 "Escrevendo output",
                 formato=output.format,
                 path=output.path,
                 modo=output.mode,
                 colunas=output.columns or "todas",
+                transformacoes=len(output.transformations),
             )
             WriterFactory.create(spark, output).write(output_df)
 
