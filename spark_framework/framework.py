@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
-from pyspark.sql import DataFrame
+from typing import Any, Dict, Iterable, List, Optional
 
 from spark_framework.core.config import PipelineConfig, SparkConfig
 from spark_framework.core.context import SparkContextManager
@@ -10,6 +9,7 @@ from spark_framework.io.factory import ReaderFactory, WriterFactory
 from spark_framework.io.base import BaseReader, BaseWriter
 from spark_framework.transform.base import BaseTransformation
 from spark_framework.transform.engine import TransformationEngine
+from spark_framework.utils.logger import logger
 from spark_framework.validation.base import BaseValidator
 from spark_framework.validation.engine import ValidationEngine
 
@@ -50,33 +50,32 @@ class SparkFramework:
     def run(
         self,
         config_path: str,
-        input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um arquivo JSON.
 
         Args:
             config_path: caminho para o JSON de configuração.
-            input_df:    DataFrame de entrada; quando fornecido substitui o 'input'
-                         declarado no JSON e não adiciona ingestion_ts automaticamente.
-            columns:     Colunas literais a injetar no df antes das transformações,
-                         ex: {"param_tipo_ativo": "NC", "param_registradora": "CERC"}.
-                         Permitem que filtros na conf referenciem valores de runtime.
+            columns:     Valores literais de runtime injetados como colunas no df
+                         logo após a leitura, antes das transformações.
+                         Escalares viram F.lit; listas viram F.array(F.lit, ...).
+                         Valores None/[] não são injetados — transformações que
+                         dependem deles devem usar "skip_if_null".
+                         Ex: {"param_tipo_ativo": "NC", "param_lista_cessoes": ["a","b"]}.
         """
         config = PipelineConfig.from_file(config_path)
         self._apply_spark_override(config)
-        return self._execute(config, input_df=input_df, columns=columns)
+        return self._execute(config, columns=columns)
 
     def run_from_dict(
         self,
         config: Dict[str, Any],
-        input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um dicionário Python."""
         pipeline_config = PipelineConfig.from_dict(config)
         self._apply_spark_override(pipeline_config)
-        return self._execute(pipeline_config, input_df=input_df, columns=columns)
+        return self._execute(pipeline_config, columns=columns)
 
     # ------------------------------------------------------------------
     # Registro de extensões
@@ -106,6 +105,35 @@ class SparkFramework:
     # Ciclo de vida
     # ------------------------------------------------------------------
 
+    def drop_views(self, names: Iterable[str]) -> List[str]:
+        """Remove temp views da sessão Spark e libera o cache associado.
+
+        Útil ao final de um orquestrador para limpar as views intermediárias
+        criadas por ViewWriter (que faz cache + createOrReplaceTempView).
+
+        Args:
+            names: nomes das temp views a remover.
+
+        Returns:
+            Lista das views efetivamente removidas (as inexistentes são ignoradas).
+        """
+        spark = SparkContextManager.get_or_create(self._spark_config)
+        removed: List[str] = []
+        for name in names:
+            try:
+                # unpersist (caso a view esteja em cache via ViewWriter)
+                try:
+                    spark.table(name).unpersist()
+                except Exception:
+                    pass
+                spark.catalog.dropTempView(name)
+                removed.append(name)
+            except Exception as exc:
+                logger.warn("Falha ao remover temp view", view=name, error=str(exc))
+        if removed:
+            logger.info("Temp views removidas", views=removed)
+        return removed
+
     def stop(self) -> None:
         """Encerra a SparkSession."""
         SparkContextManager.stop()
@@ -117,14 +145,12 @@ class SparkFramework:
     def _execute(
         self,
         config: PipelineConfig,
-        input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         pipeline = Pipeline(
             config,
             transform_engine=self._transform_engine,
             validation_engine=self._validation_engine,
-            input_df=input_df,
             columns=columns,
         )
         return pipeline.run()

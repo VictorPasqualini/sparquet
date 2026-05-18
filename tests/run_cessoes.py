@@ -150,6 +150,7 @@ if processar_somente_cessoes_pendentes:
     )
 
 df.cache()
+df.createOrReplaceTempView("cessoes_para_processar")
 df_nao_processadas = df
 
 
@@ -161,10 +162,10 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
 
         print(f"\n⌛ PROCESSANDO: {tipo_ativo}-{registradora} ({tipo_fluxo})")
 
-        # A conf é responsável por filtrar e enriquecer; os params são injetados como colunas literais
+        # A conf lê da view 'cessoes_para_processar' e filtra/enriquece;
+        # os params são injetados como colunas literais via 'columns'.
         r = fw.run(
             f"{BASE_PATH}/{atributos_fluxo['config']}",
-            input_df=df,
             columns={
                 "param_tipo_ativo":     tipo_ativo,
                 "param_registradora":   registradora,
@@ -176,7 +177,8 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
             print(f"❌ Erro na conf — {tipo_ativo}-{registradora} ({tipo_fluxo})\n{r.error}")
             continue
 
-        df_registro = r.output_df
+        # A conf grava a view 'cessoes_nota_comercial_reg' (ou similar) — lemos de volta
+        df_registro = spark.table(atributos_fluxo["view_saida"])
 
         df_nao_processadas = df_nao_processadas.join(
             df_registro.select("id_cessao").distinct(),

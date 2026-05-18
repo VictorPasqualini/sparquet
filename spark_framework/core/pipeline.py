@@ -23,7 +23,6 @@ class PipelineResult:
     rows_written: int = 0
     validation_results: List[ValidationResult] = field(default_factory=list)
     error: Optional[str] = None
-    output_df: Optional[DataFrame] = None  # df após transformações; disponível quando input_df é injetado
 
     def summary(self) -> str:
         if not self.success:
@@ -38,6 +37,29 @@ class PipelineResult:
         )
 
 
+def _is_empty_param(value: Any) -> bool:
+    """Determina se um parâmetro de runtime deve ser tratado como vazio.
+
+    Usado por `skip_if_null` nas transformações e pela injeção de colunas
+    (valores vazios não viram coluna literal — a transformação dependente skipa).
+    """
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, dict, str)) and len(value) == 0:
+        return True
+    return False
+
+
+def _inject_column(df: DataFrame, name: str, value: Any) -> DataFrame:
+    """Injeta um valor de runtime como coluna literal.
+
+    Escalares → F.lit(value). Listas/tuplas → F.array(F.lit(...), ...).
+    """
+    if isinstance(value, (list, tuple)):
+        return df.withColumn(name, F.array(*[F.lit(v) for v in value]))
+    return df.withColumn(name, F.lit(value))
+
+
 class Pipeline:
     """Orquestra o fluxo: leitura → transformação → validação → escrita."""
 
@@ -46,13 +68,11 @@ class Pipeline:
         config: PipelineConfig,
         transform_engine: Optional[TransformationEngine] = None,
         validation_engine: Optional[ValidationEngine] = None,
-        input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.config = config
         self._transform_engine = transform_engine or TransformationEngine()
         self._validation_engine = validation_engine or ValidationEngine()
-        self._input_df = input_df
         self._columns: Dict[str, Any] = columns or {}
 
     @classmethod
@@ -70,26 +90,27 @@ class Pipeline:
         try:
             spark = SparkContextManager.get_or_create(self.config.spark)
 
-            if self._input_df is not None:
-                df = self._input_df
-                rows_read = 0
-                log.info("Input df injetado externamente", colunas=len(df.columns))
-            else:
-                df = ReaderFactory.create(spark, self.config.input).read()
-                df = df.withColumn("ingestion_ts", F.current_timestamp())
-                rows_read = df.count()
-                log.info(
-                    "Leitura concluida",
-                    linhas=rows_read,
-                    formato=self.config.input.format,
-                )
+            df = ReaderFactory.create(spark, self.config.input).read()
+            df = df.withColumn("ingestion_ts", F.current_timestamp())
+            rows_read = df.count()
+            log.info(
+                "Leitura concluida",
+                linhas=rows_read,
+                formato=self.config.input.format,
+            )
 
+            injected: List[str] = []
             for col_name, value in self._columns.items():
-                df = df.withColumn(col_name, F.lit(value))
-            if self._columns:
-                log.info("Colunas injetadas", colunas=list(self._columns))
+                if _is_empty_param(value):
+                    continue  # transformações com skip_if_null cuidam disso
+                df = _inject_column(df, col_name, value)
+                injected.append(col_name)
+            if injected:
+                log.info("Colunas injetadas", colunas=injected)
 
-            df = self._transform_engine.apply(df, self.config.transformations)
+            df = self._transform_engine.apply(
+                df, self.config.transformations, columns=self._columns
+            )
             log.info("Transformacoes aplicadas")
 
             validation_results = self._validation_engine.validate(
@@ -106,7 +127,6 @@ class Pipeline:
                 rows_read=rows_read,
                 rows_written=rows_written,
                 validation_results=validation_results,
-                output_df=df,
             )
 
         except Exception as exc:

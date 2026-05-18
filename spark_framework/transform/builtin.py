@@ -132,13 +132,15 @@ class GroupByTransformation(BaseTransformation):
     JSON params:
       by  – list of columns to group by
       agg – list of aggregation specs, each with:
-              func   – aggregation function name (see supported list below)
-              column – column to aggregate (optional for count)
-              alias  – output column name (optional; defaults to Spark naming)
+              func       – aggregation function name (see supported list below)
+              column     – column to aggregate (optional for count)
+              expression – arbitrary Spark SQL expression (only when func='expr')
+              alias      – output column name (optional; defaults to Spark naming)
 
     Supported func values:
       min, max, sum, avg/mean, count, first, last,
-      count_distinct, collect_list, collect_set
+      count_distinct, collect_list, collect_set,
+      expr — para agregações arbitrárias via Spark SQL
 
     Example:
       { "type": "group_by",
@@ -146,7 +148,10 @@ class GroupByTransformation(BaseTransformation):
         "agg": [
           { "func": "sum",   "column": "valor",  "alias": "total"  },
           { "func": "min",   "column": "status", "alias": "status" },
-          { "func": "count",                     "alias": "n"      }
+          { "func": "count",                     "alias": "n"      },
+          { "func": "expr",
+            "expression": "count(distinct struct(tipo_ativo, registradora)) > 1",
+            "alias": "multi_ativos" }
         ] }
     """
 
@@ -157,14 +162,27 @@ class GroupByTransformation(BaseTransformation):
         agg_exprs = []
         for spec in agg_specs:
             func_name = spec["func"].lower()
+            alias = spec.get("alias")
+
+            if func_name == "expr":
+                expression = spec.get("expression")
+                if not expression:
+                    raise ValueError(
+                        "agg func='expr' exige campo 'expression' com SQL Spark"
+                    )
+                expr = F.expr(expression)
+                if alias:
+                    expr = expr.alias(alias)
+                agg_exprs.append(expr)
+                continue
+
             func = _AGG_FUNCTIONS.get(func_name)
             if func is None:
                 raise ValueError(
                     f"Função de agregação '{func_name}' não suportada. "
-                    f"Disponíveis: {sorted(_AGG_FUNCTIONS)}"
+                    f"Disponíveis: {sorted(list(_AGG_FUNCTIONS) + ['expr'])}"
                 )
             col = spec.get("column")
-            alias = spec.get("alias")
 
             expr = func(F.col(col)) if col else func("*")
             if alias:
@@ -195,7 +213,10 @@ class JoinTransformation(BaseTransformation):
     and r.campo to disambiguate columns.
 
     JSON params:
-      with                 – source config (format + path + options)
+      with                 – source config (format + path + options) OR the
+                             string "self" to reuse the current DataFrame as
+                             the right-side base (útil para criar colunas
+                             agregadas via auto-join, ex: multi_ativos)
       on                   – column name, list of column names, or SQL expression
                              (SQL expressions containing spaces use l./r. aliases)
       how                  – join type (default: inner)
@@ -209,20 +230,35 @@ class JoinTransformation(BaseTransformation):
         "how": "leftanti" }
 
       { "type": "join",
-        "with": { "format": "delta", "path": "catalog.schema.contratos" },
+        "with": "self",
         "with_transformations": [
-          { "type": "filter", "condition": "status = 1" },
-          { "type": "select", "columns": ["id", "nome"] }
+          { "type": "select", "columns": ["id_operacao", "tipo_ativo", "registradora"] },
+          { "type": "drop_duplicates" },
+          { "type": "group_by",
+            "by": ["id_operacao"],
+            "agg": [
+              { "func": "expr",
+                "expression": "count(distinct struct(tipo_ativo, registradora)) > 1",
+                "alias": "multi_ativos" }
+            ] },
+          { "type": "select", "columns": ["id_operacao", "multi_ativos"] }
         ],
-        "on": "id",
-        "how": "inner" }
+        "on": ["id_operacao"],
+        "how": "left" }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
-        from spark_framework.io.factory import ReaderFactory
+        with_param = self.config.params["with"]
 
-        source_cfg = InputConfig.from_dict(self.config.params["with"])
-        other = ReaderFactory.create(df.sparkSession, source_cfg).read()
+        if isinstance(with_param, str) and with_param.lower() == "self":
+            # Self-join: usa o próprio df como base do right-side.
+            # with_transformations é obrigatório aqui (sem elas o join seria
+            # com o df idêntico, gerando colisões massivas).
+            other = df
+        else:
+            from spark_framework.io.factory import ReaderFactory
+            source_cfg = InputConfig.from_dict(with_param)
+            other = ReaderFactory.create(df.sparkSession, source_cfg).read()
 
         raw_transforms = self.config.params.get("with_transformations", [])
         if raw_transforms:
