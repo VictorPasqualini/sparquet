@@ -1,20 +1,48 @@
 {
   "name": "nota_comercial_b3_payload",
-  "description": "Monta o struct 'payload' Nota Comercial/B3 em camadas with_columns. Parcelas agregadas via window function (collect_list over numero_contrato) — sem self-join. 4 outputs com transformações específicas para Kafka + 3 Deltas.",
+  "description": "Fluxo completo Nota Comercial/B3: lê cessoes_pendentes (já filtrada por tipo/registradora/fluxo/lista), faz join com bronze_remessa para dados do sacado + informacoes_adicionais (parseadas via from_json), calcula max_data_vencimento_parcela via window, monta struct 'payload' em camadas. Parcelas via collect_list over window. 4 outputs: view + Kafka + 3 Deltas.",
 
   "params": [
     "param_tipo_ativo",
     "param_registradora",
     "param_topico",
-    "param_kafka_broker"
+    "param_kafka_broker",
+    "param_lista_cessoes_pendentes"
   ],
 
   "input": {
     "format": "view",
-    "path":   "nota_comercial_b3_pendentes"
+    "path":   "cessoes_pendentes"
   },
 
   "transformations": [
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+      "with_transformations": [
+        { "type": "filter",
+          "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+          "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
+        { "type": "select",
+          "columns": ["id_cessao", "numero_contrato", "numero_parcela", "nome_sacado",
+                      "documento_sacado", "data_emissao_contrato", "data_vencimento_parcela",
+                      "informacoes_adicionais"] }
+      ],
+      "on":  ["id_cessao", "numero_contrato"],
+      "how": "inner"
+    },
+
+    { "type": "with_columns",
+      "columns": [
+        { "name": "max_data_vencimento_parcela",
+          "expression": "max(data_vencimento_parcela) over (partition by id_cessao, numero_contrato)" },
+        { "name": "informacoes_adicionais",
+          "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" }
+      ] },
+
+    { "type": "with_column", "name": "informacoes_adicionais",
+      "expression": "from_json(informacoes_adicionais, 'STRUCT<numero_da_emissao: STRING, numero_da_serie: STRING, quantidade_emitida: STRING, valor_da_unidade_de_emissao: STRING, nome_fiador: STRING, codigo_tipo_garantia: STRING, codigo_metodo_pagamento: STRING, codigo_do_indexador: STRING, taxa_contrato: STRING>')" },
+
     { "type": "with_columns",
       "columns": [
         { "name": "uuid_temp", "expression": "uuid()" },

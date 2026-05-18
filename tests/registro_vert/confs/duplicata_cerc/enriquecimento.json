@@ -1,22 +1,17 @@
 {
-  "name": "duplicata_cerc_cessoes_pendentes",
-  "description": "Filtra cessoes_base para o fluxo DUPLICATA / CERC (qualquer subfluxo: REGISTRO, EMISSAO, EMISSAO_E_REGISTRO) e enriquece com bronze_remessa (sacado, cedente, datas, valores, informacoes_adicionais via from_json), silver_lastros_relacionamento (municipio/uf), e silver_parcela agregada em array de struct. O filter por param_fluxo_operacao acontece nos payloads (cada payload é específico para seu subfluxo).",
+  "name": "duplicata_cerc_enriquecimento",
+  "description": "Enriquecimento comum aos 3 subfluxos de Duplicata (REGISTRO/EMISSAO/EMISSAO_E_REGISTRO). Lê cessoes_pendentes (filtrada por DUPLICATA/CERC sem filtro de fluxo) e junta bronze_remessa + silver_lastros_relacionamento + silver_parcela agregada. Faz parsing de informacoes_adicionais. Cada payload da Duplicata lê desta view e aplica seu filter de fluxo + struct específico.",
 
   "params": [
-    "param_tipo_ativo",
-    "param_registradora",
     "param_lista_cessoes_pendentes"
   ],
 
   "input": {
     "format": "view",
-    "path":   "cessoes_base"
+    "path":   "cessoes_pendentes"
   },
 
   "transformations": [
-    { "type": "filter",
-      "condition": "tipo_ativo = ${param_tipo_ativo} AND registradora = ${param_registradora} AND ((tipo_contrato = '1' AND multi_ativos) OR NOT multi_ativos)" },
-
     {
       "type": "join",
       "with": { "format": "delta", "path": "lastros.bronze_remessa" },
@@ -49,14 +44,16 @@
       "how": "left"
     },
 
-    { "type": "with_column", "name": "informacoes_adicionais",
-      "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" },
+    { "type": "with_columns",
+      "columns": [
+        { "name": "informacoes_adicionais",
+          "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" },
+        { "name": "data_emissao_duplicata",
+          "expression": "current_date()" }
+      ] },
 
     { "type": "with_column", "name": "informacoes_adicionais",
       "expression": "from_json(informacoes_adicionais, 'STRUCT<codigo_m_oper_cred: INT, codigo_s_m_oper_cred: INT, chave_unica_da_duplicata: STRING, especie_da_duplicata: STRING, data_emissao_da_duplicata: STRING, natureza_da_operacao: STRING>')" },
-
-    { "type": "with_column", "name": "data_emissao_duplicata",
-      "expression": "current_date()" },
 
     {
       "type": "join",
@@ -83,7 +80,7 @@
 
   "output": {
     "format": "view",
-    "path":   "duplicata_cerc_pendentes",
+    "path":   "duplicata_cerc_enriquecido",
     "mode":   "overwrite"
   }
 }

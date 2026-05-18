@@ -88,55 +88,47 @@ def test_cessoes_base_skip_anti_join_quando_lista_explicita(register_fixtures, r
     assert spark.table("cessoes_base").count() == 3
 
 
-def test_nc_cessoes_pendentes_filtra_por_tipo_e_registradora(
+def test_cessoes_pendentes_filtra_por_tipo_e_registradora(
     register_fixtures, run_conf, spark
 ):
-    """nota_comercial_b3/cessoes_pendentes filtra cessoes_base por NC/B3/REGISTRO
-    e enriquece com bronze_remessa."""
+    """cessoes_pendentes.json (genérica) filtra cessoes_base por NC/B3/REGISTRO
+    + multi_ativos compatível + lista opcional de cessões pendentes."""
     register_fixtures(FIXTURES_BASICAS)
 
     # Roda cessoes_base primeiro
     r = run_conf("cessoes_base.json", params={"param_processar_somente_pendentes": True})
     assert r.success
 
-    # Agora cessoes_pendentes do NC
-    r = run_conf("nota_comercial_b3/cessoes_pendentes.json", params={
+    # Cessões pendentes genéricas para NC
+    r = run_conf("cessoes_pendentes.json", params={
         "param_tipo_ativo":              "NOTA_COMERCIAL",
         "param_registradora":            "B3",
         "param_fluxo_operacao":          "REGISTRO",
+        "param_codigo_tipo_contrato":    "8",
         "param_lista_cessoes_pendentes": ["CESS001", "CESS002"],
     })
     assert r.success, r.error
 
-    df = spark.table("nota_comercial_b3_pendentes")
+    df = spark.table("cessoes_pendentes")
     rows = df.collect()
     assert len(rows) == 2  # só CESS001 e CESS002 são NC
 
     ids = sorted([r["id_cessao"] for r in rows])
     assert ids == ["CESS001", "CESS002"]
 
-    # informacoes_adicionais deve ter sido parseada para struct
-    info = rows[0]["informacoes_adicionais"]
-    assert info is not None
-    assert hasattr(info, "asDict")  # é struct
-    info_d = info.asDict()
-    assert "numero_da_emissao" in info_d
-    assert "valor_da_unidade_de_emissao" in info_d
 
-
-def test_nc_cessoes_pendentes_max_data_vencimento(register_fixtures, run_conf, spark):
-    """A coluna max_data_vencimento_parcela deve ser calculada via window."""
+def test_cessoes_pendentes_filtro_fluxo_skipavel(register_fixtures, run_conf, spark):
+    """Quando param_fluxo_operacao é None, o filter de fluxo é skipado
+    (útil para Duplicata com 3 subfluxos compartilhando enriquecimento)."""
     register_fixtures(FIXTURES_BASICAS)
     run_conf("cessoes_base.json", params={"param_processar_somente_pendentes": True})
-    r = run_conf("nota_comercial_b3/cessoes_pendentes.json", params={
-        "param_tipo_ativo":     "NOTA_COMERCIAL",
-        "param_registradora":   "B3",
-        "param_fluxo_operacao": "REGISTRO",
+
+    r = run_conf("cessoes_pendentes.json", params={
+        "param_tipo_ativo":           "NOTA_COMERCIAL",
+        "param_registradora":         "B3",
+        "param_fluxo_operacao":       None,  # skipa filtro
+        "param_codigo_tipo_contrato": "8",
     })
     assert r.success, r.error
-
-    df = spark.table("nota_comercial_b3_pendentes")
-    # Cada linha tem max_data_vencimento_parcela = data_vencimento_parcela
-    # (só há 1 parcela por contrato nas fixtures)
-    for row in df.collect():
-        assert row["max_data_vencimento_parcela"] is not None
+    # Sem filter de fluxo, todas as cessões NC (independente de fluxo) passam
+    assert spark.table("cessoes_pendentes").count() >= 1

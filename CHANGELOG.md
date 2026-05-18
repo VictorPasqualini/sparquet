@@ -22,6 +22,13 @@ Categorias usadas (de Keep a Changelog):
 ### Added
 - `CHANGELOG.md` (este arquivo) para manter contexto histórico do framework. Atualizado a cada mudança.
 
+### Changed (registro_vert)
+- **Refatoração**: 4 `<ativo>/cessoes_pendentes.json` consolidadas em **1 conf genérica** `confs/cessoes_pendentes.json` que filtra por `(tipo_ativo, registradora, fluxo_operacao)` + compatibilidade `multi_ativos` × `tipo_contrato` (via `${param_codigo_tipo_contrato}`).
+- Os joins específicos de cada ativo (bronze_remessa, silver_sacado, silver_dados_auxiliares, silver_emissao_ccb, silver_parcela, silver_lastros_relacionamento) migraram para cada `<ativo>/payload.json`.
+- Para Duplicata (3 subfluxos compartilham os joins): nova conf intermediária `duplicata_cerc/enriquecimento.json` evita duplicação 3×.
+- `cessoes_pendentes.json` aceita `param_fluxo_operacao` `null` para skipar o filtro de fluxo (usado pela Duplicata, onde o filtro acontece em cada `payload_*` específico).
+- Total de confs: 10 → 7.
+
 ---
 
 ## [0.4.0] — 2026-05-18 — Refactor: substituição `${param}` + skip_if SQL + checkpoint/cache como transformação

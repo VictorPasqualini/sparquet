@@ -22,7 +22,12 @@ import traceback
 from spark_framework import SparkFramework
 from spark_framework.core.context import SparkContextManager
 
-from constants import FLUXOS_OPERACOES, KAFKA_BROKER, VIEWS_INTERMEDIARIAS  # noqa: E402
+from constants import (  # noqa: E402
+    CODIGOS_TIPO_CONTRATO,
+    FLUXOS_OPERACOES,
+    KAFKA_BROKER,
+    VIEWS_INTERMEDIARIAS,
+)
 from validacao_parametros import validar_param_lista, validar_param_unico  # noqa: E402
 
 BASE_PATH = "/Workspace/Repos/SEU_USUARIO/sparquet/tests/registro_vert/confs"
@@ -102,13 +107,19 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
             "param_tipo_ativo":             tipo_ativo,
             "param_registradora":           registradora,
             "param_fluxo_operacao":         tipo_fluxo,
+            "param_codigo_tipo_contrato":   CODIGOS_TIPO_CONTRATO[tipo_ativo],
             "param_lista_cessoes_pendentes": lista_cessoes_pendentes,
             "param_topico":                 attrs["topico"],
             "param_kafka_broker":           KAFKA_BROKER,
         }
 
-        # --- 1. Cessões pendentes do ativo (filter + joins específicos) ---
-        r_pend = fw.run(f"{BASE_PATH}/{attrs['conf_cessoes_pendentes']}", params=runtime_params)
+        # --- 1. Cessoes_pendentes genérica (filter por params) ---
+        # Para Duplicata o fluxo_operacao é skipado (3 subfluxos compartilham);
+        # cada payload de Duplicata aplica seu próprio filter de fluxo.
+        params_pendentes = dict(runtime_params)
+        if tipo_ativo == "DUPLICATA":
+            params_pendentes["param_fluxo_operacao"] = None
+        r_pend = fw.run(f"{BASE_PATH}/cessoes_pendentes.json", params=params_pendentes)
         if not r_pend.success:
             print(f"❌ cessoes_pendentes — {r_pend.error}")
             continue
@@ -116,7 +127,14 @@ for (tipo_ativo, registradora), fluxo_operacao in fluxos_ativos.items():
             print(f"ℹ️ sem cessões para este fluxo")
             continue
 
-        # --- 2. Payload + Kafka + 3 Deltas (output múltiplo) ---
+        # --- 2. Enriquecimento (opcional, apenas Duplicata por agora) ---
+        if attrs.get("conf_enriquecimento"):
+            r_enriq = fw.run(f"{BASE_PATH}/{attrs['conf_enriquecimento']}", params=runtime_params)
+            if not r_enriq.success:
+                print(f"❌ enriquecimento — {r_enriq.error}")
+                continue
+
+        # --- 3. Payload + Kafka + 3 Deltas (output múltiplo) ---
         r_payload = fw.run(f"{BASE_PATH}/{attrs['conf_payload']}", params=runtime_params)
         if not r_payload.success:
             print(f"❌ payload — {r_payload.error}")

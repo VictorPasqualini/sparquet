@@ -1,0 +1,41 @@
+{
+  "name": "cessoes_pendentes",
+  "description": "Conf genérica reutilizada por todos os fluxos: filtra cessoes_base por (tipo_ativo, registradora, fluxo_operacao) e por compatibilidade multi_ativos × tipo_contrato. Aceita filtro opcional por param_lista_cessoes_pendentes (vem do orquestrador). Materializa via checkpoint. Cada payload de ativo lê desta view e faz seus joins específicos.\n\nObs: o filtro de fluxo_operacao é skipado quando o param está null — útil para Duplicata que tem 3 subfluxos (REGISTRO, EMISSAO, EMISSAO_E_REGISTRO) compartilhando a mesma cessoes_pendentes; cada payload da Duplicata aplica seu próprio filter de fluxo.",
+
+  "params": [
+    "param_tipo_ativo",
+    "param_registradora",
+    "param_fluxo_operacao",
+    "param_codigo_tipo_contrato",
+    "param_lista_cessoes_pendentes"
+  ],
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_base"
+  },
+
+  "transformations": [
+    { "type": "filter",
+      "condition": "tipo_ativo = ${param_tipo_ativo} AND registradora = ${param_registradora}" },
+
+    { "type": "filter",
+      "skip_if":   "${param_fluxo_operacao} IS NULL",
+      "condition": "fluxo_operacao = ${param_fluxo_operacao}" },
+
+    { "type": "filter",
+      "condition": "(tipo_contrato = ${param_codigo_tipo_contrato} AND multi_ativos) OR NOT multi_ativos" },
+
+    { "type": "filter",
+      "skip_if":   "${param_lista_cessoes_pendentes} IS NULL",
+      "condition": "array_contains(${param_lista_cessoes_pendentes}, id_cessao)" },
+
+    { "type": "checkpoint" }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_pendentes",
+    "mode":   "overwrite"
+  }
+}
