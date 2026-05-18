@@ -15,38 +15,41 @@ class FilterTransformation(BaseTransformation):
 
 
 class SelectTransformation(BaseTransformation):
-    """Projects a subset of columns, optionally creating new ones via expressions.
+    """Projects columns. Cada item é uma string Spark SQL.
 
-    Cada item em `columns` pode ser:
-      - string  → nome de coluna existente (mantém-se inalterada)
-      - dict    → { "name": "...", "expression": "SQL expr" } cria uma coluna
-                  computada já dentro do select (mais compacto que with_column
-                  quando há várias projeções correlatas).
+    Suporta tanto nomes simples quanto expressões com alias (sintaxe SQL nativa):
+      - "id"                              → coluna 'id' (inalterada)
+      - "antigo as novo"                  → renomeia 'antigo' para 'novo'
+      - "a * b as produto"                → cria coluna computada 'produto'
+      - "current_timestamp() as ts"       → função sem args
+      - "lpad(doc, 14, '0') as doc_pad"   → expressão arbitrária
 
-    Ex (combinando referência simples + colunas computadas):
+    Internamente cada item passa por F.expr(), que aceita qualquer expressão
+    Spark SQL válida — incluindo o alias via 'as'.
+
+    Ex:
       { "type": "select",
         "columns": [
           "id_operacao",
           "id_cessao",
-          { "name": "data_envio",   "expression": "current_timestamp()" },
-          { "name": "documento_norm",
-            "expression": "lpad(regexp_replace(documento, '\\\\D', ''), 14, '0')" }
+          "current_timestamp() as data_envio",
+          "lpad(regexp_replace(documento, '\\\\D', ''), 14, '0') as documento_norm"
         ] }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
+        items = self.config.params["columns"]
         exprs = []
-        for item in self.config.params["columns"]:
+        for item in items:
             if isinstance(item, str):
-                exprs.append(F.col(item))
+                exprs.append(F.expr(item))
             elif isinstance(item, dict):
-                name = item["name"]
-                expression = item["expression"]
-                exprs.append(F.expr(expression).alias(name))
+                # Backward-compat: {name, expression}
+                exprs.append(F.expr(item["expression"]).alias(item["name"]))
             else:
                 raise ValueError(
                     f"select columns item invalido: {item!r}. "
-                    f"Use string (nome) ou {{'name': ..., 'expression': ...}}."
+                    f"Use string SQL (com 'as nome' para alias)."
                 )
         return df.select(*exprs)
 

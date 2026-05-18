@@ -5,6 +5,13 @@ Toda a lógica de leitura, transformação e escrita é declarativa; Python só 
 (loops, parâmetros de runtime, cleanup). Objetivo: produto reutilizável para
 qualquer caso de ingestão, transformação e qualidade de dados.
 
+> 📋 **Mantenha o `CHANGELOG.md` atualizado** sempre que alterar capacidades do
+> framework (transformações novas, mudança em contrato de uso, novos formatos
+> IO, validators, etc.). Adicione uma entrada na seção `[Unreleased]` descrevendo
+> a mudança orientada ao usuário do framework. Use as categorias do
+> [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/): `Added`,
+> `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
+
 ---
 
 ## Uso como biblioteca (ponto de entrada principal)
@@ -127,14 +134,15 @@ JSON/dict → substitute_params(${...}) → PipelineConfig → Pipeline.run()
 
     { "type": "filter", "condition": "SQL expr" },
 
-    // select aceita strings (nomes) OU dicts {name, expression} (colunas computadas)
-    // ESTA É A FORMA MAIS COMPACTA de criar colunas inline dentro de uma projeção:
+    // select aceita strings Spark SQL (cada uma resolvida via F.expr).
+    // Use 'as nome' para criar colunas computadas inline — sintaxe nativa SQL:
     { "type": "select",
       "columns": [
         "id",
         "nome",
-        { "name": "doc_padronizado", "expression": "lpad(regexp_replace(doc, '\\D', ''), 14, '0')" },
-        { "name": "data_envio",      "expression": "current_timestamp()" }
+        "lpad(regexp_replace(doc, '\\D', ''), 14, '0') as doc_padronizado",
+        "current_timestamp() as data_envio",
+        "antigo_nome as novo_nome"
       ] },
 
     { "type": "drop", "columns": ["x"] },
@@ -410,8 +418,8 @@ com granularidades diferentes a partir do mesmo pipeline**:
       { "type": "select",
         "columns": [
           "id_cessao",
-          { "name": "identificador", "expression": "parcela.id" },
-          { "name": "numero",        "expression": "parcela.numero" }
+          "parcela.id     as identificador",
+          "parcela.numero as numero"
         ] }
     ] }
 ]

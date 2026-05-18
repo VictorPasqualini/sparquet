@@ -78,7 +78,7 @@
           "columns": [
             "id_cessao",
             "id_operacao",
-            { "name": "data_envio", "expression": "current_timestamp()" }
+            "current_timestamp() as data_envio"
           ] },
         { "type": "drop_duplicates" }
       ],
@@ -115,10 +115,10 @@
         { "type": "select",
           "columns": [
             "id_operacao", "id_vert", "id_cessao", "numero_contrato",
-            { "name": "identificador_parcela", "expression": "parcela.codigo_controle_parcela_contrato_if" },
-            { "name": "numero_parcela",        "expression": "parcela.numero_parcela" },
-            { "name": "status_parcela",        "expression": "'ENVIADO_PARA_REGISTRO'" },
-            { "name": "data_baixa",            "expression": "cast(NULL as date)" }
+            "parcela.codigo_controle_parcela_contrato_if as identificador_parcela",
+            "parcela.numero_parcela as numero_parcela",
+            "'ENVIADO_PARA_REGISTRO' as status_parcela",
+            "cast(NULL as date) as data_baixa"
           ] }
       ],
       "options": { "mergeSchema": "true" }

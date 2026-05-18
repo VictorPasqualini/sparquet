@@ -190,8 +190,8 @@ def test_output_transformations(fw, spark):
     assert v2 == [(1, 2, 2), (3, 4, 12)]
 
 
-def test_select_com_expressoes(fw, spark):
-    """select aceita strings (nomes) e dicts {name, expression}."""
+def test_select_com_expressoes_sintaxe_string(fw, spark):
+    """select aceita strings SQL com 'expr as alias' direto (sintaxe preferida)."""
     df = spark.createDataFrame([Row(a=10, b=2), Row(a=20, b=3)])
     df.createOrReplaceTempView("test_sel_in")
 
@@ -202,18 +202,42 @@ def test_select_com_expressoes(fw, spark):
             {"type": "select",
              "columns": [
                  "a",
-                 {"name": "produto", "expression": "a * b"},
-                 {"name": "dobro_a", "expression": "a * 2"},
+                 "a * b as produto",
+                 "a * 2 as dobro_a",
              ]}
         ],
         "output": {"format": "view", "path": "test_sel_out"},
     }
     r = fw.run_from_dict(conf)
-    assert r.success
+    assert r.success, r.error
     rows = sorted([(r["a"], r["produto"], r["dobro_a"]) for r in spark.table("test_sel_out").collect()])
     assert rows == [(10, 20, 20), (20, 60, 40)]
     # 'b' não está nas colunas resultantes (foi dropada)
     assert "b" not in spark.table("test_sel_out").columns
+
+
+def test_select_com_expressoes_dict_backward_compat(fw, spark):
+    """select ainda aceita {name, expression} para retrocompat."""
+    df = spark.createDataFrame([Row(a=10, b=2)])
+    df.createOrReplaceTempView("test_sel_dict_in")
+
+    conf = {
+        "name":  "test_sel_dict",
+        "input": {"format": "view", "path": "test_sel_dict_in"},
+        "transformations": [
+            {"type": "select",
+             "columns": [
+                 "a",
+                 {"name": "produto", "expression": "a * b"},
+             ]}
+        ],
+        "output": {"format": "view", "path": "test_sel_dict_out"},
+    }
+    r = fw.run_from_dict(conf)
+    assert r.success, r.error
+    row = spark.table("test_sel_dict_out").first()
+    assert row["a"] == 10
+    assert row["produto"] == 20
 
 
 def test_checkpoint_transformation(fw, spark):
