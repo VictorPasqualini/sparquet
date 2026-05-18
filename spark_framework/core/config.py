@@ -1,9 +1,45 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+_PARAM_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def substitute_params(data: Any, columns: Dict[str, Any]) -> Any:
+    """Substitui ocorrências de ${param_name} em strings do dict de configuração.
+
+    Aplicado recursivamente em dicts, lists e strings. Útil para parametrizar
+    paths e options da conf via valores de runtime — ex: tópico Kafka que
+    muda por fluxo.
+
+    Substituição é literal (str(value)); listas/dicts em columns não são
+    suportados como valores de substituição (use F.lit/array via 'columns'
+    para isso, não substituição de string).
+
+    Ex:
+      "path": "${param_topico}" + columns={"param_topico": "abc"}
+      → "path": "abc"
+    """
+    if isinstance(data, dict):
+        return {k: substitute_params(v, columns) for k, v in data.items()}
+    if isinstance(data, list):
+        return [substitute_params(item, columns) for item in data]
+    if isinstance(data, str):
+        def _replace(match: "re.Match[str]") -> str:
+            name = match.group(1)
+            if name not in columns:
+                return match.group(0)  # mantém literal se não encontrar
+            value = columns[name]
+            if isinstance(value, (list, dict)):
+                return match.group(0)  # não substitui listas/dicts
+            return str(value) if value is not None else ""
+        return _PARAM_PATTERN.sub(_replace, data)
+    return data
 
 
 @dataclass

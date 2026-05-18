@@ -61,9 +61,19 @@ class SparkFramework:
                          Escalares viram F.lit; listas viram F.array(F.lit, ...).
                          Valores None/[] não são injetados — transformações que
                          dependem deles devem usar "skip_if_null".
+                         Strings escalares em columns também substituem ocorrências
+                         de ${param_name} em paths e options do JSON.
                          Ex: {"param_tipo_ativo": "NC", "param_lista_cessoes": ["a","b"]}.
         """
-        config = PipelineConfig.from_file(config_path)
+        import json
+        from pathlib import Path
+        from spark_framework.core.config import substitute_params
+
+        raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        if columns:
+            raw = substitute_params(raw, columns)
+
+        config = PipelineConfig.from_dict(raw)
         self._apply_spark_override(config)
         return self._execute(config, columns=columns)
 
@@ -73,6 +83,10 @@ class SparkFramework:
         columns: Optional[Dict[str, Any]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um dicionário Python."""
+        from spark_framework.core.config import substitute_params
+
+        if columns:
+            config = substitute_params(config, columns)
         pipeline_config = PipelineConfig.from_dict(config)
         self._apply_spark_override(pipeline_config)
         return self._execute(pipeline_config, columns=columns)

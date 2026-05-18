@@ -1,0 +1,24 @@
+{
+  "name": "envio_delta_controle",
+  "description": "Grava em lastros.silver_controle_registro_cessoes os pares (id_cessao, id_operacao) processados, com data_envio. Lê da view de payload do fluxo corrente.",
+
+  "input": {
+    "format": "view",
+    "path":   "${param_view_payload}"
+  },
+
+  "transformations": [
+    { "type": "select", "columns": ["id_cessao", "id_operacao"] },
+    { "type": "drop_duplicates" },
+    { "type": "with_column",
+      "name": "data_envio",
+      "expression": "current_timestamp()" }
+  ],
+
+  "output": {
+    "format":  "delta",
+    "path":    "lastros.silver_controle_registro_cessoes",
+    "mode":    "append",
+    "options": { "mergeSchema": "true" }
+  }
+}

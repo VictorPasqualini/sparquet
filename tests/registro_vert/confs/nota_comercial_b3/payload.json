@@ -1,0 +1,56 @@
+{
+  "name": "cessoes_nota_comercial_b3_payload",
+  "description": "Monta o struct 'payload' do registro Nota Comercial/B3 em camadas with_column (legibilidade). Gera id_vert (uuid first por contrato), monta paymentMethod, nc, data, payload, e adiciona array 'parcelas' via self-join + group_by.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_nota_comercial_b3_enriquecido"
+  },
+
+  "transformations": [
+    { "type": "with_column", "name": "uuid_temp", "expression": "uuid()" },
+    { "type": "with_column", "name": "id_vert",   "expression": "first(uuid_temp) over (partition by numero_contrato)" },
+    { "type": "drop", "columns": ["uuid_temp"] },
+
+    { "type": "with_column",
+      "name": "payment_method",
+      "expression": "struct(lpad(informacoes_adicionais.codigo_metodo_pagamento, 2, '0') as paymentMethodCode, lpad(informacoes_adicionais.codigo_do_indexador, 4, '0') as indexCode, CASE WHEN cast(informacoes_adicionais.codigo_do_indexador as int) IN (20, 99) THEN NULL ELSE cast(percentual_taxa_variavel as float) END as rateFloatingPercentage, cast(informacoes_adicionais.taxa_contrato as int) as interestRateSpread, codigo_criterio_calculo_juros as interestCalculationCriteriaCode)" },
+
+    { "type": "with_column",
+      "name": "nc_data",
+      "expression": "struct('N' as ncEmissionTypeCode, '55639.40-2' as otcIssuerAccountCode, codigo_tipo_emissao as issueTypeCode, codigo_conta_contabil_otc as otcBookkeeperAccountCode, cast(informacoes_adicionais.numero_da_emissao as int) as issueNumber, informacoes_adicionais.numero_da_serie as serieNumber, data_emissao_contrato as issueDate, max_data_vencimento_parcela as maturityDate, data_referencia as profitabilityStartDate, cast(informacoes_adicionais.quantidade_emitida as int) as issuedQuantity, cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as unitIssueValue, cast(cast(informacoes_adicionais.quantidade_emitida as double) * cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as double) as issueFinancialValue, codigo_regime_tributario as regimeTypeCode, indicador_processamento_cetip as cetipEventAttendedIndicator, 'PRIVADAVERT' as cvmRegistrationNumber, 1 as cvmSequentialNumber, '2026-01-12' as cvmRegistrationDate, indicador_resgate_antecipado_unilateral as unilateralEarlyRedemptionIndicator, informacoes_adicionais.nome_fiador as guarantorName, indicador_presenca_agente_fiduciario as fiduciaryAgentIndicator, nome_sacado as issuerName, documento_sacado as issuerDocumentNumber, cast(informacoes_adicionais.codigo_tipo_garantia as int) as guaranteeTypeCode, payment_method as paymentMethod)" },
+
+    { "type": "with_column",
+      "name": "payload",
+      "expression": "struct(id_vert as id_externo, struct(nc_data as nc) as data)" },
+
+    { "type": "select",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato", "payload"] },
+
+    { "type": "drop_duplicates", "columns": ["id_cessao", "numero_contrato"] },
+
+    {
+      "type": "join",
+      "with": "self",
+      "with_transformations": [
+        { "type": "select", "columns": ["numero_contrato"] },
+        { "type": "group_by",
+          "by": ["numero_contrato"],
+          "agg": [
+            { "func": "expr",
+              "expression": "array(struct(concat(first(numero_contrato), '1') as codigo_controle_parcela_contrato_if, 1 as numero_parcela))",
+              "alias": "parcelas" }
+          ] }
+      ],
+      "on":  ["numero_contrato"],
+      "how": "inner"
+    }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_nota_comercial_b3_payload",
+    "mode":   "overwrite",
+    "options": { "cache": "true" }
+  }
+}

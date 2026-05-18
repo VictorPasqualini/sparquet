@@ -1,0 +1,46 @@
+{
+  "name": "cessoes_nota_comercial_b3_enriquecimento",
+  "description": "Enriquece cessões de Nota Comercial/B3 com colunas da remessa, faz parsing de informacoes_adicionais (struct JSON) e calcula max_data_vencimento_parcela via window. Grava view 'cessoes_nota_comercial_b3_enriquecido'.",
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_para_processar"
+  },
+
+  "transformations": [
+    { "type": "filter",
+      "condition": "tipo_ativo = param_tipo_ativo AND registradora = param_registradora AND fluxo_operacao = param_fluxo_operacao AND ((tipo_contrato = '8' AND multi_ativos) OR NOT multi_ativos)" },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+      "with_transformations": [
+        { "type": "select",
+          "columns": ["id_cessao", "numero_contrato", "numero_parcela", "nome_sacado",
+                      "documento_sacado", "data_emissao_contrato", "data_vencimento_parcela",
+                      "informacoes_adicionais"] }
+      ],
+      "on":  ["id_cessao", "numero_contrato"],
+      "how": "inner"
+    },
+
+    { "type": "with_column",
+      "name": "max_data_vencimento_parcela",
+      "expression": "max(data_vencimento_parcela) over (partition by id_cessao, numero_contrato)" },
+
+    { "type": "with_column",
+      "name": "informacoes_adicionais",
+      "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" },
+
+    { "type": "with_column",
+      "name": "informacoes_adicionais",
+      "expression": "from_json(informacoes_adicionais, 'STRUCT<numero_da_emissao: STRING, numero_da_serie: STRING, quantidade_emitida: STRING, valor_da_unidade_de_emissao: STRING, nome_fiador: STRING, codigo_tipo_garantia: STRING, codigo_metodo_pagamento: STRING, codigo_do_indexador: STRING, taxa_contrato: STRING>')" }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_nota_comercial_b3_enriquecido",
+    "mode":   "overwrite",
+    "options": { "cache": "false" }
+  }
+}

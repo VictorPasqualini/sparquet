@@ -1,0 +1,96 @@
+{
+  "name": "cessoes_base",
+  "description": "Base de cessões aprovadas para registro: filtra status elegível, junta parametrização, contratos aprovados (com critérios) e tipo_contrato da remessa. Aceita filtros opcionais por listas de id_cessao, id_operacao e numero_contrato via params de runtime.",
+
+  "input": {
+    "format": "delta",
+    "path":   "lastros.silver_cessao"
+  },
+
+  "transformations": [
+    { "type": "select", "columns": ["id_cessao", "id_operacao"] },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_cessoes_status" },
+      "with_transformations": [
+        { "type": "filter", "condition": "status IN (1, 10, 11)" }
+      ],
+      "on":  "id_cessao",
+      "how": "leftsemi"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_parametrizacao_registro_lastro" },
+      "on":   "id_operacao",
+      "how":  "inner"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_contrato" },
+      "with_transformations": [
+        {
+          "type": "join",
+          "with": { "format": "delta", "path": "lastros.silver_status_criterios_contratos" },
+          "with_transformations": [
+            { "type": "select", "columns": ["id_cessao", "id_operacao", "numero_contrato", "status_criterio"] }
+          ],
+          "on":   ["id_cessao", "id_operacao", "numero_contrato"],
+          "how":  "left"
+        },
+        { "type": "with_column",
+          "name": "status_criterio_contrato",
+          "expression": "CASE WHEN status_criterio IS NULL THEN TRUE ELSE status_criterio END" },
+        { "type": "group_by",
+          "by": ["id_cessao", "id_operacao", "numero_contrato", "data_referencia"],
+          "agg": [
+            { "func": "min", "column": "status_criterio_contrato", "alias": "status_criterio_contrato" }
+          ] },
+        { "type": "filter", "condition": "status_criterio_contrato = TRUE" },
+        { "type": "select", "columns": ["id_cessao", "numero_contrato", "data_referencia"] }
+      ],
+      "on":  "id_cessao",
+      "how": "inner"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+      "with_transformations": [
+        { "type": "select", "columns": ["id_cessao", "numero_contrato", "tipo_contrato"] },
+        { "type": "group_by",
+          "by": ["id_cessao", "numero_contrato"],
+          "agg": [
+            { "func": "first", "column": "tipo_contrato", "alias": "tipo_contrato" }
+          ] }
+      ],
+      "on":  ["id_cessao", "numero_contrato"],
+      "how": "left"
+    },
+
+    {
+      "type": "filter",
+      "skip_if_null": "param_lista_cessoes",
+      "condition": "array_contains(param_lista_cessoes, id_cessao)"
+    },
+    {
+      "type": "filter",
+      "skip_if_null": "param_lista_operacoes",
+      "condition": "array_contains(param_lista_operacoes, id_operacao)"
+    },
+    {
+      "type": "filter",
+      "skip_if_null": "param_lista_contratos",
+      "condition": "array_contains(param_lista_contratos, numero_contrato)"
+    }
+  ],
+
+  "output": {
+    "format": "view",
+    "path":   "cessoes_base",
+    "mode":   "overwrite",
+    "options": { "cache": "false" }
+  }
+}

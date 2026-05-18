@@ -1,0 +1,52 @@
+{
+  "name": "envio_delta_contratos",
+  "description": "Grava em lastros.silver_registro_contratos o registro de cada (id_cessao, numero_contrato) processado, com payload serializado em JSON e metadados de controle. tipo_ativo/registradora vêm como params.",
+
+  "input": {
+    "format": "view",
+    "path":   "${param_view_payload}"
+  },
+
+  "transformations": [
+    { "type": "with_column",
+      "name": "payload",
+      "expression": "to_json(payload)" },
+
+    { "type": "with_column",
+      "name": "status",
+      "expression": "'ENVIADO_PARA_REGISTRO'" },
+
+    { "type": "with_column",
+      "name": "data_atualizacao",
+      "expression": "cast(NULL as date)" },
+
+    { "type": "with_column",
+      "name": "data_envio",
+      "expression": "current_timestamp()" },
+
+    { "type": "with_column",
+      "name": "id_registro",
+      "expression": "cast(NULL as string)" },
+
+    { "type": "with_column",
+      "name": "id",
+      "expression": "cast(NULL as bigint)" },
+
+    { "type": "with_column",
+      "name": "registradora",
+      "expression": "param_registradora" },
+
+    { "type": "with_column",
+      "name": "tipo_ativo",
+      "expression": "param_tipo_ativo" },
+
+    { "type": "drop", "columns": ["parcelas"] }
+  ],
+
+  "output": {
+    "format":  "delta",
+    "path":    "lastros.silver_registro_contratos",
+    "mode":    "append",
+    "options": { "mergeSchema": "true" }
+  }
+}
