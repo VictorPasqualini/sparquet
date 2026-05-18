@@ -1,0 +1,88 @@
+{
+  "name": "duplicata_cerc_cessoes_pendentes",
+  "description": "Filtra cessoes_base para o fluxo DUPLICATA / CERC (qualquer subfluxo: REGISTRO, EMISSAO, EMISSAO_E_REGISTRO) e enriquece com bronze_remessa (sacado, cedente, datas, valores, informacoes_adicionais via from_json), silver_lastros_relacionamento (municipio/uf), e silver_parcela agregada em array de struct. O filter por param_fluxo_operacao acontece nos payloads (cada payload é específico para seu subfluxo).",
+
+  "params": [
+    "param_tipo_ativo",
+    "param_registradora",
+    "param_lista_cessoes_pendentes"
+  ],
+
+  "input": {
+    "format": "view",
+    "path":   "cessoes_base"
+  },
+
+  "transformations": [
+    { "type": "filter",
+      "condition": "tipo_ativo = param_tipo_ativo AND registradora = param_registradora AND ((tipo_contrato = '1' AND multi_ativos) OR NOT multi_ativos)" },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+      "with_transformations": [
+        { "type": "filter",
+          "skip_if_null": "param_lista_cessoes_pendentes",
+          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+        { "type": "select",
+          "columns": ["id_cessao", "numero_contrato", "nome_sacado", "documento_sacado",
+                      "tipo_pessoa_sacado", "municipio_sacado", "nome_cedente",
+                      "documento_cedente", "total_parcelas_contrato", "data_emissao_contrato",
+                      "data_vencimento_parcela", "nome_originador", "cnpj_originador",
+                      "informacoes_adicionais", "valor_face_parcela", "tipo_pessoa_cedente",
+                      "coobrigacao", "uf_sacado", "logradouro_sacado", "valor_aquisicao_parcela",
+                      "numero_nf_duplicata", "cep_sacado"] },
+        { "type": "drop_duplicates", "columns": ["id_cessao", "numero_contrato"] }
+      ],
+      "on":  ["id_cessao", "numero_contrato"],
+      "how": "inner"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_lastros_relacionamento" },
+      "with_transformations": [
+        { "type": "select",
+          "columns": ["documento_entidade_relacionada", "municipio", "uf"] }
+      ],
+      "on":  "l.documento_sacado = r.documento_entidade_relacionada",
+      "how": "left"
+    },
+
+    { "type": "with_column", "name": "informacoes_adicionais",
+      "expression": "regexp_replace(informacoes_adicionais, \"'\", '\"')" },
+
+    { "type": "with_column", "name": "informacoes_adicionais",
+      "expression": "from_json(informacoes_adicionais, 'STRUCT<codigo_m_oper_cred: INT, codigo_s_m_oper_cred: INT, chave_unica_da_duplicata: STRING, especie_da_duplicata: STRING, data_emissao_da_duplicata: STRING, natureza_da_operacao: STRING>')" },
+
+    { "type": "with_column", "name": "data_emissao_duplicata",
+      "expression": "current_date()" },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_parcela" },
+      "with_transformations": [
+        { "type": "filter",
+          "skip_if_null": "param_lista_cessoes_pendentes",
+          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+        { "type": "sort", "columns": ["numero_contrato", "numero_parcela"] },
+        { "type": "group_by",
+          "by": ["id_cessao", "numero_contrato"],
+          "agg": [
+            { "func": "expr",
+              "expression": "collect_list(struct(identificador_parcela as codigo_controle_parcela_contrato_if, data_vencimento_parcela as data_vencimento_parcela, cast(valor_face_parcela as decimal(15,2)) as valor_parcela, cast(valor_aquisicao_parcela as decimal(15,2)) as valor_principal_parcela, numero_parcela as numero_parcela))",
+              "alias": "parcelas" }
+          ] }
+      ],
+      "on":  ["id_cessao", "numero_contrato"],
+      "how": "left"
+    }
+  ],
+
+  "output": {
+    "format":  "view",
+    "path":    "duplicata_cerc_pendentes",
+    "mode":    "overwrite",
+    "options": { "checkpoint": "true" }
+  }
+}

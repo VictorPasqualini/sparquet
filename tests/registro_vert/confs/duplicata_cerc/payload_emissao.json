@@ -1,0 +1,129 @@
+{
+  "name": "duplicata_cerc_payload_emissao",
+  "description": "Monta o struct 'payload' do subfluxo EMISSAO de DUPLICATA/CERC. Faz explode de assinantes e cedentes, calcula contrato_rank + lote_index (agrupamento por 300 contratos), e monta arrays 'signer_list' e 'documents' via collect_list over (partition by id_cessao, lote_index). 4 outputs.",
+
+  "params": [
+    "param_tipo_ativo",
+    "param_registradora",
+    "param_topico",
+    "param_kafka_broker"
+  ],
+
+  "input": {
+    "format": "view",
+    "path":   "duplicata_cerc_pendentes"
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "fluxo_operacao = 'EMISSAO'" },
+
+    { "type": "with_column", "name": "assinantes", "expression": "explode(assinantes)" },
+    { "type": "with_column", "name": "cedentes",   "expression": "explode(cedentes)" },
+
+    { "type": "with_column", "name": "contrato_rank",
+      "expression": "dense_rank() over (partition by id_cessao order by numero_contrato)" },
+    { "type": "with_column", "name": "lote_index",
+      "expression": "cast((contrato_rank - 1) / 300 as int)" },
+
+    { "type": "with_column", "name": "uuid_temp", "expression": "uuid()" },
+    { "type": "with_column", "name": "id_vert",
+      "expression": "first(uuid_temp) over (partition by id_cessao, lote_index)" },
+    { "type": "drop", "columns": ["uuid_temp"] },
+
+    { "type": "with_column", "name": "signer_item",
+      "expression": "struct(assinantes.email as email, assinantes.nome as name, assinantes.pessoa_estrangeira as foreignPerson, assinantes.documento as document, assinantes.tipo_autenticacao as authType)" },
+    { "type": "with_column", "name": "signer_list",
+      "expression": "array_distinct(collect_list(signer_item) over (partition by id_cessao, lote_index))" },
+
+    { "type": "with_column", "name": "doc_input_struct",
+      "expression": "struct(struct(nome_sacado as value) as sacado_nome, struct(numero_contrato as value) as duplicata_numero, struct(logradouro_sacado as value) as sacado_endereco, struct(municipio as value) as sacado_municipio, struct(uf as value) as sacado_uf, struct(valor_face_parcela as value) as duplicata_valor, struct(documento_sacado as value) as sacado_cnpj_cpf, struct('municipio' as value) as sacado_praca_pagamento, struct(data_emissao_duplicata as value) as duplicata_data_emissao, struct(cep_sacado as value) as sacado_cep, struct(data_vencimento_parcela as value) as duplicata_vencimento, struct(valor_face_parcela as value) as fatura_valor_por_extenso, struct(cnpj_fundo as value) as endossatario_cpf_cnpj, struct(valor_face_parcela as value) as fatura_valor, struct(numero_nf_duplicata as value) as fatura_numero, struct(nome_fundo as value) as endossatario_nome, struct(lpad(cast(documento_cedente as string), 14, '0') as value) as cedente_cnpj_cpf, struct(nome_cedente as value) as cedente_nome, struct(cedentes.cedente_municipio as value) as cedente_municipio, struct(cedentes.cedente_rua as value) as cedente_rua, struct(cedentes.cedente_agencia as value) as cedente_agencia, struct(cedentes.cedente_conta as value) as cedente_conta, struct(cedentes.cedente_bairro as value) as cedente_bairro, struct(cedentes.cedente_inscricao_estadual as value) as cedente_inscricao_estadual, struct(cedentes.cedente_banco as value) as cedente_banco, struct(cedentes.cedente_telefone as value) as cedente_telefone, struct(cedentes.cedente_uf as value) as cedente_uf, struct(cedentes.cedente_cep as value) as cedente_cep, struct(cedentes.cedente_inscricao_municipal as value) as cedente_inscricao_municipal)" },
+
+    { "type": "with_column", "name": "doc_item",
+      "expression": "struct(concat('Connectoway_', numero_contrato) as fileExternalReference, produto as product, struct(cast(tipo_template as int) as type, referencia_template as externalReference, doc_input_struct as inputs) as template)" },
+
+    { "type": "with_column", "name": "documents",
+      "expression": "array_distinct(collect_list(doc_item) over (partition by id_cessao, lote_index))" },
+
+    { "type": "with_column", "name": "payload",
+      "expression": "struct(id_vert as id_externo, documento_participante as participant_document, id_cessao as envelope_external_reference, signer_list as signer_list, documents as documents)" },
+
+    { "type": "select",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato", "lote_index", "payload", "parcelas"] },
+
+    { "type": "drop_duplicates", "columns": ["id_cessao", "lote_index"] }
+  ],
+
+  "outputs": [
+    {
+      "format":  "view",
+      "path":    "duplicata_cerc_payload",
+      "mode":    "overwrite",
+      "options": { "checkpoint": "true" }
+    },
+    {
+      "format":  "kafka",
+      "path":    "${param_topico}",
+      "transformations": [
+        { "type": "with_column", "name": "value", "expression": "to_json(payload)" },
+        { "type": "with_column", "name": "headers",
+          "expression": "array(struct(cast('type' as string) as key, cast('REGISTRO' as binary) as value), struct(cast('kind' as string) as key, cast('ENVIO' as binary) as value))" }
+      ],
+      "columns": ["value", "headers"],
+      "options": {
+        "bootstrap_servers":      "${param_kafka_broker}",
+        "value_column":           "value",
+        "key_column":             null,
+        "kafka.max.request.size": "4194304"
+      }
+    },
+    {
+      "format": "delta",
+      "path":   "lastros.silver_controle_registro_cessoes",
+      "mode":   "append",
+      "transformations": [
+        { "type": "select", "columns": ["id_cessao", "id_operacao"] },
+        { "type": "drop_duplicates" },
+        { "type": "with_column", "name": "data_envio", "expression": "current_timestamp()" }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+    {
+      "format": "delta",
+      "path":   "lastros.silver_registro_contratos",
+      "mode":   "append",
+      "transformations": [
+        { "type": "with_columns",
+          "columns": [
+            { "name": "payload",          "expression": "to_json(payload)" },
+            { "name": "status",           "expression": "'ENVIADO_PARA_REGISTRO'" },
+            { "name": "data_atualizacao", "expression": "cast(NULL as date)" },
+            { "name": "data_envio",       "expression": "current_timestamp()" },
+            { "name": "id_registro",      "expression": "cast(NULL as string)" },
+            { "name": "id",               "expression": "cast(NULL as bigint)" },
+            { "name": "registradora",     "expression": "param_registradora" },
+            { "name": "tipo_ativo",       "expression": "param_tipo_ativo" }
+          ] },
+        { "type": "drop", "columns": ["parcelas"] }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+    {
+      "format": "delta",
+      "path":   "lastros.silver_registro_parcelas",
+      "mode":   "append",
+      "transformations": [
+        { "type": "with_column", "name": "parcela", "expression": "explode(parcelas)" },
+        { "type": "with_columns",
+          "columns": [
+            { "name": "identificador_parcela", "expression": "parcela.codigo_controle_parcela_contrato_if" },
+            { "name": "numero_parcela",        "expression": "parcela.numero_parcela" },
+            { "name": "status_parcela",        "expression": "'ENVIADO_PARA_REGISTRO'" },
+            { "name": "data_baixa",            "expression": "cast(NULL as date)" }
+          ] }
+      ],
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato",
+                  "identificador_parcela", "numero_parcela", "status_parcela", "data_baixa"],
+      "options": { "mergeSchema": "true" }
+    }
+  ]
+}

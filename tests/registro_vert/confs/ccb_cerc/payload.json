@@ -1,0 +1,149 @@
+{
+  "name": "ccb_cerc_payload",
+  "description": "Monta o struct 'payload' do registro CCB / CERC com sub-structs 'contrato_valores' (campos do contrato com valores tipados) e 'agentes' (originador/detentor/devedores/credores/emissor/beneficiario). Agrega parcelas via self-join + group_by (collect_list de struct com identificador, valores e datas). Escreve em 4 destinos com transformações específicas.",
+
+  "params": [
+    "param_tipo_ativo",
+    "param_registradora",
+    "param_topico",
+    "param_kafka_broker"
+  ],
+
+  "input": {
+    "format": "view",
+    "path":   "ccb_cerc_pendentes"
+  },
+
+  "transformations": [
+    { "type": "with_column", "name": "id_vert", "expression": "uuid()" },
+
+    { "type": "with_column", "name": "contrato_valores",
+      "expression": "struct(tipo_ativo as tipo_ativo, api_identificacao_padronizada_operacao_credito_checked as identificacao_padronizada_operacao_credito, api_codigo_modalidade_operacao_credito_checked as codigo_modalidade_operacao_credito, api_codigo_sub_checked as codigo_sub, numero_contrato as codigo_contrato_operacao_credito, data_emissao_contrato as data_transacao, cast(api_valor_total_credito_checked as decimal(15,2)) as valor_total_credito, cast(api_valor_liquido_credito_checked as decimal(15,2)) as valor_liquido_credito, cast(taxa_contrato as decimal(10,4)) as taxa_juros_operacao, cast(indexacao as string) as indexacao, total_parcelas_contrato_checked as quantidade_parcela_contratada, numero_contrato as referencia_externa)" },
+
+    { "type": "with_column", "name": "devedor_struct",
+      "expression": "struct(cast(tipo_pessoa_sacado_checked as int) as devedor_tipo_pessoa, cast(documento_sacado_checked as string) as devedor_numero_documento, nome_sacado as devedor_nome_razao_social)" },
+
+    { "type": "with_column", "name": "credor_struct",
+      "expression": "struct(credito_tipo_pessoa as credor_tipo_pessoa, credor_numero_documento_checked as credor_numero_documento, nome_razao_social_credor_checked as nome_razao_social_credor)" },
+
+    { "type": "with_column", "name": "devedores",
+      "expression": "array_distinct(collect_list(devedor_struct) over (partition by numero_contrato))" },
+
+    { "type": "with_column", "name": "credores",
+      "expression": "array_distinct(collect_list(credor_struct) over (partition by numero_contrato))" },
+
+    { "type": "with_column", "name": "agentes",
+      "expression": "struct(originador_cnpj_checked as originador_cnpj, detentor_cnpj as detentor_cnpj, detentor_carteira as detentor_carteira, cnpj_agente_registro as cnpj_agente_registro, devedores as devedores, cast(tipo_pessoa_sacado_checked as int) as beneficiario_tipo_pessoa, cast(documento_sacado_checked as string) as beneficiario_numero_documento, tipo_pessoa_emissor as tipo_pessoa_emissor, numero_documento_emissor_checked as numero_documento_emissor, nome_razao_social_emissor_checked as nome_razao_social_emissor, credores as credores)" },
+
+    { "type": "select",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato",
+                  "contrato_valores", "agentes"] },
+
+    { "type": "drop_duplicates", "columns": ["id_cessao", "numero_contrato"] },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_parcela" },
+      "with_transformations": [
+        { "type": "filter",
+          "skip_if_null": "param_lista_cessoes_pendentes",
+          "condition": "array_contains(param_lista_cessoes_pendentes, id_cessao)" },
+        { "type": "sort", "columns": ["numero_contrato", "numero_parcela"] },
+        { "type": "group_by",
+          "by": ["id_cessao", "numero_contrato"],
+          "agg": [
+            { "func": "expr",
+              "expression": "collect_list(struct(identificador_parcela as codigo_controle_parcela_contrato_if, data_vencimento_parcela as data_vencimento_parcela, cast(valor_face_parcela as decimal(15,2)) as valor_parcela, cast(valor_aquisicao_parcela as decimal(15,2)) as valor_principal_parcela, numero_parcela as numero_parcela))",
+              "alias": "parcelas" }
+          ] }
+      ],
+      "on":  ["id_cessao", "numero_contrato"],
+      "how": "inner"
+    },
+
+    { "type": "with_column", "name": "status", "expression": "''" },
+
+    { "type": "with_column", "name": "payload",
+      "expression": "struct(id_vert as id_vert, contrato_valores as contrato_valores, agentes as agentes, parcelas as parcelas, status as status)" },
+
+    { "type": "drop", "columns": ["contrato_valores", "agentes"] }
+  ],
+
+  "outputs": [
+    {
+      "format":  "view",
+      "path":    "ccb_cerc_payload",
+      "mode":    "overwrite",
+      "options": { "checkpoint": "true" }
+    },
+
+    {
+      "format":  "kafka",
+      "path":    "${param_topico}",
+      "transformations": [
+        { "type": "with_column", "name": "value", "expression": "to_json(payload)" },
+        { "type": "with_column", "name": "headers",
+          "expression": "array(struct(cast('type' as string) as key, cast('REGISTRO' as binary) as value), struct(cast('kind' as string) as key, cast('ENVIO' as binary) as value))" }
+      ],
+      "columns": ["value", "headers"],
+      "options": {
+        "bootstrap_servers":      "${param_kafka_broker}",
+        "value_column":           "value",
+        "key_column":             null,
+        "kafka.max.request.size": "4194304"
+      }
+    },
+
+    {
+      "format": "delta",
+      "path":   "lastros.silver_controle_registro_cessoes",
+      "mode":   "append",
+      "transformations": [
+        { "type": "select", "columns": ["id_cessao", "id_operacao"] },
+        { "type": "drop_duplicates" },
+        { "type": "with_column", "name": "data_envio", "expression": "current_timestamp()" }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+
+    {
+      "format": "delta",
+      "path":   "lastros.silver_registro_contratos",
+      "mode":   "append",
+      "transformations": [
+        { "type": "with_columns",
+          "columns": [
+            { "name": "payload",          "expression": "to_json(payload)" },
+            { "name": "status",           "expression": "'ENVIADO_PARA_REGISTRO'" },
+            { "name": "data_atualizacao", "expression": "cast(NULL as date)" },
+            { "name": "data_envio",       "expression": "current_timestamp()" },
+            { "name": "id_registro",      "expression": "cast(NULL as string)" },
+            { "name": "id",               "expression": "cast(NULL as bigint)" },
+            { "name": "registradora",     "expression": "param_registradora" },
+            { "name": "tipo_ativo",       "expression": "param_tipo_ativo" }
+          ] },
+        { "type": "drop", "columns": ["parcelas"] }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+
+    {
+      "format": "delta",
+      "path":   "lastros.silver_registro_parcelas",
+      "mode":   "append",
+      "transformations": [
+        { "type": "with_column", "name": "parcela", "expression": "explode(parcelas)" },
+        { "type": "with_columns",
+          "columns": [
+            { "name": "identificador_parcela", "expression": "parcela.codigo_controle_parcela_contrato_if" },
+            { "name": "numero_parcela",        "expression": "parcela.numero_parcela" },
+            { "name": "status_parcela",        "expression": "'ENVIADO_PARA_REGISTRO'" },
+            { "name": "data_baixa",            "expression": "cast(NULL as date)" }
+          ] }
+      ],
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato",
+                  "identificador_parcela", "numero_parcela", "status_parcela", "data_baixa"],
+      "options": { "mergeSchema": "true" }
+    }
+  ]
+}

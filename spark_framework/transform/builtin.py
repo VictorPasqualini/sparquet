@@ -65,6 +65,34 @@ class WithColumnTransformation(BaseTransformation):
 AddColumnTransformation = WithColumnTransformation
 
 
+class WithColumnsTransformation(BaseTransformation):
+    """Adds or replaces multiple columns in a single batch transformation.
+
+    Mais legível que N with_column quando há várias regras correlatas
+    (ex: regras 'api_*' no CCB). Cada coluna é uma SQL expression e pode
+    referenciar colunas criadas em entradas anteriores da MESMA lista
+    (Spark aplica em ordem).
+
+    JSON:
+      { "type": "with_columns",
+        "columns": [
+          { "name": "tipo_pessoa_checked",
+            "expression": "CASE WHEN tipo_pessoa IS NOT NULL AND tipo_pessoa != '' THEN tipo_pessoa ELSE ... END" },
+          { "name": "documento_checked",
+            "expression": "CASE WHEN tipo_pessoa_checked = 1 THEN lpad(documento, 11, '0') ELSE lpad(documento, 14, '0') END" }
+        ] }
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        cols: list[dict] = self.config.params["columns"]
+        result = df
+        for spec in cols:
+            name = spec["name"]
+            expression = spec["expression"]
+            result = result.withColumn(name, F.expr(expression))
+        return result
+
+
 class DropDuplicatesTransformation(BaseTransformation):
     """Removes duplicate rows, optionally scoped to specific columns."""
 
