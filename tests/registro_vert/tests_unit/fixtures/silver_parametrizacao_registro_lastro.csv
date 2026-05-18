@@ -1,0 +1,3 @@
+id_operacao,tipo_ativo,registradora,fluxo_operacao,codigo_tipo_emissao,codigo_conta_contabil_otc,codigo_regime_tributario,indicador_processamento_cetip,indicador_resgate_antecipado_unilateral,indicador_presenca_agente_fiduciario,percentual_taxa_variavel,codigo_criterio_calculo_juros
+100,NOTA_COMERCIAL,B3,REGISTRO,1,99999,T,S,N,N,100.0,A
+200,CCB,CERC,REGISTRO,1,11111,T,S,N,N,100.0,A

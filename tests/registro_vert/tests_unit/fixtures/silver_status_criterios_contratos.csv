@@ -1,0 +1,4 @@
+id_cessao,id_operacao,numero_contrato,status_criterio
+CESS001,100,CTR-NC-001,true
+CESS002,100,CTR-NC-002,true
+CESS003,200,CTR-CCB-003,true
