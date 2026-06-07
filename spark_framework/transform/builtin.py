@@ -75,6 +75,13 @@ class DropDuplicatesTransformation(BaseTransformation):
     def apply(self, df: DataFrame) -> DataFrame:
         columns: list[str] | None = self.config.params.get("columns")
         return df.dropDuplicates(columns) if columns else df.dropDuplicates()
+    
+
+class DistinctTransformation(BaseTransformation):
+    """Removes duplicate rows, using all columns."""
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        return df.distinct()
 
 
 class SqlTransformation(BaseTransformation):
