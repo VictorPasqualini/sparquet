@@ -67,6 +67,8 @@
 
     { "type": "checkpoint" },
 
+    { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" },
+
     {
       "type": "join",
       "with": {
@@ -74,6 +76,10 @@
         "path": "lastros.silver_contrato"
       },
       "with_transformations": [
+        {
+          "type": "filter",
+          "condition": "id_cessao IN ({{cessoes_pendentes}})"
+        },
         {
           "type": "select",
           "columns": ["id_cessao", "id_operacao", "numero_contrato", "data_referencia"]
@@ -85,6 +91,10 @@
             "path": "lastros.silver_status_criterios_contratos"
           },
           "with_transformations": [
+            {
+              "type": "filter",
+              "condition": "id_cessao IN ({{cessoes_pendentes}})"
+            },
             {
               "type": "select",
               "columns": ["id_cessao", "id_operacao", "numero_contrato", "status_criterio"]
@@ -122,6 +132,10 @@
         "path": "lastros.bronze_remessa"
       },
       "with_transformations": [
+        {
+          "type": "filter",
+          "condition": "id_cessao IN ({{cessoes_pendentes}})"
+        },
         {
           "type": "select",
           "columns": ["id_cessao", "numero_contrato", "tipo_contrato"]

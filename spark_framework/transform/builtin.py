@@ -5,7 +5,7 @@ from pyspark.sql import functions as F
 
 from spark_framework.core.config import InputConfig
 from spark_framework.transform.base import BaseTransformation
-from spark_framework.utils.logger import defer_warning
+from spark_framework.utils.logger import defer_warning, logger
 
 
 class FilterTransformation(BaseTransformation):
@@ -128,6 +128,46 @@ class CheckpointTransformation(BaseTransformation):
         if normalized == "checkpoint":
             return df.checkpoint(eager=eager)
         return df.localCheckpoint(eager=eager)
+
+
+class CollectTransformation(BaseTransformation):
+    """Coleta os valores distintos de uma coluna para uma variável de runtime.
+
+    Os valores ficam disponíveis nas transformações seguintes (inclusive dentro de
+    with_transformations) via placeholder {{nome}}, resolvido em tempo de execução
+    e formatado como lista SQL — pronto para `IN (...)`.
+
+    Use para empurrar um filtro literal (predicate pushdown / data skipping) nas
+    leituras de tabelas grandes carregadas depois. Equivale ao .collect()+.isin()
+    de jobs Spark: traz a lista para o driver uma vez e reusa nos reads seguintes.
+
+    JSON params:
+      column – coluna cujos valores distintos serão coletados
+      as     – nome da variável de runtime (referenciada como {{as}})
+
+    Não altera o DataFrame, mas dispara uma action Spark (collect no driver) —
+    use após um `checkpoint` para evitar recomputar a linhagem inteira.
+
+    Exemplo:
+      { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" }
+      // depois, no read de uma tabela grande:
+      // { "type": "filter", "condition": "id_cessao IN ({{cessoes_pendentes}})" }
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        column = self.config.params["column"]
+        var_name = self.config.params["as"]
+
+        values = [row[0] for row in df.select(column).distinct().collect()]
+        self.runtime[var_name] = values
+
+        logger.info(
+            "Valores coletados para runtime",
+            coluna=column,
+            variavel=var_name,
+            quantidade=len(values),
+        )
+        return df
 
 
 class SqlTransformation(BaseTransformation):
@@ -274,7 +314,9 @@ class JoinTransformation(BaseTransformation):
         if raw_transforms:
             from spark_framework.core.config import TransformationConfig
             from spark_framework.transform.engine import TransformationEngine
-            engine = TransformationEngine()
+            # Compartilha o mesmo store de runtime para que placeholders {{var}}
+            # coletados no escopo externo sejam resolvidos aqui dentro.
+            engine = TransformationEngine(runtime=self.runtime)
             cfgs = [TransformationConfig.from_dict(t) for t in raw_transforms]
             other = engine.apply(other, cfgs)
 

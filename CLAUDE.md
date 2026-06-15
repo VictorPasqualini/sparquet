@@ -143,6 +143,51 @@ Qualquer transformação aceita `"skip_if_false": "{chave}"`. Após substituiç�
 
 ---
 
+## Variáveis de runtime (`{{var}}`)
+
+Diferente de `{param}` (substituído **antes** do parse, com valores conhecidos na
+chamada), `{{var}}` é resolvido **durante a execução**, com valores computados pelo
+próprio pipeline. Serve para empurrar um filtro literal (`IN (...)`) nas leituras de
+tabelas grandes carregadas depois — o equivalente declarativo ao `df.collect()` +
+`col.isin(lista)` de jobs Spark (predicate pushdown / data skipping no Delta).
+
+```jsonc
+// 1) materializa o conjunto e coleta a chave numa variável de runtime
+{ "type": "checkpoint" },
+{ "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" },
+
+// 2) usa {{cessoes_pendentes}} para filtrar a leitura de tabelas seguintes
+{ "type": "join",
+  "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+  "with_transformations": [
+    { "type": "filter", "condition": "id_cessao IN ({{cessoes_pendentes}})" },  // pushdown
+    { "type": "select", "columns": ["id_cessao", "numero_contrato", "tipo_contrato"] }
+  ],
+  "on": ["id_cessao", "numero_contrato"], "how": "left" }
+```
+
+Como funciona:
+
+- **`collect`** roda `df.select(column).distinct().collect()` e guarda a lista em um
+  *store* de runtime sob a chave `as`. Não altera o df, mas dispara uma action Spark
+  (traz dados ao driver) — por isso use **após um `checkpoint`** (o df já materializado
+  torna o collect barato e evita recomputar a linhagem).
+- **`{{var}}`** é resolvido no momento de aplicar cada transformação. A formatação para
+  SQL: lista de strings → `'a', 'b'` (aspas escapadas); lista de números → `1, 2`;
+  lista vazia → `NULL` (`IN (NULL)` não casa nada — comportamento correto quando o
+  conjunto apto está vazio); string → `'valor'`.
+- O store é **compartilhado com os `with_transformations` aninhados** dos joins, então
+  variáveis coletadas no escopo externo são visíveis nos reads de dentro.
+- O store é **zerado a cada `fw.run(...)`** (o engine é reusado no `SparkFramework`),
+  evitando vazamento de variáveis entre execuções.
+- `{{var}}` cuja variável ainda não foi coletada fica **literal** (não dá erro) — é
+  resolvido quando/se a variável passar a existir num escopo aninhado.
+
+Ordem de resolução: `{param}` (template, pré-parse) → parse do JSON → `{{var}}` (runtime,
+durante as transformações).
+
+---
+
 ## Reutilização de transformações com `$include`
 
 Um item `{ "$include": "caminho/arquivo.json" }` na lista de `transformations` é substituído inline pelo conteúdo do arquivo referenciado. O caminho é relativo ao diretório do JSON principal.
@@ -204,6 +249,10 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     // method: "localCheckpoint" (default) ou "checkpoint" (confiável); eager: true (default)
     // method inválido → transformação ignorada + warning no fim do pipeline
     { "type": "checkpoint", "method": "localCheckpoint", "eager": true },
+    // collect: coleta valores distintos de uma coluna numa variável de runtime {{as}}
+    // (não altera o df; dispara collect no driver — use após checkpoint). Ver seção
+    // "Variáveis de runtime ({{var}})" abaixo.
+    { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" },
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },

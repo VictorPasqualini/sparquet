@@ -89,6 +89,9 @@ class Pipeline:
             if self._columns:
                 log.info("Colunas injetadas", colunas=list(self._columns))
 
+            # O engine é reusado entre execuções no SparkFramework; zera o store
+            # de runtime para não vazar variáveis coletadas de um run anterior.
+            self._transform_engine.reset_runtime()
             df = self._transform_engine.apply(df, self.config.transformations)
             log.info("Transformacoes aplicadas")
 
