@@ -9,7 +9,9 @@ from spark_framework.transform.base import BaseTransformation
 from spark_framework.transform.builtin import (
     AddColumnTransformation,
     CastTransformation,
+    CheckpointTransformation,
     DebugTransformation,
+    DistinctTransformation,
     DropDuplicatesTransformation,
     DropTransformation,
     FillNaTransformation,
@@ -34,6 +36,8 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "with_column": WithColumnTransformation,
     "add_column": AddColumnTransformation,   # alias backward-compat
     "drop_duplicates": DropDuplicatesTransformation,
+    "distinct": DistinctTransformation,
+    "checkpoint": CheckpointTransformation,
     "group_by": GroupByTransformation,
     "sql": SqlTransformation,
     "fill_na": FillNaTransformation,

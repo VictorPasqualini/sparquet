@@ -45,3 +45,29 @@ class StructuredLogger:
 
 
 logger = StructuredLogger("spark_framework")
+
+
+# ---------------------------------------------------------------------------
+# Warnings adiados — coletados durante a execução e emitidos no fim do pipeline
+# ---------------------------------------------------------------------------
+_deferred_warnings: list[tuple[str, Dict[str, Any]]] = []
+
+
+def defer_warning(message: str, **context: Any) -> None:
+    """Registra um warning para ser emitido apenas no fim do processo.
+
+    Útil para sinalizar etapas ignoradas (ex: parâmetro inválido que fez a
+    transformação ser pulada) sem interromper o pipeline nem poluir o meio do log.
+    """
+    _deferred_warnings.append((message, context))
+
+
+def flush_deferred_warnings(log: StructuredLogger | None = None) -> None:
+    """Emite e limpa todos os warnings adiados. Chamado ao final do pipeline."""
+    global _deferred_warnings
+    if not _deferred_warnings:
+        return
+    target = log or logger
+    for message, context in _deferred_warnings:
+        target.warning(message, **context)
+    _deferred_warnings = []

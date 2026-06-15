@@ -5,6 +5,7 @@ from pyspark.sql import functions as F
 
 from spark_framework.core.config import InputConfig
 from spark_framework.transform.base import BaseTransformation
+from spark_framework.utils.logger import defer_warning
 
 
 class FilterTransformation(BaseTransformation):
@@ -84,6 +85,51 @@ class DistinctTransformation(BaseTransformation):
         return df.distinct()
 
 
+class CheckpointTransformation(BaseTransformation):
+    """Materializa o DataFrame e trunca seu plano lógico (checkpoint).
+
+    Equivale aos checkpoint()/localCheckpoint() usados em jobs Spark longos para
+    quebrar a linhagem após joins pesados — mantém o planner rápido e evita
+    recomputar estágios anteriores a cada ação. Não altera os dados.
+
+    JSON params:
+      method – qual método Spark chamar (default: "localCheckpoint")
+                 "localCheckpoint" → df.localCheckpoint() — grava no disco local
+                                     dos executors; rápido, mas perdido se um
+                                     executor morre (recomputa). É o usado no job.
+                 "checkpoint"      → df.checkpoint() — grava em storage confiável;
+                                     requer spark.sparkContext.setCheckpointDir.
+      eager  – materializa imediatamente (default: true)
+
+    Se `method` vier com valor inválido, a transformação é ignorada (o df segue
+    intacto para as próximas etapas) e um warning é emitido no fim do pipeline.
+
+    Exemplo:
+      { "type": "checkpoint" }                              // localCheckpoint(eager=True)
+      { "type": "checkpoint", "method": "checkpoint" }      // checkpoint confiável
+      { "type": "checkpoint", "eager": false }
+    """
+
+    _METHODS = {"localcheckpoint", "checkpoint"}
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        eager = self.config.params.get("eager", True)
+        method = self.config.params.get("method", "localCheckpoint")
+        normalized = method.lower() if isinstance(method, str) else None
+
+        if normalized not in self._METHODS:
+            defer_warning(
+                "checkpoint ignorado: method inválido",
+                method=method,
+                opcoes=["localCheckpoint", "checkpoint"],
+            )
+            return df
+
+        if normalized == "checkpoint":
+            return df.checkpoint(eager=eager)
+        return df.localCheckpoint(eager=eager)
+
+
 class SqlTransformation(BaseTransformation):
     """Runs an arbitrary SQL query against the DataFrame exposed as a temp view."""
 
@@ -122,67 +168,56 @@ class SortTransformation(BaseTransformation):
         return df.orderBy(*order_cols)
 
 
-_AGG_FUNCTIONS = {
-    "min":            F.min,
-    "max":            F.max,
-    "sum":            F.sum,
-    "avg":            F.avg,
-    "mean":           F.avg,
-    "count":          F.count,
-    "first":          F.first,
-    "last":           F.last,
-    "count_distinct": F.countDistinct,
-    "collect_list":   F.collect_list,
-    "collect_set":    F.collect_set,
-}
-
-
 class GroupByTransformation(BaseTransformation):
-    """Groups the DataFrame and applies aggregations without raw SQL.
+    """Groups the DataFrame and applies SQL aggregation expressions.
 
     JSON params:
-      by  – list of columns to group by
-      agg – list of aggregation specs, each with:
-              func   – aggregation function name (see supported list below)
-              column – column to aggregate (optional for count)
-              alias  – output column name (optional; defaults to Spark naming)
-
-    Supported func values:
-      min, max, sum, avg/mean, count, first, last,
-      count_distinct, collect_list, collect_set
+      by    – lista de colunas para agrupar
+      agg   – lista de expressões SQL de agregação completas (strings). Cada item
+              é passado direto para F.expr(), então qualquer função/sintaxe SQL do
+              Spark é válida, incluindo alias e expressões compostas.
+      pivot – (opcional) pivota os grupos por uma coluna. Aceita:
+                "coluna"                                   → pivot simples
+                { "column": "coluna", "values": [...] }    → pivot com valores
+                  explícitos (mais eficiente, evita um scan extra do Spark)
 
     Example:
       { "type": "group_by",
         "by": ["id", "categoria"],
         "agg": [
-          { "func": "sum",   "column": "valor",  "alias": "total"  },
-          { "func": "min",   "column": "status", "alias": "status" },
-          { "func": "count",                     "alias": "n"      }
+          "sum(valor) as total",
+          "min(status) as status",
+          "count(*) as n",
+          "first(tipo_contrato) as tipo_contrato",
+          "count(distinct struct(tipo_ativo, registradora)) > 1 as multi_ativos"
         ] }
+
+      { "type": "group_by",
+        "by": ["id"],
+        "pivot": { "column": "mes", "values": ["jan", "fev", "mar"] },
+        "agg": ["sum(valor) as total"] }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
         by: list[str] = self.config.params["by"]
-        agg_specs: list[dict] = self.config.params["agg"]
+        agg_specs: list[str] = self.config.params["agg"]
+        agg_exprs = [F.expr(spec) for spec in agg_specs]
 
-        agg_exprs = []
-        for spec in agg_specs:
-            func_name = spec["func"].lower()
-            func = _AGG_FUNCTIONS.get(func_name)
-            if func is None:
-                raise ValueError(
-                    f"Função de agregação '{func_name}' não suportada. "
-                    f"Disponíveis: {sorted(_AGG_FUNCTIONS)}"
+        grouped = df.groupBy(*by)
+
+        pivot = self.config.params.get("pivot")
+        if pivot is not None:
+            if isinstance(pivot, dict):
+                values = pivot.get("values")
+                grouped = (
+                    grouped.pivot(pivot["column"], values)
+                    if values
+                    else grouped.pivot(pivot["column"])
                 )
-            col = spec.get("column")
-            alias = spec.get("alias")
+            else:
+                grouped = grouped.pivot(pivot)
 
-            expr = func(F.col(col)) if col else func("*")
-            if alias:
-                expr = expr.alias(alias)
-            agg_exprs.append(expr)
-
-        return df.groupBy(*by).agg(*agg_exprs)
+        return grouped.agg(*agg_exprs)
 
 
 _VALID_JOIN_TYPES = {

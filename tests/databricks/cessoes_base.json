@@ -52,7 +52,7 @@
           "type": "group_by",
           "by":   ["id_cessao", "id_operacao", "numero_contrato", "data_referencia"],
           "agg":  [
-            { "func": "min", "column": "status_criterio_contrato", "alias": "status_criterio_contrato" }
+            "min(status_criterio_contrato) as status_criterio_contrato"
           ]
         },
         {

@@ -199,6 +199,11 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     { "type": "cast", "columns": {"col": "type"} },
     { "type": "with_column", "name": "col", "expression": "SQL expr" },  // add_column também aceito
     { "type": "drop_duplicates", "columns": ["id"] },
+    { "type": "distinct" },                                  // remove duplicatas usando todas as colunas
+    // checkpoint: materializa e trunca o plano lógico (quebra a linhagem após joins pesados)
+    // method: "localCheckpoint" (default) ou "checkpoint" (confiável); eager: true (default)
+    // method inválido → transformação ignorada + warning no fim do pipeline
+    { "type": "checkpoint", "method": "localCheckpoint", "eager": true },
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
@@ -217,12 +222,15 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     {
       "type": "group_by",
       "by": ["col1", "col2"],
+      // agg: lista de expressões SQL de agregação completas (strings) — qualquer
+      // função/sintaxe SQL do Spark, com alias e expressões compostas.
       "agg": [
-        { "func": "min|max|sum|avg|count|first|last|count_distinct|collect_list|collect_set",
-          "column": "col",   // opcional para count
-          "alias": "nome"    // opcional
-        }
-      ]
+        "sum(valor) as total",
+        "first(tipo_contrato) as tipo_contrato",
+        "count(distinct struct(tipo_ativo, registradora)) > 1 as multi_ativos"
+      ],
+      // pivot (opcional): "coluna" ou { "column": "coluna", "values": [...] }
+      "pivot": { "column": "mes", "values": ["jan", "fev"] }
     },
     {
       "type": "join",

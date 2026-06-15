@@ -12,7 +12,7 @@ from spark_framework.io.factory import ReaderFactory, WriterFactory
 from spark_framework.transform.engine import TransformationEngine
 from spark_framework.validation.base import ValidationResult
 from spark_framework.validation.engine import ValidationEngine
-from spark_framework.utils.logger import logger
+from spark_framework.utils.logger import flush_deferred_warnings, logger
 
 
 @dataclass
@@ -98,6 +98,7 @@ class Pipeline:
 
             rows_written = df.count()
             self._write_outputs(spark, df, log)
+            flush_deferred_warnings(log)
             log.info("Pipeline concluido", linhas_escritas=rows_written)
 
             return PipelineResult(
@@ -110,6 +111,7 @@ class Pipeline:
             )
 
         except Exception as exc:
+            flush_deferred_warnings(log)
             log.error("Pipeline falhou", error=str(exc))
             return PipelineResult(
                 pipeline_name=self.config.name,
