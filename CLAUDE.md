@@ -289,6 +289,10 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       "label": "após join contratos",           // opcional, aparece no separador
       // show usa df.show() — display() do Databricks só funciona chamado diretamente na célula
       "actions": ["count", "print_schema", "show", "explain", "columns", "dtypes"],
+      // transformations: opcional — aplicadas a um df descartável SÓ para esta
+      // inspeção (filter/select/group_by/etc.); NÃO alteram o df do pipeline
+      // (o debug sempre retorna o df original). Útil p/ focar a visualização.
+      "transformations": [ { "type": "filter", "condition": "id_cessao = 'C1'" } ],
       "show_rows": 20,                          // linhas para show (default: 20)
       "truncate": true,                         // truncar show (default: true)
       "vertical": false,                        // layout vertical no show (default: false)

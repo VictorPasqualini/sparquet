@@ -463,12 +463,17 @@ class DebugTransformation(BaseTransformation):
     instead of the actual rows.
 
     JSON params:
-      actions    – list of actions to run (default: ["show", "print_schema"])
-      label      – optional label shown in the separator line
-      show_rows  – rows for show/display (default: 20)
-      truncate   – truncate show output (default: true)
-      vertical   – vertical layout for show (default: false)
-      extended   – extended plan for explain (default: false)
+      actions         – list of actions to run (default: ["show", "print_schema"])
+      label           – optional label shown in the separator line
+      transformations – optional list of transformations applied to a throwaway
+                        copy of the df, JUST for this inspection. They do NOT touch
+                        the pipeline df (debug always returns the original df).
+                        Useful to focus the view (filter/select/group_by/…) without
+                        changing what the next steps receive.
+      show_rows       – rows for show/display (default: 20)
+      truncate        – truncate show output (default: true)
+      vertical        – vertical layout for show (default: false)
+      extended        – extended plan for explain (default: false)
 
     Supported actions:
       show, print_schema, count, explain, columns, dtypes
@@ -476,6 +481,10 @@ class DebugTransformation(BaseTransformation):
     Example:
       { "type": "debug", "label": "após join", "actions": ["count", "print_schema", "show"] }
       { "type": "debug", "actions": ["show"], "show_rows": 5, "truncate": false }
+      // inspeciona só as linhas de uma cessão, sem alterar o pipeline:
+      { "type": "debug", "label": "cessão C1", "actions": ["count", "show"],
+        "transformations": [ { "type": "filter", "condition": "id_cessao = 'C1'" },
+                             { "type": "select", "columns": ["id_cessao", "numero_contrato"] } ] }
     """
 
     _SUPPORTED_ACTIONS = {"show", "print_schema", "count", "explain", "columns", "dtypes"}
@@ -485,27 +494,39 @@ class DebugTransformation(BaseTransformation):
         label = params.get("label", "")
         actions: list[str] = params.get("actions", ["show", "print_schema"])
 
+        # Transformações efêmeras: aplicadas num df à parte, só para a inspeção.
+        # O df do pipeline não é alterado — no fim retornamos o `df` original.
+        view = df
+        raw_transforms = params.get("transformations", [])
+        if raw_transforms:
+            from spark_framework.core.config import TransformationConfig
+            from spark_framework.transform.engine import TransformationEngine
+            # Compartilha o runtime para que {{var}} coletadas antes resolvam aqui.
+            engine = TransformationEngine(runtime=self.runtime)
+            cfgs = [TransformationConfig.from_dict(t) for t in raw_transforms]
+            view = engine.apply(view, cfgs)
+
         header = f"[DEBUG{f' — {label}' if label else ''}]"
         print(f"\n{'─' * 60}\n{header}\n{'─' * 60}")
 
         for raw in actions:
             action = raw.lower().replace("-", "_").replace("printschema", "print_schema")
             if action == "show":
-                df.show(
+                view.show(
                     n=params.get("show_rows", 20),
                     truncate=params.get("truncate", True),
                     vertical=params.get("vertical", False),
                 )
             elif action == "print_schema":
-                df.printSchema()
+                view.printSchema()
             elif action == "count":
-                print(f"count: {df.count()}")
+                print(f"count: {view.count()}")
             elif action == "explain":
-                df.explain(extended=params.get("extended", False))
+                view.explain(extended=params.get("extended", False))
             elif action == "columns":
-                print(f"columns: {df.columns}")
+                print(f"columns: {view.columns}")
             elif action == "dtypes":
-                print(f"dtypes: {df.dtypes}")
+                print(f"dtypes: {view.dtypes}")
             else:
                 print(
                     f"⚠️  ação desconhecida: '{raw}'. "
