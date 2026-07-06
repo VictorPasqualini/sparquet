@@ -9,6 +9,7 @@ from pyspark.sql import functions as F
 from spark_framework.core.config import OutputConfig, PipelineConfig
 from spark_framework.core.context import SparkContextManager
 from spark_framework.io.factory import ReaderFactory, WriterFactory
+from spark_framework.transform.base import PipelineStop
 from spark_framework.transform.engine import TransformationEngine
 from spark_framework.validation.base import ValidationResult
 from spark_framework.validation.engine import ValidationEngine
@@ -24,10 +25,13 @@ class PipelineResult:
     validation_results: List[ValidationResult] = field(default_factory=list)
     error: Optional[str] = None
     output_df: Optional[DataFrame] = None  # df após transformações; disponível quando input_df é injetado
+    skipped: bool = False  # True quando o pipeline foi encerrado por stop_if_empty (sem dados)
 
     def summary(self) -> str:
         if not self.success:
             return f"[FAIL] '{self.pipeline_name}': {self.error}"
+        if self.skipped:
+            return f"[SKIP] '{self.pipeline_name}': sem dados a processar"
         passed = sum(1 for r in self.validation_results if r.passed)
         total = len(self.validation_results)
         return (
@@ -67,6 +71,7 @@ class Pipeline:
         log = logger.bind(pipeline=self.config.name)
         log.info("Pipeline iniciado")
 
+        rows_read = 0
         try:
             spark = SparkContextManager.get_or_create(self.config.spark)
 
@@ -113,6 +118,17 @@ class Pipeline:
                 output_df=df,
             )
 
+        except PipelineStop as stop:
+            flush_deferred_warnings(log)
+            log.info("Pipeline encerrado sem processamento", motivo=str(stop))
+            return PipelineResult(
+                pipeline_name=self.config.name,
+                success=True,
+                rows_read=rows_read,
+                rows_written=0,
+                skipped=True,
+            )
+
         except Exception as exc:
             flush_deferred_warnings(log)
             log.error("Pipeline falhou", error=str(exc))
@@ -126,13 +142,21 @@ class Pipeline:
         self, spark: SparkSession, df: DataFrame, log
     ) -> None:
         for output in self.config.outputs:
-            output_df = self._project_columns(df, output)
+            # Transformações próprias do destino (ex: explode, to_json, join),
+            # aplicadas sobre o df principal sem afetar as demais saídas.
+            output_df = df
+            if output.transformations:
+                output_df = self._transform_engine.apply(
+                    output_df, output.transformations
+                )
+            output_df = self._project_columns(output_df, output)
             log.info(
                 "Escrevendo output",
                 formato=output.format,
                 path=output.path,
                 modo=output.mode,
                 colunas=output.columns or "todas",
+                transformacoes=len(output.transformations),
             )
             WriterFactory.create(spark, output).write(output_df)
 

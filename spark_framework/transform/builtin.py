@@ -4,7 +4,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from spark_framework.core.config import InputConfig
-from spark_framework.transform.base import BaseTransformation
+from spark_framework.transform.base import BaseTransformation, PipelineStop
 from spark_framework.utils.logger import defer_warning, logger
 
 
@@ -54,20 +54,109 @@ class CastTransformation(BaseTransformation):
 
 
 class WithColumnTransformation(BaseTransformation):
-    """Adds or replaces a column computed from a SQL expression.
+    """Adiciona ou substitui colunas computadas a partir de expressões SQL.
 
-    JSON: { "type": "with_column", "name": "col", "expression": "SQL expr" }
+    Três formas (uma coluna ou várias):
+      { "type": "with_column", "column": "col", "expression": "SQL expr" }
+      { "type": "with_column", "name": "col", "expression": "SQL expr" }   // compat
+      { "type": "with_column", "columns": { "c1": "expr1", "c2": "expr2" } }
+
+    Na forma múltipla (`columns`) as colunas são criadas na ordem do mapa, então
+    uma coluna pode referenciar outra definida antes no mesmo bloco.
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
-        return df.withColumn(
-            self.config.params["name"],
-            F.expr(self.config.params["expression"]),
-        )
+        params = self.config.params
+
+        columns = params.get("columns")
+        if columns is not None:
+            for name, expression in columns.items():
+                df = df.withColumn(name, F.expr(expression))
+            return df
+
+        name = params.get("column", params.get("name"))
+        if name is None:
+            raise ValueError(
+                "with_column requer 'column' (ou 'name'), "
+                "ou 'columns' para múltiplas colunas."
+            )
+        return df.withColumn(name, F.expr(params["expression"]))
 
 
 # Backward-compatible alias — use "with_column" in new configs
 AddColumnTransformation = WithColumnTransformation
+
+
+class StructTransformation(BaseTransformation):
+    """Monta uma coluna struct (aninhada) a partir de um mapa campo → expressão.
+
+    Bem mais legível que named_struct(...) para payloads aninhados. Cada chave é o
+    nome do campo; o valor é uma expressão SQL (string) ou outro mapa (struct
+    aninhado). Para evitar aninhamento profundo de JSON, a chave pode usar
+    **dot-path** (`"data.nc.issuerName"`), que auto-aninha — deixando o payload
+    como uma tabela plana campo→expressão (ótimo para ler/diff/revisar). As duas
+    formas podem ser misturadas; a ordem dos campos segue a ordem de escrita.
+
+    JSON params:
+      column (ou name) – nome da coluna struct de saída
+      fields           – mapa campo → expressão SQL | mapa aninhado, com chaves
+                         simples ou em dot-path
+
+    Exemplo (dot-path, plano):
+      { "type": "struct", "column": "payload",
+        "fields": {
+          "id_externo": "id_vert",
+          "data.nc.issueTypeCode": "codigo_tipo_emissao",
+          "data.nc.issuerName": "nome_sacado",
+          "data.nc.paymentMethod.indexCode": "lpad(codigo_indexador, 4, '0')"
+        } }
+      // equivale a named_struct('id_externo', id_vert, 'data', named_struct('nc', ...))
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        params = self.config.params
+        name = params.get("column", params.get("name"))
+        if name is None:
+            raise ValueError("struct requer 'column' (ou 'name').")
+        return df.withColumn(name, self._build(params["fields"]))
+
+    @classmethod
+    def _build(cls, fields: dict):
+        fields = cls._expand_dotpaths(fields)
+        cols = []
+        for field_name, value in fields.items():
+            if isinstance(value, dict):
+                col = cls._build(value).alias(field_name)
+            else:
+                col = F.expr(value).alias(field_name)
+            cols.append(col)
+        return F.struct(*cols)
+
+    @classmethod
+    def _expand_dotpaths(cls, fields: dict) -> dict:
+        """Expande chaves em dot-path ("a.b.c") para mapas aninhados, preservando
+        a ordem de escrita e mesclando prefixos comuns. Chaves sem ponto ficam
+        como estão. Conflito (mesmo caminho usado como folha e como mapa) → erro.
+        """
+        root: dict = {}
+        for key, value in fields.items():
+            parts = key.split(".")
+            node = root
+            for part in parts[:-1]:
+                nxt = node.setdefault(part, {})
+                if not isinstance(nxt, dict):
+                    raise ValueError(
+                        f"struct: conflito no caminho '{key}': '{part}' já é um valor folha"
+                    )
+                node = nxt
+            leaf = parts[-1]
+            if leaf in node and isinstance(node[leaf], dict) and isinstance(value, dict):
+                node[leaf] = {**node[leaf], **value}
+            elif leaf in node:
+                raise ValueError(f"struct: campo conflitante/duplicado '{key}'")
+            else:
+                node[leaf] = value
+        return root
 
 
 class DropDuplicatesTransformation(BaseTransformation):
@@ -128,6 +217,32 @@ class CheckpointTransformation(BaseTransformation):
         if normalized == "checkpoint":
             return df.checkpoint(eager=eager)
         return df.localCheckpoint(eager=eager)
+
+
+class StopIfEmptyTransformation(BaseTransformation):
+    """Encerra o pipeline graciosamente se o DataFrame estiver vazio.
+
+    Evita iniciar processamento pesado (joins, payloads) e abrir escritas vazias
+    quando não há dados a processar. Levanta PipelineStop, capturada pelo
+    Pipeline, que retorna um resultado com success=True, skipped=True e
+    rows_written=0 — sem rodar as transformações seguintes nem as saídas.
+
+    Dispara uma action (isEmpty) — posicione logo após o filtro que define o
+    conjunto a processar, antes de checkpoint/joins.
+
+    JSON params:
+      message – texto opcional logado no encerramento
+
+    Exemplo:
+      { "type": "stop_if_empty", "message": "Sem cessoes a processar" }
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        if df.isEmpty():
+            raise PipelineStop(
+                self.config.params.get("message", "DataFrame vazio — nada a processar")
+            )
+        return df
 
 
 class CollectTransformation(BaseTransformation):
@@ -314,8 +429,8 @@ class JoinTransformation(BaseTransformation):
         if raw_transforms:
             from spark_framework.core.config import TransformationConfig
             from spark_framework.transform.engine import TransformationEngine
-            # Compartilha o mesmo store de runtime para que placeholders {{var}}
-            # coletados no escopo externo sejam resolvidos aqui dentro.
+            # Compartilha o runtime para que {{var}} coletadas no escopo externo
+            # valham nos with_transformations aninhados.
             engine = TransformationEngine(runtime=self.runtime)
             cfgs = [TransformationConfig.from_dict(t) for t in raw_transforms]
             other = engine.apply(other, cfgs)

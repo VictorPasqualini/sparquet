@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-framework"
-version = "0.2.1"
+# Versão é fonte única em spark_framework/__init__.py (__version__), lida
+# dinamicamente abaixo via [tool.setuptools.dynamic]. Para subir de versão,
+# altere apenas o __version__.
+dynamic = ["version"]
 description = "JSON-driven Spark pipeline framework for ingestion, transformation, and data quality"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -41,6 +44,9 @@ all   = ["delta-spark>=3.0.0"]
 
 [project.scripts]
 spark-framework = "spark_framework.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "spark_framework.__version__" }
 
 [tool.setuptools.packages.find]
 exclude = ["tests*", "examples*", "docs*"]

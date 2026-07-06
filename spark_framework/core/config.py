@@ -89,6 +89,12 @@ class OutputConfig:
     O campo `columns` permite selecionar quais colunas serão escritas
     neste destino específico, sem alterar o DataFrame das demais saídas.
     Se omitido, todas as colunas são escritas.
+
+    O campo `transformations` aplica transformações próprias deste destino sobre
+    o DataFrame transformado, antes da projeção de `columns` e da escrita — sem
+    afetar as demais saídas. Permite gravar formas diferentes (ex: explode,
+    to_json, join, colunas extras) a partir do mesmo df. Aceita todos os tipos
+    de transformação do TransformationEngine (inclusive {{var}} de runtime).
     """
 
     format: str
@@ -97,6 +103,7 @@ class OutputConfig:
     partition_by: List[str] = field(default_factory=list)
     columns: Optional[List[str]] = None
     options: Dict[str, Any] = field(default_factory=dict)
+    transformations: List["TransformationConfig"] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> OutputConfig:
@@ -107,6 +114,10 @@ class OutputConfig:
             partition_by=data.get("partition_by", []),
             columns=data.get("columns"),
             options=data.get("options", {}),
+            transformations=[
+                TransformationConfig.from_dict(t)
+                for t in data.get("transformations", [])
+            ],
         )
 
 

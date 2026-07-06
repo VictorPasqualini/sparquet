@@ -1,9 +1,0 @@
-order_id,customer_id,product_name,total_amount
-1001,1,Notebook Pro,7000.0
-1002,2,Mouse Gamer,250.0
-1004,1,Teclado Mecanico,2250.0
-1005,4,Mouse Gamer,500.0
-1006,5,"Monitor 27\"",1800.0
-1007,2,Teclado Mecanico,1800.0
-1009,1,Mouse Gamer,250.0
-1010,7,Headset Wireless,1800.0

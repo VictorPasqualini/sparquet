@@ -131,15 +131,26 @@ Chaves sem correspondência em `params` ficam literais no JSON — não causam e
 
 ### `skip_if_false`
 
-Qualquer transformação aceita `"skip_if_false": "{chave}"`. Após substituição, se o valor resultante for string vazia a transformação é ignorada; qualquer outro valor a executa normalmente.
+Qualquer transformação aceita `"skip_if_false"`. Após a substituição de template, o engine decide em 3 casos:
+
+| Valor pós-substituição | Comportamento |
+|------------------------|---------------|
+| `""` (string vazia) | **pula** (ex: bool `False`, lista vazia, param ausente) |
+| expressão que avalia como **booleano** (ex: `'REGISTRO' in ('EMISSAO', ...)`) | **pula se `false`** |
+| qualquer outro valor não-vazio (ex: `"CERC"`, `"'a','b'"`) | executa |
 
 ```jsonc
-// Pula o join inteiro se params["aplicar_join"] == False
+// Pula o join inteiro se params["aplicar_join"] == False  (valor vira "")
 { "type": "join", "skip_if_false": "{aplicar_join}", "with": {...}, "on": "id" }
 
 // Filtro só aplicado se params["registradora"] != ""
 { "type": "filter", "skip_if_false": "{registradora}", "condition": "registradora = '{registradora}'" }
+
+// Branch por valor (expressão booleana): roda só nos fluxos de emissão
+{ "type": "struct", "skip_if_false": "'{fluxo_operacao}' in ('EMISSAO', 'EMISSAO_E_REGISTRO')", "column": "payload", "fields": {...} }
 ```
+
+A expressão é avaliada sobre **literais** (já substituídos pelo template) — não enxerga colunas do df; serve para branchear por parâmetro.
 
 ---
 
@@ -242,7 +253,17 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     { "type": "drop", "columns": ["x"] },
     { "type": "rename", "mappings": {"old": "new"} },
     { "type": "cast", "columns": {"col": "type"} },
-    { "type": "with_column", "name": "col", "expression": "SQL expr" },  // add_column também aceito
+    // with_column: aceita "column" (ou "name", compat) + "expression", OU "columns"
+    // (mapa nome→expr) para criar várias colunas num bloco, em ordem. add_column = alias.
+    { "type": "with_column", "column": "col", "expression": "SQL expr" },
+    { "type": "with_column", "columns": { "c1": "expr1", "c2": "expr2 usando c1" } },
+    // struct: monta coluna struct aninhada a partir de um mapa campo→expressão
+    // (valor string = expr SQL; valor mapa = struct aninhado). Mais legível que named_struct.
+    // Chaves em dot-path ("data.nc.issuerName") auto-aninham → payload como tabela
+    // plana (ótimo p/ ler/diff). Pode misturar dot-path e mapa aninhado.
+    { "type": "struct", "column": "payload",
+      "fields": { "id_externo": "id_vert", "data.nc.issuerName": "nome_sacado",
+                  "data.nc.paymentMethod.indexCode": "lpad(cod, 4, '0')" } },
     { "type": "drop_duplicates", "columns": ["id"] },
     { "type": "distinct" },                                  // remove duplicatas usando todas as colunas
     // checkpoint: materializa e trunca o plano lógico (quebra a linhagem após joins pesados)
@@ -253,6 +274,11 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     // (não altera o df; dispara collect no driver — use após checkpoint). Ver seção
     // "Variáveis de runtime ({{var}})" abaixo.
     { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" },
+    // stop_if_empty: encerra o pipeline graciosamente se o df estiver vazio — não
+    // roda as transformações seguintes nem escreve nas saídas. result.skipped = True,
+    // success = True, rows_written = 0. Posicione logo após o filtro que define o
+    // conjunto a processar (antes de joins/payloads pesados).
+    { "type": "stop_if_empty", "message": "Sem dados a processar" },
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
@@ -325,6 +351,10 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     "mode": "overwrite|append|merge",
     "partition_by": ["col"],
     "columns": ["col_a", "col_b"],    // opcional: projeta só essas colunas
+    // transformations: opcional — transformações próprias deste destino aplicadas
+    // sobre o df transformado, antes de columns/escrita, sem afetar as demais saídas.
+    // Permite gravar formas diferentes do mesmo df (explode, to_json, join, etc.).
+    "transformations": [ { "type": "with_column", "column": "value", "expression": "to_json(payload)" } ],
     // merge (Delta/Iceberg): T = target (tabela destino), S = source (DataFrame)
     "options": {
       "merge_keys": ["id"],
@@ -337,7 +367,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     }
   },
 
-  // OU múltiplas saídas (cada uma pode ter "columns" diferente):
+  // OU múltiplas saídas (cada uma pode ter "columns" e "transformations" diferentes):
   "outputs": [
     {
       "format": "parquet",
@@ -402,11 +432,13 @@ class PipelineResult:
     validation_results: List[ValidationResult] = []
     error: Optional[str] = None
     output_df: Optional[DataFrame] = None  # preenchido quando input_df é injetado
+    skipped: bool = False                  # True quando encerrado por stop_if_empty (sem dados)
 
     def summary() -> str  # linha de status legível
 ```
 
 `PipelineResult` nunca lança exceção — erros ficam em `result.error`.
+`skipped=True` indica encerramento gracioso por `stop_if_empty` (success=True, rows_written=0).
 
 ---
 
@@ -423,6 +455,27 @@ O campo `columns` em cada output permite escrever subconjuntos diferentes para d
 ```
 
 A projeção é feita em `Pipeline._project_columns()` — o DataFrame principal não é alterado entre outputs.
+
+### Transformações por output
+
+Quando os destinos precisam de **formas diferentes** (não só subconjuntos de colunas) do mesmo df, use `transformations` por output. São aplicadas sobre o df transformado, antes de `columns`/escrita, sem afetar as demais saídas. Aceitam todos os tipos do engine (incl. `join`, `explode` via `with_column`, `to_json`, `{{var}}` de runtime).
+
+```json
+"outputs": [
+  { "format": "kafka", "path": "topico",
+    "transformations": [ { "type": "with_column", "column": "value", "expression": "to_json(payload)" } ],
+    "options": { "bootstrap_servers": "broker:9092", "value_column": "value", "key_column": null } },
+
+  { "format": "delta", "path": "schema.parcelas", "mode": "append",
+    "transformations": [
+      { "type": "join", "with": { "format": "delta", "path": "schema.silver_parcela" },
+        "on": ["id_cessao", "numero_contrato"], "how": "inner" },
+      { "type": "with_column", "column": "data_baixa", "expression": "cast(null as date)" }
+    ] }
+]
+```
+
+Cada output parte do **mesmo** df principal (materialize-o com `checkpoint` na última transformação para não recomputar a linhagem a cada destino). Aplicado em `Pipeline._write_outputs()`.
 
 ---
 
@@ -477,22 +530,23 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 
 ---
 
-## Arquivos de teste disponíveis
+## Exemplos e caso de uso
 
-| Script | Config | Descrição |
-|--------|--------|-----------|
-| `tests/run_ingestion.py` | `tests/ingestion_csv_to_parquet.json` | CSV de clientes → Parquet |
-| `tests/run_join.py` | `tests/join_orders_products.json` | JOIN orders×products → 3 outputs |
-| `tests/run_databricks.py` | `tests/databricks/` | Testes específicos para Databricks |
-| `tests/run_cessoes.py` | — | Pipeline de cessões |
+| Caminho | Descrição |
+|---------|-----------|
+| `examples/` | Confs ilustrativas das capacidades (ingestão+validações, pushdown runtime, struct/multi-saída, merge). Ver `examples/README.md`. |
+| `tests/case-of-success/` | Caso real completo: migração dos jobs de registro de lastros (base de cessões → registro por fluxo → commit). `job_registro.py` orquestra as confs. |
+| `tests/case-of-success/old/` | Material-fonte: os jobs Spark originais (`.py`) que foram migrados. |
 
-Dados em `tests/csv/`: `customers.csv`, `orders.csv`, `products.csv`.
+Padrão **staging → commit** do caso de uso: cada conf de registro grava no staging
+genérico `view_registro_staging`; a `conf_commit_registro.json` verifica (via
+`validations`) e grava os 3 destinos. Ver `ROADMAP_CASE_OF_SUCCESS.md`.
 
 ---
 
-## Roadmap pendente
+## Roadmap
 
-- Modo dry-run (valida config sem executar)
-- Testes unitários com dados mock
-- Métricas de tempo de execução por etapa
-- Suporte a perfis (dev/staging/prod) no mesmo JSON
+- Caso de uso (migração de registro): `ROADMAP_CASE_OF_SUCCESS.md`
+- Evolução estrutural do framework (conectores, data quality/governança, dry-run,
+  métricas, perfis): `ROADMAP.md`
+- Deploy como biblioteca no PyPI: `docs/DEPLOY_PYPI.md`

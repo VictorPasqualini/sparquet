@@ -24,6 +24,8 @@ from spark_framework.transform.builtin import (
     SelectTransformation,
     SortTransformation,
     SqlTransformation,
+    StopIfEmptyTransformation,
+    StructTransformation,
     UnionTransformation,
     WithColumnTransformation,
 )
@@ -37,9 +39,11 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "cast": CastTransformation,
     "with_column": WithColumnTransformation,
     "add_column": AddColumnTransformation,   # alias backward-compat
+    "struct": StructTransformation,
     "drop_duplicates": DropDuplicatesTransformation,
     "distinct": DistinctTransformation,
     "checkpoint": CheckpointTransformation,
+    "stop_if_empty": StopIfEmptyTransformation,
     "collect": CollectTransformation,
     "group_by": GroupByTransformation,
     "sql": SqlTransformation,
@@ -82,7 +86,10 @@ class TransformationEngine:
     Supports registering custom transformations at runtime via `register()`.
     """
 
-    def __init__(self, runtime: Dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        runtime: Dict[str, Any] | None = None,
+    ) -> None:
         self._registry: Dict[str, Type[BaseTransformation]] = dict(
             _BUILTIN_TRANSFORMATIONS
         )
@@ -105,7 +112,7 @@ class TransformationEngine:
         configs: List[TransformationConfig],
     ) -> DataFrame:
         for config in configs:
-            if config.skip_if_false is not None and not config.skip_if_false:
+            if self._should_skip(config.skip_if_false, df):
                 logger.info(
                     "Transformacao pulada",
                     type=config.type,
@@ -124,6 +131,38 @@ class TransformationEngine:
             transformation.runtime = self.runtime
             df = transformation.apply(df)
         return df
+
+    def _should_skip(self, skip_if_false: str | None, df: DataFrame) -> bool:
+        """Decide se a transformação é pulada a partir de `skip_if_false`.
+
+        Três casos (após a substituição de template já ter ocorrido):
+          - None                  → não pula.
+          - "" (string vazia)     → pula (compat: param ausente, ex bool False/lista vazia).
+          - expressão booleana    → pula se avaliar como false (ex:
+                                     "'{fluxo}' in ('EMISSAO', 'EMISSAO_E_REGISTRO')").
+          - qualquer outro valor  → não pula (compat: param presente, ex "CERC").
+
+        A expressão é de literais (já substituídos) — não enxerga colunas do df;
+        serve para branchear por parâmetro, não por dado.
+        """
+        if skip_if_false is None:
+            return False
+        if skip_if_false == "":
+            return True
+        valor_bool = self._eval_bool(skip_if_false, df)
+        if valor_bool is None:
+            return False
+        return not valor_bool
+
+    @staticmethod
+    def _eval_bool(expr: str, df: DataFrame):
+        """Avalia `expr` como booleano via Spark. Retorna o bool, ou None se a
+        expressão não compilar ou não resultar em booleano (trata como valor literal)."""
+        try:
+            resultado = df.sparkSession.sql(f"SELECT ({expr})").collect()[0][0]
+        except Exception:
+            return None
+        return resultado if isinstance(resultado, bool) else None
 
     def _resolve_runtime(self, config: TransformationConfig) -> TransformationConfig:
         """Substitui placeholders {{var}} nos params usando o store de runtime.

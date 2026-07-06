@@ -28,3 +28,7 @@ tests/csv/orders_export/
 
 # claude
 .claude/*
+
+# testes
+tests
+output
