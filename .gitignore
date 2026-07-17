@@ -30,5 +30,4 @@ tests/csv/orders_export/
 .claude/*
 
 # testes
-tests
 output
