@@ -1,0 +1,174 @@
+{
+  "name": "conf_registro_b3_cpr",
+  "description": "Registro de CPR na B3. Recebe as cessoes pendentes (view_cessoes_pendentes), filtra tipo_ativo/registradora/fluxo, monta o payload do instrumento por contrato e grava no staging generico view_registro_staging (id_operacao, id_vert, id_cessao, numero_contrato, payload). A escrita nos 3 destinos + verificacao fica na conf_commit_registro (Kafka deduplica por id_vert). Adaptacao de registro_b3_cpr.py.",
+
+  "input": {
+    "format": "view",
+    "path": "view_cessoes_pendentes"
+  },
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}' AND fluxo_operacao = '{fluxo_operacao}' AND ((tipo_contrato = '{tipo_contrato}' AND multi_ativos = true) OR (multi_ativos = false))"
+    },
+
+    { "type": "stop_if_empty", "message": "Sem cessoes para CPR/B3 - registro nao iniciado" },
+
+    { "type": "checkpoint" },
+
+    { "type": "collect", "column": "id_cessao",       "as": "cessoes_a_processar" },
+    { "type": "collect", "column": "numero_contrato", "as": "contratos_a_processar" },
+
+    {
+      "type": "join",
+      "with": {
+        "format": "delta",
+        "path": "lastros.bronze_remessa"
+      },
+      "with_transformations": [
+        { "type": "filter", "condition": "id_cessao IN ({{cessoes_a_processar}})" },
+        {
+          "type": "select",
+          "columns": [
+            "id_cessao",
+            "numero_contrato",
+            "nome_sacado",
+            "documento_sacado",
+            "tipo_pessoa_sacado",
+            "municipio_sacado",
+            "nome_cedente",
+            "documento_cedente",
+            "total_parcelas_contrato",
+            "data_emissao_contrato",
+            "data_vencimento_parcela",
+            "nome_originador",
+            "cnpj_originador",
+            "taxa_contrato"
+          ]
+        }
+      ],
+      "on": ["id_cessao", "numero_contrato"],
+      "how": "left"
+    },
+
+    {
+      "type": "join",
+      "with": {
+        "format": "delta",
+        "path": "lastros.silver_dados_auxiliares"
+      },
+      "with_transformations": [
+        { "type": "filter", "condition": "numero_contrato IN ({{contratos_a_processar}})" },
+        {
+          "type": "select",
+          "columns": ["informacoes_adicionais", "numero_contrato", "data_referencia"]
+        }
+      ],
+      "on": ["numero_contrato", "data_referencia"],
+      "how": "left"
+    },
+
+    { "type": "with_column", "column": "id_vert", "expression": "first(uuid()) over (partition by numero_contrato)" },
+    { "type": "with_column", "column": "dados_auxiliares", "expression": "explode_outer(informacoes_adicionais)" },
+
+    {
+      "type": "struct",
+      "column": "collateral_item",
+      "fields": { "collateralTypeCode": "dados_auxiliares.tipo_garantia" }
+    },
+    {
+      "type": "struct",
+      "column": "product_item",
+      "fields": {
+        "cprProductName": "dados_auxiliares.nome_produto",
+        "cprProductClassName": "dados_auxiliares.classe_produto",
+        "cprProductHarvest": "dados_auxiliares.safra_produto",
+        "cprProductQuantity": "cast(dados_auxiliares.quantidade_produto as string)",
+        "cprProductDescription": "dados_auxiliares.descricao_produto",
+        "measureUnitName": "dados_auxiliares.unidade_medida",
+        "packagingWayName": "dados_auxiliares.tipo_armazenamento",
+        "cprProductStatusCode": "dados_auxiliares.status_produto",
+        "productionTypeCode": "dados_auxiliares.tipo_producao"
+      }
+    },
+    {
+      "type": "struct",
+      "column": "issuer_item",
+      "fields": {
+        "cprIssuerName": "nome_sacado",
+        "documentNumber": "case when tipo_pessoa_sacado = 0 then lpad(documento_sacado, 14, '0') else lpad(documento_sacado, 11, '0') end",
+        "personTypeAcronym": "case when tipo_pessoa_sacado = '0' then 'PJ' when tipo_pessoa_sacado = '1' then 'PF' else 'PF' end",
+        "stateAcronym": "dados_auxiliares.uf_emissor",
+        "cityName": "upper(municipio_sacado)",
+        "issuerLegalNatureCode": "lpad(dados_auxiliares.natureza_juridica_emissor, 2, '0')"
+      }
+    },
+    {
+      "type": "struct",
+      "column": "production_place_item",
+      "fields": {
+        "productionPlaceName": "dados_auxiliares.local_producao",
+        "zipCode": "cast(dados_auxiliares.cep_local_producao as string)"
+      }
+    },
+    {
+      "type": "struct",
+      "column": "payment_method",
+      "fields": {
+        "paymentMethodCode": "codigo_metodo_pagamento_cpr",
+        "indexCode": "codigo_index_cpr",
+        "interestRateSpreadPercentage": "taxa_contrato",
+        "interestRateCriteriaTypeCode": "codigo_tipo_taxa_juros_cpr"
+      }
+    },
+
+    {
+      "type": "struct",
+      "column": "payload",
+      "fields": {
+        "id_externo": "id_vert",
+        "data.instrument.cprTypeCode": "tipo_codigo_cpr",
+        "data.instrument.otcRegisterAccountCode": "codigo_registro_conta_otc",
+        "data.instrument.otcCustodianAccountCode": "codigo_conta_custodiante_otc",
+        "data.instrument.electronicEmissionIndicator": "case when indicador_emissao_eletronica = true then 'S' when indicador_emissao_eletronica = false then 'N' else 'N' end",
+        "data.instrument.issueDate": "data_emissao_contrato",
+        "data.instrument.maturityDate": "data_vencimento_parcela",
+        "data.instrument.issueQuantity": "cast(dados_auxiliares.quantidade_parcela_contratada as string)",
+        "data.instrument.issueValue": "cast(dados_auxiliares.valor_face_parcela as string)",
+        "data.instrument.issueFinancialValue": "cast(dados_auxiliares.valor_face_contrato as string)",
+        "data.instrument.profitabilityStartDate": "data_referencia",
+        "data.instrument.automaticExpirationIndicator": "case when indicador_expiracao = true then 'S' when indicador_expiracao = false then 'N' else 'N' end",
+        "data.instrument.collaterals": "array_distinct(collect_list(collateral_item) over (partition by numero_contrato))",
+        "data.instrument.products": "array_distinct(collect_list(product_item) over (partition by numero_contrato))",
+        "data.instrument.issuers": "array_distinct(collect_list(issuer_item) over (partition by numero_contrato))",
+        "data.instrument.scr.scrTypeCode": "dados_auxiliares.ativo_informado_scr",
+        "data.instrument.scr.contractCode": "numero_contrato",
+        "data.instrument.scr.finalityCode": "dados_auxiliares.codigo_finalidade",
+        "data.instrument.creditor.creditorName": "nome_originador",
+        "data.instrument.creditor.documentNumber": "lpad(cnpj_originador, 14, '0')",
+        "data.instrument.deposit.otcFavoredAccountCode": "codigo_conta_favorecida_otc",
+        "data.instrument.deposit.documentNumber": "coalesce(numero_documento_cpr, '')",
+        "data.instrument.deposit.personTypeAcronym": "coalesce(tipo_pessoa_sigla_cpr, '')",
+        "data.instrument.deposit.selfNumber": "numero_contrato",
+        "data.instrument.deposit.settlementModalityTypeCode": "tipo_modalidade_liquidacao",
+        "data.instrument.deposit.depositQuantity": "total_parcelas_contrato",
+        "data.instrument.productionPlaces": "array_distinct(collect_list(production_place_item) over (partition by numero_contrato))",
+        "data.instrument.paymentMethod": "case when tipo_codigo_cpr = 'F' then payment_method else null end"
+      }
+    },
+
+    {
+      "type": "select",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato", "payload"]
+    },
+
+    { "type": "drop_duplicates", "columns": ["id_cessao", "numero_contrato"] }
+  ],
+
+  "output": {
+    "format": "view",
+    "path": "view_registro_staging",
+    "mode": "overwrite"
+  }
+}

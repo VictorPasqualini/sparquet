@@ -1,0 +1,114 @@
+{
+  "name": "conf_registro_b3_nota_comercial",
+  "description": "Registro de Nota Comercial na B3. Recebe as cessoes pendentes (view_cessoes_pendentes), filtra tipo_ativo/registradora/fluxo, monta o payload por contrato e grava no staging generico view_registro_staging (id_operacao, id_vert, id_cessao, numero_contrato, payload). A escrita nos 3 destinos + verificacao fica na conf_commit_registro (Kafka deduplica por id_vert). Adaptacao de registro_b3_nota_comercial.py.",
+
+  "input": {
+    "format": "view",
+    "path": "view_cessoes_pendentes"
+  },
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}' AND fluxo_operacao = '{fluxo_operacao}' AND ((tipo_contrato = '{tipo_contrato}' AND multi_ativos = true) OR (multi_ativos = false))"
+    },
+
+    { "type": "stop_if_empty", "message": "Sem cessoes para NOTA_COMERCIAL/B3 - registro nao iniciado" },
+
+    { "type": "checkpoint" },
+
+    { "type": "collect", "column": "id_cessao", "as": "cessoes_a_processar" },
+
+    {
+      "type": "join",
+      "with": {
+        "format": "delta",
+        "path": "lastros.bronze_remessa"
+      },
+      "with_transformations": [
+        {
+          "type": "filter",
+          "condition": "id_cessao IN ({{cessoes_a_processar}})"
+        },
+        {
+          "type": "select",
+          "columns": [
+            "id_cessao",
+            "numero_contrato",
+            "nome_sacado",
+            "documento_sacado",
+            "tipo_pessoa_sacado",
+            "data_emissao_contrato",
+            "data_vencimento_parcela",
+            "informacoes_adicionais"
+          ]
+        }
+      ],
+      "on": ["id_cessao", "numero_contrato"],
+      "how": "left"
+    },
+
+    {
+      "type": "with_column",
+      "columns": {
+        "id_vert": "first(uuid()) over (partition by numero_contrato)",
+        "max_data_vencimento_parcela": "max(data_vencimento_parcela) over (partition by id_cessao, numero_contrato)",
+        "informacoes_adicionais": "regexp_replace(informacoes_adicionais, '''', '\"')"
+      }
+    },
+    {
+      "type": "with_column",
+      "column": "informacoes_adicionais",
+      "expression": "from_json(informacoes_adicionais, 'STRUCT<numero_da_emissao: STRING, numero_da_serie: STRING, quantidade_emitida: STRING, valor_da_unidade_de_emissao: STRING, nome_fiador: STRING, codigo_tipo_garantia: STRING, codigo_metodo_pagamento: STRING, codigo_do_indexador: STRING, taxa_contrato: STRING>')"
+    },
+
+    {
+      "type": "struct",
+      "column": "payload",
+      "fields": {
+        "id_externo": "id_vert",
+        "data.nc.ncEmissionTypeCode": "'N'",
+        "data.nc.otcIssuerAccountCode": "'55639.40-2'",
+        "data.nc.issueTypeCode": "codigo_tipo_emissao",
+        "data.nc.otcBookkeeperAccountCode": "codigo_conta_contabil_otc",
+        "data.nc.issueNumber": "cast(informacoes_adicionais.numero_da_emissao as int)",
+        "data.nc.serieNumber": "informacoes_adicionais.numero_da_serie",
+        "data.nc.issueDate": "data_emissao_contrato",
+        "data.nc.maturityDate": "max_data_vencimento_parcela",
+        "data.nc.profitabilityStartDate": "data_referencia",
+        "data.nc.issuedQuantity": "cast(informacoes_adicionais.quantidade_emitida as int)",
+        "data.nc.unitIssueValue": "cast(informacoes_adicionais.valor_da_unidade_de_emissao as double)",
+        "data.nc.issueFinancialValue": "cast(cast(informacoes_adicionais.quantidade_emitida as double) * cast(informacoes_adicionais.valor_da_unidade_de_emissao as double) as double)",
+        "data.nc.regimeTypeCode": "codigo_regime_tributario",
+        "data.nc.cetipEventAttendedIndicator": "indicador_processamento_cetip",
+        "data.nc.cvmRegistrationNumber": "'PRIVADAVERT'",
+        "data.nc.cvmSequentialNumber": "1",
+        "data.nc.cvmRegistrationDate": "'2026-01-12'",
+        "data.nc.unilateralEarlyRedemptionIndicator": "indicador_resgate_antecipado_unilateral",
+        "data.nc.guarantorName": "informacoes_adicionais.nome_fiador",
+        "data.nc.fiduciaryAgentIndicator": "indicador_presenca_agente_fiduciario",
+        "data.nc.issuerName": "nome_sacado",
+        "data.nc.issuerDocumentNumber": "case when tipo_pessoa_sacado = 0 then lpad(documento_sacado, 14, '0') else lpad(documento_sacado, 11, '0') end",
+        "data.nc.guaranteeTypeCode": "cast(informacoes_adicionais.codigo_tipo_garantia as int)",
+        "data.nc.paymentMethod.paymentMethodCode": "lpad(informacoes_adicionais.codigo_metodo_pagamento, 2, '0')",
+        "data.nc.paymentMethod.indexCode": "lpad(informacoes_adicionais.codigo_do_indexador, 4, '0')",
+        "data.nc.paymentMethod.rateFloatingPercentage": "case when cast(informacoes_adicionais.codigo_do_indexador as int) in (20, 99) then null else cast(percentual_taxa_variavel as float) end",
+        "data.nc.paymentMethod.interestRateSpread": "cast(informacoes_adicionais.taxa_contrato as int)",
+        "data.nc.paymentMethod.interestCalculationCriteriaCode": "codigo_criterio_calculo_juros"
+      }
+    },
+
+    {
+      "type": "select",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato", "payload"]
+    },
+
+    { "type": "drop_duplicates", "columns": ["id_cessao", "numero_contrato"] }
+  ],
+
+  "output": {
+    "format": "view",
+    "path": "view_registro_staging",
+    "mode": "overwrite"
+  }
+}

@@ -1,0 +1,154 @@
+{
+  "name": "conf_registro_vert_duplicata",
+  "description": "Registro/emissao de Duplicata na VERT (fluxo EMISSAO). Le as cessoes pendentes (view_cessoes_pendentes), filtra DUPLICATA/VERT/EMISSAO, monta o payload de emissao em lotes (REGISTROS_POR_GRUPO=300 contratos por lote, agregados por id_cessao+lote_index) e grava no staging generico view_registro_staging no nivel contrato (id_operacao, id_vert, id_cessao, numero_contrato, payload). A escrita nos 3 destinos + verificacao fica na conf_commit_registro: como id_vert e por lote (first(uuid()) over id_cessao+lote_index), o Kafka deduplicado por id_vert sai 1 envelope por lote, e contratos/parcelas saem por contrato. Adaptacao de registro_vert_duplicata.py. Notas: (1) explode_outer em assinantes/cedentes para nao descartar contratos; (2) from_json de informacoes_adicionais omitido por nao ser usado no payload de emissao.",
+
+  "input": {
+    "format": "view",
+    "path": "view_cessoes_pendentes"
+  },
+
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}' AND fluxo_operacao = '{fluxo_operacao}' AND ((tipo_contrato = '{tipo_contrato}' AND multi_ativos = true) OR (multi_ativos = false))"
+    },
+
+    { "type": "stop_if_empty", "message": "Sem cessoes para DUPLICATA/VERT (EMISSAO) - registro nao iniciado" },
+
+    { "type": "checkpoint" },
+
+    { "type": "collect", "column": "id_cessao", "as": "cessoes_a_processar" },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+      "with_transformations": [
+        { "type": "filter", "condition": "id_cessao IN ({{cessoes_a_processar}})" },
+        {
+          "type": "select",
+          "columns": [
+            "id_cessao",
+            "numero_contrato",
+            "nome_sacado",
+            "documento_sacado",
+            "logradouro_sacado",
+            "cep_sacado",
+            "valor_face_parcela",
+            "data_vencimento_parcela",
+            "numero_nf_duplicata",
+            "documento_cedente",
+            "nome_cedente"
+          ]
+        }
+      ],
+      "on": ["id_cessao", "numero_contrato"],
+      "how": "inner"
+    },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "lastros.silver_lastros_relacionamento" },
+      "with_transformations": [
+        { "type": "select", "columns": ["documento_entidade_relacionada", "municipio", "uf"] }
+      ],
+      "on": "l.documento_sacado = r.documento_entidade_relacionada",
+      "how": "left"
+    },
+
+    {
+      "type": "with_column",
+      "columns": {
+        "data_emissao_duplicata": "current_date()",
+        "assinantes": "explode_outer(assinantes)"
+      }
+    },
+    { "type": "with_column", "column": "cedentes", "expression": "explode_outer(cedentes)" },
+
+    {
+      "type": "with_column",
+      "columns": {
+        "contrato_rank": "dense_rank() over (partition by id_cessao order by numero_contrato)",
+        "lote_index": "cast((dense_rank() over (partition by id_cessao order by numero_contrato) - 1) / 300 as int)",
+        "id_vert": "first(uuid()) over (partition by id_cessao, lote_index)",
+        "cedente_dado": "filter(array(cedentes), x -> x.documento_cedente = documento_cedente)[0]"
+      }
+    },
+
+    {
+      "type": "struct",
+      "column": "signer_item",
+      "fields": {
+        "email": "assinantes.email",
+        "name": "assinantes.nome",
+        "foreignPerson": "assinantes.pessoa_estrangeira",
+        "document": "assinantes.documento",
+        "authType": "assinantes.tipo_autenticacao"
+      }
+    },
+
+    {
+      "type": "struct",
+      "column": "document_item",
+      "fields": {
+        "fileExternalReference": "concat('VERT_', numero_contrato)",
+        "product": "produto",
+        "template.type": "cast(tipo_template as int)",
+        "template.externalReference": "referencia_template",
+        "template.inputs.sacado_nome.value": "nome_sacado",
+        "template.inputs.duplicata_numero.value": "numero_contrato",
+        "template.inputs.sacado_endereco.value": "logradouro_sacado",
+        "template.inputs.sacado_municipio.value": "municipio",
+        "template.inputs.sacado_uf.value": "uf",
+        "template.inputs.duplicata_valor.value": "valor_face_parcela",
+        "template.inputs.sacado_cnpj_cpf.value": "documento_sacado",
+        "template.inputs.sacado_praca_pagamento.value": "'municipio'",
+        "template.inputs.duplicata_data_emissao.value": "data_emissao_duplicata",
+        "template.inputs.sacado_cep.value": "cep_sacado",
+        "template.inputs.duplicata_vencimento.value": "data_vencimento_parcela",
+        "template.inputs.fatura_valor_por_extenso.value": "valor_face_parcela",
+        "template.inputs.endossatario_cpf_cnpj.value": "cnpj_fundo",
+        "template.inputs.fatura_valor.value": "valor_face_parcela",
+        "template.inputs.fatura_numero.value": "numero_nf_duplicata",
+        "template.inputs.endossatario_nome.value": "nome_fundo",
+        "template.inputs.cedente_cnpj_cpf.value": "lpad(cast(documento_cedente as string), 14, '0')",
+        "template.inputs.cedente_nome.value": "nome_cedente",
+        "template.inputs.cedente_municipio.value": "cedente_dado.cedente_municipio",
+        "template.inputs.cedente_rua.value": "cedente_dado.cedente_rua",
+        "template.inputs.cedente_agencia.value": "cedente_dado.cedente_agencia",
+        "template.inputs.cedente_conta.value": "cedente_dado.cedente_conta",
+        "template.inputs.cedente_bairro.value": "cedente_dado.cedente_bairro",
+        "template.inputs.cedente_inscricao_estadual.value": "cedente_dado.cedente_inscricao_estadual",
+        "template.inputs.cedente_banco.value": "cedente_dado.cedente_banco",
+        "template.inputs.cedente_telefone.value": "cedente_dado.cedente_telefone",
+        "template.inputs.cedente_uf.value": "cedente_dado.cedente_uf",
+        "template.inputs.cedente_cep.value": "cedente_dado.cedente_cep",
+        "template.inputs.cedente_inscricao_municipal.value": "cedente_dado.cedente_inscricao_municipal"
+      }
+    },
+
+    {
+      "type": "struct",
+      "column": "payload",
+      "fields": {
+        "id_externo": "id_vert",
+        "participant_document": "documento_participante",
+        "envelope_external_reference": "id_cessao",
+        "signer_list": "array_distinct(collect_list(signer_item) over (partition by id_cessao, lote_index))",
+        "documents": "array_distinct(collect_list(document_item) over (partition by id_cessao, lote_index))"
+      }
+    },
+
+    {
+      "type": "select",
+      "columns": ["id_operacao", "id_vert", "id_cessao", "numero_contrato", "payload"]
+    },
+
+    { "type": "drop_duplicates", "columns": ["id_cessao", "numero_contrato"] }
+  ],
+
+  "output": {
+    "format": "view",
+    "path": "view_registro_staging",
+    "mode": "overwrite"
+  }
+}
