@@ -334,6 +334,11 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 
   "validations": {                      // opcional
     "on_failure": "fail|warn|skip",
+    // report: opcional — grava 1 linha por regra (pipeline, rule_type, passed,
+    // failed_count, message, validated_at) para análise de qualidade. Aceita
+    // qualquer formato de saída. Gerado nos modos que não abortam (warn/skip)
+    // ou quando todas as regras passam (em "fail" com violação, aborta antes).
+    "report": { "format": "csv", "path": "/dq/validation_report", "mode": "overwrite" },
     "rules": [
       { "type": "not_null", "columns": ["id"] },
       { "type": "unique", "columns": ["id"] },

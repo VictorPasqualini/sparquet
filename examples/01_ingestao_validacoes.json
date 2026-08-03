@@ -1,10 +1,10 @@
 {
   "name": "01_ingestao_validacoes",
-  "description": "Ingestão básica: lê clientes em Parquet, limpa/normaliza, valida qualidade e grava processado. Demonstra filter, select, cast, rename, with_column, drop_duplicates e o bloco validations.",
+  "description": "Ingestao basica RODAVEL LOCALMENTE (CSV -> CSV): le clientes em CSV, limpa/normaliza, valida qualidade e grava o processado. Demonstra filter, select, cast, rename, with_column, drop_duplicates, o bloco validations e a SAIDA de validacoes (validations.report). Rode da raiz do repo: python main.py examples/01_ingestao_validacoes.json",
 
   "input": {
-    "format": "parquet",
-    "path": "/data/raw/customers"
+    "format": "csv",
+    "path": "examples/data/customers.csv"
   },
 
   "transformations": [
@@ -17,7 +17,12 @@
   ],
 
   "validations": {
-    "on_failure": "fail",
+    "on_failure": "warn",
+    "report": {
+      "format": "csv",
+      "path": "examples/output/01_validation_report",
+      "mode": "overwrite"
+    },
     "rules": [
       { "type": "not_null", "columns": ["id", "email"] },
       { "type": "unique", "columns": ["id"] },
@@ -27,8 +32,8 @@
   },
 
   "output": {
-    "format": "parquet",
-    "path": "/data/processed/customers",
+    "format": "csv",
+    "path": "examples/output/01_customers",
     "mode": "overwrite",
     "partition_by": ["country"]
   }

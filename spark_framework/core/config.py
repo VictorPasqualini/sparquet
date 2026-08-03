@@ -73,12 +73,19 @@ class ValidationRule:
 class ValidationConfig:
     on_failure: str = "fail"  # fail | warn | skip
     rules: List[ValidationRule] = field(default_factory=list)
+    # Destino opcional para gravar o resultado das validações (uma linha por regra:
+    # pipeline, rule_type, passed, failed_count, message, validated_at). Serve para
+    # análise/observabilidade de qualidade. Aceita qualquer formato de saída.
+    report: Optional["OutputConfig"] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ValidationConfig:
         return cls(
             on_failure=data.get("on_failure", "fail"),
             rules=[ValidationRule.from_dict(r) for r in data.get("rules", [])],
+            report=(
+                OutputConfig.from_dict(data["report"]) if data.get("report") else None
+            ),
         )
 
 

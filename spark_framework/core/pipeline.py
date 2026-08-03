@@ -103,6 +103,7 @@ class Pipeline:
             validation_results = self._validation_engine.validate(
                 df, self.config.validations
             )
+            self._write_validation_report(spark, validation_results, log)
 
             rows_written = df.count()
             self._write_outputs(spark, df, log)
@@ -137,6 +138,50 @@ class Pipeline:
                 success=False,
                 error=str(exc),
             )
+
+    def _write_validation_report(
+        self, spark: SparkSession, results: List[ValidationResult], log
+    ) -> None:
+        """Grava o resultado das validações no destino de `validations.report`,
+        se configurado — uma linha por regra, para análise de qualidade.
+
+        Observação: em `on_failure="fail"` com violações, o ValidationEngine
+        interrompe antes daqui, então o relatório é gerado nos modos que não
+        abortam (`warn`/`skip`) ou quando todas as regras passam.
+        """
+        report = self.config.validations.report
+        if report is None:
+            return
+
+        from pyspark.sql.types import (
+            BooleanType,
+            LongType,
+            StringType,
+            StructField,
+            StructType,
+        )
+
+        schema = StructType([
+            StructField("pipeline", StringType()),
+            StructField("rule_type", StringType()),
+            StructField("passed", BooleanType()),
+            StructField("failed_count", LongType()),
+            StructField("message", StringType()),
+        ])
+        rows = [
+            (self.config.name, r.rule_type, r.passed, int(r.failed_count), r.message)
+            for r in results
+        ]
+        report_df = spark.createDataFrame(rows, schema).withColumn(
+            "validated_at", F.current_timestamp()
+        )
+        log.info(
+            "Escrevendo relatorio de validacoes",
+            formato=report.format,
+            path=report.path,
+            regras=len(results),
+        )
+        WriterFactory.create(spark, report).write(report_df)
 
     def _write_outputs(
         self, spark: SparkSession, df: DataFrame, log
