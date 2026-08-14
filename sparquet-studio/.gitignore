@@ -1,5 +1,8 @@
 node_modules
 dist
+*.tsbuildinfo
+vite.config.js
+vitest.config.js
 dist-ssr
 *.local
 .vite
