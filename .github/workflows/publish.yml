@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/spark-framework/
+      url: https://pypi.org/project/sparquet/
     permissions:
       id-token: write  # OIDC — sem precisar de token manual
 

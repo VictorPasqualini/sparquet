@@ -1,14 +1,14 @@
-# Deploy no PyPI — publicar o `spark-framework` como biblioteca
+# Deploy no PyPI — publicar o `sparquet` como biblioteca
 
 Guia para empacotar e publicar o projeto no PyPI, de forma que possa ser instalado
-com `pip install spark-framework` e usado como biblioteca.
+com `pip install sparquet` e usado como biblioteca.
 
 O empacotamento já está configurado em [`pyproject.toml`](../pyproject.toml):
-- nome de distribuição: **`spark-framework`** (import: `spark_framework`);
-- **versão é fonte única** em `spark_framework/__init__.py` (`__version__`), lida
+- nome de distribuição: **`sparquet`** (import: `sparquet`);
+- **versão é fonte única** em `sparquet/__init__.py` (`__version__`), lida
   dinamicamente pelo setuptools (`[tool.setuptools.dynamic]`);
 - `tests*`, `examples*`, `docs*` são excluídos do pacote;
-- dependência base: `pyspark>=3.4.0`; extra opcional: `spark-framework[delta]`.
+- dependência base: `pyspark>=3.4.0`; extra opcional: `sparquet[delta]`.
 
 ---
 
@@ -27,7 +27,7 @@ O empacotamento já está configurado em [`pyproject.toml`](../pyproject.toml):
 
 ## 2. Subir a versão
 
-A versão fica **só** em `spark_framework/__init__.py`:
+A versão fica **só** em `sparquet/__init__.py`:
 ```python
 __version__ = "0.2.1"   # bump aqui (segue SemVer: MAJOR.MINOR.PATCH)
 ```
@@ -45,8 +45,8 @@ rm -rf dist build *.egg-info        # limpa artefatos antigos
 python -m build                     # gera dist/*.whl e dist/*.tar.gz
 ```
 Isso produz, em `dist/`:
-- `spark_framework-<versão>-py3-none-any.whl` (wheel)
-- `spark_framework-<versão>.tar.gz` (sdist)
+- `sparquet-<versão>-py3-none-any.whl` (wheel)
+- `sparquet-<versão>.tar.gz` (sdist)
 
 Valide os metadados antes de publicar:
 ```bash
@@ -69,8 +69,8 @@ Instale a partir do TestPyPI num venv limpo (puxando deps reais do PyPI):
 python -m venv /tmp/venv && source /tmp/venv/bin/activate   # Windows: .\venv\Scripts\activate
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            spark-framework
-python -c "import spark_framework; print(spark_framework.__version__)"
+            sparquet
+python -c "import sparquet; print(sparquet.__version__)"
 ```
 
 ---
@@ -82,8 +82,8 @@ python -m twine upload dist/*
 ```
 Pronto — o pacote fica disponível para:
 ```bash
-pip install spark-framework            # núcleo (pyspark)
-pip install "spark-framework[delta]"   # com Delta Lake OSS (fora do Databricks)
+pip install sparquet            # núcleo (pyspark)
+pip install "sparquet[delta]"   # com Delta Lake OSS (fora do Databricks)
 ```
 
 ### Credenciais sem digitar toda vez (`~/.pypirc`)
@@ -106,14 +106,14 @@ index-servers = pypi testpypi
 ## 6. Usando como biblioteca (consumidor)
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import SparkFramework
 
 fw = SparkFramework(spark={"app_name": "MeuJob"})
 resultado = fw.run("meu_pipeline.json", params={"tipo_ativo": "NC"})
 print(resultado.summary())
 fw.stop()
 ```
-Também há o entrypoint de CLI `spark-framework` (definido em `[project.scripts]`).
+Também há o entrypoint de CLI `sparquet` (definido em `[project.scripts]`).
 
 ---
 
@@ -127,5 +127,5 @@ Também há o entrypoint de CLI `spark-framework` (definido em `[project.scripts
 - [ ] `twine upload dist/*` no PyPI.
 - [ ] Tag git da versão: `git tag v<versão> && git push --tags`.
 
-> Futuro (ver [ROADMAP.md](../ROADMAP.md) §6): automatizar build+publish via CI ao
+> Futuro (ver [BACKLOG.md](../BACKLOG.md) §5): automatizar build+publish via CI ao
 > criar uma tag de versão.

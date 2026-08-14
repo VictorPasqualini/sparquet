@@ -8,7 +8,7 @@ lastros.titulos_metricas_entidade → seu destino).
 """
 import sys
 
-from spark_framework import SparkFramework
+from sparquet import SparkFramework
 
 conf = (
     "tests/agregacao_titulos_sem_join.json"

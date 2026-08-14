@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "spark-framework"
-# Versão é fonte única em spark_framework/__init__.py (__version__), lida
+name = "sparquet"
+# Versão é fonte única em sparquet/__init__.py (__version__), lida
 # dinamicamente abaixo via [tool.setuptools.dynamic]. Para subir de versão,
 # altere apenas o __version__.
 dynamic = ["version"]
@@ -38,15 +38,15 @@ Repository = "https://github.com/VictorPasqualini/sparquet"
 "Bug Tracker" = "https://github.com/VictorPasqualini/sparquet/issues"
 
 [project.optional-dependencies]
-# pip install spark-framework[delta]  →  OSS Delta fora do Databricks
+# pip install sparquet[delta]  →  OSS Delta fora do Databricks
 delta = ["delta-spark>=3.0.0"]
 all   = ["delta-spark>=3.0.0"]
 
 [project.scripts]
-spark-framework = "spark_framework.cli:main"
+sparquet = "sparquet.cli:main"
 
 [tool.setuptools.dynamic]
-version = { attr = "spark_framework.__version__" }
+version = { attr = "sparquet.__version__" }
 
 [tool.setuptools.packages.find]
 exclude = ["tests*", "examples*", "docs*"]

@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""CLI entry point para o SparkFramework."""
+"""CLI entry point para o SparkFramework (sparquet <config.json>)."""
 
 import argparse
 import sys
@@ -14,9 +13,9 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
-  python main.py examples/basic_parquet.json
-  python main.py examples/iceberg_upsert.json --stop-spark
-  python main.py tests/ingestion_csv_to_parquet.json
+  sparquet examples/basic_parquet.json
+  sparquet examples/iceberg_upsert.json --stop-spark
+  sparquet tests/ingestion_csv_to_parquet.json
         """,
     )
     parser.add_argument("config", help="Caminho para o arquivo JSON de configuracao")
