@@ -559,3 +559,43 @@ genérico `view_registro_staging`; a `conf_commit_registro.json` verifica (via
 - Evolução estrutural do framework (conectores, data quality/governança, dry-run,
   métricas, perfis): `ROADMAP.md`
 - Deploy como biblioteca no PyPI: `docs/DEPLOY_PYPI.md`
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+---
+
+## Sparquet Studio (frontend)
+
+Editor visual para os pipelines JSON, em `sparquet-studio/` (React 18 + TypeScript +
+Vite + Tailwind + React Flow). É o ponto de entrada de uso do framework: o usuário
+desenha o pipeline no canvas, o Studio compila para o mesmo JSON que o
+`SparkFramework` executa.
+
+```bash
+cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
+```
+
+| Camada | Caminho | Responsabilidade |
+|--------|---------|------------------|
+| Catálogo | `src/catalog/` | Descreve a linguagem (transformações, formatos, validators) com campos, defaults, docs e gotchas. **Fonte única**: alimenta paleta, formulários, linter e o system prompt da IA. |
+| Compilador | `src/lib/compiler/` | `compileGraph()` (grafo → JSON) e `pipelineToGraph()` (JSON → grafo) são inversos, com testes de round-trip sobre os confs de `examples/`. |
+| Linter | `src/lib/validation/lint.ts` | Regras client-side (merge sem `merge_keys`, `{{var}}` sem `collect`, `{param}` não declarado, etc). |
+| IA | `src/lib/ai/` | Cliente streaming multi-provider (Anthropic/OpenAI/Google/compatível), prompt gerado do catálogo, parser de proposta. |
+| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o pipeline com o `SparkFramework` real e devolve contadores, validações, preview e logs. |
+| Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (projetos/workflows), settings. |
+
+**Regra de ouro ao evoluir o framework**: toda transformação, formato ou validator
+novo precisa de uma entrada correspondente no catálogo (`src/catalog/`), senão o
+Studio não a oferece na paleta nem a descreve para a IA. Tipos desconhecidos ainda
+são importados e preservados no round-trip, mas sem formulário dedicado.
+
+Verificação: `npm run typecheck`, `npm run test` (vitest), `npm run lint` e
+`npm run smoke` (end-to-end em Chrome real).
