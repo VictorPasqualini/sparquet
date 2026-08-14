@@ -64,7 +64,7 @@ spark-submit --packages org.apache.iceberg:iceberg-spark-runtime-3.4_2.12:1.4.2 
 
 ```
 framework-spark/
-├── spark_framework/
+├── sparquet/
 │   ├── core/
 │   │   ├── config.py        # Dataclasses de configuração
 │   │   ├── context.py       # Gerenciamento do SparkSession
@@ -367,7 +367,7 @@ spark-submit \
 ## Usando via código Python
 
 ```python
-from spark_framework import Pipeline
+from sparquet import Pipeline
 
 # A partir de um arquivo JSON
 pipeline = Pipeline.from_file("meu_pipeline.json")
@@ -392,8 +392,8 @@ if not result.success:
 ### Adicionar um novo formato de leitura/escrita
 
 ```python
-from spark_framework.io.base import BaseReader, BaseWriter
-from spark_framework.io.factory import ReaderFactory, WriterFactory
+from sparquet.io.base import BaseReader, BaseWriter
+from sparquet.io.factory import ReaderFactory, WriterFactory
 
 class DeltaReader(BaseReader):
     def read(self):
@@ -410,8 +410,8 @@ WriterFactory.register("delta", DeltaWriter)
 ### Adicionar uma transformação customizada
 
 ```python
-from spark_framework.transform.base import BaseTransformation
-from spark_framework.transform.engine import TransformationEngine
+from sparquet.transform.base import BaseTransformation
+from sparquet.transform.engine import TransformationEngine
 from pyspark.sql import functions as F
 
 class NormalizeTextTransformation(BaseTransformation):
@@ -428,8 +428,8 @@ pipeline = Pipeline(config, transform_engine=engine)
 ### Adicionar um validator customizado
 
 ```python
-from spark_framework.validation.base import BaseValidator, ValidationResult
-from spark_framework.validation.engine import ValidationEngine
+from sparquet.validation.base import BaseValidator, ValidationResult
+from sparquet.validation.engine import ValidationEngine
 
 class NoFutureDate(BaseValidator):
     def validate(self, df):

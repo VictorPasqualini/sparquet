@@ -1,1 +1,34 @@
-.claude
+# Build / packaging
+dist/
+build/
+*.egg-info/
+*.whl
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.venv312/
+venv/
+env/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Spark / Hadoop
+derby.log
+metastore_db/
+
+# Tests output
+tests/parquet/
+tests/csv/orders_export/
+
+# claude
+.claude/*
+
+# testes
+output

@@ -1,0 +1,8 @@
+id,name,email,age,country,status,created_at
+1,Ana Souza,ana@ex.com,30,BR,active,2026-01-05
+2,Bruno Lima,bruno@ex.com,45,BR,active,2026-01-06
+3,Carla Dias,,27,PT,active,2026-01-07
+4,Diego Reis,diego@ex.com,200,BR,active,2026-01-08
+5,Eva Nunes,eva@ex.com,52,US,active,2026-01-09
+6,Ines Melo,ines@ex.com,33,BR,inactive,2026-01-10
+2,Bruno Duplicado,brunodup@ex.com,46,BR,active,2026-01-11

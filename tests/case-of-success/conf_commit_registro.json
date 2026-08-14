@@ -1,0 +1,108 @@
+{
+  "name": "conf_commit_registro",
+  "description": "Commit genérico do registro (roda no loop, 1x por fluxo). Lê o staging produzido pela conf de registro (view_registro_staging: id_operacao, id_vert, id_cessao, numero_contrato, payload), VERIFICA a completude dos contratos via validations (custom_sql, warn — compara com os elegíveis em view_cessoes_pendentes) e grava os 3 destinos: Kafka (deduplicado por id_vert => grão contrato no registro, lote na emissão), silver_registro_contratos (nível contrato) e silver_registro_parcelas (nível parcela, via join com silver_parcela). Topico e kafka_broker vêm por param.",
+
+  "input": {
+    "format": "view",
+    "path": "view_registro_staging"
+  },
+
+  "transformations": [
+    { "type": "checkpoint" },
+    { "type": "collect", "column": "id_cessao", "as": "cessoes_processadas" }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      {
+        "type": "custom_sql",
+        "error_message": "PERDA DE DADOS: contratos preparados (staging) < contratos elegiveis na base para este fluxo",
+        "query": "SELECT (SELECT count(*) FROM (SELECT DISTINCT id_cessao, numero_contrato FROM _validation_df)) >= (SELECT count(*) FROM (SELECT DISTINCT id_cessao, numero_contrato FROM view_cessoes_pendentes WHERE tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}' AND fluxo_operacao = '{fluxo_operacao}' AND ((tipo_contrato = '{tipo_contrato}' AND multi_ativos = true) OR (multi_ativos = false))))"
+      }
+    ]
+  },
+
+  "outputs": [
+    {
+      "format": "kafka",
+      "path": "{topico}",
+      "mode": "append",
+      "transformations": [
+        { "type": "drop_duplicates", "columns": ["id_vert"] },
+        { "type": "struct", "column": "header_type", "fields": { "key": "'type'", "value": "cast('REGISTRO' as binary)" } },
+        { "type": "struct", "column": "header_kind", "fields": { "key": "'kind'", "value": "cast('ENVIO' as binary)" } },
+        {
+          "type": "with_column",
+          "columns": {
+            "value": "to_json(payload)",
+            "headers": "array(header_type, header_kind)"
+          }
+        }
+      ],
+      "options": {
+        "bootstrap_servers": "{kafka_broker}",
+        "value_column": "value",
+        "key_column": null,
+        "kafka.max.request.size": "4194304"
+      }
+    },
+
+    {
+      "format": "delta",
+      "path": "lastros.silver_registro_contratos",
+      "mode": "append",
+      "transformations": [
+        {
+          "type": "with_column",
+          "columns": {
+            "payload": "to_json(payload)",
+            "status": "'ENVIADO_PARA_REGISTRO'",
+            "data_atualizacao": "cast(null as date)",
+            "data_envio": "current_timestamp()",
+            "id_registro": "cast(null as string)",
+            "id": "cast(null as bigint)",
+            "registradora": "'{registradora}'",
+            "tipo_ativo": "'{tipo_ativo}'"
+          }
+        }
+      ],
+      "options": { "mergeSchema": "true" }
+    },
+
+    {
+      "format": "delta",
+      "path": "lastros.silver_registro_parcelas",
+      "mode": "append",
+      "transformations": [
+        {
+          "type": "join",
+          "with": { "format": "delta", "path": "lastros.silver_parcela" },
+          "with_transformations": [
+            { "type": "filter", "condition": "id_cessao IN ({{cessoes_processadas}})" },
+            {
+              "type": "select",
+              "columns": ["id_cessao", "numero_contrato", "numero_parcela", "identificador_parcela"]
+            }
+          ],
+          "on": ["id_cessao", "numero_contrato"],
+          "how": "inner"
+        },
+        {
+          "type": "select",
+          "columns": [
+            "id_operacao",
+            "id_vert",
+            "id_cessao",
+            "numero_contrato",
+            "identificador_parcela",
+            "numero_parcela",
+            "'ENVIADO_PARA_REGISTRO' as status_parcela"
+          ]
+        },
+        { "type": "with_column", "column": "data_baixa", "expression": "cast(null as date)" }
+      ],
+      "options": { "mergeSchema": "true" }
+    }
+  ]
+}

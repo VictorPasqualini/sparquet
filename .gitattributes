@@ -1,0 +1,12 @@
+# Normaliza fim de linha: LF no repositorio E no working tree.
+# Evita o warning "LF will be replaced by CRLF" no Windows e mantem o fim de
+# linha deterministico entre contribuidores/CI.
+* text=auto eol=lf
+
+# Arquivos binarios: nunca normalizar.
+*.parquet binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gz binary
+*.whl binary

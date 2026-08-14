@@ -1,0 +1,66 @@
+{
+  "name": "agregacao_titulos_sacado_cedente_sem_join",
+  "description": "Mesma agregação de títulos da versão com join, porém SEM join e SEM union — tudo numa única linhagem. explode(array(cnpj_sacado, cnpj_cedente)) unifica a entidade; window functions congelam a soma diária por dt_compra e o fim da janela; explode(sequence(...)) expande os 428 dias; o saldo em aberto de cada dia sai por uma window (sum OVER partition entidade/fonte/dia), sem group_by intermediário; um único group_by com max/max_by extrai as 6 métricas por (cnpj_entidade, cnpj_fonte). Casa exatamente com a versão com join (mesmos valores e datas).",
+
+  "input": {
+    "format": "iceberg",
+    "path": "lastros.titulos"
+  },
+
+  "transformations": [
+    { "type": "with_column", "column": "cnpj_entidade",
+      "expression": "explode(array(cnpj_sacado, cnpj_cedente))" },
+    { "type": "filter", "condition": "cnpj_entidade IS NOT NULL" },
+    { "type": "select", "columns": [
+        "cnpj_entidade", "cnpj_fonte", "valor_duplicata",
+        "dt_vencimento", "dt_pagamento", "dt_compra", "dt_fim_ult_remessa"
+    ] },
+
+    { "type": "with_column", "columns": {
+        "vl_dia": "sum(valor_duplicata) OVER (PARTITION BY cnpj_entidade, cnpj_fonte, dt_compra)",
+        "dt_fim": "max(dt_fim_ult_remessa) OVER (PARTITION BY cnpj_entidade, cnpj_fonte)"
+    } },
+
+    { "type": "debug", "label": "base unificada + somas diárias (window)", "actions": ["count", "print_schema"] },
+    { "type": "checkpoint" },
+
+    { "type": "with_column", "column": "dia",
+      "expression": "explode(sequence(date_sub(dt_fim, 428), dt_fim, interval 1 day))" },
+
+    { "type": "with_column", "column": "saldo",
+      "expression": "sum(case when dt_vencimento <= dia then valor_duplicata else 0 end - case when dt_pagamento <= dia then valor_duplicata else 0 end) OVER (PARTITION BY cnpj_entidade, cnpj_fonte, dia)" },
+
+    { "type": "group_by", "by": ["cnpj_entidade", "cnpj_fonte"],
+      "agg": [
+        "max(dt_compra) as dt_ultima_compra",
+        "max_by(vl_dia, dt_compra) as vl_ultima_compra",
+        "max_by(dt_compra, struct(vl_dia, dt_compra)) as dt_maior_fatura",
+        "max(vl_dia) as vl_maior_fatura",
+        "max_by(dia, struct(saldo, dia)) as dt_maior_acumulo",
+        "max(saldo) as vl_maior_acumulo"
+      ] },
+
+    { "type": "select", "columns": [
+        "cnpj_entidade", "cnpj_fonte",
+        "dt_ultima_compra", "vl_ultima_compra",
+        "dt_maior_fatura", "vl_maior_fatura",
+        "dt_maior_acumulo", "vl_maior_acumulo"
+    ] },
+
+    { "type": "debug", "label": "métricas finais por entidade/fonte", "actions": ["show"], "truncate": false }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "not_null", "columns": ["cnpj_entidade", "cnpj_fonte"] },
+      { "type": "unique", "columns": ["cnpj_entidade", "cnpj_fonte"] }
+    ]
+  },
+
+  "output": {
+    "format": "iceberg",
+    "path": "lastros.titulos_metricas_entidade",
+    "mode": "overwrite"
+  }
+}

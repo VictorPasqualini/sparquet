@@ -1,26 +1,52 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "spark-framework"
-version = "0.2.0"
+name = "sparquet"
+# Versão é fonte única em sparquet/__init__.py (__version__), lida
+# dinamicamente abaixo via [tool.setuptools.dynamic]. Para subir de versão,
+# altere apenas o __version__.
+dynamic = ["version"]
 description = "JSON-driven Spark pipeline framework for ingestion, transformation, and data quality"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "Victor Pasqualini" }]
+keywords = ["spark", "pyspark", "pipeline", "etl", "databricks", "data-engineering"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pyspark>=3.4.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/VictorPasqualini/sparquet"
+Repository = "https://github.com/VictorPasqualini/sparquet"
+"Bug Tracker" = "https://github.com/VictorPasqualini/sparquet/issues"
+
 [project.optional-dependencies]
-# Instala suporte a Delta Lake fora do Databricks (OSS)
-# pip install spark-framework[delta]
+# pip install sparquet[delta]  →  OSS Delta fora do Databricks
 delta = ["delta-spark>=3.0.0"]
 all   = ["delta-spark>=3.0.0"]
 
 [project.scripts]
-spark-framework = "main:main"
+sparquet = "sparquet.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "sparquet.__version__" }
 
 [tool.setuptools.packages.find]
 exclude = ["tests*", "examples*", "docs*"]

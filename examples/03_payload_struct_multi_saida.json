@@ -1,0 +1,60 @@
+{
+  "name": "03_payload_struct_multi_saida",
+  "description": "Monta um payload aninhado e grava formas diferentes do MESMO df em vários destinos. Demonstra stop_if_empty (encerra sem dados), struct (struct aninhado legível), with_column múltiplo, checkpoint antes de múltiplos outputs e transformations por output (cada destino com sua forma: JSON p/ mensageria, colunas planas p/ tabela).",
+
+  "input": {
+    "format": "delta",
+    "path": "lastros.silver_contrato"
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "status = 'PRONTO'" },
+    { "type": "stop_if_empty", "message": "Sem contratos prontos — nada a publicar" },
+
+    {
+      "type": "struct",
+      "column": "payload",
+      "fields": {
+        "id_externo": "id_contrato",
+        "emissor": {
+          "nome": "nome_sacado",
+          "documento": "lpad(documento_sacado, 14, '0')"
+        },
+        "valores": {
+          "principal": "cast(valor_principal as double)",
+          "total": "cast(valor_principal + valor_juros as double)"
+        }
+      }
+    },
+
+    { "type": "checkpoint" }
+  ],
+
+  "outputs": [
+    {
+      "format": "parquet",
+      "path": "/data/eventos/contratos_json",
+      "mode": "append",
+      "transformations": [
+        { "type": "with_column", "columns": {
+            "value": "to_json(payload)",
+            "publicado_em": "current_timestamp()"
+        } }
+      ],
+      "columns": ["id_contrato", "value", "publicado_em"]
+    },
+
+    {
+      "format": "delta",
+      "path": "lastros.gold_contratos",
+      "mode": "append",
+      "transformations": [
+        { "type": "with_column", "columns": {
+            "valor_total": "payload.valores.total",
+            "documento_emissor": "payload.emissor.documento"
+        } }
+      ],
+      "columns": ["id_contrato", "documento_emissor", "valor_total"]
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "name": "01_ingestao_validacoes",
+  "description": "Ingestao basica RODAVEL LOCALMENTE (CSV -> CSV): le clientes em CSV, limpa/normaliza, valida qualidade e grava o processado. Demonstra filter, select, cast, rename, with_column, drop_duplicates, o bloco validations e a SAIDA de validacoes (validations.report). Rode da raiz do repo: python main.py examples/01_ingestao_validacoes.json",
+
+  "input": {
+    "format": "csv",
+    "path": "examples/data/customers.csv"
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "status = 'active'" },
+    { "type": "select", "columns": ["id", "name", "email", "age", "country", "created_at"] },
+    { "type": "cast", "columns": { "age": "integer", "created_at": "timestamp" } },
+    { "type": "rename", "mappings": { "created_at": "creation_date" } },
+    { "type": "with_column", "column": "ingestion_ts", "expression": "current_timestamp()" },
+    { "type": "drop_duplicates", "columns": ["id"] }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "report": {
+      "format": "csv",
+      "path": "examples/output/01_validation_report",
+      "mode": "overwrite"
+    },
+    "rules": [
+      { "type": "not_null", "columns": ["id", "email"] },
+      { "type": "unique", "columns": ["id"] },
+      { "type": "range", "column": "age", "min": 0, "max": 150 },
+      { "type": "row_count", "min": 1 }
+    ]
+  },
+
+  "output": {
+    "format": "csv",
+    "path": "examples/output/01_customers",
+    "mode": "overwrite",
+    "partition_by": ["country"]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "02_join_e_pushdown_runtime",
+  "description": "Enriquecimento com pushdown de runtime: materializa o conjunto a processar (checkpoint), coleta as chaves numa variável {{var}} e empurra um filtro literal IN (...) na leitura de uma tabela grande antes do join. Demonstra checkpoint, collect e {{var}} (predicate pushdown / data skipping).",
+
+  "input": {
+    "format": "delta",
+    "path": "vendas.pedidos"
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "data_pedido >= '2026-01-01' AND status = 'APROVADO'" },
+
+    { "type": "checkpoint" },
+    { "type": "collect", "column": "id_cliente", "as": "clientes_ativos" },
+
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "vendas.bronze_eventos_cliente" },
+      "with_transformations": [
+        { "type": "filter", "condition": "id_cliente IN ({{clientes_ativos}})" },
+        { "type": "select", "columns": ["id_cliente", "score_credito", "segmento"] },
+        { "type": "distinct" }
+      ],
+      "on": "id_cliente",
+      "how": "left"
+    },
+
+    { "type": "fill_na", "value": "SEM_SEGMENTO", "columns": ["segmento"] }
+  ],
+
+  "output": {
+    "format": "delta",
+    "path": "vendas.pedidos_enriquecidos",
+    "mode": "overwrite"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "name": "agregacao_titulos_sacado_cedente",
+  "description": "Lê a tabela Iceberg de títulos e unifica a visão de sacado e de cedente num único cnpj_entidade (explode(array(cnpj_sacado, cnpj_cedente)) + filtro de nulos — equivale ao union com rename). Calcula por (cnpj_entidade, cnpj_fonte): (A) última compra e valor acumulado nesse dia; (B) maior fatura = dia de maior valor acumulado comprado; (C) maior acúmulo = dia de maior saldo em aberto (a vencer − pago), avaliado dia a dia nos 428 dias anteriores à dt_fim_ult_remessa. Usa apenas tipos nativos (with_column/explode, filter, group_by/max_by, join com with_transformations) — sem type sql.",
+
+  "input": {
+    "format": "iceberg",
+    "path": "lastros.titulos"
+  },
+
+  "transformations": [
+    { "type": "with_column", "column": "cnpj_entidade",
+      "expression": "explode(array(cnpj_sacado, cnpj_cedente))" },
+    { "type": "filter", "condition": "cnpj_entidade IS NOT NULL" },
+    { "type": "select", "columns": [
+        "cnpj_entidade", "cnpj_fonte", "valor_duplicata",
+        "dt_vencimento", "dt_pagamento", "dt_compra", "dt_fim_ult_remessa"
+    ] },
+
+    { "type": "debug", "label": "base unificada (sacado + cedente)", "actions": ["count", "print_schema"] },
+    { "type": "checkpoint" },
+
+    { "type": "join",
+      "with": { "format": "iceberg", "path": "lastros.titulos" },
+      "with_transformations": [
+        { "type": "with_column", "column": "cnpj_entidade",
+          "expression": "explode(array(cnpj_sacado, cnpj_cedente))" },
+        { "type": "filter", "condition": "cnpj_entidade IS NOT NULL" },
+        { "type": "group_by", "by": ["cnpj_entidade", "cnpj_fonte"],
+          "agg": ["max(dt_fim_ult_remessa) as dt_fim"] },
+        { "type": "with_column", "column": "dia",
+          "expression": "explode(sequence(date_sub(dt_fim, 428), dt_fim, interval 1 day))" },
+        { "type": "select", "columns": ["cnpj_entidade", "cnpj_fonte", "dia"] }
+      ],
+      "on": ["cnpj_entidade", "cnpj_fonte"], "how": "inner" },
+
+    { "type": "group_by", "by": ["cnpj_entidade", "cnpj_fonte", "dia"],
+      "agg": [
+        "sum(case when dt_vencimento <= dia then valor_duplicata else 0 end) - sum(case when dt_pagamento <= dia then valor_duplicata else 0 end) as saldo"
+      ] },
+
+    { "type": "group_by", "by": ["cnpj_entidade", "cnpj_fonte"],
+      "agg": [
+        "max_by(dia, saldo) as dt_maior_acumulo",
+        "max(saldo) as vl_maior_acumulo"
+      ] },
+
+    { "type": "join",
+      "with": { "format": "iceberg", "path": "lastros.titulos" },
+      "with_transformations": [
+        { "type": "with_column", "column": "cnpj_entidade",
+          "expression": "explode(array(cnpj_sacado, cnpj_cedente))" },
+        { "type": "filter", "condition": "cnpj_entidade IS NOT NULL" },
+        { "type": "group_by", "by": ["cnpj_entidade", "cnpj_fonte", "dt_compra"],
+          "agg": ["sum(valor_duplicata) as vl_dia"] },
+        { "type": "group_by", "by": ["cnpj_entidade", "cnpj_fonte"],
+          "agg": [
+            "max(dt_compra) as dt_ultima_compra",
+            "max_by(vl_dia, dt_compra) as vl_ultima_compra",
+            "max_by(dt_compra, vl_dia) as dt_maior_fatura",
+            "max(vl_dia) as vl_maior_fatura"
+          ] }
+      ],
+      "on": ["cnpj_entidade", "cnpj_fonte"], "how": "inner" },
+
+    { "type": "select", "columns": [
+        "cnpj_entidade", "cnpj_fonte",
+        "dt_ultima_compra", "vl_ultima_compra",
+        "dt_maior_fatura", "vl_maior_fatura",
+        "dt_maior_acumulo", "vl_maior_acumulo"
+    ] },
+
+    { "type": "debug", "label": "métricas finais por entidade/fonte", "actions": ["show"], "truncate": false }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "not_null", "columns": ["cnpj_entidade", "cnpj_fonte"] },
+      { "type": "unique", "columns": ["cnpj_entidade", "cnpj_fonte"] }
+    ]
+  },
+
+  "output": {
+    "format": "iceberg",
+    "path": "lastros.titulos_metricas_entidade",
+    "mode": "overwrite"
+  }
+}

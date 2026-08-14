@@ -1,0 +1,37 @@
+{
+  "id_externo": "12c7a58e-f6e5-4adb-a528-264cd7a43f9d",
+  "data": {
+    "nc": {
+      "ncEmissionTypeCode": "N",
+      "otcIssuerAccountCode": "55639.40-2",
+      "issueTypeCode": "E",
+      "otcBookkeeperAccountCode": "55639.00-0",
+      "issueNumber": 1,
+      "serieNumber": "1",
+      "issueDate": "2026-01-21",
+      "maturityDate": "2026-04-30",
+      "profitabilityStartDate": "2026-04-16",
+      "issuedQuantity": 1,
+      "unitIssueValue": 13341.876,
+      "issueFinancialValue": 13341.876,
+      "regimeTypeCode": "2",
+      "cetipEventAttendedIndicator": "S",
+      "cvmRegistrationNumber": "PRIVADAVERT",
+      "cvmSequentialNumber": 1,
+      "cvmRegistrationDate": "2026-01-12",
+      "unilateralEarlyRedemptionIndicator": "S",
+      "guarantorName": "HOSPITAL MUNICIPAL DE ARAGUAINA - HMA ISAC",
+      "fiduciaryAgentIndicator": "N",
+      "issuerName": "HOSPITAL MUNICIPAL DE ARAGUAINA - HMA ISAC",
+      "issuerDocumentNumber": "14702257000795",
+      "guaranteeTypeCode": 4,
+      "paymentMethod": {
+        "paymentMethodCode": "01",
+        "indexCode": "0003",
+        "rateFloatingPercentage": 9.99,
+        "interestRateSpread": 2,
+        "interestCalculationCriteriaCode": "01"
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "04_merge_delta",
+  "description": "Upsert incremental (MERGE INTO) em tabela Delta. Demonstra cast, filter, group_by com expressões SQL e o modo de escrita merge com merge_keys.",
+
+  "input": {
+    "format": "parquet",
+    "path": "/data/incremental/pedidos"
+  },
+
+  "transformations": [
+    { "type": "cast", "columns": { "pedido_id": "long", "valor": "double", "data_pedido": "date" } },
+    { "type": "filter", "condition": "valor > 0" },
+    {
+      "type": "group_by",
+      "by": ["cliente_id"],
+      "agg": [
+        "sum(valor) as valor_total",
+        "count(*) as qtd_pedidos",
+        "max(data_pedido) as ultima_compra"
+      ]
+    }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "not_null", "columns": ["cliente_id"] },
+      { "type": "unique", "columns": ["cliente_id"] }
+    ]
+  },
+
+  "output": {
+    "format": "delta",
+    "path": "analytics.resumo_cliente",
+    "mode": "merge",
+    "options": { "merge_keys": ["cliente_id"] }
+  }
+}
