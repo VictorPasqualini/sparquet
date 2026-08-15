@@ -1,0 +1,103 @@
+---
+title: Sparquet Studio
+description: The visual editor for Sparquet pipelines — what it is, how it stores your work, and how it maps a canvas onto the JSON the framework runs.
+sidebar:
+  order: 1
+  label: Overview
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components'
+
+Studio is a browser application that edits Sparquet pipelines on a node canvas. It is not a separate product with its own format: it reads the pipeline JSON and writes the pipeline JSON.
+
+```bash
+cd sparquet-studio
+npm install
+npm run dev          # http://localhost:5273
+```
+
+<CardGrid>
+  <Card title="Local first">
+    Projects and workflows live in your browser's IndexedDB. No account, no
+    server, no telemetry. Export the whole workspace as one JSON file.
+  </Card>
+  <Card title="No lock-in">
+    The canvas compiles to the file the CLI runs. Delete Studio and every
+    pipeline keeps working.
+  </Card>
+  <Card title="Documented in place">
+    Every field carries the same notes as this reference, including the
+    behaviors that normally live only in the framework source.
+  </Card>
+  <Card title="Optional runner">
+    Point it at a small local service and execute pipelines from the canvas,
+    with counters, validations and a data preview.
+  </Card>
+</CardGrid>
+
+## The layout
+
+| Area | What it does |
+|---|---|
+| **Palette** (left) | Every source, transformation, validator and destination. Drag onto the canvas, or click to append after the last node. |
+| **Canvas** (center) | The pipeline as connected nodes. Left to right is execution order. |
+| **Inspector** (right) | The selected node's fields, with help, examples and gotchas. |
+| **JSON panel** | The compiled pipeline, live. Also the import surface. |
+| **Issues panel** | Lint results as you type, each one linking to the node and field. |
+| **Run panel** | Execution through the local runner. |
+| **Status bar** | Node count, validity, save state. |
+
+Panels share one tabbed, resizable column on the right — <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>E</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd> and <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd> switch between them.
+
+## Projects and workflows
+
+A **workflow** is one pipeline. A **project** groups related workflows — usually one per domain: `Sales`, `Billing`, `CRM`.
+
+Both live in your browser. **Settings → Data** exports everything as a single JSON bundle and imports it back, which is how you move a workspace between machines or share a set of pipelines with a colleague.
+
+<Aside type="caution">
+  Browser storage is per browser and per profile. Clearing site data deletes
+  your workspace. Commit the compiled pipelines to git — they are the artifact
+  that matters, and Studio can reimport any of them.
+</Aside>
+
+## How the canvas becomes the file
+
+Two rules define the whole mapping:
+
+**The shared chain is the main pipeline.** Whatever every destination has in common becomes the top-level `transformations`. After the graph forks, each branch becomes that destination's own `transformations`.
+
+**A join or union takes its second source from its second input.** The chain feeding that handle becomes `with` plus `with_transformations`.
+
+Everything else is a node field. Sticky notes never compile; muted nodes are skipped.
+
+<Aside type="tip">
+  Press <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd> at any point to see exactly what your
+  drawing produces. If the JSON is not what you expected, the graph is not what
+  you thought — the panel is the fastest way to learn the mapping.
+</Aside>
+
+## Importing what you already have
+
+Open the JSON panel, switch to **Edit**, paste a pipeline and click **Apply to canvas**. Studio lays it out automatically. Unknown transformation types — custom ones you registered — are preserved untouched through import and export.
+
+## Verifying a change
+
+Studio ships its own checks:
+
+```bash
+npm run typecheck   # TypeScript, zero errors expected
+npm run test        # unit tests, including compiler round-trips
+npm run lint        # eslint
+npm run smoke       # end-to-end pass in a real Chrome
+```
+
+The compiler is covered by round-trip tests over the framework's own example pipelines: import each one, compile it back, and compare. That test is what guarantees the canvas never quietly changes your file.
+
+## Next
+
+- [The canvas](/docs/studio/canvas/) — connections, branching, keyboard control
+- [The inspector](/docs/studio/inspector/) — editing node fields
+- [AI assistant](/docs/studio/ai-assistant/) — generating and modifying pipelines
+- [Running pipelines](/docs/studio/running/) — the local runner
+- [Templates and lessons](/docs/studio/templates/) — the fastest way to learn a feature

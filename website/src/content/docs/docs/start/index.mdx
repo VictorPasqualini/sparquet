@@ -1,0 +1,99 @@
+---
+title: What is Sparquet?
+description: A configuration-driven PySpark framework — describe a pipeline as a JSON document, run it anywhere Spark runs, and design it on a canvas.
+sidebar:
+  order: 1
+  label: What is Sparquet?
+---
+
+import { Aside, Card, CardGrid, Steps } from '@astrojs/starlight/components'
+
+Sparquet is two things that share one file.
+
+**The framework** is a Python library that reads a pipeline described in JSON and executes it on Spark: it reads a source, applies transformations in order, checks data quality rules, and writes one or more destinations.
+
+**Sparquet Studio** is a browser application that draws that same JSON on a node canvas — and compiles the canvas straight back into it.
+
+The document is the contract. The framework never needs Studio to run a job, and Studio never invents syntax the framework does not support.
+
+## The whole idea in one file
+
+```json title="orders_curated.json"
+{
+  "name": "orders_curated",
+  "input": {
+    "format": "postgres",
+    "path": "public.orders",
+    "options": { "host": "db.internal", "database": "sales", "password_env": "PG_PASSWORD" }
+  },
+  "transformations": [
+    { "type": "filter", "condition": "status = 'CONFIRMED'" },
+    { "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" }
+  ],
+  "validations": {
+    "on_failure": "warn",
+    "rules": [{ "type": "not_null", "columns": ["id"] }]
+  },
+  "output": { "format": "delta", "path": "analytics.orders", "mode": "overwrite" }
+}
+```
+
+```python
+from spark_framework import SparkFramework
+
+fw = SparkFramework()
+print(fw.run("orders_curated.json").summary())
+fw.stop()
+```
+
+That is the entire surface: a file and a call. Everything else in these docs is a field you can add to that file.
+
+## Why configuration instead of code
+
+<CardGrid>
+  <Card title="Reviewable">
+    A pipeline is a document. It fits in a pull request, diffs cleanly between
+    environments, and does not hide behind notebook cell state.
+  </Card>
+  <Card title="Reusable">
+    `{param}` placeholders turn one file into many runs — per region, per date,
+    per client — without copying logic.
+  </Card>
+  <Card title="Consistent">
+    Reads, writes, merges and quality checks behave the same way in every job,
+    because they are the same code path.
+  </Card>
+  <Card title="Visual, when useful">
+    The canvas is an editor for the file, not a replacement. Delete Studio and
+    every job keeps running.
+  </Card>
+</CardGrid>
+
+## What it is not
+
+- **Not an orchestrator.** Sparquet runs one pipeline. Airflow, Dagster, Databricks Workflows or cron decide *when* to run it.
+- **Not a hosted platform.** There is no control plane and nothing phones home. It is a library on your cluster.
+- **Not a replacement for Spark.** It is a way to write Spark jobs you do not have to rewrite. Anything the framework does not express, `sql` transformations and custom registrations do.
+
+## How these docs are organized
+
+<Steps>
+
+1. **[Install](/docs/start/install/)** — the framework, and optionally Studio.
+
+2. **[Your first pipeline](/docs/start/quickstart/)** — a working job in five minutes, from the terminal.
+
+3. **[Your first flow in Studio](/docs/start/first-flow/)** — the same pipeline, drawn on the canvas.
+
+4. **[Core concepts](/docs/start/concepts/)** — execution order, and how a graph maps onto the file.
+
+5. **Reference** — every transformation, connector, validator and API, field by field.
+
+6. **Guides** — end-to-end recipes: databases, joins with pushdown, data quality, incremental loads.
+
+</Steps>
+
+<Aside type="tip" title="In a hurry?">
+  Go straight to [Your first pipeline](/docs/start/quickstart/). It takes five
+  minutes and produces a real Parquet dataset on disk.
+</Aside>

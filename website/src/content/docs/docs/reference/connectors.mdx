@@ -1,0 +1,283 @@
+---
+title: Connectors
+description: Every source and destination Sparquet supports — files, lakehouse tables, temp views, Kafka and relational databases over JDBC.
+sidebar:
+  order: 3
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components'
+
+A connector is chosen by the `format` field of an `input`, an `output`, or a join/union source. The same registry serves all three.
+
+| Format | Read | Write | Notes |
+|---|:---:|:---:|---|
+| `parquet` | ✓ | ✓ | Spark native |
+| `delta` | ✓ | ✓ | MERGE upserts, time travel |
+| `iceberg` | ✓ | ✓ | MERGE INTO |
+| `csv` | ✓ | ✓ | `header` and `inferSchema` default to true |
+| `txt` | ✓ | ✓ | plain text, single `value` column |
+| `view` | ✓ | ✓ | Spark temp views, auto-cached |
+| `kafka` | — | ✓ | batch publish |
+| `postgres` | ✓ | ✓ | JDBC, alias `postgresql` |
+| `mysql` | ✓ | ✓ | JDBC |
+| `sqlserver` | ✓ | ✓ | JDBC, alias `mssql` |
+| `oracle` | ✓ | ✓ | JDBC |
+| `jdbc` | ✓ | ✓ | any driver, explicit `url` + `driver` |
+
+## Files and lakehouse
+
+### Parquet
+
+```json
+{ "format": "parquet", "path": "/data/curated/orders", "mode": "overwrite", "partition_by": ["country"] }
+```
+
+Any Spark Parquet option passes through `options`. `path` is a directory of part files, not a single file.
+
+### CSV
+
+```json
+{ "format": "csv", "path": "/data/landing/orders", "options": { "sep": ";", "encoding": "UTF-8" } }
+```
+
+Defaults applied by the framework: `header: true` and `inferSchema: true` on read, `header: true` on write, `encoding: UTF-8` on both. `inferSchema` costs an extra pass over the data — set an explicit `cast` and turn it off for large, stable feeds.
+
+### Delta Lake
+
+```json
+// read a table, or a path, or a past version
+{ "format": "delta", "path": "catalog.schema.orders" }
+{ "format": "delta", "path": "/mnt/raw/orders", "options": { "versionAsOf": "5" } }
+{ "format": "delta", "path": "catalog.schema.orders", "options": { "timestampAsOf": "2026-01-01T00:00:00Z" } }
+
+// upsert
+{ "format": "delta", "path": "catalog.schema.orders", "mode": "merge",
+  "options": { "merge_keys": ["order_id"], "merge_condition": "T.deleted = false" } }
+```
+
+`path` is treated as a table name when it contains a dot and does not start with `/` or a storage scheme; otherwise as a path. In `merge_condition`, `T` is the target table and `S` the incoming DataFrame.
+
+Outside Databricks, install the OSS package: `pip install "spark-framework[delta]"`.
+
+### Iceberg
+
+```json
+{ "format": "iceberg", "path": "catalog.db.orders", "mode": "merge", "options": { "merge_keys": ["id"] } }
+```
+
+<Aside type="caution">
+  The Iceberg writer compares the mode against `"merge"` case-sensitively.
+  `"MERGE"` skips the merge branch and reaches `df.write.mode("MERGE")`, which
+  Spark rejects with *Unknown save mode* — nothing is written. Always lowercase.
+</Aside>
+
+### Text
+
+```json
+{ "format": "txt", "path": "/data/exports/lines", "mode": "overwrite" }
+```
+
+Reads into a single `value` column, and writes a DataFrame that must have exactly one string column — project it first with `select`.
+
+### Temp views
+
+```json
+{ "format": "view", "path": "orders_staging", "mode": "overwrite" }
+```
+
+Registers a Spark temp view, cached by default, so a later pipeline in the same session can read it as `{"format": "view", "path": "orders_staging"}`. This is the staging mechanism behind multi-pipeline jobs — one writes the view, the next consumes it.
+
+### Kafka
+
+```json
+{
+  "format": "kafka",
+  "path": "orders-events",
+  "mode": "append",
+  "transformations": [
+    { "type": "with_column", "column": "value", "expression": "to_json(payload)" }
+  ],
+  "options": {
+    "bootstrap_servers": "broker1:9092,broker2:9092",
+    "value_column": "value",
+    "key_column": "order_id"
+  }
+}
+```
+
+Write-only. `path` is the topic. The configured value and key columns are renamed to `value` and `key`, and every column outside `{key, value, topic, partition, timestamp, headers}` is dropped before the write. Requires `spark-sql-kafka` on the classpath.
+
+## Databases over JDBC
+
+The same connector serves every relational database. The vendor alias only presets the driver, the default port and the URL shape.
+
+<Tabs>
+  <TabItem label="Read">
+
+```json
+{
+  "format": "postgres",
+  "path": "public.orders",
+  "options": {
+    "host": "db.internal",
+    "database": "sales",
+    "user": "app",
+    "password_env": "PG_PASSWORD",
+    "partition_column": "id",
+    "lower_bound": 1,
+    "upper_bound": 5000000,
+    "num_partitions": 8,
+    "fetch_size": 10000
+  }
+}
+```
+
+  </TabItem>
+  <TabItem label="Query pushdown">
+
+```json
+{
+  "format": "mysql",
+  "path": "unused_when_query_is_set",
+  "options": {
+    "host": "legacy.internal",
+    "database": "crm",
+    "user": "reader",
+    "password_env": "MYSQL_PASSWORD",
+    "query": "SELECT id AS customer_id, segment FROM customers WHERE active = 1"
+  }
+}
+```
+
+  </TabItem>
+  <TabItem label="Write / upsert">
+
+```json
+{
+  "format": "postgres",
+  "path": "analytics.customer_revenue",
+  "mode": "merge",
+  "options": {
+    "host": "db.internal",
+    "database": "sales",
+    "user": "app",
+    "password_env": "PG_PASSWORD",
+    "merge_keys": ["customer_id"],
+    "batch_size": 5000
+  }
+}
+```
+
+  </TabItem>
+</Tabs>
+
+### Connection
+
+Either give a full `url`, or let the connector build one from `host`, `port` and `database`:
+
+| Vendor | URL built |
+|---|---|
+| `postgres` | `jdbc:postgresql://host:5432/database` |
+| `mysql` | `jdbc:mysql://host:3306/database` |
+| `sqlserver` | `jdbc:sqlserver://host:1433;databaseName=database` |
+| `oracle` | `jdbc:oracle:thin:@//host:1521/service` |
+| `jdbc` | `url` and `driver` are required |
+
+When both are present, `url` wins — that is the escape hatch for SSL parameters, failover hosts and driver-specific flags.
+
+### Credentials
+
+```json
+{ "user_env": "PG_USER", "password_env": "PG_PASSWORD" }
+```
+
+`user_env` and `password_env` name **environment variables**, read at run time, so the pipeline file can be committed without carrying a secret. The literal `user` / `password` keys still work and accept `{param}`, but then the file itself becomes a credential. A missing variable fails the run with an explicit message rather than attempting an anonymous connection.
+
+### Parallel reads
+
+Without a partition column the whole table comes through **one connection on one executor**, however large it is. The four keys go together:
+
+```json
+{ "partition_column": "id", "lower_bound": 1, "upper_bound": 5000000, "num_partitions": 8 }
+```
+
+Spark issues `num_partitions` queries, each bounded by a slice of the range. Pick an indexed, reasonably uniform numeric, date or timestamp column, and keep `num_partitions` under the database's connection limit. Rows outside the bounds are still read, in the first and last partitions.
+
+### Write modes
+
+| Mode | Behavior |
+|---|---|
+| `append` | inserts rows |
+| `overwrite` | drops and recreates the table — add `"truncate_table": true` to keep the schema, indexes, constraints and grants |
+| `ignore` | writes nothing if the table exists |
+| `error` | fails if the table exists |
+| `merge` | upsert on `merge_keys` |
+
+`merge` writes a staging table next to the target and then runs the database's own upsert:
+
+| Vendor | Statement |
+|---|---|
+| PostgreSQL | `INSERT … ON CONFLICT (keys) DO UPDATE` |
+| MySQL | `INSERT … ON DUPLICATE KEY UPDATE` |
+| SQL Server / Oracle | `MERGE INTO … WHEN MATCHED / WHEN NOT MATCHED` |
+
+<Aside type="caution" title="Requirements for merge">
+  The target needs a unique constraint over `merge_keys`, or the database
+  inserts duplicates instead of updating. The upsert runs through the JVM, so it
+  needs a classic Spark session — Spark Connect cannot execute it. Restrict what
+  the UPDATE touches with `merge_update_columns`.
+</Aside>
+
+### Option names
+
+Friendly snake_case names map onto Spark's own; the original camelCase keys keep working.
+
+| Sparquet | Spark |
+|---|---|
+| `partition_column` | `partitionColumn` |
+| `lower_bound` / `upper_bound` | `lowerBound` / `upperBound` |
+| `num_partitions` | `numPartitions` |
+| `fetch_size` | `fetchsize` |
+| `batch_size` | `batchsize` |
+| `isolation_level` | `isolationLevel` |
+| `truncate_table` | `truncate` |
+| `query_timeout` | `queryTimeout` |
+| `session_init_statement` | `sessionInitStatement` |
+| `push_down_predicate` | `pushDownPredicate` |
+| `create_table_options` | `createTableOptions` |
+| `create_table_column_types` | `createTableColumnTypes` |
+
+### Drivers
+
+The JDBC driver JAR must be on the classpath. The simplest route is declaring it in the pipeline itself:
+
+```json
+{
+  "spark": {
+    "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" }
+  }
+}
+```
+
+| Vendor | Maven coordinate |
+|---|---|
+| PostgreSQL | `org.postgresql:postgresql:42.7.4` |
+| MySQL | `com.mysql:mysql-connector-j:9.1.0` |
+| SQL Server | `com.microsoft.sqlserver:mssql-jdbc:12.8.1.jre11` |
+| Oracle | `com.oracle.database.jdbc:ojdbc11:23.6.0.24.10` |
+
+<Aside type="note">
+  `partition_by` has no meaning for a database destination — the writer logs a
+  warning and ignores it. Partition the table on the database side instead.
+</Aside>
+
+## Adding your own
+
+Register a reader or writer once and every pipeline in the process can use it:
+
+```python
+fw.register_reader("my_format", MyReader)   # class MyReader(BaseReader)
+fw.register_writer("my_format", MyWriter)   # class MyWriter(BaseWriter)
+```
+
+See [Extending](/docs/reference/extending/). Studio preserves unknown formats through import and export, so a custom connector does not break the canvas.

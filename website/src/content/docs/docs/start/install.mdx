@@ -1,0 +1,132 @@
+---
+title: Install
+description: Install the Sparquet framework with pip, add the optional extras you need, and run Sparquet Studio locally.
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
+
+## Requirements
+
+| | |
+|---|---|
+| Python | 3.9 or newer |
+| Java | 11 or 17 — required by Spark itself (`JAVA_HOME` must point at it) |
+| PySpark | 3.4 or newer, installed as a dependency |
+| Node.js | 18.18+ — only for Sparquet Studio |
+
+On a managed platform (Databricks, EMR, Dataproc, Synapse) Spark and Java are already there; you only install the framework.
+
+## The framework
+
+<Tabs>
+  <TabItem label="pip">
+
+```bash
+pip install spark-framework
+```
+
+  </TabItem>
+  <TabItem label="From source">
+
+```bash
+git clone https://github.com/VictorPasqualini/sparquet.git
+cd sparquet
+pip install -e .
+```
+
+  </TabItem>
+  <TabItem label="Databricks">
+
+Add `spark-framework` to the cluster libraries, or install it in a notebook:
+
+```python
+%pip install spark-framework
+dbutils.library.restartPython()
+```
+
+  </TabItem>
+</Tabs>
+
+Verify the install:
+
+```python
+from spark_framework import SparkFramework
+print(SparkFramework)
+```
+
+### Optional extras
+
+| Extra | Install | When you need it |
+|---|---|---|
+| Delta Lake (OSS) | `pip install "spark-framework[delta]"` | Delta tables outside Databricks |
+| Iceberg | Spark package on the cluster | Iceberg tables |
+| Kafka | Spark package on the cluster | Publishing to a topic |
+| Databases | JDBC driver JAR | PostgreSQL, MySQL, SQL Server, Oracle |
+
+Connector JARs are declared per pipeline, so a job carries its own dependency:
+
+```json
+{
+  "spark": {
+    "configs": {
+      "spark.jars.packages": "org.postgresql:postgresql:42.7.4"
+    }
+  }
+}
+```
+
+<Aside type="caution" title="Windows">
+  Spark needs the Hadoop native shims to touch the local filesystem on Windows.
+  Download `winutils.exe` and `hadoop.dll`, put them in `C:\hadoop\bin`, and set
+  `HADOOP_HOME=C:\hadoop`. Without them a local run hangs the first time it
+  writes a file. WSL2 or Docker avoids the problem entirely.
+</Aside>
+
+## Sparquet Studio
+
+Studio is a static browser app — it needs no server to design pipelines.
+
+<Steps>
+
+1. Clone the repository and install:
+
+   ```bash
+   git clone https://github.com/VictorPasqualini/sparquet.git
+   cd sparquet/sparquet-studio
+   npm install
+   ```
+
+2. Start it:
+
+   ```bash
+   npm run dev
+   ```
+
+3. Open [http://localhost:5273](http://localhost:5273). The first launch seeds a **Getting Started** project with working pipelines.
+
+</Steps>
+
+To host it, build the static bundle and copy it anywhere:
+
+```bash
+npm run build      # → dist/
+npm run preview    # serve the build locally
+```
+
+### The local runner (optional)
+
+Designing needs only the browser. *Executing* from the canvas needs Spark, so Studio ships a small service you run yourself:
+
+```bash
+cd sparquet-studio
+pip install -r server/requirements.txt
+uvicorn server.main:app --port 8787
+```
+
+It prints a token on startup; paste it into **Settings → Local runner** in Studio. See [Running pipelines](/docs/studio/running/) for the full flow.
+
+## Next
+
+Write [your first pipeline](/docs/start/quickstart/) — five minutes, no Studio required.

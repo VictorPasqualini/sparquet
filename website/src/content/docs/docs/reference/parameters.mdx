@@ -1,0 +1,183 @@
+---
+title: Parameters and variables
+description: One file, many runs — template parameters, run conditions, runtime variables and reusable includes.
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Four mechanisms turn a static document into a reusable one. They resolve at different moments, and knowing which is which prevents most confusion.
+
+| Mechanism | Resolves | Comes from |
+|---|---|---|
+| `{param}` | before parsing | the `params` argument |
+| `skip_if_false` | while applying a transformation | a value after substitution |
+| `{{variable}}` | during execution | a `collect` transformation |
+| `$include` | before parsing | another file |
+
+## Template parameters
+
+`{param}` placeholders are replaced in the **raw text** of the file, before it becomes JSON. They can appear anywhere — inside a string, a number or even a key.
+
+```json
+{
+  "input": { "format": "delta", "path": "sales.orders_{region}" },
+  "transformations": [
+    { "type": "filter", "condition": "ordered_at >= '{since}' AND status IN ({statuses})" }
+  ]
+}
+```
+
+```python
+fw.run("orders.json", params={
+    "region": "br",
+    "since": "2026-01-01",
+    "statuses": ["CONFIRMED", "SHIPPED"],
+})
+```
+
+### Formatting rules
+
+The Python type decides how the value is written into the file:
+
+| Python | Becomes | Typical use |
+|---|---|---|
+| `str` / `int` / `float` | `str(value)` | a path, a name, a number |
+| `True` | `"true"` | keeps a step (with `skip_if_false`) |
+| `False` | `""` (empty) | skips a step |
+| `["a", "b"]` | `'a', 'b'` | a SQL `IN (...)` clause |
+| `[1, 2]` | `1, 2` | a numeric `IN (...)` |
+| `[]` | `""` (empty) | falsy — skips the step |
+
+A placeholder with no matching key stays literal in the file. That is intentional: it lets a fragment carry optional parameters without failing when they are absent.
+
+<Aside type="caution">
+  Because substitution is textual, a string parameter used inside SQL needs its
+  own quotes in the template: `"condition": "region = '{region}'"`. Only pass
+  values you control — a parameter is spliced into the document verbatim.
+</Aside>
+
+## `skip_if_false`
+
+Any transformation accepts this meta key. After substitution the engine decides:
+
+| Value after substitution | Result |
+|---|---|
+| `""` (empty) | **skipped** — from `False`, an empty list, or a missing param |
+| an expression that evaluates to a boolean | skipped when it is `false` |
+| any other non-empty value | runs |
+
+```json
+// switch a whole join on and off per run
+{ "type": "join", "skip_if_false": "{enrich}", "with": { … }, "on": "customer_id" }
+
+// only apply the filter when a region was given
+{ "type": "filter", "skip_if_false": "{region}", "condition": "region = '{region}'" }
+
+// branch on a value
+{ "type": "struct", "skip_if_false": "'{flow}' in ('ISSUE', 'ISSUE_AND_REGISTER')", "column": "payload", "fields": { … } }
+```
+
+The expression sees only literals — the values already substituted — never DataFrame columns. It is a per-run switch, not a row-level condition. An expression that fails to parse is treated as "do not skip", so a typo runs the step rather than silently dropping it.
+
+## Runtime variables
+
+`{{variable}}` is resolved **during** execution, with values the pipeline computed itself. The pattern it exists for: pushing a key list into a later read so the source can skip data.
+
+```json
+[
+  { "type": "filter", "condition": "status = 'PENDING'" },
+  { "type": "checkpoint" },
+  { "type": "collect", "column": "customer_id", "as": "pending_customers" },
+  {
+    "type": "join",
+    "with": { "format": "delta", "path": "sales.bronze_events" },
+    "with_transformations": [
+      { "type": "filter", "condition": "customer_id IN ({{pending_customers}})" },
+      { "type": "select", "columns": ["customer_id", "segment"] }
+    ],
+    "on": "customer_id",
+    "how": "left"
+  }
+]
+```
+
+This is the declarative form of `df.select(col).distinct().collect()` followed by `isin(...)` — the trick that lets Delta and Parquet skip files instead of scanning the table.
+
+### How it behaves
+
+- `collect` runs `distinct().collect()` on the driver, so **checkpoint first**: on an unmaterialized plan the whole lineage is recomputed.
+- Formatting matches the SQL you need: strings become `'a', 'b'` (quotes escaped), numbers `1, 2`.
+- An **empty** collection renders as `NULL`, so `IN (NULL)` matches nothing — the correct behavior when the working set is empty.
+- The store is shared with nested `with_transformations`, so variables collected in the outer chain are visible inside a join's right side.
+- It is cleared at the start of every `run()`, so nothing leaks between pipelines.
+- A `{{variable}}` that does not exist yet stays literal instead of raising.
+
+## Includes
+
+`$include` inlines a fragment into the top-level `transformations`:
+
+```json
+{
+  "transformations": [
+    { "$include": "shared/standard_filters.json" },
+    { "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" }
+  ]
+}
+```
+
+```json title="shared/standard_filters.json"
+[
+  { "type": "filter", "condition": "status = '{status}'" },
+  { "type": "drop_duplicates", "columns": ["id"] }
+]
+```
+
+- The path is relative to the pipeline file.
+- The fragment is a single object or a list.
+- `{param}` substitution happens **after** the include is expanded, so shared fragments can be parameterized.
+- Nested includes are not expanded, and the directive only works in the top-level `transformations` array.
+
+<Aside type="note">
+  Studio shows an `$include` node as a reference — it does not fetch or preview
+  the file's content, because the path only resolves at run time relative to the
+  pipeline on disk.
+</Aside>
+
+## Putting it together
+
+```json
+{
+  "name": "regional_load",
+  "input": { "format": "delta", "path": "sales.orders" },
+  "transformations": [
+    { "type": "filter", "condition": "region = '{region}'" },
+    { "type": "filter", "skip_if_false": "{products}", "condition": "product_id IN ({products})" },
+    { "type": "stop_if_empty", "message": "Nothing for {region}" },
+    { "type": "checkpoint" },
+    { "type": "collect", "column": "customer_id", "as": "customers" },
+    {
+      "type": "join",
+      "skip_if_false": "{enrich}",
+      "with": { "format": "delta", "path": "crm.customers" },
+      "with_transformations": [
+        { "type": "filter", "condition": "customer_id IN ({{customers}})" }
+      ],
+      "on": "customer_id",
+      "how": "left"
+    }
+  ],
+  "output": { "format": "delta", "path": "analytics.orders_{region}", "mode": "overwrite" }
+}
+```
+
+```python
+fw.run("regional_load.json", params={
+    "region": "br",
+    "products": ["P1", "P2"],   # [] would skip the second filter entirely
+    "enrich": True,             # False would skip the join
+})
+```
+
+One file, one code path, four different jobs depending on what you pass.

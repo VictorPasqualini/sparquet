@@ -1,0 +1,79 @@
+---
+title: The inspector
+description: Editing node fields in Sparquet Studio — typed forms generated from the catalog, with help, examples and validation in place.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Select a node and the inspector shows exactly the fields that node's type reads — no more, no less. The forms are generated from the same catalog that feeds the linter and the AI assistant, so what you see is what the framework supports.
+
+## Anatomy
+
+| Part | Purpose |
+|---|---|
+| Header | Node icon, editable label, type chip, and a menu (duplicate, mute, delete, copy node JSON) |
+| Issues | The linter's findings for this node, each linking to the field that caused it |
+| Fields | The node's parameters, grouped into main and advanced |
+| Run condition | `skip_if_false`, for every transformation |
+| Worth knowing | The behaviors that usually live only in the framework source |
+| Examples | Valid snippets for this node type |
+| Notes | Free-form annotation, never compiled |
+
+## Field types
+
+The widget follows the JSON shape the framework expects:
+
+| Widget | For | Notes |
+|---|---|---|
+| Text | names, paths, single values | |
+| SQL | conditions, expressions, queries | monospace; highlights `{param}` and `{{variable}}` placeholders it detects |
+| Number / Toggle | numeric and boolean options | |
+| Select | fixed choices (`how`, `mode`, `method`) | only the values the framework accepts |
+| Chips | ordered string lists (`columns`, `by`, `merge_keys`) | paste a comma-separated list to add many at once |
+| Expression rows | ordered maps (`agg`, `with_column.columns`) | order is preserved because it is load-bearing |
+| Key/value rows | ordered maps (`cast.columns`, `rename.mappings`) | order matters for `rename` |
+| JSON | nested structures (`struct.fields`, `pivot`) | live parse feedback under the box |
+
+Ordered widgets exist because order is semantic in the framework: `rename` applies mappings sequentially, and `with_column.columns` lets a later expression use a column an earlier one created.
+
+## Sources and destinations
+
+Picking a format rewrites the form to that connector's options — the ones it actually reads, with the framework's defaults prefilled. Switching format drops options the new one does not define, so a config never carries dead keys from a previous choice.
+
+Destinations add:
+
+- **Write mode**, restricted to the modes that format supports
+- **Partition by**, hidden for connectors where it means nothing
+- **Column projection**, a toggle plus a chip list
+- **Options**, including the merge fields that appear only in merge mode
+
+## Validations
+
+The validations node has its own form: the `on_failure` policy with a one-line explanation of each mode, a rule list where every rule renders its own fields, and an optional report destination that reuses the full output form.
+
+## Run condition
+
+Every transformation carries `skip_if_false`. The inspector documents the three cases in place: an empty value skips the step, a boolean expression skips it when false, anything else runs it.
+
+<Aside type="note">
+  The expression sees only literals — the values already substituted — never
+  DataFrame columns. It is a per-run switch, not a row filter.
+</Aside>
+
+## Worth knowing
+
+Each node type carries the gotchas that cost real debugging time:
+
+- `select` entries go through `F.expr`, so odd column names need backticks
+- `union` matches by **position** unless `allow_missing_columns` is on
+- `group_by.agg` takes complete SQL expressions with aliases, never a map
+- `merge` needs a unique constraint on the merge keys
+- `collect` triggers a driver action, so it belongs after a `checkpoint`
+
+They live next to the field they apply to, which is where they are useful.
+
+## Jumping from an issue
+
+Issues in the panel — and the badge on a node — link straight to the field that caused them. Studio opens collapsed sections and scrolls the control into view, so a lint result is one click from a fix.

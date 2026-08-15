@@ -1,0 +1,228 @@
+---
+title: Working with databases
+description: A full recipe for reading from and writing to a relational database with Sparquet — credentials, parallel reads, joins across systems and upserts.
+sidebar:
+  order: 1
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+This guide takes one job end to end: read orders from PostgreSQL, enrich them from a MySQL legacy system, land the detail in Delta and upsert the aggregate back into PostgreSQL.
+
+## 1. Get the driver on the classpath
+
+Declare it in the pipeline so the job carries its own dependency:
+
+```json
+{
+  "spark": {
+    "configs": {
+      "spark.jars.packages": "org.postgresql:postgresql:42.7.4,com.mysql:mysql-connector-j:9.1.0"
+    }
+  }
+}
+```
+
+On Databricks, installing the driver as a cluster library works too — and is faster, since the package is not resolved on every run.
+
+## 2. Keep credentials out of the file
+
+```json
+{
+  "options": {
+    "host": "db.internal",
+    "database": "sales",
+    "user": "app",
+    "password_env": "PG_PASSWORD"
+  }
+}
+```
+
+`password_env` names an **environment variable**, read when the job runs. The pipeline can then be committed like any other file. A missing variable fails the run with a clear message instead of trying an anonymous connection.
+
+<Aside type="tip">
+  On Databricks, set the variable from a secret scope in the job's environment:
+  `PG_PASSWORD={{secrets/scope/pg_password}}`.
+</Aside>
+
+## 3. Read in parallel
+
+Without a partition column the entire table is pulled through **one connection on one executor**:
+
+```json
+{
+  "input": {
+    "format": "postgres",
+    "path": "public.orders",
+    "options": {
+      "host": "db.internal",
+      "database": "sales",
+      "user": "app",
+      "password_env": "PG_PASSWORD",
+      "partition_column": "id",
+      "lower_bound": 1,
+      "upper_bound": 5000000,
+      "num_partitions": 8,
+      "fetch_size": 10000
+    }
+  }
+}
+```
+
+Choosing the four values:
+
+- **`partition_column`** — indexed, numeric/date/timestamp, reasonably uniform. A primary key usually qualifies.
+- **`lower_bound` / `upper_bound`** — the range Spark slices. They do not filter: rows outside land in the first and last partitions.
+- **`num_partitions`** — concurrent connections. Keep it well under the database's connection limit; 8 is a sane start.
+- **`fetch_size`** — rows per round trip. 10 000 trades a little driver memory for far fewer round trips.
+
+## 4. Push the filter into the database
+
+Anything the database can do before sending bytes over the wire is work Spark does not do:
+
+```json
+{
+  "options": {
+    "query": "SELECT id, customer_id, quantity, unit_price FROM public.orders WHERE ordered_at >= '{since}' AND status = 'CONFIRMED'"
+  }
+}
+```
+
+With `query` set, `path` is ignored. Combine it with a `{param}` so the same file serves every window.
+
+## 5. Join across systems
+
+A join reads its right side through the same connector registry, so the two sides can live in different databases:
+
+```json
+{
+  "type": "join",
+  "with": {
+    "format": "mysql",
+    "path": "unused_when_query_is_set",
+    "options": {
+      "host": "legacy.internal",
+      "database": "crm",
+      "user": "reader",
+      "password_env": "MYSQL_PASSWORD",
+      "query": "SELECT id AS customer_id, segment, region FROM customers WHERE active = 1"
+    }
+  },
+  "on": "customer_id",
+  "how": "left"
+}
+```
+
+For a large right side, collect the keys first and push them down — see [Joins and pushdown](/docs/guides/joins/).
+
+## 6. Upsert the result back
+
+```json
+{
+  "format": "postgres",
+  "path": "analytics.customer_revenue",
+  "mode": "merge",
+  "options": {
+    "host": "db.internal",
+    "database": "sales",
+    "user": "app",
+    "password_env": "PG_PASSWORD",
+    "merge_keys": ["customer_id"],
+    "merge_update_columns": ["revenue", "orders"],
+    "batch_size": 5000
+  }
+}
+```
+
+What happens: the DataFrame is written to a staging table next to the target, the database's own upsert runs (`ON CONFLICT` here), and the staging table is dropped.
+
+<Aside type="caution" title="Prerequisites">
+  The target needs a **unique constraint** over `merge_keys` — without it the
+  database inserts duplicates instead of updating. The upsert runs through the
+  JVM, so a classic Spark session is required (not Spark Connect). Add a
+  `unique` validation on the same columns so a duplicated key is reported before
+  the write.
+</Aside>
+
+## The complete pipeline
+
+```json
+{
+  "name": "customer_revenue",
+  "spark": {
+    "configs": {
+      "spark.jars.packages": "org.postgresql:postgresql:42.7.4,com.mysql:mysql-connector-j:9.1.0"
+    }
+  },
+
+  "input": {
+    "format": "postgres",
+    "path": "public.orders",
+    "options": {
+      "host": "db.internal", "database": "sales",
+      "user": "app", "password_env": "PG_PASSWORD",
+      "partition_column": "id", "lower_bound": 1,
+      "upper_bound": 5000000, "num_partitions": 8
+    }
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "status = 'CONFIRMED'" },
+    { "type": "stop_if_empty", "message": "No confirmed orders" },
+    {
+      "type": "join",
+      "with": {
+        "format": "mysql",
+        "path": "customers",
+        "options": {
+          "host": "legacy.internal", "database": "crm",
+          "user": "reader", "password_env": "MYSQL_PASSWORD",
+          "query": "SELECT id AS customer_id, segment FROM customers WHERE active = 1"
+        }
+      },
+      "on": "customer_id",
+      "how": "left"
+    },
+    { "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" },
+    { "type": "checkpoint" }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "not_null", "columns": ["id", "customer_id"] },
+      { "type": "row_count", "min": 1 }
+    ]
+  },
+
+  "outputs": [
+    { "format": "delta", "path": "analytics.orders", "mode": "overwrite" },
+    {
+      "format": "postgres",
+      "path": "analytics.customer_revenue",
+      "mode": "merge",
+      "transformations": [
+        {
+          "type": "group_by",
+          "by": ["customer_id", "segment"],
+          "agg": ["sum(revenue) as revenue", "count(*) as orders"]
+        }
+      ],
+      "options": {
+        "host": "db.internal", "database": "sales",
+        "user": "app", "password_env": "PG_PASSWORD",
+        "merge_keys": ["customer_id"]
+      }
+    }
+  ]
+}
+```
+
+The `checkpoint` before the outputs matters: both destinations start from the same DataFrame, and without it Spark recomputes the join twice.
+
+## Operational notes
+
+- **Never `overwrite` a production table casually.** It drops and recreates it, taking indexes, constraints and grants with it. Use `"truncate_table": true` to keep the structure, or `merge` to update in place.
+- **Watch the connection count.** `num_partitions` on the read plus concurrent jobs must stay under the pool limit.
+- **Write during a window.** A large `append` or `merge` competes with the operational workload; a staging schema plus a short swap is often kinder.
+- **`partition_by` does nothing here.** It is a filesystem concept; the writer warns and ignores it.

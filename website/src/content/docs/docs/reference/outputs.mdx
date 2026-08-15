@@ -1,0 +1,161 @@
+---
+title: Outputs
+description: Writing results in Sparquet — write modes, multiple destinations, per-destination transformations and column projections.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+A pipeline writes one destination with `output`, or several with `outputs`. Each destination is configured independently, and they all start from the same transformed DataFrame.
+
+```json
+{
+  "outputs": [
+    { "format": "delta", "path": "analytics.orders", "mode": "overwrite" },
+    { "format": "csv", "path": "/exports/summary", "columns": ["id", "revenue"] }
+  ]
+}
+```
+
+## Fields
+
+| Key | Type | Default | Purpose |
+|---|---|---|---|
+| `format` | string | — | connector, lowercased at parse |
+| `path` | string | — | path, table, view or topic |
+| `mode` | string | `overwrite` | write behavior |
+| `partition_by` | list | `[]` | physical partitioning, file formats only |
+| `columns` | list | all | column projection for this destination |
+| `options` | object | `{}` | connector options |
+| `transformations` | list | `[]` | reshaping for this destination only |
+
+## Write modes
+
+| Mode | Behavior |
+|---|---|
+| `overwrite` | replaces the destination |
+| `append` | adds rows |
+| `merge` | upsert — Delta, Iceberg and the JDBC connectors |
+| `ignore` | skips the write if the destination exists (JDBC) |
+| `error` | fails if the destination exists (JDBC) |
+
+`merge` requires `options.merge_keys`:
+
+```json
+{
+  "format": "delta",
+  "path": "analytics.orders",
+  "mode": "merge",
+  "options": {
+    "merge_keys": ["order_id"],
+    "merge_condition": "T.deleted = false"
+  }
+}
+```
+
+`T` is the target table, `S` the incoming DataFrame. For databases the same key drives the vendor's own upsert — see [Connectors](/docs/reference/connectors/#write-modes).
+
+<Aside type="caution">
+  Delta raises *multiple source rows matched* when the incoming DataFrame has
+  more than one row per merge key. Add a `unique` validation on those columns so
+  the pipeline tells you before the write does.
+</Aside>
+
+## Column projection
+
+`columns` selects what this destination writes, without touching the others:
+
+```json
+{
+  "outputs": [
+    { "format": "parquet", "path": "/dw/orders_full" },
+    { "format": "csv", "path": "/exports/finance", "columns": ["order_id", "revenue", "country"] }
+  ]
+}
+```
+
+<Aside type="note">
+  These are plain column names, not SQL expressions — the projection is a
+  `df.select(*columns)`. A name that does not exist raises and fails the whole
+  pipeline. For computed columns, use `transformations` below.
+</Aside>
+
+## Per-destination transformations
+
+When destinations need different *shapes* — not just different columns — give each one its own chain. It runs after the validations, on that destination only.
+
+```json
+{
+  "outputs": [
+    {
+      "format": "kafka",
+      "path": "orders-events",
+      "transformations": [
+        { "type": "struct", "column": "payload", "fields": { "id": "order_id", "total": "revenue" } },
+        { "type": "with_column", "column": "value", "expression": "to_json(payload)" }
+      ],
+      "options": { "bootstrap_servers": "broker:9092", "value_column": "value" }
+    },
+    {
+      "format": "postgres",
+      "path": "analytics.customer_revenue",
+      "mode": "merge",
+      "transformations": [
+        {
+          "type": "group_by",
+          "by": ["customer_id"],
+          "agg": ["sum(revenue) as revenue", "count(*) as orders"]
+        }
+      ],
+      "options": { "host": "db.internal", "database": "sales", "merge_keys": ["customer_id"] }
+    }
+  ]
+}
+```
+
+Every transformation type is available here, including `join` and runtime `{{variables}}`.
+
+<Aside type="tip" title="Checkpoint before fanning out">
+  Each destination re-reads the same DataFrame. Without a `checkpoint` as the
+  last main transformation, Spark recomputes the whole lineage once per
+  destination — the single most common cause of a pipeline that is N times
+  slower than it should be.
+</Aside>
+
+## Order of operations per destination
+
+For each destination, in this order:
+
+1. its own `transformations`
+2. the `columns` projection
+3. the write
+
+Which means a projection sees the columns the destination's own transformations produced, not the ones the main chain ended with.
+
+## Staging between pipelines
+
+Temp views turn a set of pipelines into a composable job: several pipelines write the same staging view, and a final one validates and publishes it.
+
+```json
+// pipeline 1..N
+{ "output": { "format": "view", "path": "orders_staging", "mode": "overwrite" } }
+
+// final pipeline
+{ "input": { "format": "view", "path": "orders_staging" } }
+```
+
+All of them must run in the same Spark session — the same process — which is exactly what `SparkFramework` does when you call `run()` several times on one instance.
+
+## What comes back
+
+```python
+result = fw.run("pipeline.json")
+result.rows_written   # rows in the main DataFrame at write time
+```
+
+<Aside type="note">
+  `rows_written` counts the main DataFrame, not the sum of what every
+  destination wrote. With per-destination transformations that explode or
+  aggregate rows, the number a destination actually received will differ.
+</Aside>

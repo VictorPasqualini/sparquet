@@ -1,0 +1,85 @@
+---
+title: AI assistant
+description: Generate, modify and explain Sparquet pipelines with the model of your choice — bring your own key, review every proposal.
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+The assistant writes pipelines in the language Studio already understands. Its system prompt is generated from the same catalog that drives the forms and the linter, so it cannot suggest a transformation the framework does not have.
+
+## Setting it up
+
+<Steps>
+
+1. Open **Settings → AI assistant**.
+
+2. Pick a provider and paste a key:
+
+   | Provider | Get a key | Default model |
+   |---|---|---|
+   | Anthropic | [console.anthropic.com](https://console.anthropic.com/settings/keys) | `claude-sonnet-4-5` |
+   | OpenAI | [platform.openai.com](https://platform.openai.com/api-keys) | `gpt-4.1` |
+   | Google | [aistudio.google.com](https://aistudio.google.com/apikey) | `gemini-2.5-pro` |
+   | OpenAI-compatible | your own gateway, Ollama, vLLM | free text |
+
+3. Optionally press **Test connection** — it sends a one-token ping and reports the result inline.
+
+</Steps>
+
+<Aside type="caution" title="Where the key lives">
+  Requests go **straight from your browser to your provider** — there is no
+  Sparquet server in the loop. By default the key is held in memory for the
+  session only. "Remember key in this browser" stores it in `localStorage`,
+  which is convenient on a personal machine and a bad idea on a shared one.
+</Aside>
+
+## Using it
+
+Open the panel with <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd>. Pick an intent, describe what you want, send.
+
+| Intent | What it does |
+|---|---|
+| **Generate** | A complete pipeline from a description |
+| **Modify** | Changes the pipeline currently on the canvas |
+| **Explain** | Plain-English walkthrough of what the pipeline does |
+| **Fix issues** | Takes the linter's findings and proposes corrections |
+| **Optimize** | Suggests checkpoints, pushdown and cheaper reads |
+| **Document** | Writes the `description` fields |
+
+Good prompts are specific about sources, keys and destinations:
+
+> Read orders from Postgres `public.orders`, keep the confirmed ones, aggregate revenue per customer, and upsert the result into `analytics.customer_revenue` on `customer_id`.
+
+> Add a data quality block that fails the run when `id` has nulls or duplicates, and write the report to `quality.report` as Delta.
+
+> The join is slow. Push the customer id list into the right side instead of reading the whole events table.
+
+## Proposals
+
+When a reply contains a pipeline, it arrives as a **card**, not as an applied change:
+
+- **Apply to canvas** replaces the graph — and is a single <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> away from being undone.
+- **View JSON** shows the raw document first.
+
+An explanation that merely quotes a fragment does not produce a proposal — only a complete pipeline does, which keeps a "what does this do?" answer from wiping your work.
+
+## What the model is told
+
+The system prompt is generated from the catalog at build time and carries:
+
+- every transformation type with its required and optional keys
+- readable and writable formats, with their valid write modes
+- validators and the `on_failure` policies
+- the hard rules: `agg` is a list of SQL strings, `select` entries are expressions, kafka is write-only, `merge` needs `merge_keys`, `skip_if_false` is a top-level key, `{param}` and `{{variable}}` are different mechanisms
+
+Context is added per request: the compiled pipeline, the current lint issues and the selected node — **only** when *Share workflow context* is on. Turn it off and nothing about your pipeline leaves the browser.
+
+## Cost and limits
+
+You pay your provider directly, at their rates. A generation is typically a few thousand tokens in and under a thousand out. Long conversations trim older turns rather than growing without bound.
+
+## When it gets something wrong
+
+The linter is the backstop: apply the proposal, read the Issues panel, and either fix it by hand or send the issues back with **Fix issues**. The assistant is a drafting tool — the file it produces is checked by the same rules as anything you write yourself.

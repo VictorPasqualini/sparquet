@@ -1,0 +1,18 @@
+---
+import FinalCta from '../components/landing/FinalCta.astro'
+import Hero from '../components/landing/Hero.astro'
+import Sections from '../components/landing/Sections.astro'
+import Showcase from '../components/landing/Showcase.astro'
+import { LANDING } from '../i18n/landing'
+import Landing from '../layouts/Landing.astro'
+
+const locale = 'en' as const
+const copy = LANDING[locale]
+---
+
+<Landing locale={locale} title={copy.meta.title} description={copy.meta.description}>
+  <Hero locale={locale} />
+  <Sections locale={locale} />
+  <Showcase locale={locale} />
+  <FinalCta locale={locale} />
+</Landing>

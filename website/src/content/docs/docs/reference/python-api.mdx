@@ -1,0 +1,179 @@
+---
+title: Python API and CLI
+description: Every way to run a Sparquet pipeline — the SparkFramework class, the Pipeline class, the CLI, and the result object they return.
+sidebar:
+  order: 7
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+## `SparkFramework`
+
+The entry point. It owns the Spark session and shares the transformation and validation engines across every run.
+
+```python
+from spark_framework import SparkFramework
+
+fw = SparkFramework(spark={"app_name": "daily_load", "master": "local[*]"})
+
+fw.run("pipelines/orders.json")
+fw.run("pipelines/customers.json")
+
+fw.stop()
+```
+
+Creating one instance per process and running many pipelines through it is the intended shape: the session is built once, and temp views written by one pipeline are visible to the next.
+
+### `run(config_path, input_df=None, columns=None, params=None)`
+
+Runs a pipeline described by a file.
+
+| Argument | Type | Purpose |
+|---|---|---|
+| `config_path` | `str` | path to the JSON file |
+| `input_df` | `DataFrame` | replaces the `input` read — the pipeline starts from this DataFrame |
+| `columns` | `dict` | literal columns injected before the transformations |
+| `params` | `dict` | `{param}` substitutions |
+
+```python
+result = fw.run(
+    "orders.json",
+    params={"region": "br", "since": "2026-01-01"},
+    columns={"load_id": "2026-01-15T03:00:00Z"},
+)
+```
+
+`columns` adds each entry as a literal column (`F.lit(value)`) right after the read — the clean way to stamp a batch id or an execution timestamp without editing the file.
+
+### `run_from_dict(config, input_df=None, columns=None, params=None)`
+
+Same, from a dictionary already in memory:
+
+```python
+result = fw.run_from_dict({
+    "name": "inline",
+    "input": {"format": "delta", "path": "sales.orders"},
+    "output": {"format": "parquet", "path": "/tmp/orders"},
+})
+```
+
+Useful when a pipeline is generated — by a notebook, a test, or Studio's local runner.
+
+### Registration
+
+```python
+fw.register_reader("my_format", MyReader)
+fw.register_writer("my_format", MyWriter)
+fw.register_transformation("normalize_text", NormalizeText)
+fw.register_validator("no_future_date", NoFutureDateValidator)
+```
+
+See [Extending](/docs/reference/extending/).
+
+<Aside type="note">
+  Reader and writer registries are class-level: registering a format affects
+  every `SparkFramework` in the process. Transformation and validator registries
+  are per-instance.
+</Aside>
+
+### `stop()`
+
+Stops the underlying Spark session. On Databricks, where the session is the
+platform's, leave it running.
+
+## `Pipeline`
+
+One pipeline, without the framework wrapper — useful in tests and when you manage the session yourself.
+
+```python
+from spark_framework import Pipeline
+
+result = Pipeline.from_file("orders.json").run()
+result = Pipeline.from_dict({...}).run()
+```
+
+`Pipeline` also accepts injected engines, which is how you test a pipeline with a custom transformation registered only for that case.
+
+## `PipelineResult`
+
+Every run returns this object. **It never raises** — failures come back as data.
+
+```python
+@dataclass
+class PipelineResult:
+    pipeline_name: str
+    success: bool
+    rows_read: int = 0
+    rows_written: int = 0
+    validation_results: list[ValidationResult] = []
+    error: str | None = None
+    output_df: DataFrame | None = None
+    skipped: bool = False
+
+    def summary(self) -> str: ...
+```
+
+| Field | Meaning |
+|---|---|
+| `success` | `False` when the run failed; check `error` for why |
+| `skipped` | `True` when `stop_if_empty` ended the run — `success` stays `True` |
+| `rows_read` | rows read from the input (`0` when a DataFrame was injected) |
+| `rows_written` | rows in the main DataFrame at write time |
+| `validation_results` | one entry per rule: `rule_type`, `passed`, `message`, `failed_count` |
+| `output_df` | the transformed DataFrame, available when `input_df` was injected |
+| `error` | the failure message |
+
+```python
+result = fw.run("orders.json")
+
+if result.skipped:
+    log.info("nothing to process")
+elif not result.success:
+    raise RuntimeError(result.error)
+else:
+    log.info(result.summary())
+    for check in result.validation_results:
+        if not check.passed:
+            alert(f"{check.rule_type}: {check.message} ({check.failed_count} rows)")
+```
+
+## Chaining pipelines in one job
+
+```python
+fw = SparkFramework(spark={"app_name": "registration"})
+
+for conf in ["conf_a.json", "conf_b.json", "conf_c.json"]:
+    result = fw.run(conf, params={"dt_ref": dt_ref})
+    if not result.success:
+        raise RuntimeError(f"{conf}: {result.error}")
+
+# every pipeline above wrote the same temp view; this one publishes it
+final = fw.run("conf_commit.json")
+fw.stop()
+```
+
+Each pipeline writes a staging temp view, and the last one validates and publishes. Because they share one session, the views survive between calls.
+
+## CLI
+
+```bash
+python -m spark_framework.cli pipeline.json
+```
+
+Or, when installed as a package, through the console script:
+
+```bash
+spark-framework pipeline.json
+```
+
+The CLI parses the file, runs it and prints the structured result. It is the right entry point for a scheduler or a container: no wrapper script to maintain.
+
+## Structured logging
+
+Every log line is one JSON object on stderr:
+
+```json
+{"timestamp": "2026-01-15T03:00:12.918Z", "level": "INFO", "message": "Pipeline finished", "pipeline": "orders_curated", "rows_written": 41233}
+```
+
+That shape drops straight into Datadog, CloudWatch or Splunk without a parser. Studio's local runner captures the same records and shows them in the Run panel.

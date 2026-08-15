@@ -1,0 +1,120 @@
+---
+title: Running pipelines
+description: Execute a pipeline from the Sparquet Studio canvas through the local runner — setup, the security token, and reading the results.
+sidebar:
+  order: 5
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+Designing needs only the browser. Executing needs Spark, so Studio talks to a small service you run yourself.
+
+## Start the runner
+
+<Steps>
+
+1. Install its dependencies:
+
+   ```bash
+   cd sparquet-studio
+   pip install -r server/requirements.txt
+   ```
+
+2. Start it from that directory — the module inserts the repository root into `sys.path`, so `spark_framework` resolves without installing anything:
+
+   ```bash
+   uvicorn server.main:app --port 8787
+   ```
+
+3. Copy the token it prints:
+
+   ```
+   ========================================================================
+   Sparquet Studio runner token (this session only):
+       S3yhI-6191J6wu2xz7bCX9YpafB0GOLo
+   ========================================================================
+   ```
+
+4. Paste it into **Settings → Local runner → Runner token**, or into the card the Run panel shows when a run is refused.
+
+</Steps>
+
+`pyspark` and a working `JAVA_HOME` are required for real runs. On Windows you also need `winutils.exe` and `HADOOP_HOME` — without them Spark hangs the first time it touches the filesystem.
+
+### A stable token
+
+The generated token changes on every restart. Pin it with an environment variable:
+
+```bash
+SPARQUET_STUDIO_TOKEN=my-local-token uvicorn server.main:app --port 8787
+```
+
+```powershell
+$env:SPARQUET_STUDIO_TOKEN = "my-local-token"; uvicorn server.main:app --port 8787
+```
+
+<Aside type="danger" title="Why there is a token at all">
+  The runner executes arbitrary Spark work — arbitrary SQL, arbitrary reads and
+  writes on everything this machine can reach. Without the token, any web page
+  you happen to visit could post a pipeline to `127.0.0.1:8787` and run it;
+  CORS does not stop that kind of request. `/run` and `/validate` require the
+  token and check the request `Origin`. Keep the service bound to localhost and
+  never expose it to a network.
+</Aside>
+
+## Run
+
+Open the Run panel with <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>.
+
+- **Run pipeline** compiles the canvas and executes it.
+- **Validate only** parses the configuration without touching Spark — the fastest way to check a config is well formed.
+- Blocking lint errors disable the button, with a tooltip explaining why.
+- A warning appears when a destination writes with `overwrite`, because the run is real.
+
+When the workflow declares `{param}` placeholders, the panel renders an input per parameter and sends the values with the run.
+
+## Reading the result
+
+| Section | What it tells you |
+|---|---|
+| Status | success, skipped (a `stop_if_empty` fired) or error, with the message |
+| Metrics | rows read, rows written, duration |
+| Validations | one row per rule: passed, failed count, message |
+| Preview | up to 50 rows of the output DataFrame |
+| Logs | the framework's own structured records for this run |
+
+A skipped run is not a failure: `stop_if_empty` ended it because there was nothing to process.
+
+## Endpoints
+
+The service is a small FastAPI app you can call directly:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /health` | open | version, whether Spark is importable, whether the token is enforced |
+| `POST /run` | token | run a pipeline, return counters, validations, preview and logs |
+| `POST /validate` | token | parse only |
+| `GET /capabilities` | token | the **live** registries — every transformation, reader, writer and validator the running process knows |
+
+`/capabilities` is the authoritative answer to "does this runtime have my custom transformation?", since registries are dynamic.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| *Local runner not detected* | The service is not running, or the URL in Settings does not match |
+| **401** with an explanation | Missing or wrong token — paste the one the terminal printed |
+| **403** | The request `Origin` is not allowed; widen it with `SPARQUET_STUDIO_ORIGINS` |
+| **409** | A run is already in progress — the service serializes runs to protect the shared session |
+| **503** mentioning pyspark | `pyspark` is not importable in that environment |
+| A run that never finishes on Windows | Missing `winutils.exe` / `HADOOP_HOME` |
+
+## Beyond local runs
+
+The runner is a development convenience, not a scheduler. In production, run the compiled JSON the ordinary way:
+
+```bash
+python -m spark_framework.cli pipeline.json
+```
+
+or from your orchestrator through the [Python API](/docs/reference/python-api/). The file Studio produced is the same file either way.

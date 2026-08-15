@@ -1,0 +1,144 @@
+---
+title: Incremental loads and upserts
+description: Patterns for loading only what changed with Sparquet — merge writes, staging views, stopping early and idempotent reruns.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+A full reload is simple and, past a certain size, impossible. These are the patterns that replace it.
+
+## Merge instead of overwrite
+
+```json
+{
+  "output": {
+    "format": "delta",
+    "path": "analytics.orders",
+    "mode": "merge",
+    "options": {
+      "merge_keys": ["order_id"],
+      "merge_condition": "T.deleted = false"
+    }
+  }
+}
+```
+
+`T` is the target table, `S` the incoming DataFrame. `merge_condition` adds SQL to the matching clause — useful for ignoring soft-deleted rows or restricting the merge to a partition.
+
+The same mode works for the [database connectors](/docs/reference/connectors/#write-modes), where it runs the vendor's own upsert.
+
+<Aside type="caution" title="One row per key">
+  A merge fails when the incoming DataFrame has more than one row per key —
+  Delta raises *multiple source rows matched*, and a database silently inserts
+  twice. Deduplicate before writing, and add a `unique` validation on the merge
+  keys so the pipeline reports it rather than the storage layer.
+</Aside>
+
+## Read only the new window
+
+Push the window into the source so the read is small:
+
+```json
+// a partitioned table or a database query
+{ "type": "filter", "condition": "ordered_at >= '{since}'" }
+```
+
+```json
+{ "options": { "query": "SELECT * FROM orders WHERE updated_at > '{since}'" } }
+```
+
+```python
+fw.run("orders.json", params={"since": last_success_timestamp})
+```
+
+Keeping `since` outside the file — in the orchestrator, in a control table — is what makes the pipeline reusable for both the nightly delta and a backfill.
+
+## Stop when there is nothing to do
+
+```json
+[
+  { "type": "filter", "condition": "updated_at > '{since}'" },
+  { "type": "stop_if_empty", "message": "No changes since {since}" },
+  { "type": "checkpoint" }
+]
+```
+
+The remaining transformations and every write are skipped, and the run comes back with `skipped: true` and `success: true`. Placed right after the window filter — before joins and payload building — it turns an idle night into a few seconds instead of a full pipeline over zero rows.
+
+```python
+result = fw.run("orders.json", params={"since": since})
+if result.skipped:
+    log.info("nothing to load")     # not a failure
+```
+
+## Make reruns safe
+
+An incremental job will be rerun — after a failure, after a late-arriving file, by someone debugging. Two properties make that harmless:
+
+- **Idempotent writes.** `merge` on a stable business key produces the same table whether it runs once or five times. `append` does not.
+- **A deterministic window.** Derive it from a parameter or a control table, never from `now()` inside the pipeline, so a rerun covers the same range.
+
+```json
+{ "type": "drop_duplicates", "columns": ["order_id"] }
+```
+
+Deduplicating on the merge key just before the write closes the last gap: a source that delivers the same record twice inside one window.
+
+## Staging, then commit
+
+When several pipelines contribute to one destination, let each write a staging view and give the final one the job of validating and publishing:
+
+```json
+// pipelines 1..N
+{ "output": { "format": "view", "path": "orders_staging", "mode": "overwrite" } }
+```
+
+```json
+// the commit pipeline
+{
+  "input": { "format": "view", "path": "orders_staging" },
+  "validations": {
+    "on_failure": "fail",
+    "rules": [
+      { "type": "unique", "columns": ["order_id"] },
+      { "type": "row_count", "min": 1 }
+    ]
+  },
+  "outputs": [
+    { "format": "delta", "path": "analytics.orders", "mode": "merge",
+      "options": { "merge_keys": ["order_id"] } }
+  ]
+}
+```
+
+```python
+fw = SparkFramework()
+for conf in ["conf_a.json", "conf_b.json", "conf_c.json"]:
+    result = fw.run(conf, params={"since": since})
+    if not result.success:
+        raise RuntimeError(f"{conf}: {result.error}")
+
+commit = fw.run("conf_commit.json")
+fw.stop()
+```
+
+Nothing reaches the destination until the whole set succeeded and the rules passed. Temp views live in the Spark session, so every pipeline must run in the same process — which is exactly what reusing one `SparkFramework` gives you.
+
+## Watch the lineage
+
+An incremental pipeline that joins several sources builds a deep plan. Two rules keep it cheap:
+
+- `checkpoint` after the heavy joins, before `collect` and before fanning out to destinations.
+- Push the key list into large reads with [runtime pushdown](/docs/guides/joins/#runtime-pushdown) so the source skips files instead of scanning them.
+
+## Choosing a pattern
+
+| Situation | Pattern |
+|---|---|
+| Small dimension table | full `overwrite` — simple wins |
+| Fact table with a stable key | `merge` on the key |
+| Append-only event log | `append` plus a deduplicating read |
+| Several jobs feeding one table | staging view, then a commit pipeline |
+| Backfill | the same file, a different `{since}` |

@@ -1,0 +1,151 @@
+---
+import { LANDING } from '../../i18n/landing'
+import { GITHUB_URL, docsOf, type Locale } from '../../i18n/ui'
+
+interface Props {
+  locale: Locale
+}
+
+const { locale } = Astro.props
+const copy = LANDING[locale].hero
+
+/**
+ * The hero shows one pipeline twice: as the file that runs, and as the canvas
+ * that writes it. Both halves are real — the JSON below is a valid pipeline and
+ * the nodes are the ones Studio renders for it.
+ */
+const pipeline = `{
+  "name": "orders_curated",
+  "input": {
+    "format": "postgres",
+    "path": "public.orders",
+    "options": { "host": "db.internal", "database": "sales" }
+  },
+  "transformations": [
+    { "type": "filter", "condition": "status = 'CONFIRMED'" },
+    { "type": "with_column",
+      "column": "revenue",
+      "expression": "quantity * unit_price" }
+  ],
+  "validations": {
+    "on_failure": "warn",
+    "rules": [{ "type": "not_null", "columns": ["id"] }]
+  },
+  "output": {
+    "format": "delta",
+    "path": "analytics.orders",
+    "mode": "overwrite"
+  }
+}`
+
+const nodes = [
+  { label: 'PostgreSQL', detail: 'public.orders', accent: 'sky' },
+  { label: 'Filter', detail: "status = 'CONFIRMED'", accent: 'amber' },
+  { label: 'With column', detail: 'revenue = qty * price', accent: 'amber' },
+  { label: 'Validations', detail: '1 rule · warn', accent: 'cyan' },
+  { label: 'Delta', detail: 'analytics.orders', accent: 'emerald' },
+]
+
+const ACCENTS: Record<string, string> = {
+  sky: 'bg-sky-400',
+  amber: 'bg-brand-500',
+  cyan: 'bg-cyan-400',
+  emerald: 'bg-emerald-400',
+}
+---
+
+<section class="relative overflow-hidden">
+  <div class="grid-surface absolute inset-0 opacity-70" aria-hidden="true"></div>
+  <div class="glow-brand absolute inset-x-0 top-0 h-[520px]" aria-hidden="true"></div>
+
+  <div class="relative mx-auto max-w-6xl px-5 pb-20 pt-16 md:pb-28 md:pt-24">
+    <div class="grid items-start gap-14 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
+      <div class="lg:pt-6">
+        <p class="eyebrow">{copy.eyebrow}</p>
+
+        <h1
+          class="mt-4 text-balance text-4xl font-semibold leading-[1.08] tracking-tight text-white sm:text-5xl lg:text-[3.4rem]"
+        >
+          {copy.title}<br />
+          <span class="text-brand-500">{copy.titleAccent}</span>
+        </h1>
+
+        <p class="mt-6 max-w-xl text-base leading-relaxed text-ink-300 sm:text-lg">
+          {copy.subtitle}
+        </p>
+
+        <div class="mt-8 flex flex-wrap items-center gap-3">
+          <a
+            href={docsOf(locale, 'start/quickstart/')}
+            class="rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-ink-950 transition-colors hover:bg-brand-400"
+          >
+            {copy.primaryCta}
+          </a>
+          <a
+            href={docsOf(locale, 'start/')}
+            class="rounded-xl border border-white/12 px-5 py-3 text-sm font-medium text-ink-200 transition-colors hover:border-white/25 hover:text-white"
+          >
+            {copy.secondaryCta}
+          </a>
+          <a
+            href={GITHUB_URL}
+            rel="noopener"
+            class="group inline-flex items-center gap-2 px-1 py-3 text-sm text-ink-400 transition-colors hover:text-white"
+          >
+            <svg viewBox="0 0 16 16" class="h-4 w-4 fill-current" aria-hidden="true">
+              <path
+                d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38l-.01-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"
+              ></path>
+            </svg>
+            GitHub
+          </a>
+        </div>
+
+        <p class="mt-6 text-xs text-ink-500">{copy.note}</p>
+      </div>
+
+      <div class="relative">
+        <!-- The file -->
+        <div class="card-surface overflow-hidden shadow-2xl shadow-black/40">
+          <div class="flex items-center gap-2 border-b border-white/8 px-4 py-2.5">
+            <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
+            <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
+            <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
+            <span class="ml-2 font-mono text-xs text-ink-400">{copy.fileName}</span>
+          </div>
+          <pre
+            class="overflow-x-auto px-4 py-4 font-mono text-[0.72rem] leading-relaxed text-ink-300"><code>{pipeline}</code></pre>
+        </div>
+
+        <!-- The same thing, as nodes -->
+        <div class="card-surface mt-4 p-4">
+          <p class="mb-3 text-[0.7rem] uppercase tracking-wider text-ink-500">
+            {copy.canvasCaption}
+          </p>
+          <ol class="flex flex-wrap items-stretch gap-2">
+            {
+              nodes.map((node, index) => (
+                <li class="flex items-stretch gap-2">
+                  <div class="flex min-w-[8.5rem] overflow-hidden rounded-lg border border-white/10 bg-ink-800">
+                    <span class={`w-1 shrink-0 ${ACCENTS[node.accent]}`} />
+                    <span class="px-2.5 py-1.5">
+                      <span class="block text-[0.7rem] font-medium text-white">{node.label}</span>
+                      <span class="mt-0.5 block truncate font-mono text-[0.62rem] text-ink-400">
+                        {node.detail}
+                      </span>
+                    </span>
+                  </div>
+                  {index < nodes.length - 1 && (
+                    <span class="self-center text-ink-600" aria-hidden="true">
+                      →
+                    </span>
+                  )}
+                </li>
+              ))
+            }
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

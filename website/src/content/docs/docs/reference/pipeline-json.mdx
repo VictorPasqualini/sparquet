@@ -1,0 +1,238 @@
+---
+title: The pipeline JSON
+description: Complete reference for the Sparquet pipeline document — every top-level field, its type, its default and how it is parsed.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+One document describes one pipeline. This page is the whole schema; each section links to the detail pages.
+
+## Skeleton
+
+```json
+{
+  "name": "string",                    // required
+  "description": "string",             // optional
+
+  "spark": {                           // optional
+    "app_name": "string",
+    "master": "string",
+    "configs": { "spark.sql.shuffle.partitions": "200" }
+  },
+
+  "input": {                           // required
+    "format": "csv|parquet|delta|iceberg|txt|view|postgres|mysql|sqlserver|oracle|jdbc",
+    "path": "string",
+    "options": {}
+  },
+
+  "transformations": [],               // optional, ordered
+
+  "validations": {                     // optional
+    "on_failure": "fail|warn|skip",
+    "report": { "format": "csv", "path": "/dq/report", "mode": "append" },
+    "rules": []
+  },
+
+  "output": {                          // required — or "outputs"
+    "format": "parquet",
+    "path": "string",
+    "mode": "overwrite|append|merge|ignore|error",
+    "partition_by": [],
+    "columns": [],
+    "options": {},
+    "transformations": []
+  }
+}
+```
+
+## `name`
+
+**Required.** Identifies the pipeline in logs, in the validation report and in `PipelineResult.pipeline_name`. Use a stable, file-system-friendly slug: `orders_curated`.
+
+## `description`
+
+Optional prose. It travels with the file and shows up in Studio, which makes it the cheapest documentation a pipeline can carry.
+
+## `spark`
+
+Optional session settings.
+
+| Key | Default | Notes |
+|---|---|---|
+| `app_name` | `SparkFramework` | Overridden by the `SparkFramework(spark=…)` constructor |
+| `master` | `local[*]` | Applied **only** in the local environment |
+| `configs` | `{}` | Any `spark.*` setting, applied when the session is created |
+
+<Aside type="caution">
+  The session is a process-wide singleton: the first pipeline that creates it
+  wins, and later pipelines reuse it. On Databricks the active session is reused
+  and this block is effectively ignored. Treat it as best-effort, and set
+  cluster-level settings on the cluster.
+</Aside>
+
+The common real use is declaring connector packages:
+
+```json
+{ "spark": { "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" } } }
+```
+
+## `input`
+
+**Required.** The pipeline's single source.
+
+| Key | Type | Required |
+|---|---|---|
+| `format` | string | yes — lowercased at parse time |
+| `path` | string | yes — table, path, view or topic depending on the format |
+| `options` | object | no — passed to the reader |
+
+```json
+{ "input": { "format": "delta", "path": "sales.orders", "options": { "versionAsOf": "12" } } }
+```
+
+Every readable format is listed in [Connectors](/docs/reference/connectors/). Additional sources enter through `join` and `union` transformations.
+
+<Aside type="note">
+  `input` stays mandatory even when you inject a DataFrame with
+  `fw.run(..., input_df=df)`: the block must still parse, so keep a valid
+  `format` and `path` in the file. The read itself is skipped.
+</Aside>
+
+After the read, the framework adds an `ingestion_ts` column with the read timestamp. Drop it with `drop` or a `select` if the destination schema is fixed.
+
+## `transformations`
+
+Optional, ordered. See [Transformations](/docs/reference/transformations/) for all twenty types, and [Parameters](/docs/reference/parameters/) for `skip_if_false` and placeholders.
+
+Unknown keys inside a transformation are kept, not rejected — which is what lets custom registered transformations travel through the same file.
+
+## `validations`
+
+Optional quality block, measured after every transformation and before any write.
+
+```json
+{
+  "validations": {
+    "on_failure": "warn",
+    "report": { "format": "csv", "path": "/dq/orders", "mode": "append" },
+    "rules": [
+      { "type": "not_null", "columns": ["id"] },
+      { "type": "unique", "columns": ["id"] }
+    ]
+  }
+}
+```
+
+See [Validations](/docs/reference/validations/) for every rule and what each `on_failure` mode does.
+
+## `output` / `outputs`
+
+**One of them is required.** A single object, or a list of destinations.
+
+| Key | Type | Default |
+|---|---|---|
+| `format` | string | — |
+| `path` | string | — |
+| `mode` | string | `overwrite` |
+| `partition_by` | list of columns | `[]` |
+| `columns` | list of columns | all columns |
+| `options` | object | `{}` |
+| `transformations` | list | `[]` |
+
+```json
+{
+  "outputs": [
+    { "format": "delta", "path": "analytics.orders", "mode": "overwrite" },
+    { "format": "csv", "path": "/exports/summary", "columns": ["id", "revenue"] }
+  ]
+}
+```
+
+When both `output` and `outputs` are present, `outputs` wins and `output` is ignored. See [Outputs](/docs/reference/outputs/) for per-destination transformations, projections and merge semantics.
+
+## Parsing rules worth knowing
+
+- **`format` is lowercased** on both input and output; `mode` is not, and some writers compare it case-sensitively.
+- **Unknown keys survive.** Anything the schema does not know about is carried into the transformation params or ignored, never rejected — forward compatibility for custom registrations.
+- **`{param}` substitution happens before parsing**, on the raw text. A placeholder can therefore appear anywhere, including inside a number or a key.
+- **`$include` is expanded before parsing**, and only in the top-level `transformations`.
+
+## Full example
+
+```json
+{
+  "name": "customer_revenue",
+  "description": "Daily revenue per customer, curated and published back to the operational database.",
+
+  "spark": {
+    "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" }
+  },
+
+  "input": {
+    "format": "postgres",
+    "path": "public.orders",
+    "options": {
+      "host": "db.internal",
+      "database": "sales",
+      "user": "app",
+      "password_env": "PG_PASSWORD",
+      "partition_column": "id",
+      "lower_bound": 1,
+      "upper_bound": 5000000,
+      "num_partitions": 8
+    }
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "status = 'CONFIRMED' AND ordered_at >= '{since}'" },
+    { "type": "stop_if_empty", "message": "No confirmed orders since {since}" },
+    { "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" },
+    { "type": "checkpoint" }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "report": { "format": "delta", "path": "quality.pipeline_report", "mode": "append" },
+    "rules": [
+      { "type": "not_null", "columns": ["id", "customer_id"] },
+      { "type": "unique", "columns": ["id"] },
+      { "type": "row_count", "min": 1 }
+    ]
+  },
+
+  "outputs": [
+    {
+      "format": "delta",
+      "path": "analytics.orders",
+      "mode": "overwrite",
+      "partition_by": ["ordered_at"]
+    },
+    {
+      "format": "postgres",
+      "path": "analytics.customer_revenue",
+      "mode": "merge",
+      "transformations": [
+        {
+          "type": "group_by",
+          "by": ["customer_id"],
+          "agg": ["sum(revenue) as revenue", "count(*) as orders"]
+        }
+      ],
+      "options": {
+        "host": "db.internal",
+        "database": "sales",
+        "user": "app",
+        "password_env": "PG_PASSWORD",
+        "merge_keys": ["customer_id"]
+      }
+    }
+  ]
+}
+```
+
+```python
+fw.run("customer_revenue.json", params={"since": "2026-01-01"})
+```
