@@ -42,7 +42,7 @@ Each input handle takes **one** connection. Dropping a second one replaces the f
 Connect the same node to two destinations and the graph forks. Everything before the fork stays in the main `transformations`; everything after it belongs to that destination.
 
 ```
-source → filter → cast ─┬─→ group_by → postgres     ← group_by is the postgres output's own
+source → filter → cast ─┬─→ group_by → delta        ← group_by is the delta output's own
                         └─→ parquet                  ← filter and cast are shared
 ```
 
@@ -103,8 +103,8 @@ Linting runs while you type. It reports what is statically decidable and stays q
 | Severity | Examples |
 |---|---|
 | **Error** | no destination; an orphan node; a required field empty; `merge` without `merge_keys`; a `kafka` source; two main inputs into one node |
-| **Warning** | a `collect` with no upstream `checkpoint`; a `{{variable}}` nothing publishes; a `{param}` never declared; two destinations writing the same path; a positional `union`; a database password stored in the file |
-| **Info** | a `debug` node left in the pipeline; no validations block; no JDBC driver package declared |
+| **Warning** | a `collect` with no upstream `checkpoint`; a `{{variable}}` nothing publishes; a `{param}` never declared; two destinations writing the same path; a positional `union` |
+| **Info** | a `debug` node left in the pipeline; no validations block |
 
 Click any issue to select the node and jump to the offending field.
 

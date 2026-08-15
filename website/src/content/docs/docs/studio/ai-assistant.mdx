@@ -50,7 +50,7 @@ Open the panel with <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd>. Pick an intent, describe w
 
 Good prompts are specific about sources, keys and destinations:
 
-> Read orders from Postgres `public.orders`, keep the confirmed ones, aggregate revenue per customer, and upsert the result into `analytics.customer_revenue` on `customer_id`.
+> Read orders from the Delta table `sales.orders`, keep the confirmed ones, aggregate revenue per customer, and upsert the result into `analytics.customer_revenue` on `customer_id`.
 
 > Add a data quality block that fails the run when `id` has nulls or duplicates, and write the report to `quality.report` as Delta.
 

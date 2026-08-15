@@ -14,9 +14,6 @@ Most slow pipelines are slow for one of four reasons: they read too much, they r
 The cheapest row is the one that never leaves the source.
 
 ```json
-// database: let the server filter and project
-{ "options": { "query": "SELECT id, customer_id, amount FROM orders WHERE updated_at > '{since}'" } }
-
 // partitioned lake table: filter on the partition column first
 { "type": "filter", "condition": "ordered_at >= '{since}'" }
 
@@ -25,16 +22,6 @@ The cheapest row is the one that never leaves the source.
 ```
 
 Order matters: a `select` after the join still carries every column through the shuffle.
-
-## Read in parallel
-
-A JDBC read without a partition column uses **one connection on one executor**, no matter the cluster size:
-
-```json
-{ "partition_column": "id", "lower_bound": 1, "upper_bound": 5000000, "num_partitions": 8 }
-```
-
-Pick an indexed, uniform column and keep `num_partitions` under the database's connection limit. Raising `fetch_size` to 10 000 cuts round trips at a small memory cost.
 
 ## Checkpoint the plan
 
@@ -98,7 +85,6 @@ Filter, project, deduplicate — in that order — before the join. A right side
 
 - **`partition_by` with high cardinality** creates thousands of tiny files. Partition on something coarse (date, country), never on an id.
 - **`merge` costs more than `append`.** Use it when you need idempotence, not by default.
-- **`overwrite` on a database** drops and recreates the table; `truncate_table: true` keeps the structure.
 - **CSV `inferSchema`** costs an extra pass. Set explicit `cast` transformations and turn it off for large, stable feeds.
 
 ## Measure before guessing
@@ -115,7 +101,6 @@ The Run panel in Studio reports rows read, rows written and duration per run, wh
 
 | Symptom | Likely cause |
 |---|---|
-| One executor busy, the rest idle | JDBC read with no `partition_column` |
 | Runtime scales with the number of outputs | Missing `checkpoint` before the fan-out |
 | Driver out of memory | `collect` on a large column, or a huge `IN (...)` list |
 | Join takes longer than the whole rest | Right side not filtered or projected before the join |

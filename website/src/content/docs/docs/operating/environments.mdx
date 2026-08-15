@@ -47,14 +47,13 @@ result = fw.run("/Workspace/Repos/team/pipelines/orders.json",
                                           # do NOT call fw.stop() here
 ```
 
-Store pipelines in a Repo so they are versioned with the rest of the code. Job parameters map straight onto `params`. Secrets belong in a scope, exposed as environment variables for `password_env`.
+Store pipelines in a Repo so they are versioned with the rest of the code. Job parameters map straight onto `params`. Secrets belong in a scope, exposed as environment variables to the job.
 
   </TabItem>
   <TabItem label="EMR / Dataproc">
 
 ```bash
 spark-submit \
-  --packages org.postgresql:postgresql:42.7.4 \
   --py-files pipelines.zip \
   run_job.py --config pipelines/orders.json --since 2026-01-01
 ```
@@ -90,7 +89,7 @@ ENTRYPOINT ["python", "-m", "spark_framework.cli"]
 ```
 
 ```bash
-docker run --rm -e PG_PASSWORD=… my-image /opt/pipelines/orders.json
+docker run --rm my-image /opt/pipelines/orders.json
 ```
 
   </TabItem>
@@ -154,13 +153,13 @@ if not result.success:
 
 ## Dependencies per pipeline
 
-Connector JARs are declared in the file, which keeps a job self-describing:
+Connector packages are declared in the file, which keeps a job self-describing:
 
 ```json
-{ "spark": { "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" } } }
+{ "spark": { "configs": { "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.0" } } }
 ```
 
-On a shared cluster, installing the driver as a cluster library is faster — the package is not resolved on every run.
+On a shared cluster, installing the package as a cluster library is faster — it is not resolved on every run.
 
 <Aside type="note">
   The `spark` block only takes effect when the framework creates the session.

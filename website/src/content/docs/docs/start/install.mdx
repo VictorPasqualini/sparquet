@@ -63,7 +63,6 @@ print(SparkFramework)
 | Delta Lake (OSS) | `pip install "spark-framework[delta]"` | Delta tables outside Databricks |
 | Iceberg | Spark package on the cluster | Iceberg tables |
 | Kafka | Spark package on the cluster | Publishing to a topic |
-| Databases | JDBC driver JAR | PostgreSQL, MySQL, SQL Server, Oracle |
 
 Connector JARs are declared per pipeline, so a job carries its own dependency:
 
@@ -71,7 +70,7 @@ Connector JARs are declared per pipeline, so a job carries its own dependency:
 {
   "spark": {
     "configs": {
-      "spark.jars.packages": "org.postgresql:postgresql:42.7.4"
+      "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.0"
     }
   }
 }

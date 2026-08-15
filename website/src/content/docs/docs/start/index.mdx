@@ -22,9 +22,8 @@ The document is the contract. The framework never needs Studio to run a job, and
 {
   "name": "orders_curated",
   "input": {
-    "format": "postgres",
-    "path": "public.orders",
-    "options": { "host": "db.internal", "database": "sales", "password_env": "PG_PASSWORD" }
+    "format": "delta",
+    "path": "sales.orders"
   },
   "transformations": [
     { "type": "filter", "condition": "status = 'CONFIRMED'" },

@@ -36,9 +36,7 @@ A pipeline writes one destination with `output`, or several with `outputs`. Each
 |---|---|
 | `overwrite` | replaces the destination |
 | `append` | adds rows |
-| `merge` | upsert — Delta, Iceberg and the JDBC connectors |
-| `ignore` | skips the write if the destination exists (JDBC) |
-| `error` | fails if the destination exists (JDBC) |
+| `merge` | upsert — Delta and Iceberg |
 
 `merge` requires `options.merge_keys`:
 
@@ -54,7 +52,7 @@ A pipeline writes one destination with `output`, or several with `outputs`. Each
 }
 ```
 
-`T` is the target table, `S` the incoming DataFrame. For databases the same key drives the vendor's own upsert — see [Connectors](/docs/reference/connectors/#write-modes).
+`T` is the target table, `S` the incoming DataFrame.
 
 <Aside type="caution">
   Delta raises *multiple source rows matched* when the incoming DataFrame has
@@ -98,7 +96,7 @@ When destinations need different *shapes* — not just different columns — giv
       "options": { "bootstrap_servers": "broker:9092", "value_column": "value" }
     },
     {
-      "format": "postgres",
+      "format": "delta",
       "path": "analytics.customer_revenue",
       "mode": "merge",
       "transformations": [
@@ -108,7 +106,7 @@ When destinations need different *shapes* — not just different columns — giv
           "agg": ["sum(revenue) as revenue", "count(*) as orders"]
         }
       ],
-      "options": { "host": "db.internal", "database": "sales", "merge_keys": ["customer_id"] }
+      "options": { "merge_keys": ["customer_id"] }
     }
   ]
 }

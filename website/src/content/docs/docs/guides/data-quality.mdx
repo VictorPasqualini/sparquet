@@ -141,7 +141,7 @@ Delta and Iceberg raise *multiple source rows matched* when the incoming DataFra
 }
 ```
 
-Same for a database upsert, where a duplicated key silently inserts twice instead of updating.
+The same guard belongs on any incremental write keyed by a business id.
 
 ## A checklist
 

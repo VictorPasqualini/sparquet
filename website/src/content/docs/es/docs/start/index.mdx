@@ -22,9 +22,8 @@ El documento es el contrato. El framework nunca necesita al Studio para ejecutar
 {
   "name": "pedidos_curados",
   "input": {
-    "format": "postgres",
-    "path": "public.pedidos",
-    "options": { "host": "db.interno", "database": "ventas", "password_env": "PG_PASSWORD" }
+    "format": "delta",
+    "path": "ventas.pedidos"
   },
   "transformations": [
     { "type": "filter", "condition": "status = 'CONFIRMADO'" },

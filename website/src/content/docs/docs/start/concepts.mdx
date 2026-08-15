@@ -93,7 +93,7 @@ Studio does not store a proprietary project format — it compiles the graph. Tw
 **1. The shared chain is the main pipeline.** The transformations every destination has in common become the top-level `transformations`. Once the graph forks, each branch becomes that destination's own `transformations`.
 
 ```
-source → filter → cast ─┬─→ [group_by] → postgres     ← group_by belongs to this output
+source → filter → cast ─┬─→ [group_by] → delta        ← group_by belongs to this output
                         └─→ parquet                    ← filter and cast are shared
 ```
 
@@ -139,4 +139,4 @@ That shape is what lets an orchestrator branch on the outcome without wrapping e
 
 - [The pipeline JSON](/docs/reference/pipeline-json/) — every field, with its defaults.
 - [Transformations](/docs/reference/transformations/) — all twenty.
-- [Guides](/docs/guides/databases/) — end-to-end recipes.
+- [Guides](/docs/guides/joins/) — end-to-end recipes.

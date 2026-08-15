@@ -116,4 +116,4 @@ Studio lists a workflow's parameters and renders an input for each — typed as 
 - **Name for meaning, not position**: `{region}`, not `{p1}`.
 - **Document them** in the pipeline `description` — the file is the documentation.
 - **Do not parameterize the shape.** Parameters are values. When two variants need different *structures*, `skip_if_false` is the tool; when they need different pipelines, write two.
-- **Never put a secret in a parameter that ends up committed.** For credentials, use `password_env` — see [Connectors](/docs/reference/connectors/#credentials).
+- **Never put a secret in a parameter that ends up committed.** Read credentials from the environment in the job that launches the run, and pass only non-sensitive values here.

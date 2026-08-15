@@ -7,7 +7,6 @@
  * connector reads it, not the framework.
  */
 
-import { JDBC_FORMATS } from '@/catalog/formats.jdbc'
 import type { FieldOption, FieldSpec, FormatDef } from '@/catalog/types'
 
 /**
@@ -900,5 +899,4 @@ export const FORMATS: FormatDef[] = [
       },
     ],
   },
-  ...JDBC_FORMATS,
 ]

@@ -63,15 +63,14 @@ print(SparkFramework)
 | Delta Lake (OSS) | `pip install "spark-framework[delta]"` | Tablas Delta fuera de Databricks |
 | Iceberg | paquete Spark en el clúster | Tablas Iceberg |
 | Kafka | paquete Spark en el clúster | Publicar en un tópico |
-| Bases de datos | JAR del driver JDBC | PostgreSQL, MySQL, SQL Server, Oracle |
 
-Los JAR de conector se declaran por pipeline, así el trabajo lleva su propia dependencia:
+Los paquetes de conector se declaran por pipeline, así el trabajo lleva su propia dependencia:
 
 ```json
 {
   "spark": {
     "configs": {
-      "spark.jars.packages": "org.postgresql:postgresql:42.7.4"
+      "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.0"
     }
   }
 }

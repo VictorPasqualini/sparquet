@@ -25,12 +25,12 @@ const FILE_CONNECTORS = [
   { name: 'Temp view', note: 'auto-cached' },
 ]
 
-const DATABASE_CONNECTORS = [
-  { name: 'PostgreSQL', note: 'ON CONFLICT upsert' },
-  { name: 'MySQL', note: 'ON DUPLICATE KEY' },
-  { name: 'SQL Server', note: 'MERGE' },
-  { name: 'Oracle', note: 'MERGE' },
-  { name: 'JDBC', note: 'any driver' },
+const LAKEHOUSE_FEATURES = [
+  { name: 'MERGE upserts', note: 'delta · iceberg' },
+  { name: 'Time travel', note: 'delta' },
+  { name: 'Partitioned writes', note: 'file formats' },
+  { name: 'Column projection', note: 'per destination' },
+  { name: 'Custom connectors', note: 'register your own' },
 ]
 
 const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
@@ -138,11 +138,11 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
 
     <div>
       <h3 class="text-xs font-semibold uppercase tracking-wider text-ink-500">
-        {copy.connectors.databases}
+        {copy.connectors.lakehouse}
       </h3>
       <ul class="mt-3 grid gap-2 sm:grid-cols-2">
         {
-          DATABASE_CONNECTORS.map((connector) => (
+          LAKEHOUSE_FEATURES.map((connector) => (
             <li class="card-surface flex items-baseline justify-between gap-3 px-4 py-3">
               <span class="text-sm font-medium text-white">{connector.name}</span>
               <span class="font-mono text-[0.65rem] text-ink-500">{connector.note}</span>
@@ -153,15 +153,12 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
 
       <div class="card-surface mt-4 p-4">
         <pre class="overflow-x-auto font-mono text-[0.7rem] leading-relaxed text-ink-300"><code>{`{
-  "format": "postgres",
-  "path": "public.orders",
+  "format": "delta",
+  "path": "analytics.orders",
+  "mode": "merge",
   "options": {
-    "host": "db.internal",
-    "database": "sales",
-    "user": "app",
-    "password_env": "PG_PASSWORD",
-    "partition_column": "id",
-    "num_partitions": 8
+    "merge_keys": ["order_id"],
+    "merge_condition": "T.deleted = false"
   }
 }`}</code></pre>
       </div>

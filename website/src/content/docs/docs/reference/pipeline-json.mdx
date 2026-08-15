@@ -23,7 +23,7 @@ One document describes one pipeline. This page is the whole schema; each section
   },
 
   "input": {                           // required
-    "format": "csv|parquet|delta|iceberg|txt|view|postgres|mysql|sqlserver|oracle|jdbc",
+    "format": "csv|parquet|delta|iceberg|txt|view",
     "path": "string",
     "options": {}
   },
@@ -76,7 +76,7 @@ Optional session settings.
 The common real use is declaring connector packages:
 
 ```json
-{ "spark": { "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" } } }
+{ "spark": { "configs": { "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.0" } } }
 ```
 
 ## `input`
@@ -165,25 +165,11 @@ When both `output` and `outputs` are present, `outputs` wins and `output` is ign
 ```json
 {
   "name": "customer_revenue",
-  "description": "Daily revenue per customer, curated and published back to the operational database.",
-
-  "spark": {
-    "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" }
-  },
+  "description": "Daily revenue per customer, curated and published to the lakehouse.",
 
   "input": {
-    "format": "postgres",
-    "path": "public.orders",
-    "options": {
-      "host": "db.internal",
-      "database": "sales",
-      "user": "app",
-      "password_env": "PG_PASSWORD",
-      "partition_column": "id",
-      "lower_bound": 1,
-      "upper_bound": 5000000,
-      "num_partitions": 8
-    }
+    "format": "delta",
+    "path": "sales.orders"
   },
 
   "transformations": [
@@ -211,7 +197,7 @@ When both `output` and `outputs` are present, `outputs` wins and `output` is ign
       "partition_by": ["ordered_at"]
     },
     {
-      "format": "postgres",
+      "format": "delta",
       "path": "analytics.customer_revenue",
       "mode": "merge",
       "transformations": [
@@ -221,13 +207,7 @@ When both `output` and `outputs` are present, `outputs` wins and `output` is ign
           "agg": ["sum(revenue) as revenue", "count(*) as orders"]
         }
       ],
-      "options": {
-        "host": "db.internal",
-        "database": "sales",
-        "user": "app",
-        "password_env": "PG_PASSWORD",
-        "merge_keys": ["customer_id"]
-      }
+      "options": { "merge_keys": ["customer_id"] }
     }
   ]
 }

@@ -27,13 +27,11 @@ A full reload is simple and, past a certain size, impossible. These are the patt
 
 `T` is the target table, `S` the incoming DataFrame. `merge_condition` adds SQL to the matching clause — useful for ignoring soft-deleted rows or restricting the merge to a partition.
 
-The same mode works for the [database connectors](/docs/reference/connectors/#write-modes), where it runs the vendor's own upsert.
-
 <Aside type="caution" title="One row per key">
   A merge fails when the incoming DataFrame has more than one row per key —
-  Delta raises *multiple source rows matched*, and a database silently inserts
-  twice. Deduplicate before writing, and add a `unique` validation on the merge
-  keys so the pipeline reports it rather than the storage layer.
+  Delta raises *multiple source rows matched*. Deduplicate before writing, and
+  add a `unique` validation on the merge keys so the pipeline reports it rather
+  than the storage layer.
 </Aside>
 
 ## Read only the new window
@@ -43,10 +41,6 @@ Push the window into the source so the read is small:
 ```json
 // a partitioned table or a database query
 { "type": "filter", "condition": "ordered_at >= '{since}'" }
-```
-
-```json
-{ "options": { "query": "SELECT * FROM orders WHERE updated_at > '{since}'" } }
 ```
 
 ```python

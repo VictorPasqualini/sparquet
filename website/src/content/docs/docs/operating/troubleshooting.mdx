@@ -26,9 +26,6 @@ A `stop_if_empty` fired: there was no data to process. `success` stays `True` â€
 **A transformation was silently skipped**
 Its `skip_if_false` evaluated to empty or false. Remember that `False`, `[]` and a missing parameter all become an empty string. Print the substituted document if in doubt.
 
-**The write mode was `ignore`**
-JDBC's `ignore` skips the write when the table already exists.
-
 ## Wrong or missing data
 
 **Columns disappeared**
@@ -54,28 +51,16 @@ The key was not in `params`. Unmatched placeholders stay literal by design.
 **`multiple source rows matched`** (Delta)
 The incoming DataFrame has more than one row per merge key. Deduplicate before writing, and add a `unique` validation on those columns.
 
-**A database upsert inserted duplicates**
-The target has no unique constraint on `merge_keys`. `ON CONFLICT` and `ON DUPLICATE KEY` need one to detect the conflict.
-
 **`Unknown save mode: MERGE`**
 The Iceberg writer compares the mode case-sensitively. Write `merge` in lowercase.
 
-**`merge` failed on Spark Connect**
-The JDBC upsert runs through the JVM, which Spark Connect does not expose. Use a classic session, or `append` plus an upsert on the database side.
+## Connectors
 
-## Database connections
+**`ClassNotFoundException` / `No suitable driver`**
+The connector package is not on the classpath. Add `spark.jars.packages` to the pipeline `spark.configs`, or install it as a cluster library.
 
-**`No suitable driver`**
-The JDBC driver JAR is not on the classpath. Add `spark.jars.packages` to the pipeline `spark.configs`, or install it as a cluster library.
-
-**`environment variable 'X' is not defined`**
-`password_env` / `user_env` name a variable that does not exist in the executing environment. On Databricks, expose the secret as an environment variable in the job.
-
-**The read is slow and one executor does all the work**
-No `partition_column`. See [Performance](/docs/operating/performance/#read-in-parallel).
-
-**`partition_column` raised an error**
-It needs `lower_bound`, `upper_bound` and `num_partitions` alongside it.
+**`Read format 'x' not supported`**
+The format is not registered. Custom connectors must be registered before the run â€” see [Extending](/docs/reference/extending/).
 
 ## Studio
 

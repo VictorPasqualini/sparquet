@@ -9,15 +9,10 @@ from spark_framework.io.base import BaseReader, BaseWriter
 from spark_framework.io.csv import CsvReader, CsvWriter
 from spark_framework.io.delta import DeltaReader, DeltaWriter
 from spark_framework.io.iceberg import IcebergReader, IcebergWriter
-from spark_framework.io.jdbc import JdbcReader, JdbcWriter
 from spark_framework.io.kafka import KafkaWriter
 from spark_framework.io.parquet import ParquetReader, ParquetWriter
 from spark_framework.io.txt import TxtReader, TxtWriter
 from spark_framework.io.view import ViewReader, ViewWriter
-
-# Um unico par de classes atende jdbc e os apelidos por banco: o `format` do JSON
-# escolhe driver, URL e dialeto de upsert dentro do proprio conector.
-_JDBC_FORMATS = ("jdbc", "postgres", "postgresql", "mysql", "sqlserver", "mssql", "oracle")
 
 _READERS: Dict[str, Type[BaseReader]] = {
     "parquet": ParquetReader,
@@ -26,7 +21,6 @@ _READERS: Dict[str, Type[BaseReader]] = {
     "delta": DeltaReader,
     "txt": TxtReader,
     "view": ViewReader,
-    **{name: JdbcReader for name in _JDBC_FORMATS},
 }
 
 _WRITERS: Dict[str, Type[BaseWriter]] = {
@@ -37,7 +31,6 @@ _WRITERS: Dict[str, Type[BaseWriter]] = {
     "txt": TxtWriter,
     "kafka": KafkaWriter,
     "view": ViewWriter,
-    **{name: JdbcWriter for name in _JDBC_FORMATS},
 }
 
 

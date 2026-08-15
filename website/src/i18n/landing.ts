@@ -53,7 +53,7 @@ export interface LandingCopy {
     body: string
     readWrite: string
     writeOnly: string
-    databases: string
+    lakehouse: string
     cta: string
   }
   ai: {
@@ -144,7 +144,7 @@ const EN: LandingCopy = {
     eyebrow: 'What you get',
     title: 'A complete pipeline language.',
     subtitle:
-      'Twenty transformations, twelve IO formats and six validators — every one of them documented, typed in the editor, and understood by the assistant.',
+      'Twenty transformations, seven IO formats and six validators — every one of them documented, typed in the editor, and understood by the assistant.',
     items: [
       {
         title: 'Transformations',
@@ -155,8 +155,8 @@ const EN: LandingCopy = {
         body: 'not_null, unique, range, regex, row_count and custom SQL, with fail / warn / skip policies and a per-rule report written to any destination.',
       },
       {
-        title: 'Databases',
-        body: 'PostgreSQL, MySQL, SQL Server, Oracle and generic JDBC as sources and destinations, with parallel reads and native upserts.',
+        title: 'Composable jobs',
+        body: 'Temp views hand data between pipelines in one session, and $include shares fragments across files.',
       },
       {
         title: 'Lakehouse formats',
@@ -196,17 +196,17 @@ const EN: LandingCopy = {
   connectors: {
     eyebrow: 'Connectors',
     title: 'Read from anywhere. Write to anywhere.',
-    body: 'The same node model covers files, lakehouse tables, streams and operational databases. Swapping a source is a field, not a rewrite.',
+    body: 'The same node model covers files, lakehouse tables, temp views and streams. Swapping a source is a field, not a rewrite.',
     readWrite: 'Read and write',
     writeOnly: 'Write only',
-    databases: 'Databases over JDBC',
+    lakehouse: 'Lakehouse features',
     cta: 'See all connectors',
   },
   ai: {
     eyebrow: 'AI assistant',
     title: 'Describe the pipeline. Review the diff.',
     body: 'The assistant knows the language because its prompt is generated from the same catalog that drives the editor — it cannot invent a transformation the framework does not have. Bring your own key: requests go straight from your browser to your provider.',
-    prompt: 'Read orders from Postgres, keep the confirmed ones, aggregate revenue per customer and upsert it into analytics.customer_revenue',
+    prompt: 'Read orders from Delta, keep the confirmed ones, aggregate revenue per customer and upsert it into analytics.customer_revenue',
     answer: 'Proposed a pipeline with 6 nodes · 1 destination',
     bullets: [
       'Generate a complete pipeline, or modify the one on the canvas',
@@ -299,7 +299,7 @@ const PT: LandingCopy = {
     eyebrow: 'O que você ganha',
     title: 'Uma linguagem de pipeline completa.',
     subtitle:
-      'Vinte transformações, doze formatos de IO e seis validadores — todos documentados, tipados no editor e compreendidos pelo assistente.',
+      'Vinte transformações, sete formatos de IO e seis validadores — todos documentados, tipados no editor e compreendidos pelo assistente.',
     items: [
       {
         title: 'Transformações',
@@ -310,8 +310,8 @@ const PT: LandingCopy = {
         body: 'not_null, unique, range, regex, row_count e SQL customizado, com políticas fail / warn / skip e relatório por regra gravado em qualquer destino.',
       },
       {
-        title: 'Bancos de dados',
-        body: 'PostgreSQL, MySQL, SQL Server, Oracle e JDBC genérico como fonte e destino, com leitura paralela e upsert nativo.',
+        title: 'Jobs componíveis',
+        body: 'Views temporárias passam dados entre pipelines na mesma sessão, e $include compartilha fragmentos entre arquivos.',
       },
       {
         title: 'Formatos de lakehouse',
@@ -351,17 +351,17 @@ const PT: LandingCopy = {
   connectors: {
     eyebrow: 'Conectores',
     title: 'Leia de qualquer lugar. Grave em qualquer lugar.',
-    body: 'O mesmo modelo de nós cobre arquivos, tabelas de lakehouse, streams e bancos operacionais. Trocar de fonte é mudar um campo, não reescrever o job.',
+    body: 'O mesmo modelo de nós cobre arquivos, tabelas de lakehouse, views temporárias e streams. Trocar de fonte é mudar um campo, não reescrever o job.',
     readWrite: 'Leitura e escrita',
     writeOnly: 'Somente escrita',
-    databases: 'Bancos via JDBC',
+    lakehouse: 'Recursos de lakehouse',
     cta: 'Ver todos os conectores',
   },
   ai: {
     eyebrow: 'Assistente de IA',
     title: 'Descreva o pipeline. Revise a proposta.',
     body: 'O assistente conhece a linguagem porque o prompt é gerado do mesmo catálogo que alimenta o editor — ele não inventa transformação que o framework não tem. Use sua própria chave: as requisições vão direto do seu navegador para o seu provedor.',
-    prompt: 'Leia pedidos do Postgres, mantenha os confirmados, agregue a receita por cliente e faça upsert em analytics.receita_cliente',
+    prompt: 'Leia pedidos do Delta, mantenha os confirmados, agregue a receita por cliente e faça upsert em analytics.receita_cliente',
     answer: 'Pipeline proposto com 6 nós · 1 destino',
     bullets: [
       'Gere um pipeline completo ou modifique o que está no canvas',
@@ -454,7 +454,7 @@ const ES: LandingCopy = {
     eyebrow: 'Lo que obtienes',
     title: 'Un lenguaje de pipelines completo.',
     subtitle:
-      'Veinte transformaciones, doce formatos de IO y seis validadores — todos documentados, tipados en el editor y comprendidos por el asistente.',
+      'Veinte transformaciones, siete formatos de IO y seis validadores — todos documentados, tipados en el editor y comprendidos por el asistente.',
     items: [
       {
         title: 'Transformaciones',
@@ -465,8 +465,8 @@ const ES: LandingCopy = {
         body: 'not_null, unique, range, regex, row_count y SQL propio, con políticas fail / warn / skip y un informe por regla escrito en cualquier destino.',
       },
       {
-        title: 'Bases de datos',
-        body: 'PostgreSQL, MySQL, SQL Server, Oracle y JDBC genérico como fuente y destino, con lecturas paralelas y upserts nativos.',
+        title: 'Trabajos componibles',
+        body: 'Las vistas temporales pasan datos entre pipelines en una sesión, y $include comparte fragmentos entre archivos.',
       },
       {
         title: 'Formatos de lakehouse',
@@ -506,17 +506,17 @@ const ES: LandingCopy = {
   connectors: {
     eyebrow: 'Conectores',
     title: 'Lee desde donde sea. Escribe donde sea.',
-    body: 'El mismo modelo de nodos cubre archivos, tablas de lakehouse, streams y bases operativas. Cambiar de fuente es cambiar un campo, no reescribir el trabajo.',
+    body: 'El mismo modelo de nodos cubre archivos, tablas de lakehouse, vistas temporales y streams. Cambiar de fuente es cambiar un campo, no reescribir el trabajo.',
     readWrite: 'Lectura y escritura',
     writeOnly: 'Solo escritura',
-    databases: 'Bases de datos por JDBC',
+    lakehouse: 'Funciones de lakehouse',
     cta: 'Ver todos los conectores',
   },
   ai: {
     eyebrow: 'Asistente de IA',
     title: 'Describe el pipeline. Revisa la propuesta.',
     body: 'El asistente conoce el lenguaje porque su prompt se genera del mismo catálogo que alimenta el editor — no puede inventar una transformación que el framework no tiene. Usa tu propia clave: las peticiones van directas de tu navegador a tu proveedor.',
-    prompt: 'Lee pedidos de Postgres, quédate con los confirmados, agrega los ingresos por cliente y haz upsert en analytics.ingresos_cliente',
+    prompt: 'Lee pedidos de Delta, quédate con los confirmados, agrega los ingresos por cliente y haz upsert en analytics.ingresos_cliente',
     answer: 'Pipeline propuesto con 6 nodos · 1 destino',
     bullets: [
       'Genera un pipeline completo o modifica el que está en el lienzo',

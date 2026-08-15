@@ -17,9 +17,9 @@ const copy = LANDING[locale].hero
 const pipeline = `{
   "name": "orders_curated",
   "input": {
-    "format": "postgres",
-    "path": "public.orders",
-    "options": { "host": "db.internal", "database": "sales" }
+    "format": "csv",
+    "path": "/data/landing/orders",
+    "options": { "header": "true", "inferSchema": "true" }
   },
   "transformations": [
     { "type": "filter", "condition": "status = 'CONFIRMED'" },
@@ -39,7 +39,7 @@ const pipeline = `{
 }`
 
 const nodes = [
-  { label: 'PostgreSQL', detail: 'public.orders', accent: 'sky' },
+  { label: 'CSV', detail: '/data/landing/orders', accent: 'sky' },
   { label: 'Filter', detail: "status = 'CONFIRMED'", accent: 'amber' },
   { label: 'With column', detail: 'revenue = qty * price', accent: 'amber' },
   { label: 'Validations', detail: '1 rule · warn', accent: 'cyan' },
