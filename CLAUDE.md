@@ -8,7 +8,7 @@ Objetivo: produto reutilizável para qualquer caso de ingestão, transformação
 ## Uso como biblioteca (ponto de entrada principal)
 
 ```python
-from spark_framework import SparkFramework, Pipeline, PipelineResult, PipelineConfig
+from sparquet import SparkFramework, Pipeline, PipelineResult, PipelineConfig
 
 fw = SparkFramework(spark={"app_name": "MeuJob", "master": "yarn"})
 
@@ -50,7 +50,7 @@ fw.stop()
 ### Uso direto de Pipeline
 
 ```python
-from spark_framework import Pipeline
+from sparquet import Pipeline
 
 p = Pipeline.from_file("meu_pipeline.json")
 result = p.run()
@@ -549,15 +549,15 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 
 Padrão **staging → commit** do caso de uso: cada conf de registro grava no staging
 genérico `view_registro_staging`; a `conf_commit_registro.json` verifica (via
-`validations`) e grava os 3 destinos. Ver `ROADMAP_CASE_OF_SUCCESS.md`.
+`validations`) e grava os 3 destinos. Ver `tests/case-of-success/ROADMAP_CASE_OF_SUCCESS.md`.
 
 ---
 
 ## Roadmap
 
-- Caso de uso (migração de registro): `ROADMAP_CASE_OF_SUCCESS.md`
-- Evolução estrutural do framework (conectores, data quality/governança, dry-run,
-  métricas, perfis): `ROADMAP.md`
+- Caso de uso (migração de registro): `tests/case-of-success/ROADMAP_CASE_OF_SUCCESS.md`
+- Melhorias e pendências de desenvolvimento do framework (conectores, data
+  quality/governança, dry-run, métricas, perfis): `BACKLOG.md`
 - Deploy como biblioteca no PyPI: `docs/DEPLOY_PYPI.md`
 
 ## graphify

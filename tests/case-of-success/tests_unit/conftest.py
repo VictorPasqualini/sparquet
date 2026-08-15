@@ -17,7 +17,7 @@ import os
 import pytest
 from pyspark.sql import SparkSession
 
-from spark_framework import SparkFramework
+from sparquet import SparkFramework
 
 # Diretorio das confs (um nivel acima de tests_unit/) e dos goldens.
 CONF_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -1,6 +1,6 @@
 import traceback
 
-from spark_framework import SparkFramework
+from sparquet import SparkFramework
 
 # ---------------------------------------------------------------------------
 # Mapeamento declarativo dos registros: cada (tipo_ativo, registradora) aponta

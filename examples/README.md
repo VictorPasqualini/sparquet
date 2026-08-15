@@ -6,7 +6,7 @@ real e completo, veja [`tests/case-of-success/`](../tests/case-of-success).
 
 Como executar (como biblioteca):
 ```python
-from spark_framework import SparkFramework
+from sparquet import SparkFramework
 fw = SparkFramework()
 print(fw.run("examples/01_ingestao_validacoes.json").summary())
 fw.stop()
