@@ -32,3 +32,10 @@ tests/csv/orders_export/
 
 # testes
 output
+
+# Generated knowledge graph (rebuild with /graphify)
+graphify-out/
+
+# Frontend
+node_modules/
+sparquet-studio/dist/

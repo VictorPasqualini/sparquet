@@ -1,0 +1,20 @@
+node_modules
+dist
+*.tsbuildinfo
+vite.config.js
+vitest.config.js
+dist-ssr
+*.local
+.vite
+
+# Generated framework spec used while authoring the catalog
+.spec
+
+# Python runner
+server/__pycache__
+server/.venv
+*.pyc
+
+.DS_Store
+.idea
+*.log
