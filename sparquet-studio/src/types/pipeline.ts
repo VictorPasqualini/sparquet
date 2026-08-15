@@ -79,7 +79,6 @@ export const TRANSFORMATION_TYPES = [
   'rename',
   'cast',
   'with_column',
-  'add_column',
   'struct',
   'drop_duplicates',
   'distinct',
@@ -104,7 +103,7 @@ export const VALIDATION_TYPES = [
   'range',
   'regex',
   'row_count',
-  'custom_sql',
+  'sql',
 ] as const
 
 export type ValidationType = (typeof VALIDATION_TYPES)[number]
@@ -148,6 +147,8 @@ export interface ValidationsSpec {
   rules?: ValidationRuleSpec[]
   /** Optional sink for the per-rule quality report. */
   report?: OutputSpec
+  /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
+  outputs?: Record<string, OutputSpec>
 }
 
 export interface OutputSpec {

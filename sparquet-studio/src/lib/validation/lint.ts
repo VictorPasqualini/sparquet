@@ -881,8 +881,7 @@ const trackColumns = (columns: Set<string> | null, node: TransformNode): Set<str
       }
       return new Set(names)
     }
-    case 'with_column':
-    case 'add_column': {
+    case 'with_column': {
       if (!columns) return null
       const next = new Set(columns)
       const map = params.columns

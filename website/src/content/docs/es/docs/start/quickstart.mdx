@@ -68,9 +68,9 @@ Cinco minutos, un archivo, un conjunto de datos real en disco. Sin Studio, sin c
 3. ### Ejecútalo
 
    ```python title="run.py"
-   from spark_framework import SparkFramework
+   from sparquet import Sparquet
 
-   fw = SparkFramework(spark={"app_name": "demo", "master": "local[*]"})
+   fw = Sparquet(spark={"app_name": "demo", "master": "local[*]"})
    result = fw.run("pedidos.json")
 
    print(result.summary())
@@ -87,7 +87,7 @@ Cinco minutos, un archivo, un conjunto de datos real en disco. Sin Studio, sin c
    O directamente desde la terminal, sin ningún archivo Python:
 
    ```bash
-   python -m spark_framework.cli pedidos.json
+   python -m sparquet.cli pedidos.json
    ```
 
 4. ### Lee el resultado

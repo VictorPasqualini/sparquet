@@ -83,10 +83,6 @@ class WithColumnTransformation(BaseTransformation):
         return df.withColumn(name, F.expr(params["expression"]))
 
 
-# Backward-compatible alias — use "with_column" in new configs
-AddColumnTransformation = WithColumnTransformation
-
-
 class StructTransformation(BaseTransformation):
     """Monta uma coluna struct (aninhada) a partir de um mapa campo → expressão.
 
@@ -400,6 +396,11 @@ class JoinTransformation(BaseTransformation):
       on                   – column name, list of column names, or SQL expression
                              (SQL expressions containing spaces use l./r. aliases)
       how                  – join type (default: inner)
+      broadcast            – dica de broadcast (map-side) join: espalha o lado pequeno
+                             em todos os executors e evita o shuffle do lado grande.
+                             true / "right" → broadcast do lado direito (o `with`, ex:
+                             dimensão/lookup pequeno); "left" → broadcast do principal;
+                             false / ausente → sem dica (o Spark decide por tamanho).
       with_transformations – list of transformations applied to the right-side
                              DataFrame before the join (all builtin types supported)
 
@@ -408,6 +409,12 @@ class JoinTransformation(BaseTransformation):
         "with": { "format": "parquet", "path": "/ref/products" },
         "on": "product_id",
         "how": "leftanti" }
+
+      { "type": "join",
+        "with": { "format": "delta", "path": "ref.dim_produto" },
+        "on": "produto_id",
+        "how": "left",
+        "broadcast": true }
 
       { "type": "join",
         "with": { "format": "delta", "path": "catalog.schema.contratos" },
@@ -447,10 +454,37 @@ class JoinTransformation(BaseTransformation):
         left = df.alias("l")
         right = other.alias("r")
 
+        # Broadcast (map-side) join: espalha o lado pequeno em todos os executors,
+        # evitando o shuffle do lado grande. O alias é preservado dentro da dica.
+        side = self._broadcast_side()
+        if side == "right":
+            right = F.broadcast(right)
+        elif side == "left":
+            left = F.broadcast(left)
+
         # String with spaces → SQL expression (supports l.campo / r.campo)
         if isinstance(on, str) and " " in on:
             return left.join(right, F.expr(on), how)
         return left.join(right, on, how)
+
+    def _broadcast_side(self) -> str:
+        """Normaliza o param 'broadcast' → "left" | "right" | "" (sem dica)."""
+        value = self.config.params.get("broadcast", False)
+        if value is True:
+            return "right"
+        if value is False or value is None:
+            return ""
+        if isinstance(value, str):
+            side = value.strip().lower()
+            if side in ("true", "yes", "right"):
+                return "right"
+            if side == "left":
+                return "left"
+            if side in ("", "false", "no", "none"):
+                return ""
+        raise ValueError(
+            f"join: 'broadcast' invalido '{value}'. Use true/false ou 'left'/'right'."
+        )
 
 
 

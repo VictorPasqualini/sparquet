@@ -116,7 +116,7 @@ The framework detects its environment and adapts the session:
 | EMR / Dataproc / Synapse | Builds a session with your `configs` |
 | Local | Applies `master` too (`local[*]` by default) |
 
-The session is a process-wide singleton: the first `SparkFramework` instance wins, and later pipelines share it. That is what makes running several pipelines in one job cheap.
+The session is a process-wide singleton: the first `Sparquet` instance wins, and later pipelines share it. That is what makes running several pipelines in one job cheap.
 
 ## Failure model
 

@@ -8,7 +8,6 @@ from pyspark.sql import DataFrame
 from sparquet.core.config import TransformationConfig
 from sparquet.transform.base import BaseTransformation
 from sparquet.transform.builtin import (
-    AddColumnTransformation,
     CastTransformation,
     CheckpointTransformation,
     CollectTransformation,
@@ -38,7 +37,6 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "rename": RenameTransformation,
     "cast": CastTransformation,
     "with_column": WithColumnTransformation,
-    "add_column": AddColumnTransformation,   # alias backward-compat
     "struct": StructTransformation,
     "drop_duplicates": DropDuplicatesTransformation,
     "distinct": DistinctTransformation,

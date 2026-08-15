@@ -47,7 +47,7 @@ contratos (via `validations`) e grava os **3 destinos** (Kafka, silver_registro_
 silver_registro_parcelas). O Kafka deduplica por `id_vert` (grão contrato no registro,
 lote na emissão). Isso elimina a duplicação dos 3 outputs em cada conf.
 
-**Data quality:** a verificação de "não houve perda" é uma `validation` `custom_sql`
+**Data quality:** a verificação de "não houve perda" é uma `validation` `sql`
 (`on_failure: warn`) na conf de commit, que cruza o staging com `view_cessoes_pendentes`
 (elegíveis). Resultado em `PipelineResult.validation_results` (mensagem + `failed_count`).
 
@@ -189,7 +189,7 @@ orquestra** e a lógica de dados vive na configuração.
    JSON começa a virar código.
 
 6. **Data quality como cidadão de primeira classe.** A garantia de "não houve perda"
-   é uma `validation` `custom_sql` na conf de commit, com resultado estruturado em
+   é uma `validation` `sql` na conf de commit, com resultado estruturado em
    `PipelineResult.validation_results` — pronto para observabilidade, não um `assert`
    escondido no meio do job.
 

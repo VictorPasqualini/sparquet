@@ -21,7 +21,7 @@ Validations measure the DataFrame after every transformation and before any writ
       { "type": "regex", "column": "email", "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$" },
       { "type": "row_count", "min": 1, "max": 5000000 },
       {
-        "type": "custom_sql",
+        "type": "sql",
         "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE revenue < 0",
         "error_message": "Negative revenue found"
       }
@@ -81,19 +81,74 @@ Bounds the size of the DataFrame — the cheapest guard against a silently empty
 
 `min` defaults to `0`; `max` is optional.
 
-### `custom_sql`
+### `sql`
 
-Anything the other rules do not express. The query runs against a temp view named `_validation_df` and must return a **single boolean**: `true` means the rule passed.
+Anything the other rules do not express. The query runs against a temp view named `_validation_df` and must return a **single boolean**: `true` means the rule passed. Semantics are *pass-when-true* — write the invariant, not the violation.
 
 ```json
 {
-  "type": "custom_sql",
+  "type": "sql",
   "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE revenue < 0",
   "error_message": "Negative revenue found"
 }
 ```
 
 Use it for cross-column invariants (`ends_at > starts_at`), referential expectations inside the DataFrame, or business rules that only make sense together.
+
+<Aside type="note">
+  This rule was called `custom_sql` in earlier releases. It is now `sql`, with
+  identical behavior; update old configs.
+</Aside>
+
+### `check`
+
+A single **metric** measured over the DataFrame (or a column) and compared to a **threshold**, in the SODA-Core style. It carries `warn` and `fail` severity levels, so a check can pass while still raising a warning.
+
+```json
+{ "type": "check", "metric": "row_count", "must_be": "> 0" }
+
+{ "type": "check", "name": "cpf rarely missing",
+  "metric": "missing_percent", "column": "cpf", "must_be": "< 1%", "warn": "= 0" }
+
+{ "type": "check", "metric": "duplicate_count", "columns": ["id"], "must_be": "= 0" }
+
+{ "type": "check", "metric": "invalid_percent", "column": "email",
+  "valid_format": "email", "must_be": "< 5%" }
+
+{ "type": "check", "metric": "avg", "column": "amount", "must_be": "between 10 and 100" }
+
+{ "type": "check", "metric": "freshness", "column": "updated_at", "must_be": "< 1d" }
+```
+
+**Metrics.** `row_count`, `distinct_count`, `missing_count` / `missing_percent`, `duplicate_count` / `duplicate_percent`, `invalid_count` / `invalid_percent`, `min`, `max`, `avg` (`mean`), `sum`, `stddev`, and `freshness` (seconds since the newest value in `column`). Count-per-column metrics take `column` (or `columns`; the distinct/duplicate metrics use the whole set).
+
+**Threshold DSL** (in `must_be`, the pass condition, and optional `warn`):
+
+| Form | Example |
+|---|---|
+| comparison | `> 0`, `< 5`, `>= 100`, `<= 10`, `= 0`, `!= 0` |
+| range | `between 10 and 20`, `not between 1 and 2` |
+| percent suffix | `< 5%` (the `%` is cosmetic — the number is `5`) |
+| duration suffix | `< 1d`, `<= 2h`, `> 30m` (converted to seconds, for `freshness`) |
+
+Duration units are `s` `m` `h` `d` `w`. A bare number means equality (`must_be: "0"` ≡ `= 0`).
+
+**Column validity** (for `invalid_*` metrics — a value counts as invalid when it is non-missing and fails every configured rule): `valid_values`, `invalid_values`, `valid_format` (named regexes: `email`, `uuid`, `cpf`, `cnpj`, `date`, `timestamp`, `phone`, `url`, `ip`, `integer`, `decimal`, `boolean`, `alphanumeric`, `credit_card`, …), `valid_regex`, `valid_min` / `valid_max`, `valid_min_length` / `valid_max_length` / `valid_length`. For `missing_*` metrics, `missing_values` treats extra sentinel strings (e.g. `["", "N/A"]`) as missing on top of `null`.
+
+### `schema`
+
+Asserts the shape of the DataFrame — which columns must exist, which must not, and their types.
+
+```json
+{
+  "type": "schema",
+  "required_columns": ["id", "amount"],
+  "forbidden_columns": ["_debug"],
+  "column_types": { "id": "bigint", "amount": "double" }
+}
+```
+
+`column_types` accepts type aliases: `long` → `bigint`, `integer` → `int`, and a `decimal(p,s)` expectation matches on the base `decimal` type regardless of precision/scale.
 
 ## `on_failure`
 
@@ -114,6 +169,20 @@ What the engine does when at least one rule fails.
 
 The mode is compared case-sensitively — write it lowercase.
 
+## Severity
+
+`check` rules add a level between pass and fail. A check that clears `must_be` but trips its optional `warn` threshold has **`warn` severity**: it is logged and reported, but it counts as passing — a `warn` never aborts the run, even under `on_failure: "fail"`. Only a real failure (`must_be` violated, or any other rule failing) does.
+
+Each result carries the severity alongside the classic fields:
+
+| Field | Meaning |
+|---|---|
+| `severity` | `pass`, `warn` or `fail` — derived from `passed` when a rule does not set it |
+| `metric_value` | the numeric metric a `check` measured (`None` for rules that produce no metric) |
+| `check_name` | the check's optional `name`, for readable reports |
+
+Because a `warn` keeps `passed = True`, an orchestrator filtering on `not check.passed` sees only hard failures; inspect `check.severity == "warn"` to surface warnings too.
+
 ## The report
 
 `report` accepts a full output configuration — any format, any mode, even its own transformations. One row per rule:
@@ -122,8 +191,11 @@ The mode is compared case-sensitively — write it lowercase.
 |---|---|
 | `pipeline` | the pipeline `name` |
 | `rule_type` | validator type |
-| `passed` | boolean |
+| `check_name` | the check's `name`, when set (empty otherwise) |
+| `severity` | `pass`, `warn` or `fail` |
+| `passed` | boolean (`true` for `pass` and `warn`) |
 | `failed_count` | offending rows (0 when passed) |
+| `metric_value` | the measured metric for `check` rules (null otherwise) |
 | `message` | human-readable failure detail |
 | `validated_at` | timestamp of the check |
 
@@ -165,7 +237,7 @@ if any(not check.passed for check in result.validation_results):
 ## Custom validators
 
 ```python
-from spark_framework.validation.base import BaseValidator, ValidationResult
+from sparquet.validation.base import BaseValidator, ValidationResult
 import pyspark.sql.functions as F
 
 class NoFutureDateValidator(BaseValidator):

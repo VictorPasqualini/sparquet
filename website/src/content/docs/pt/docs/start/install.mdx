@@ -24,7 +24,7 @@ Em plataforma gerenciada (Databricks, EMR, Dataproc, Synapse) Spark e Java já e
   <TabItem label="pip">
 
 ```bash
-pip install spark-framework
+pip install sparquet
 ```
 
   </TabItem>
@@ -39,10 +39,10 @@ pip install -e .
   </TabItem>
   <TabItem label="Databricks">
 
-Adicione `spark-framework` às bibliotecas do cluster, ou instale no notebook:
+Adicione `sparquet` às bibliotecas do cluster, ou instale no notebook:
 
 ```python
-%pip install spark-framework
+%pip install sparquet
 dbutils.library.restartPython()
 ```
 
@@ -52,15 +52,15 @@ dbutils.library.restartPython()
 Verifique:
 
 ```python
-from spark_framework import SparkFramework
-print(SparkFramework)
+from sparquet import Sparquet
+print(Sparquet)
 ```
 
 ### Extras opcionais
 
 | Extra | Instalação | Quando precisa |
 |---|---|---|
-| Delta Lake (OSS) | `pip install "spark-framework[delta]"` | Tabelas Delta fora do Databricks |
+| Delta Lake (OSS) | `pip install "sparquet[delta]"` | Tabelas Delta fora do Databricks |
 | Iceberg | pacote Spark no cluster | Tabelas Iceberg |
 | Kafka | pacote Spark no cluster | Publicar em um tópico |
 

@@ -1,6 +1,6 @@
 {
   "name": "conf_commit_registro",
-  "description": "Commit genérico do registro (roda no loop, 1x por fluxo). Lê o staging produzido pela conf de registro (view_registro_staging: id_operacao, id_vert, id_cessao, numero_contrato, payload), VERIFICA a completude dos contratos via validations (custom_sql, warn — compara com os elegíveis em view_cessoes_pendentes) e grava os 3 destinos: Kafka (deduplicado por id_vert => grão contrato no registro, lote na emissão), silver_registro_contratos (nível contrato) e silver_registro_parcelas (nível parcela, via join com silver_parcela). Topico e kafka_broker vêm por param.",
+  "description": "Commit genérico do registro (roda no loop, 1x por fluxo). Lê o staging produzido pela conf de registro (view_registro_staging: id_operacao, id_vert, id_cessao, numero_contrato, payload), VERIFICA a completude dos contratos via validations (sql, warn — compara com os elegíveis em view_cessoes_pendentes) e grava os 3 destinos: Kafka (deduplicado por id_vert => grão contrato no registro, lote na emissão), silver_registro_contratos (nível contrato) e silver_registro_parcelas (nível parcela, via join com silver_parcela). Topico e kafka_broker vêm por param.",
 
   "input": {
     "format": "view",
@@ -16,7 +16,7 @@
     "on_failure": "warn",
     "rules": [
       {
-        "type": "custom_sql",
+        "type": "sql",
         "error_message": "PERDA DE DADOS: contratos preparados (staging) < contratos elegiveis na base para este fluxo",
         "query": "SELECT (SELECT count(*) FROM (SELECT DISTINCT id_cessao, numero_contrato FROM _validation_df)) >= (SELECT count(*) FROM (SELECT DISTINCT id_cessao, numero_contrato FROM view_cessoes_pendentes WHERE tipo_ativo = '{tipo_ativo}' AND registradora = '{registradora}' AND fluxo_operacao = '{fluxo_operacao}' AND ((tipo_contrato = '{tipo_contrato}' AND multi_ativos = true) OR (multi_ativos = false))))"
       }

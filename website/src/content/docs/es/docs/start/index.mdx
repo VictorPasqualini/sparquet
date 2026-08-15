@@ -38,9 +38,9 @@ El documento es el contrato. El framework nunca necesita al Studio para ejecutar
 ```
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework()
+fw = Sparquet()
 print(fw.run("pedidos_curados.json").summary())
 fw.stop()
 ```

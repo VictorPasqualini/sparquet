@@ -211,4 +211,4 @@ Issues and pull requests are welcome. Please keep `npm run typecheck`, `npm run 
 
 ## License
 
-MIT — see [LICENSE](../LICENSE).
+Apache 2.0 — see [LICENSE](../LICENSE).

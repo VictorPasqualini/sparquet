@@ -187,7 +187,7 @@ export const FORMATS: FormatDef[] = [
     pathLabel: 'Table or path',
     pathPlaceholder: 'catalog.schema.pedidos',
     pathHelp:
-      'Treated as a physical path when it starts with /, s3://, gs://, abfss://, wasbs://, hdfs://, dbfs:/ or file: — otherwise any value containing a dot is treated as a catalog table name.',
+      'Read as a catalog table name only when it has no "/" and no ":" (e.g. catalog.schema.table). Anything with a slash or a scheme colon — /mnt/…, s3://, s3a://, dbfs:/, C:/… — is a physical path.',
     modes: ['overwrite', 'append', 'merge'],
     supportsPartitioning: true,
     supportsMerge: true,
@@ -253,8 +253,7 @@ export const FORMATS: FormatDef[] = [
     ],
     gotchas: [
       'Merge mode requires merge_keys — an empty or absent list raises a ValueError before any Spark call.',
-      'The table-name heuristic is a trap: "output/tabela.delta", "./out.delta" and "C:/data/my.delta" are all read as catalog table names. Force a leading / or a supported scheme for physical paths.',
-      'Schemes outside the whitelist (s3a://, abfs://, wasb://, adl://, viewfs://, oss://) fall through to the dot test and can be misclassified as tables.',
+      'Table-vs-path is scheme-agnostic: any value with "/" or ":" is a physical path (every object-storage scheme — s3://, s3a://, gs://, abfss://, wasb://, dbfs:/, … — plus relative and Windows paths). Only a dotted name with neither (e.g. "out.delta") is still read as a catalog table — prefix "./" to force a path.',
       'partition_by is ignored entirely on the merge path.',
       'The generated UPDATE SET covers every column except the merge keys — a DataFrame containing only key columns produces invalid MERGE SQL.',
       'No delete branch and no source de-duplication: duplicated merge keys in the source raise Delta\'s "multiple source rows matched" error at runtime.',

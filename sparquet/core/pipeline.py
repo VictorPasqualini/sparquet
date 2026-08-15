@@ -121,6 +121,7 @@ class Pipeline:
                 df, self.config.validations
             )
             self._write_validation_report(spark, validation_results, log)
+            self._write_validation_outputs(spark, df, validation_results, log)
 
             output_metrics = self._write_outputs(spark, df, log)
             rows_written = sum(m.rows_written for m in output_metrics)
@@ -173,6 +174,7 @@ class Pipeline:
 
         from pyspark.sql.types import (
             BooleanType,
+            DoubleType,
             LongType,
             StringType,
             StructField,
@@ -182,12 +184,24 @@ class Pipeline:
         schema = StructType([
             StructField("pipeline", StringType()),
             StructField("rule_type", StringType()),
+            StructField("check_name", StringType()),
+            StructField("severity", StringType()),
             StructField("passed", BooleanType()),
             StructField("failed_count", LongType()),
+            StructField("metric_value", DoubleType()),
             StructField("message", StringType()),
         ])
         rows = [
-            (self.config.name, r.rule_type, r.passed, int(r.failed_count), r.message)
+            (
+                self.config.name,
+                r.rule_type,
+                r.check_name,
+                r.severity,
+                r.passed,
+                int(r.failed_count),
+                float(r.metric_value) if r.metric_value is not None else None,
+                r.message,
+            )
             for r in results
         ]
         report_df = spark.createDataFrame(rows, schema).withColumn(
@@ -200,6 +214,54 @@ class Pipeline:
             regras=len(results),
         )
         WriterFactory.create(spark, report).write(report_df)
+
+    def _write_validation_outputs(
+        self, spark: SparkSession, df: DataFrame, results, log
+    ) -> None:
+        """Roteia LINHAS a partir das validações — apartado das saídas principais.
+
+        1. `validations.outputs.{valid,invalid}` — split de quarentena por linha
+           (bronze → silver_ok / silver_quarentena), baseado nos checks row-level.
+        2. Destino próprio de um check `sql` com `failed_rows` (`rule.output`) — grava
+           exatamente as linhas que a query marcou como ruins.
+
+        Em `on_failure="fail"` com violação, o engine aborta antes daqui (nada é escrito).
+        """
+        validations = self.config.validations
+
+        if validations.outputs:
+            split = self._validation_engine.split(df, validations)
+            by_key = {"valid": split.valid, "invalid": split.invalid}
+            for key, output in validations.outputs.items():
+                target = by_key.get(key)
+                if target is None:
+                    log.warning(
+                        "validations.outputs: chave desconhecida (use 'valid'/'invalid')",
+                        chave=key,
+                    )
+                    continue
+                projected = self._project_columns(target, output)
+                log.info(
+                    "Escrevendo quarentena de validacao",
+                    tipo=key,
+                    formato=output.format,
+                    path=output.path,
+                )
+                WriterFactory.create(spark, output).write(projected)
+
+        # Destino por check (ex.: sql failed_rows com output próprio).
+        for rule, result in zip(validations.rules, results):
+            raw_output = rule.params.get("output")
+            failed = getattr(result, "failed_rows", None)
+            if raw_output and failed is not None:
+                out_cfg = OutputConfig.from_dict(raw_output)
+                projected = self._project_columns(failed, out_cfg)
+                log.info(
+                    "Escrevendo linhas que falharam",
+                    regra=result.rule_type,
+                    path=out_cfg.path,
+                )
+                WriterFactory.create(spark, out_cfg).write(projected)
 
     def _write_outputs(
         self, spark: SparkSession, df: DataFrame, log

@@ -13,7 +13,7 @@ Everything built in is registered through the same interfaces you can use. When 
 
 ```python
 import pyspark.sql.functions as F
-from spark_framework.transform.base import BaseTransformation
+from sparquet.transform.base import BaseTransformation
 
 class NormalizeText(BaseTransformation):
     """Trims and lowercases a column."""
@@ -37,7 +37,7 @@ fw.register_transformation("normalize_text", NormalizeText)
 
 ```python
 import pyspark.sql.functions as F
-from spark_framework.validation.base import BaseValidator, ValidationResult
+from sparquet.validation.base import BaseValidator, ValidationResult
 
 class NoFutureDateValidator(BaseValidator):
     def validate(self, df):
@@ -61,7 +61,7 @@ Returning a `ValidationResult` — rather than raising — is what lets `on_fail
 ## A connector
 
 ```python
-from spark_framework.io.base import BaseReader, BaseWriter
+from sparquet.io.base import BaseReader, BaseWriter
 
 class ElasticReader(BaseReader):
     def read(self):
@@ -85,7 +85,7 @@ fw.register_writer("elasticsearch", ElasticWriter)
 
 <Aside type="note">
   Reader and writer registries are class-level, shared by every
-  `SparkFramework` in the process. Transformation and validator registries are
+  `Sparquet` in the process. Transformation and validator registries are
   per-instance, so two frameworks can carry different custom transformations.
 </Aside>
 

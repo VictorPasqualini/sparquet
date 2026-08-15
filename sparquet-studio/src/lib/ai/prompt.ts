@@ -29,7 +29,6 @@ function transformationLine(def: TransformationDef): string {
   if (def.emitsRuntimeVar) flags.push('publishes a {{runtime}} variable')
   if (def.canHalt) flags.push('can end the run')
   if (def.sideEffectFree) flags.push('never changes the DataFrame')
-  if (def.deprecatedAlias) flags.push(`legacy alias of ${def.deprecatedAlias} — do not emit`)
 
   const head = `- ${def.type} — required: ${join(required)} — optional: ${join(optional)}`
   const tail = flags.length ? ` [${flags.join('; ')}]` : ''

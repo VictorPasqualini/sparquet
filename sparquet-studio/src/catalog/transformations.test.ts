@@ -98,11 +98,6 @@ describe('with_column precedence', () => {
     expect(mapField.validate?.(params.columns, params)).toBeNull()
   })
 
-  it('applies the same rule to the add_column alias', () => {
-    const alias = fieldOf('add_column', 'columns')
-    expect(alias.validate?.({}, { columns: {} })).toBeTruthy()
-  })
-
   it('lints a node whose empty map silently disables the single-column keys', () => {
     expect(
       lintOne('with_column', { column: 'total', expression: 'qtd * preco', columns: {} }),

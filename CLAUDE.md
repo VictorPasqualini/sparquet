@@ -103,8 +103,9 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `ReaderFactory/WriterFactory` | `io/factory.py` | Registry de formatos; extensível |
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
-| `ValidationEngine` | `validation/engine.py` | Roda validators; respeita `on_failure` |
-| Validators nativos | `validation/builtin.py` | Ver lista abaixo |
+| `ValidationEngine` | `validation/engine.py` | Adaptador fino sobre o `sparquet_cola`; respeita `on_failure` e severidade (warn não aborta); `split(df, config)` → valid/invalid |
+| **`sparquet_cola`** (lib de DQ) | `sparquet_cola/` (pacote top-level) | Motor de qualidade de dados **separável** (só depende de pyspark). `Cola` (run/split/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/`check`/`schema`), `thresholds`. O bloco JSON continua `validations`; o branding Cola é interno. Ver `sparquet_cola/__init__.py` |
+| `sparquet.validation.*` | `validation/{base,builtin,checks,thresholds}.py` | Shims de compat que reexportam do `sparquet_cola` com os nomes históricos (`BaseValidator`, `ValidationResult`, `*Validator`) |
 | `apply_template` | `utils/template.py` | Substitui `{chave}` no JSON bruto antes do parse; formata listas/booleanos para SQL |
 | `resolve_includes` | `utils/includes.py` | Expande diretivas `$include` em transformations |
 
@@ -262,7 +263,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     { "type": "rename", "mappings": {"old": "new"} },
     { "type": "cast", "columns": {"col": "type"} },
     // with_column: aceita "column" (ou "name", compat) + "expression", OU "columns"
-    // (mapa nome→expr) para criar várias colunas num bloco, em ordem. add_column = alias.
+    // (mapa nome→expr) para criar várias colunas num bloco, em ordem.
     { "type": "with_column", "column": "col", "expression": "SQL expr" },
     { "type": "with_column", "columns": { "c1": "expr1", "c2": "expr2 usando c1" } },
     // struct: monta coluna struct aninhada a partir de um mapa campo→expressão
@@ -324,6 +325,9 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
       "how": "inner|left|right|full|cross|leftsemi|leftanti|...",
+      "broadcast": true,                // opcional: true/"right" faz broadcast do lado
+                                        // direito (dimensão/lookup pequeno) — map-side
+                                        // join sem shuffle; "left" faz broadcast do principal
       "skip_if_false": "{meu_param}",   // opcional: pula o join se o valor pós-substituição for ""
       // with_transformations: aplica transformações no df da direita antes do join
       // df esquerdo (principal) é alias 'l'; df direito é alias 'r'.
@@ -353,12 +357,43 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       { "type": "range", "column": "age", "min": 0, "max": 150 },
       { "type": "regex", "column": "email", "pattern": ".*@.*" },
       { "type": "row_count", "min": 1, "max": 1000000 },
-      {
-        "type": "custom_sql",
-        "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ...",
-        "error_message": "msg"
-      }
-    ]
+      // sql: dois modos. "query" = invariante pass-when-true (retorna booleano).
+      { "type": "sql", "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ...",
+        "error_message": "msg" },
+      // "failed_rows" = retorna as LINHAS ruins (estilo SODA "failed rows"); falha se
+      // vier alguma. "output" (opcional) grava essas linhas num destino.
+      { "type": "sql", "failed_rows": "SELECT * FROM _validation_df WHERE valor < 0",
+        "output": { "format": "delta", "path": "dq.linhas_ruins", "mode": "overwrite" } },
+
+      // check: estilo SODA Core — uma MÉTRICA comparada a um THRESHOLD, com níveis
+      // warn/fail. must_be é a condição de aprovação; warn (opcional) rebaixa para
+      // aviso (não aborta em on_failure="fail"). Métricas: row_count, distinct_count,
+      // missing_count/percent, duplicate_count/percent, invalid_count/percent,
+      // min, max, avg, sum, stddev, freshness. Threshold: > < >= <= = != , between X and Y,
+      // com sufixo % (percentual) ou duração (1d/2h/30m, para freshness).
+      { "type": "check", "metric": "row_count", "must_be": "> 0" },
+      { "type": "check", "name": "cpf completo", "metric": "missing_percent",
+        "column": "cpf", "must_be": "< 1%", "warn": "= 0" },
+      { "type": "check", "metric": "duplicate_count", "columns": ["id"], "must_be": "= 0" },
+      // invalid_* usa as configs de validade: valid_values / valid_format (email, uuid,
+      // cpf, cnpj, date, …) / valid_regex / valid_min / valid_max / valid_length
+      { "type": "check", "metric": "invalid_percent", "column": "email",
+        "valid_format": "email", "must_be": "< 5%" },
+      { "type": "check", "metric": "freshness", "column": "atualizado_em", "must_be": "< 1d" },
+
+      // schema: colunas obrigatórias/proibidas e tipos (aliases: long→bigint, integer→int)
+      { "type": "schema", "required_columns": ["id", "valor"],
+        "column_types": { "id": "bigint", "valor": "double" } }
+    ],
+    // report ganha as colunas check_name, severity (pass|warn|fail) e metric_value.
+
+    // outputs (quarentena): roteia LINHAS apartado da(s) saída(s) principal(is). Uma
+    // linha é "invalid" quando viola qualquer check row-level (not_null, range, regex,
+    // unique, e o `check` de missing/invalid). Ex: bronze → silver_ok + silver_quarentena.
+    "outputs": {
+      "valid":   { "format": "delta", "path": "silver.ok",         "mode": "overwrite" },
+      "invalid": { "format": "delta", "path": "silver.quarentena", "mode": "overwrite" }
+    }
   },
 
   // Saída única (shorthand):

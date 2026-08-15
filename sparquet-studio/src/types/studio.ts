@@ -54,6 +54,8 @@ export type ValidationsNodeData = {
   rules: ValidationRuleSpec[]
   /** Optional data-quality report sink. */
   report?: OutputSpec | null
+  /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
+  outputs?: Record<string, OutputSpec> | null
   comment?: string
 }
 

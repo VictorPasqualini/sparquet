@@ -138,6 +138,23 @@ const joinHowField: FieldSpec = {
   ),
 }
 
+const joinBroadcastField: FieldSpec = {
+  key: 'broadcast',
+  label: 'Broadcast',
+  type: 'select',
+  options: [
+    { value: '', label: 'auto (Spark decides)' },
+    { value: 'true', label: 'right — broadcast the second source' },
+    { value: 'left', label: 'left — broadcast the main side' },
+  ],
+  help: 'Map-side join: broadcast the small side to every executor and skip its shuffle. "right" broadcasts the joined source (a small dimension/lookup); "left" broadcasts the main chain.',
+  docs: lines(
+    'Adds a broadcast hint via F.broadcast(). Use it when the broadcast side fits comfortably in each executor (roughly a few hundred MB or less) — broadcasting a large side spills or OOMs.',
+    '',
+    'Left empty / "auto" leaves the choice to Spark (spark.sql.autoBroadcastJoinThreshold).',
+  ),
+}
+
 const joinDef: TransformationDef = {
   type: 'join',
   label: 'Join',
@@ -154,7 +171,7 @@ const joinDef: TransformationDef = {
     '',
     'The two fields below are the join itself: which keys to match on, and how to combine the rows.',
   ),
-  fields: [joinOnField, joinHowField],
+  fields: [joinOnField, joinHowField, joinBroadcastField],
   keywords: [
     'join',
     'merge',

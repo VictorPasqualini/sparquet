@@ -77,7 +77,7 @@ const OUTPUT_KEY_ORDER = [
   'options',
   'transformations',
 ]
-const VALIDATIONS_KEY_ORDER = ['on_failure', 'report', 'rules']
+const VALIDATIONS_KEY_ORDER = ['on_failure', 'report', 'outputs', 'rules']
 /** `with` / `with_transformations` lead because they describe the second input. */
 const TRANSFORM_KEY_ORDER = ['type', 'skip_if_false', 'with', 'with_transformations']
 
@@ -245,6 +245,10 @@ function buildValidations(node: ValidationsNode, issues: Issues): ValidationsSpe
   const spec: ValidationsSpec = { on_failure: node.data.onFailure ?? 'fail' }
   const report = node.data.report ? buildReport(node.data.report) : null
   if (report) spec.report = report
+  const outputs = node.data.outputs
+  if (isRecord(outputs) && Object.keys(outputs).length > 0) {
+    spec.outputs = jsonClone(outputs) as Record<string, OutputSpec>
+  }
   spec.rules = rules
   return spec
 }

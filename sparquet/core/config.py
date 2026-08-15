@@ -77,6 +77,11 @@ class ValidationConfig:
     # pipeline, rule_type, passed, failed_count, message, validated_at). Serve para
     # análise/observabilidade de qualidade. Aceita qualquer formato de saída.
     report: Optional["OutputConfig"] = None
+    # Roteamento de LINHAS (quarentena) — apartado da(s) saída(s) principal(is). Chaves
+    # reconhecidas: "valid" e "invalid" (uma linha é inválida quando viola qualquer
+    # check row-level: not_null, range, regex, unique, e o `check` de missing/invalid).
+    # Cada valor é um destino de escrita completo (format/path/mode/columns/options).
+    outputs: Dict[str, "OutputConfig"] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ValidationConfig:
@@ -86,6 +91,10 @@ class ValidationConfig:
             report=(
                 OutputConfig.from_dict(data["report"]) if data.get("report") else None
             ),
+            outputs={
+                key: OutputConfig.from_dict(out)
+                for key, out in data.get("outputs", {}).items()
+            },
         )
 
 

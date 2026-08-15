@@ -124,8 +124,6 @@ export interface TransformationDef {
   canHalt?: boolean
   /** `debug`: never mutates the DataFrame. */
   sideEffectFree?: boolean
-  /** `add_column`: parsed but never emitted for new nodes. */
-  deprecatedAlias?: string
 }
 
 export interface FormatDef {

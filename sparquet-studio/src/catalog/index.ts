@@ -37,10 +37,8 @@ export function getValidator(type: string): ValidatorDef | undefined {
   return validatorByType.get(type)
 }
 
-/** Transformations offered in the palette (aliases such as `add_column` hidden). */
-export const PALETTE_TRANSFORMATIONS: TransformationDef[] = TRANSFORMATIONS.filter(
-  (t) => !t.deprecatedAlias,
-)
+/** Transformations offered in the palette. */
+export const PALETTE_TRANSFORMATIONS: TransformationDef[] = TRANSFORMATIONS
 
 export const READABLE_FORMATS: FormatDef[] = FORMATS.filter((f) => f.canRead)
 export const WRITABLE_FORMATS: FormatDef[] = FORMATS.filter((f) => f.canWrite)

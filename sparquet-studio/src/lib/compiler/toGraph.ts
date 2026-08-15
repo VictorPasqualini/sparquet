@@ -140,12 +140,13 @@ function makeValidationsNode(
   onFailure: OnFailureMode,
   rules: ValidationRuleSpec[],
   report: OutputSpec | null,
+  outputs: Record<string, OutputSpec> | null,
 ): ValidationsNode {
   return {
     id: newNodeId('validations'),
     type: 'validations',
     position: at(),
-    data: { kind: 'validations', onFailure, rules, report },
+    data: { kind: 'validations', onFailure, rules, report, ...(outputs ? { outputs } : {}) },
   }
 }
 
@@ -319,7 +320,11 @@ function importValidations(value: unknown, issues: Issues): ValidationsNode | nu
     ? (jsonClone(value.report) as unknown as OutputSpec)
     : null
 
-  return makeValidationsNode(onFailure, rules, report)
+  const outputs = isRecord(value.outputs)
+    ? (jsonClone(value.outputs) as unknown as Record<string, OutputSpec>)
+    : null
+
+  return makeValidationsNode(onFailure, rules, report, outputs)
 }
 
 export function pipelineToGraph(pipeline: unknown): DecompileResult {

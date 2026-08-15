@@ -108,7 +108,7 @@ When several pipelines contribute to one destination, let each write a staging v
 ```
 
 ```python
-fw = SparkFramework()
+fw = Sparquet()
 for conf in ["conf_a.json", "conf_b.json", "conf_c.json"]:
     result = fw.run(conf, params={"since": since})
     if not result.success:
@@ -118,7 +118,7 @@ commit = fw.run("conf_commit.json")
 fw.stop()
 ```
 
-Nothing reaches the destination until the whole set succeeded and the rules passed. Temp views live in the Spark session, so every pipeline must run in the same process — which is exactly what reusing one `SparkFramework` gives you.
+Nothing reaches the destination until the whole set succeeded and the rules passed. Temp views live in the Spark session, so every pipeline must run in the same process — which is exactly what reusing one `Sparquet` gives you.
 
 ## Watch the lineage
 

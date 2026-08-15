@@ -397,10 +397,10 @@ export const TEMPLATES: WorkflowTemplate[] = [
     id: 'staging-view-handoff',
     name: 'Staging view handoff',
     summary:
-      'Aggregate with raw SQL, check the result with custom_sql, and publish it as a temp view for the next pipeline.',
+      'Aggregate with raw SQL, check the result with sql, and publish it as a temp view for the next pipeline.',
     highlights: [
       'The sql step registers the DataFrame under view_name and the query must read from that name',
-      'custom_sql passes when the query returns true — write the invariant, not the violation',
+      'sql passes when the query returns true — write the invariant, not the violation',
       'A view output is session-scoped: the next fw.run() in the same session can read it as an input',
     ],
     level: 'advanced',
@@ -438,7 +438,7 @@ export const TEMPLATES: WorkflowTemplate[] = [
         rules: [
           { type: 'not_null', columns: ['customer_id'] },
           {
-            type: 'custom_sql',
+            type: 'sql',
             query: 'SELECT count(*) = 0 FROM _validation_df WHERE open_amount <= 0',
             error_message: 'Customers staged with a non-positive open amount',
           },

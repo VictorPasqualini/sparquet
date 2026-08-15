@@ -85,4 +85,4 @@ Set `site` in `astro.config.mjs` to the final domain before deploying: it is wha
 
 ## License
 
-MIT, like the rest of the repository.
+Apache 2.0, like the rest of the repository.

@@ -143,17 +143,22 @@ Temp views turn a set of pipelines into a composable job: several pipelines writ
 { "input": { "format": "view", "path": "orders_staging" } }
 ```
 
-All of them must run in the same Spark session — the same process — which is exactly what `SparkFramework` does when you call `run()` several times on one instance.
+All of them must run in the same Spark session — the same process — which is exactly what `Sparquet` does when you call `run()` several times on one instance.
 
 ## What comes back
 
 ```python
 result = fw.run("pipeline.json")
-result.rows_written   # rows in the main DataFrame at write time
+result.rows_written        # total across every destination
+
+for m in result.output_metrics:
+    print(m.format, m.mode, m.path, m.rows_written)
 ```
 
+Each destination reports its own `OutputMetrics` (`format`, `path`, `mode`, `rows_written`) in `result.output_metrics`. The count is taken on that destination's final DataFrame — after its own `transformations` and column projection, just before the write — so it is exact even when a per-destination chain explodes or aggregates rows.
+
 <Aside type="note">
-  `rows_written` counts the main DataFrame, not the sum of what every
-  destination wrote. With per-destination transformations that explode or
-  aggregate rows, the number a destination actually received will differ.
+  `result.rows_written` is the **sum** of those per-destination counts, not a
+  single measurement of the main DataFrame. A destination that aggregates rows
+  contributes its own reduced count to the total.
 </Aside>

@@ -249,7 +249,6 @@ export const LESSONS: Lesson[] = [
           'The single form takes `column` plus `expression`. The multi form takes a `columns` map of name to expression.',
           'When `columns` is present it **takes full precedence** — `column` and `expression` become dead config, silently ignored. Treat them as two modes, never mix them in one node.',
           'In the multi form, key order is semantic: columns are created in order, so a later expression can reference one defined earlier in the same block.',
-          '`add_column` is a registered alias of `with_column`; both names run the same code.',
         ].join('\n\n'),
         code: `{
   "type": "with_column",
@@ -445,7 +444,7 @@ export const LESSONS: Lesson[] = [
       {
         heading: 'The six built-in rules',
         body: [
-          '`not_null` and `unique` take **`columns`** (a list). `range` and `regex` take **`column`** (singular) — swapping them raises a raw `KeyError`, not a friendly message. `row_count` and `custom_sql` take no column at all.',
+          '`not_null` and `unique` take **`columns`** (a list). `range` and `regex` take **`column`** (singular) — swapping them raises a raw `KeyError`, not a friendly message. `row_count` and `sql` take no column at all.',
           '`unique` is a composite check: `["a", "b"]` validates the pair, not each column separately. Use two rules if you need both.',
           '`range` bounds are inclusive and both are optional — but a rule with neither bound silently passes without touching the data.',
         ].join('\n\n'),
@@ -490,14 +489,14 @@ export const LESSONS: Lesson[] = [
         code: `"report": { "format": "delta", "path": "quality.validation_log", "mode": "append" }`,
       },
       {
-        heading: 'custom_sql for the rules that do not fit',
+        heading: 'sql for the rules that do not fit',
         body: [
           'The DataFrame is exposed under the fixed view name `_validation_df` — there is no configurable name here.',
           'The semantics are **pass when true**: write the invariant, not the violation. `SELECT count(*) = 0 FROM _validation_df WHERE amount < 0` is right; returning the raw count inverts the meaning, because zero bad rows would evaluate to false.',
           'Only the first cell of the first row is read, and the query can join catalog tables — which is how a pipeline compares its own output against the source it came from.',
         ].join('\n\n'),
         code: `{
-  "type": "custom_sql",
+  "type": "sql",
   "query": "SELECT count(*) = 0 FROM _validation_df WHERE open_amount <= 0",
   "error_message": "Customers staged with a non-positive open amount"
 }`,
@@ -505,7 +504,7 @@ export const LESSONS: Lesson[] = [
       {
         heading: 'Read failed_count carefully',
         body: [
-          '`failed_count` means something different per rule: summed nulls across columns for `not_null` (a row null in two columns counts twice), excess rows for `unique`, offending rows for `range` and `regex`, and a hardcoded `1` for `row_count` and `custom_sql`.',
+          '`failed_count` means something different per rule: summed nulls across columns for `not_null` (a row null in two columns counts twice), excess rows for `unique`, offending rows for `range` and `regex`, and a hardcoded `1` for `row_count` and `sql`.',
           'Never sum it across rule types and never present it as "bad rows".',
           'Every rule also costs its own Spark actions, so a long rule list is not free on a large DataFrame.',
         ].join('\n\n'),
@@ -516,7 +515,7 @@ export const LESSONS: Lesson[] = [
       'Decide consciously between `fail` and `warn` — the default is `fail`',
       'Point the report at an append destination to build a quality history',
       'Pair every `range` rule with a `not_null` rule on the same column',
-      'Write one `custom_sql` invariant against `_validation_df`',
+      'Write one `sql` invariant against `_validation_df`',
       'Confirm the report is written by running once in `warn` mode',
     ],
   },
@@ -620,7 +619,7 @@ export const LESSONS: Lesson[] = [
       {
         heading: 'The staging handoff pattern',
         body: [
-          'Large migrations rarely fit in one JSON. The proven shape is **staging then commit**: several pipelines write to the same generic temp `view`, and one final pipeline reads that view, validates completeness with `custom_sql`, and fans out to the real destinations.',
+          'Large migrations rarely fit in one JSON. The proven shape is **staging then commit**: several pipelines write to the same generic temp `view`, and one final pipeline reads that view, validates completeness with `sql`, and fans out to the real destinations.',
           'It keeps the per-case logic small and the write logic in exactly one place. Views are session-scoped, so every step must run in the same Spark session.',
         ].join('\n\n'),
         code: `"outputs": [
