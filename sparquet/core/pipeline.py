@@ -17,12 +17,29 @@ from sparquet.utils.logger import flush_deferred_warnings, logger
 
 
 @dataclass
+class OutputMetrics:
+    """Métricas de escrita de um destino individual.
+
+    `rows_written` é contado no df **já transformado e projetado** de cada output,
+    logo antes da escrita — reflete o que aquele destino realmente recebeu (e não o
+    df principal), então é exato mesmo quando o output tem `transformations` que
+    mudam o número de linhas.
+    """
+
+    format: str
+    path: str
+    mode: str
+    rows_written: int
+
+
+@dataclass
 class PipelineResult:
     pipeline_name: str
     success: bool
     rows_read: int = 0
-    rows_written: int = 0
+    rows_written: int = 0  # soma das linhas escritas em todos os destinos
     validation_results: List[ValidationResult] = field(default_factory=list)
+    output_metrics: List[OutputMetrics] = field(default_factory=list)  # uma entrada por destino
     error: Optional[str] = None
     output_df: Optional[DataFrame] = None  # df após transformações; disponível quando input_df é injetado
     skipped: bool = False  # True quando o pipeline foi encerrado por stop_if_empty (sem dados)
@@ -94,7 +111,7 @@ class Pipeline:
             if self._columns:
                 log.info("Colunas injetadas", colunas=list(self._columns))
 
-            # O engine é reusado entre execuções no SparkFramework; zera o store
+            # O engine é reusado entre execuções no Sparquet; zera o store
             # de runtime para não vazar variáveis coletadas de um run anterior.
             self._transform_engine.reset_runtime()
             df = self._transform_engine.apply(df, self.config.transformations)
@@ -105,8 +122,8 @@ class Pipeline:
             )
             self._write_validation_report(spark, validation_results, log)
 
-            rows_written = df.count()
-            self._write_outputs(spark, df, log)
+            output_metrics = self._write_outputs(spark, df, log)
+            rows_written = sum(m.rows_written for m in output_metrics)
             flush_deferred_warnings(log)
             log.info("Pipeline concluido", linhas_escritas=rows_written)
 
@@ -116,6 +133,7 @@ class Pipeline:
                 rows_read=rows_read,
                 rows_written=rows_written,
                 validation_results=validation_results,
+                output_metrics=output_metrics,
                 output_df=df,
             )
 
@@ -185,7 +203,8 @@ class Pipeline:
 
     def _write_outputs(
         self, spark: SparkSession, df: DataFrame, log
-    ) -> None:
+    ) -> List[OutputMetrics]:
+        metrics: List[OutputMetrics] = []
         for output in self.config.outputs:
             # Transformações próprias do destino (ex: explode, to_json, join),
             # aplicadas sobre o df principal sem afetar as demais saídas.
@@ -195,6 +214,9 @@ class Pipeline:
                     output_df, output.transformations
                 )
             output_df = self._project_columns(output_df, output)
+            # Conta o df final deste destino ANTES de escrever — reflete exatamente
+            # o que é gravado aqui, mesmo com transformações de output que mudam linhas.
+            rows_written = output_df.count()
             log.info(
                 "Escrevendo output",
                 formato=output.format,
@@ -202,8 +224,18 @@ class Pipeline:
                 modo=output.mode,
                 colunas=output.columns or "todas",
                 transformacoes=len(output.transformations),
+                linhas=rows_written,
             )
             WriterFactory.create(spark, output).write(output_df)
+            metrics.append(
+                OutputMetrics(
+                    format=output.format,
+                    path=output.path,
+                    mode=output.mode,
+                    rows_written=rows_written,
+                )
+            )
+        return metrics
 
     @staticmethod
     def _project_columns(df: DataFrame, output: OutputConfig) -> DataFrame:

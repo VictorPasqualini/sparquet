@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class SparkConfig:
-    app_name: str = "SparkFramework"
+    app_name: str = "Sparquet"
     master: str = "local[*]"
     configs: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SparkConfig:
         return cls(
-            app_name=data.get("app_name", "SparkFramework"),
+            app_name=data.get("app_name", "Sparquet"),
             master=data.get("master", "local[*]"),
             configs=data.get("configs", {}),
         )

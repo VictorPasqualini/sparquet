@@ -103,7 +103,7 @@ class TransformationEngine:
 
     def reset_runtime(self) -> None:
         """Limpa o store de runtime (in place). Chamado a cada novo pipeline,
-        pois o engine é reusado entre execuções no SparkFramework."""
+        pois o engine é reusado entre execuções no Sparquet."""
         self.runtime.clear()
 
     def apply(

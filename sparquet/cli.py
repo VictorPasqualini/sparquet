@@ -1,15 +1,15 @@
-"""CLI entry point para o SparkFramework (sparquet <config.json>)."""
+"""CLI entry point para o Sparquet (sparquet <config.json>)."""
 
 import argparse
 import sys
 
-from sparquet import SparkFramework
+from sparquet import Sparquet
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sparquet",
-        description="SparkFramework — Motor de pipelines Spark orientado a JSON",
+        description="Sparquet — Motor de pipelines Spark orientado a JSON",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
@@ -31,7 +31,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    fw = SparkFramework()
+    fw = Sparquet()
     result = fw.run(args.config)
 
     print(result.summary())

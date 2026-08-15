@@ -19,7 +19,7 @@ from sparquet.validation.base import BaseValidator
 from sparquet.validation.engine import ValidationEngine
 
 
-class SparkFramework:
+class Sparquet:
     """Ponto de entrada principal para uso do framework como biblioteca.
 
     Gerencia uma única SparkSession compartilhada entre múltiplas execuções.
@@ -27,16 +27,16 @@ class SparkFramework:
     ficam disponíveis em todos os pipelines executados pela mesma instância.
 
     Uso básico:
-        fw = SparkFramework()
+        fw = Sparquet()
         fw.run("pipeline_clientes.json")
         fw.run("pipeline_pedidos.json")
         fw.stop()
 
     Com configurações Spark personalizadas:
-        fw = SparkFramework(spark={"master": "yarn", "app_name": "MeuJob"})
+        fw = Sparquet(spark={"master": "yarn", "app_name": "MeuJob"})
 
     Com extensões customizadas:
-        fw = SparkFramework()
+        fw = Sparquet()
         fw.register_reader("delta", DeltaReader)
         fw.register_transformation("normalize", NormalizeTransformation)
         fw.run("config.json")
@@ -157,7 +157,7 @@ class SparkFramework:
 
     def _apply_spark_override(self, config: PipelineConfig) -> None:
         """Garante que configs Spark do framework prevalecem sobre o JSON."""
-        if self._spark_config.app_name != "SparkFramework":
+        if self._spark_config.app_name != "Sparquet":
             config.spark.app_name = self._spark_config.app_name
         if self._spark_config.master != "local[*]":
             config.spark.master = self._spark_config.master

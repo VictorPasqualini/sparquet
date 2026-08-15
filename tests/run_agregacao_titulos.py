@@ -8,7 +8,7 @@ lastros.titulos_metricas_entidade → seu destino).
 """
 import sys
 
-from sparquet import SparkFramework
+from sparquet import Sparquet
 
 conf = (
     "tests/agregacao_titulos_sem_join.json"
@@ -16,7 +16,7 @@ conf = (
     else "tests/agregacao_titulos.json"
 )
 
-fw = SparkFramework(spark={"app_name": "agregacao_titulos"})
+fw = Sparquet(spark={"app_name": "agregacao_titulos"})
 
 result = fw.run(conf)
 

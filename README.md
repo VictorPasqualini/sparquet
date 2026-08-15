@@ -19,7 +19,7 @@ Then open the same document in **[Sparquet Studio](sparquet-studio/)**, a visual
 
 |  |  |
 |---|---|
-| **The framework** (`spark_framework/`) | Reads a JSON pipeline and executes it on Spark: readers and writers for Parquet, Delta, Iceberg, CSV, text, temp views and Kafka; 20 transformations; a validation engine with a data-quality report; template parameters, runtime pushdown variables and reusable includes. Runs locally, on Databricks, EMR, Dataproc or Synapse — the session manager detects the environment. |
+| **The framework** (`sparquet/`) | Reads a JSON pipeline and executes it on Spark: readers and writers for Parquet, Delta, Iceberg, CSV, text, temp views and Kafka; 20 transformations; a validation engine with a data-quality report; template parameters, runtime pushdown variables and reusable includes. Runs locally, on Databricks, EMR, Dataproc or Synapse — the session manager detects the environment. |
 | **The studio** (`sparquet-studio/`) | A browser app that reads and writes exactly those documents on a node canvas, lints them as you type, generates them with an LLM of your choice, and executes them through a local runner. No account, no server, no telemetry. |
 
 The JSON is the contract between them. Studio never invents syntax the framework does not support, and the framework never needs Studio to run.
@@ -29,13 +29,13 @@ The JSON is the contract between them. Studio never invents syntax the framework
 ### Framework
 
 ```bash
-pip install spark-framework
+pip install sparquet
 ```
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework(spark={"app_name": "MyJob", "master": "local[*]"})
+fw = Sparquet(spark={"app_name": "MyJob", "master": "local[*]"})
 result = fw.run("pipeline.json", params={"dt_ref": "2026-01-01"})
 print(result.summary())
 fw.stop()
@@ -44,7 +44,7 @@ fw.stop()
 Or from the CLI:
 
 ```bash
-python -m spark_framework.cli pipeline.json
+python -m sparquet.cli pipeline.json
 ```
 
 ### Studio
@@ -121,7 +121,7 @@ See [CLAUDE.md](CLAUDE.md) for the complete schema reference.
 ## Repository layout
 
 ```
-spark_framework/        the framework (readers, writers, transformations, validations)
+sparquet/        the framework (readers, writers, transformations, validations)
 sparquet-studio/        the visual editor (React + TypeScript) and its local runner
 examples/               example pipelines, one per capability
 tests/                  unit tests and a full real-world migration case

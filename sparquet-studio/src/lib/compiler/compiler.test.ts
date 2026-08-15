@@ -145,6 +145,29 @@ describe('round trip', () => {
     expect(graph.nodes.some((node) => node.position.x !== 0)).toBe(true)
   })
 
+  it('preserves empty structural params (maps/lists) through a round trip', () => {
+    // An empty required container is a valid no-op in the framework but must survive
+    // export: dropping it emits JSON the framework rejects (with_column with no
+    // `columns` falls into the single-column branch → ValueError; `struct` without
+    // `fields` → KeyError). Regression for the compiler pruning empty {} / [].
+    const pipeline = {
+      name: 'empty-structural-params',
+      input: { format: 'csv', path: '/in' },
+      transformations: [
+        { type: 'with_column', columns: {} },
+        { type: 'struct', column: 'payload', fields: {} },
+        { type: 'rename', mappings: {} },
+      ],
+      output: { format: 'parquet', path: '/out', mode: 'overwrite' },
+    }
+
+    const compiled = expectRoundTrip(pipeline)
+    const transforms = compiled.transformations as Array<Record<string, unknown>>
+    expect(transforms[0]).toEqual({ type: 'with_column', columns: {} })
+    expect(transforms[1]).toEqual({ type: 'struct', column: 'payload', fields: {} })
+    expect(transforms[2]).toEqual({ type: 'rename', mappings: {} })
+  })
+
   it('keeps per-output transformations on a multi-output pipeline', () => {
     const pipeline = {
       name: 'payload',

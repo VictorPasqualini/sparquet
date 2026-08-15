@@ -106,9 +106,9 @@ index-servers = pypi testpypi
 ## 6. Usando como biblioteca (consumidor)
 
 ```python
-from sparquet import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework(spark={"app_name": "MeuJob"})
+fw = Sparquet(spark={"app_name": "MeuJob"})
 resultado = fw.run("meu_pipeline.json", params={"tipo_ativo": "NC"})
 print(resultado.summary())
 fw.stop()

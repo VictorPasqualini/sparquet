@@ -218,7 +218,7 @@ describe('runPipeline', () => {
 
   it('surfaces the server error body on a 500', async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({ detail: 'Cannot import spark_framework: No module named pyspark' }, 500),
+      jsonResponse({ detail: 'Cannot import sparquet: No module named pyspark' }, 500),
     )
 
     const error = await runPipeline(DEFAULT_RUNNER_URL, { pipeline: PIPELINE }).catch(
@@ -229,7 +229,7 @@ describe('runPipeline', () => {
     expect((error as RunnerError).kind).toBe('http')
     expect((error as RunnerError).status).toBe(500)
     expect((error as RunnerError).message).toBe(
-      'Cannot import spark_framework: No module named pyspark',
+      'Cannot import sparquet: No module named pyspark',
     )
   })
 })

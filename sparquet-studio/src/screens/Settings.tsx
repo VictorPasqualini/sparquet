@@ -739,7 +739,7 @@ function RunnerSection() {
           Run both from the{' '}
           <code className="font-mono text-content-muted">sparquet-studio</code> directory; the
           service adds the repository root to <code className="font-mono text-content-muted">sys.path</code>{' '}
-          so <code className="font-mono text-content-muted">spark_framework</code> resolves. A working{' '}
+          so <code className="font-mono text-content-muted">sparquet</code> resolves. A working{' '}
           <code className="font-mono text-content-muted">JAVA_HOME</code> is required for Spark.
         </p>
       </div>

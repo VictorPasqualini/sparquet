@@ -1,7 +1,7 @@
 # Sparquet Studio — local runner
 
 Optional HTTP bridge that executes a pipeline built in Studio against the real
-`SparkFramework`, and returns counters, validation results, a data preview and
+`Sparquet`, and returns counters, validation results, a data preview and
 the framework's structured logs.
 
 Studio works entirely offline without it; the runner only powers the **Run**
@@ -79,7 +79,7 @@ curl -H "X-Sparquet-Token: $SPARQUET_STUDIO_TOKEN" \
 pip install -r sparquet-studio/server/requirements.txt
 ```
 
-`pyspark` and `spark_framework` are expected to already be importable — either
+`pyspark` and `sparquet` are expected to already be importable — either
 because you run the service from the `sparquet-studio` directory (the module
 inserts the repository root into `sys.path`), or because the framework is installed in the same
 environment (`pip install -e .`). A working `JAVA_HOME` is required for Spark.
@@ -87,7 +87,7 @@ environment (`pip install -e .`). A working `JAVA_HOME` is required for Spark.
 ## Run
 
 From the `sparquet-studio` directory (the module adds the repository root to
-`sys.path`, so `spark_framework` resolves without installing anything):
+`sys.path`, so `sparquet` resolves without installing anything):
 
 ```bash
 uvicorn server.main:app --port 8787
@@ -132,7 +132,7 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_ORIGINS` | `http://localhost:5273,http://127.0.0.1:5273` | Comma-separated origin allow-list, enforced for CORS **and** as a hard `403` on `/run` and `/validate`. |
 | `SPARQUET_STUDIO_HOST` | `127.0.0.1` | Bind address when running `python server/main.py`. |
 | `SPARQUET_STUDIO_PORT` | `8787` | Port when running `python server/main.py`. |
-| `SPARQUET_FRAMEWORK_PATH` | repo root, inferred from this file | Directory containing the `spark_framework` package. |
+| `SPARQUET_FRAMEWORK_PATH` | repo root, inferred from this file | Directory containing the `sparquet` package. |
 
 ## Endpoints
 
@@ -162,7 +162,7 @@ not allowed).
 { "pipeline": { "name": "demo", "input": {}, "output": {} }, "params": {}, "limit": 50, "dry_run": false }
 ```
 
-Executes `SparkFramework.run_from_dict(pipeline, params=params)`. Response:
+Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
 
 ```json
 {

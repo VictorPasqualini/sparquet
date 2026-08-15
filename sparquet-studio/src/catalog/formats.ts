@@ -1,13 +1,14 @@
 /**
  * IO format catalog — one entry per key of the reader/writer registries.
  *
- * Source of truth: spark_framework/io/factory.py (registries) plus each io/*.py
+ * Source of truth: sparquet/io/factory.py (registries) plus each io/*.py
  * module. Only the option keys the framework itself interprets carry a `default`
  * here; everything else is opaque pass-through to Spark and is listed because the
  * connector reads it, not the framework.
  */
 
 import type { FieldOption, FieldSpec, FormatDef } from '@/catalog/types'
+import { DATABASE_FORMATS } from './formats.databases'
 
 /**
  * The framework never coerces option values and PySpark stringifies whatever it
@@ -766,11 +767,11 @@ export const FORMATS: FormatDef[] = [
     id: 'kafka',
     label: 'Kafka',
     icon: 'Radio',
-    canRead: false,
+    canRead: true,
     canWrite: true,
-    summary: 'Write-only batch sink that publishes a DataFrame to a Kafka topic.',
+    summary: 'Batch read and write for Kafka topics (Amazon MSK via SASL/IAM options).',
     description:
-      'Publishes a DataFrame to a Kafka topic in batch. The configured value/key columns are renamed to `value` and `key`, and every column outside {key, value, topic, partition, timestamp, headers} is dropped before the write.\n\nThere is no Kafka reader — the format cannot be used as an input, or inside a join/union source.',
+      'Reads a Kafka topic in batch and publishes a DataFrame back to a topic.\n\nRead: subscribes to the path topic and returns the raw Kafka schema (key/value as binary, topic, partition, offset, timestamp) — cast value downstream. Without explicit offsets a batch read consumes the whole topic (startingOffsets=earliest, endingOffsets=latest).\n\nWrite: the value/key columns are renamed to `value` and `key`, and every column outside {key, value, topic, partition, timestamp, headers} is dropped before publishing.\n\nAmazon MSK is the same connector with SASL/IAM options.',
     pathLabel: 'Topic',
     pathPlaceholder: 'registro-lastros',
     pathHelp:
@@ -778,7 +779,74 @@ export const FORMATS: FormatDef[] = [
     modes: ['append'],
     supportsPartitioning: false,
     supportsMerge: false,
-    readOptions: [],
+    readOptions: [
+      {
+        key: 'bootstrap_servers',
+        label: 'Bootstrap servers',
+        type: 'text',
+        placeholder: 'broker1:9092,broker2:9092',
+        help: 'Comma-separated broker list. Friendly alias for kafka.bootstrap.servers — set one or the other.',
+      },
+      {
+        key: 'startingOffsets',
+        label: 'Starting offsets',
+        type: 'text',
+        default: 'earliest',
+        placeholder: 'earliest',
+        help: 'Batch default: earliest (reads the whole topic). Also "latest" or a JSON offsets map.',
+      },
+      {
+        key: 'endingOffsets',
+        label: 'Ending offsets',
+        type: 'text',
+        default: 'latest',
+        placeholder: 'latest',
+        help: 'Batch default: latest.',
+      },
+      {
+        key: 'kafka.bootstrap.servers',
+        label: 'Bootstrap servers (canonical key)',
+        type: 'text',
+        placeholder: 'broker1:9092',
+        group: 'advanced',
+      },
+      {
+        key: 'assign',
+        label: 'Assign',
+        type: 'text',
+        placeholder: '{"meu-topico":[0,1]}',
+        help: 'Explicit topic-partitions to read instead of subscribing to the path topic.',
+        group: 'advanced',
+      },
+      {
+        key: 'subscribePattern',
+        label: 'Subscribe pattern',
+        type: 'text',
+        placeholder: 'eventos-.*',
+        help: 'Regex of topics to read instead of the single path topic.',
+        group: 'advanced',
+      },
+      {
+        key: 'kafka.security.protocol',
+        label: 'Security protocol',
+        type: 'select',
+        options: [
+          { value: 'PLAINTEXT', label: 'PLAINTEXT' },
+          { value: 'SSL', label: 'SSL' },
+          { value: 'SASL_PLAINTEXT', label: 'SASL_PLAINTEXT' },
+          { value: 'SASL_SSL', label: 'SASL_SSL' },
+        ],
+        group: 'advanced',
+      },
+      {
+        key: 'kafka.sasl.mechanism',
+        label: 'SASL mechanism',
+        type: 'text',
+        placeholder: 'AWS_MSK_IAM',
+        help: 'e.g. PLAIN, SCRAM-SHA-512, or AWS_MSK_IAM for Amazon MSK.',
+        group: 'advanced',
+      },
+    ],
     writeOptions: [
       {
         key: 'bootstrap_servers',
@@ -859,8 +927,10 @@ export const FORMATS: FormatDef[] = [
       },
     ],
     gotchas: [
-      'WRITE-ONLY: there is no Kafka reader, so using it as an input (or as a join/union source) raises a ValueError listing the readable formats.',
-      'bootstrap_servers (or kafka.bootstrap.servers) is mandatory and validated before any Spark call.',
+      'Batch read: without explicit offsets the framework applies startingOffsets=earliest / endingOffsets=latest, so a read consumes the whole topic once.',
+      'The read returns the raw Kafka schema (key/value as binary) — add a CAST(value AS STRING) (or from_json) transformation right after the source.',
+      'Amazon MSK: set kafka.security.protocol=SASL_SSL and kafka.sasl.mechanism=AWS_MSK_IAM, with the aws-msk-iam-auth JAR on the classpath.',
+      'bootstrap_servers (or kafka.bootstrap.servers) is mandatory on both read and write, and validated before any Spark call.',
       'A `value` column must exist after the rename, otherwise the write raises a ValueError listing the available columns.',
       'The code defaults are value_column=payload and key_column=header, contradicting the documented value/key.',
       'Only {key, value, topic, partition, timestamp, headers} survive — every other column is dropped silently, including the auto-injected ingestion_ts.',
@@ -899,4 +969,6 @@ export const FORMATS: FormatDef[] = [
       },
     ],
   },
+
+  ...DATABASE_FORMATS,
 ]
