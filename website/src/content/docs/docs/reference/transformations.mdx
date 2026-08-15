@@ -1,0 +1,349 @@
+---
+title: Transformations
+description: Every built-in Sparquet transformation, with its exact keys, defaults and behavior.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Transformations are the entries of the `transformations` array. They run **in the order you write them**, each receiving the DataFrame the previous one returned.
+
+Every one accepts the meta key [`skip_if_false`](/docs/reference/parameters/#skip_if_false), which turns the step on or off per run.
+
+## Filtering and shaping
+
+### `filter`
+
+Keeps the rows matching a SQL boolean expression.
+
+```json
+{ "type": "filter", "condition": "status = 'CONFIRMED' AND amount > 0" }
+```
+
+| Key | Type | Required |
+|---|---|---|
+| `condition` | SQL expression | yes |
+
+Common carrier of `{{runtime}}` placeholders: `"id IN ({{ids}})"`.
+
+### `select`
+
+Projects a list of columns — or full SQL expressions with aliases.
+
+```json
+{ "type": "select", "columns": ["id", "customer", "to_json(payload) AS value"] }
+```
+
+<Aside type="caution">
+  Every entry goes through `F.expr`, not `F.col`. A column whose name has spaces,
+  dots or reserved words must be backticked: `` "`my column`" ``. A dotted name
+  like `a.b` is read as a struct field, not as a column literally named `a.b`.
+</Aside>
+
+### `drop`
+
+Removes columns. Names that do not exist are ignored silently by Spark.
+
+```json
+{ "type": "drop", "columns": ["tmp_flag", "debug_note"] }
+```
+
+### `rename`
+
+Renames columns through an ordered map, applied one at a time.
+
+```json
+{ "type": "rename", "mappings": { "created_at": "creation_date", "nm": "name" } }
+```
+
+Because it is sequential, chained renames work (`a→b` then `b→c` ends as `c`) and reordering the keys changes the result.
+
+### `cast`
+
+Casts columns to Spark types.
+
+```json
+{ "type": "cast", "columns": { "amount": "decimal(18,2)", "ordered_at": "date" } }
+```
+
+Uses `F.col`, so the column must exist. Values that cannot be cast become `null` — Spark does not raise.
+
+### `sort`
+
+Orders the DataFrame.
+
+```json
+{ "type": "sort", "columns": ["ordered_at", "id"], "ascending": true }
+```
+
+`ascending` accepts a boolean or a list of booleans, one per column.
+
+### `drop_duplicates`
+
+Removes duplicate rows, optionally scoped to a subset.
+
+```json
+{ "type": "drop_duplicates", "columns": ["id"] }
+```
+
+`columns` is optional: omitting it (or passing an empty list) deduplicates over **all** columns, exactly like `distinct`. Which row survives is not deterministic — `sort` first if it matters.
+
+### `distinct`
+
+Removes duplicate rows using every column. No parameters.
+
+```json
+{ "type": "distinct" }
+```
+
+### `fill_na`
+
+Replaces nulls.
+
+```json
+{ "type": "fill_na", "value": 0, "columns": ["quantity"] }
+{ "type": "fill_na", "value": { "quantity": 0, "segment": "UNKNOWN" } }
+```
+
+The scalar form takes an optional `columns` subset. Spark ignores fills whose type does not match the column type — a silent no-op, not an error.
+
+## Computing columns
+
+### `with_column`
+
+Adds or replaces computed columns from SQL expressions. Two mutually exclusive forms.
+
+```json
+// single column
+{ "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" }
+
+// several, in order — later expressions can use earlier ones
+{ "type": "with_column", "columns": {
+    "revenue": "quantity * unit_price",
+    "revenue_brl": "revenue * fx_rate"
+  } }
+```
+
+<Aside type="caution" title="Precedence">
+  Whenever the `columns` key is **present**, it wins and `column` / `expression`
+  are ignored. Never emit both. Key order is load-bearing: columns are created
+  in map order, which is why `revenue_brl` above can reference `revenue`.
+</Aside>
+
+`name` is accepted as a legacy alias of `column`, and `add_column` as a legacy alias of the whole transformation. Both are parsed for backward compatibility; write `with_column` in new pipelines.
+
+### `struct`
+
+Builds a nested struct column from a field map. More readable than a hand-written `named_struct`.
+
+```json
+{
+  "type": "struct",
+  "column": "payload",
+  "fields": {
+    "external_id": "contract_id",
+    "issuer.name": "issuer_name",
+    "issuer.document": "lpad(cast(document as string), 14, '0')",
+    "amounts": { "principal": "principal_amount", "interest": "interest_amount" }
+  }
+}
+```
+
+- String values are SQL expressions; object values nest further.
+- **Dot-paths auto-nest**: `issuer.name` and `issuer.document` become one `issuer` struct, so the payload reads like a flat table in the file and arrives nested in the data.
+- Field order follows key order, which keeps diffs stable.
+- A field name containing a literal dot is impossible — every dot means nesting.
+
+Two conflicts raise at apply time: using a path segment that is already a leaf (`a` used as both value and prefix), and duplicating a leaf key.
+
+### `sql`
+
+Runs arbitrary Spark SQL over the current DataFrame.
+
+```json
+{
+  "type": "sql",
+  "view_name": "_df",
+  "query": "SELECT customer, SUM(revenue) AS total FROM _df GROUP BY customer"
+}
+```
+
+The DataFrame is registered as a temp view named `view_name` (default `_df`) and the query result becomes the new DataFrame. The escape hatch for anything the other transformations do not express.
+
+## Aggregating
+
+### `group_by`
+
+Groups and aggregates, with optional pivot.
+
+```json
+{
+  "type": "group_by",
+  "by": ["customer_id", "country"],
+  "agg": [
+    "sum(revenue) as revenue_total",
+    "count(*) as orders",
+    "max(ordered_at) as last_order"
+  ],
+  "pivot": { "column": "month", "values": ["jan", "feb", "mar"] }
+}
+```
+
+| Key | Type | Required |
+|---|---|---|
+| `by` | list of columns | yes |
+| `agg` | list of **complete SQL aggregate expressions**, with aliases | yes |
+| `pivot` | column name, or `{ column, values }` | no |
+
+<Aside type="caution">
+  `agg` is a list of strings, never a map. Listing `values` on a pivot saves
+  Spark an extra scan to discover them; an empty list behaves as if the key were
+  absent. Every column not named in `by` or produced by `agg` disappears.
+</Aside>
+
+## Combining sources
+
+### `join`
+
+Joins a second source read inline.
+
+```json
+{
+  "type": "join",
+  "with": { "format": "delta", "path": "sales.customers" },
+  "with_transformations": [
+    { "type": "filter", "condition": "active = true" },
+    { "type": "select", "columns": ["customer_id", "segment"] }
+  ],
+  "on": "customer_id",
+  "how": "left"
+}
+```
+
+| Key | Type | Notes |
+|---|---|---|
+| `with` | source config | any readable format |
+| `on` | string, list, or SQL expression | `"id"`, `["a","b"]`, or `"l.id = r.id AND l.dt = r.dt"` |
+| `how` | join type | `inner` (default), `left`, `right`, `full`, `cross`, `leftsemi`, `leftanti`, … |
+| `with_transformations` | list | applied to the right side **before** the join |
+
+The left DataFrame is aliased `l` and the right one `r`, so an expression `on` can disambiguate columns. Inside `with_transformations` the aliases do not exist yet — use bare column names there.
+
+In Studio, `with` and `with_transformations` come from the node's **second input**, not from a form field.
+
+### `union`
+
+Appends the rows of another source.
+
+```json
+{
+  "type": "union",
+  "with": { "format": "parquet", "path": "/data/orders_archive" },
+  "allow_missing_columns": false
+}
+```
+
+<Aside type="danger" title="Positional by default">
+  With `allow_missing_columns: false` (the default) Spark matches columns **by
+  position**, not by name — a classic silent-corruption source when the two
+  schemas drifted. Set it to `true` to match by name and fill absent columns
+  with null.
+</Aside>
+
+`union` has no `with_transformations`: the right side is read as-is.
+
+## Control and inspection
+
+### `checkpoint`
+
+Materializes the DataFrame and truncates its logical plan.
+
+```json
+{ "type": "checkpoint", "method": "localCheckpoint", "eager": true }
+```
+
+| Key | Values | Default |
+|---|---|---|
+| `method` | `localCheckpoint`, `checkpoint` | `localCheckpoint` |
+| `eager` | boolean | `true` |
+
+Use it after heavy joins, before a `collect`, and before fanning out to several destinations — it stops Spark from recomputing the same lineage repeatedly. An invalid `method` is ignored, with a warning emitted at the end of the run.
+
+### `collect`
+
+Collects a column's distinct values into a runtime variable.
+
+```json
+{ "type": "collect", "column": "customer_id", "as": "active_customers" }
+```
+
+The DataFrame passes through unchanged, but the values land in `{{active_customers}}` for later steps. It triggers a driver-side action, so run it **after a `checkpoint`**. See [runtime variables](/docs/reference/parameters/#runtime-variables).
+
+### `stop_if_empty`
+
+Ends the run gracefully when there is nothing to process.
+
+```json
+{ "type": "stop_if_empty", "message": "No approved orders in the window" }
+```
+
+The remaining transformations and every write are skipped. The result comes back with `skipped: true`, `success: true` and `rows_written: 0` — a no-op, not a failure. Place it right after the filter that defines the working set, before expensive joins.
+
+<Aside type="caution">
+  Avoid it inside a per-destination chain: the run is reported as skipped even
+  though earlier destinations were already written.
+</Aside>
+
+### `debug`
+
+Inspects the DataFrame without changing it.
+
+```json
+{
+  "type": "debug",
+  "label": "after enrichment",
+  "actions": ["count", "print_schema", "show"],
+  "transformations": [{ "type": "filter", "condition": "id = 'X1'" }],
+  "show_rows": 20,
+  "truncate": true,
+  "vertical": false,
+  "extended": false
+}
+```
+
+`actions` accepts `count`, `print_schema`, `show`, `explain`, `columns`, `dtypes`. Its nested `transformations` apply to a throwaway copy used only for the inspection — the pipeline DataFrame always passes through untouched.
+
+### `$include`
+
+Not a transformation but a directive: it inlines a JSON fragment.
+
+```json
+{ "$include": "shared/standard_filters.json" }
+```
+
+The path is relative to the pipeline file. The fragment may be a single object or a list. Nested includes are not expanded, and the directive works only in the top-level `transformations` array.
+
+## Quick index
+
+| Type | Purpose |
+|---|---|
+| `filter` | keep matching rows |
+| `select` | project columns or expressions |
+| `drop` | remove columns |
+| `rename` | rename columns |
+| `cast` | change column types |
+| `with_column` (`add_column`) | compute columns |
+| `struct` | build a nested column |
+| `drop_duplicates` | deduplicate, optionally by subset |
+| `distinct` | deduplicate over all columns |
+| `sort` | order rows |
+| `fill_na` | replace nulls |
+| `sql` | arbitrary Spark SQL |
+| `group_by` | aggregate, with optional pivot |
+| `join` | join a second source |
+| `union` | append another source |
+| `checkpoint` | materialize and truncate the plan |
+| `collect` | publish a runtime variable |
+| `stop_if_empty` | end the run when there is no data |
+| `debug` | inspect without changing |

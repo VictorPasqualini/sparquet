@@ -1,0 +1,108 @@
+---
+title: Performance
+description: Making Sparquet pipelines fast — checkpoints, pushdown, reading less, and the mistakes that cost the most.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Most slow pipelines are slow for one of four reasons: they read too much, they recompute the same work, they move data to the driver, or they fan out without materializing. Each has a direct fix in the language.
+
+## Read less
+
+The cheapest row is the one that never leaves the source.
+
+```json
+// partitioned lake table: filter on the partition column first
+{ "type": "filter", "condition": "ordered_at >= '{since}'" }
+
+// then narrow the columns, before any join
+{ "type": "select", "columns": ["id", "customer_id", "amount"] }
+```
+
+Order matters: a `select` after the join still carries every column through the shuffle.
+
+## Checkpoint the plan
+
+```json
+{ "type": "checkpoint", "method": "localCheckpoint", "eager": true }
+```
+
+Three places earn it:
+
+- **After heavy joins**, so the plan does not keep growing.
+- **Before `collect`**, which is a driver action that would otherwise recompute the whole lineage.
+- **Before fanning out to several destinations**, so the work happens once instead of once per destination.
+
+<Aside type="tip" title="The single biggest win">
+  A pipeline with three outputs and no checkpoint computes its entire lineage
+  three times. Adding one node usually cuts the runtime by two thirds.
+</Aside>
+
+## Push the key list down
+
+When the working set is small and the table you are enriching from is enormous:
+
+```json
+[
+  { "type": "checkpoint" },
+  { "type": "collect", "column": "customer_id", "as": "customers" },
+  {
+    "type": "join",
+    "with": { "format": "delta", "path": "sales.bronze_events" },
+    "with_transformations": [
+      { "type": "filter", "condition": "customer_id IN ({{customers}})" }
+    ],
+    "on": "customer_id"
+  }
+]
+```
+
+The literal `IN (...)` lets Delta and Parquet skip files using their statistics. Keep the list to tens of thousands of keys at most — beyond that, a plain join is the right tool. See [Joins and pushdown](/docs/guides/joins/).
+
+## Stop early
+
+```json
+{ "type": "stop_if_empty", "message": "Nothing to process" }
+```
+
+Placed right after the filter that defines the working set, it turns a no-op night into seconds instead of a full pipeline over zero rows.
+
+## Shape the right side of a join
+
+```json
+"with_transformations": [
+  { "type": "filter", "condition": "active = true" },
+  { "type": "select", "columns": ["customer_id", "segment"] },
+  { "type": "distinct" }
+]
+```
+
+Filter, project, deduplicate — in that order — before the join. A right side that repeats the key multiplies rows, which is both a correctness bug and a performance one.
+
+## Watch the write
+
+- **`partition_by` with high cardinality** creates thousands of tiny files. Partition on something coarse (date, country), never on an id.
+- **`merge` costs more than `append`.** Use it when you need idempotence, not by default.
+- **CSV `inferSchema`** costs an extra pass. Set explicit `cast` transformations and turn it off for large, stable feeds.
+
+## Measure before guessing
+
+```json
+{ "type": "debug", "label": "after join", "actions": ["count", "explain"], "extended": false }
+```
+
+`explain` shows the plan Spark will actually run — the fastest way to confirm a filter was pushed down or a broadcast happened. `count` after each stage tells you where rows multiplied.
+
+The Run panel in Studio reports rows read, rows written and duration per run, which is often enough to spot the regression without opening the Spark UI.
+
+## A quick checklist
+
+| Symptom | Likely cause |
+|---|---|
+| Runtime scales with the number of outputs | Missing `checkpoint` before the fan-out |
+| Driver out of memory | `collect` on a large column, or a huge `IN (...)` list |
+| Join takes longer than the whole rest | Right side not filtered or projected before the join |
+| Thousands of tiny files | `partition_by` on a high-cardinality column |
+| Slow every night, even with no data | Missing `stop_if_empty` |

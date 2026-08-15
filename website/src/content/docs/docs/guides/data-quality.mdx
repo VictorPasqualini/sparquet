@@ -1,0 +1,154 @@
+---
+title: Data quality in practice
+description: Designing validations that catch real problems in Sparquet — which rules to add, which failure policy to choose, and what to do with the report.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Every pipeline should answer one question before it writes: *is this data good enough to publish?* Validations are how the answer becomes part of the file.
+
+## Start with four rules
+
+For almost any dataset, these four catch most incidents:
+
+```json
+{
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "row_count", "min": 1 },
+      { "type": "not_null", "columns": ["id"] },
+      { "type": "unique", "columns": ["id"] },
+      { "type": "range", "column": "amount", "min": 0 }
+    ]
+  }
+}
+```
+
+- **`row_count`** catches the silent empty load — an upstream feed that did not arrive, a filter that matched nothing.
+- **`not_null` on the key** catches a broken join or a renamed source column.
+- **`unique` on the key** catches the duplicated read and the fan-out join.
+- **`range`** catches unit errors and sign flips.
+
+## Choose the failure policy deliberately
+
+| Policy | The pipeline | The report | When it is right |
+|---|---|---|---|
+| `fail` | aborts before writing | **not written** | The destination feeds something that must never see bad rows |
+| `warn` | writes anyway | written | You want a history and a signal, not a stopped load |
+| `skip` | writes anyway | written | The rules are still being calibrated |
+
+<Aside type="caution">
+  In `fail` mode the run aborts before the report is written, so a dashboard fed
+  only by that table will never see hard failures. If you need every outcome
+  recorded, use `warn` and let the orchestrator decide from
+  `result.validation_results`.
+</Aside>
+
+```python
+result = fw.run("orders.json")
+failed = [check for check in result.validation_results if not check.passed]
+if failed:
+    alert(f"{result.pipeline_name}: {len(failed)} rules failed")
+    raise SystemExit(1)          # your policy, in your orchestrator
+```
+
+## Persist the report
+
+```json
+{
+  "report": {
+    "format": "delta",
+    "path": "quality.pipeline_report",
+    "mode": "append",
+    "partition_by": ["pipeline"]
+  }
+}
+```
+
+Every run appends one row per rule: `pipeline`, `rule_type`, `passed`, `failed_count`, `message`, `validated_at`. Pointing every pipeline at the same table gives you a quality history for free, and three charts worth having:
+
+- failure rate per rule over time — which check actually earns its keep
+- `failed_count` trend per pipeline — degradation before it becomes an incident
+- rules that never fail — either the data is solid or the rule is wrong
+
+## Rules for the things that actually break
+
+Once the basics are in place, the valuable rules are domain rules. `custom_sql` covers them: the query runs against `_validation_df` and must return a single boolean.
+
+```json
+{
+  "type": "custom_sql",
+  "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ends_at < starts_at",
+  "error_message": "Contracts ending before they start"
+}
+```
+
+```json
+{
+  "type": "custom_sql",
+  "query": "SELECT ABS(SUM(debit) - SUM(credit)) < 0.01 FROM _validation_df",
+  "error_message": "Ledger does not balance"
+}
+```
+
+```json
+{
+  "type": "custom_sql",
+  "query": "SELECT COUNT(DISTINCT currency) = 1 FROM _validation_df",
+  "error_message": "Mixed currencies in a single settlement batch"
+}
+```
+
+Those three are worth more than a dozen null checks, because they encode what the business considers impossible.
+
+## Validate, do not clean
+
+```json
+// removes the rows
+{ "type": "filter", "condition": "id IS NOT NULL" }
+
+// counts them, changes nothing
+{ "type": "not_null", "columns": ["id"] }
+```
+
+Both belong in most pipelines, and they answer different questions. A filter keeps the destination clean; a rule tells you how dirty the source was. Only the rule can tell you the feed is degrading.
+
+<Aside type="tip" title="Order matters">
+  Validations run **after** every main transformation, so they measure the data
+  you are about to write, not the raw source. To check the source instead, run a
+  small pipeline whose only job is to read and validate it.
+</Aside>
+
+## Guard a merge with a uniqueness rule
+
+Delta and Iceberg raise *multiple source rows matched* when the incoming DataFrame has more than one row per merge key. A rule turns that runtime crash into a clear report:
+
+```json
+{
+  "validations": {
+    "on_failure": "fail",
+    "rules": [{ "type": "unique", "columns": ["order_id"] }]
+  },
+  "output": {
+    "format": "delta",
+    "path": "analytics.orders",
+    "mode": "merge",
+    "options": { "merge_keys": ["order_id"] }
+  }
+}
+```
+
+The same guard belongs on any incremental write keyed by a business id.
+
+## A checklist
+
+- `row_count` with a `min` on every pipeline
+- `not_null` and `unique` on the business key
+- `range` on money, quantities and dates
+- `regex` on identifiers with a fixed shape (documents, codes)
+- one `custom_sql` for the invariant your domain would consider impossible
+- `warn` plus a persisted report, unless the destination truly cannot tolerate bad rows
+- a `unique` rule wherever a merge writes

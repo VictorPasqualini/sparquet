@@ -599,3 +599,24 @@ são importados e preservados no round-trip, mas sem formulário dedicado.
 
 Verificação: `npm run typecheck`, `npm run test` (vitest), `npm run lint` e
 `npm run smoke` (end-to-end em Chrome real).
+
+---
+
+## Site público (`website/`)
+
+Landing + documentação completa em inglês, português e espanhol, em Astro +
+Starlight (saída estática, sem runtime).
+
+```bash
+cd website && npm install && npm run dev     # http://localhost:4321
+```
+
+- Landing por idioma em `src/pages/{,pt/,es/}index.astro`; textos em `src/i18n/landing.ts`.
+- Documentação em `src/content/docs/docs/**` (inglês, servida em `/docs/*`) e
+  `src/content/docs/{pt,es}/docs/**`. Páginas sem tradução caem para o inglês
+  automaticamente.
+- Tokens de marca em `src/styles/theme.css` — vale para a landing e para o Starlight.
+
+**Ao mudar o framework**: a documentação em `website/src/content/docs/docs/reference/`
+descreve o comportamento real (transformações, conectores, validators, API). Toda
+capacidade nova precisa de entrada lá, além do catálogo do Studio.

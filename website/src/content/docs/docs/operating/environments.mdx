@@ -1,0 +1,178 @@
+---
+title: Where pipelines run
+description: Running Sparquet locally and on Databricks, EMR, Dataproc and Synapse — session handling, scheduling and packaging.
+sidebar:
+  order: 1
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components'
+
+Sparquet is a library. Wherever PySpark runs, it runs — and the session manager adapts to the environment it finds.
+
+| Environment | Session | The `spark` block |
+|---|---|---|
+| Databricks | reuses the active session | ignored |
+| EMR / Dataproc / Synapse | built with your `configs` | `configs` applied, `master` ignored |
+| Local | built with your `configs` | fully applied, including `master` |
+
+The session is a **process-wide singleton**: the first `SparkFramework` creates it and every later pipeline shares it. That is what makes running many pipelines in one job cheap, and what lets them hand data to each other through temp views.
+
+<Tabs>
+  <TabItem label="Local">
+
+```python
+from spark_framework import SparkFramework
+
+fw = SparkFramework(spark={"app_name": "dev", "master": "local[*]"})
+print(fw.run("pipelines/orders.json").summary())
+fw.stop()
+```
+
+Good for development and tests. On Windows, Spark needs `winutils.exe` and `HADOOP_HOME` before it can touch the local filesystem.
+
+  </TabItem>
+  <TabItem label="Databricks">
+
+```python
+%pip install spark-framework
+dbutils.library.restartPython()
+```
+
+```python
+from spark_framework import SparkFramework
+
+fw = SparkFramework()                     # reuses the notebook/job session
+result = fw.run("/Workspace/Repos/team/pipelines/orders.json",
+                params={"since": dbutils.widgets.get("since")})
+                                          # do NOT call fw.stop() here
+```
+
+Store pipelines in a Repo so they are versioned with the rest of the code. Job parameters map straight onto `params`. Secrets belong in a scope, exposed as environment variables to the job.
+
+  </TabItem>
+  <TabItem label="EMR / Dataproc">
+
+```bash
+spark-submit \
+  --py-files pipelines.zip \
+  run_job.py --config pipelines/orders.json --since 2026-01-01
+```
+
+```python title="run_job.py"
+import argparse
+from spark_framework import SparkFramework
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", required=True)
+parser.add_argument("--since", required=True)
+args = parser.parse_args()
+
+fw = SparkFramework(spark={"app_name": "orders"})
+result = fw.run(args.config, params={"since": args.since})
+fw.stop()
+
+raise SystemExit(0 if result.success else 1)
+```
+
+Exiting non-zero on failure is what lets the cluster's step and your scheduler notice.
+
+  </TabItem>
+  <TabItem label="Container">
+
+```dockerfile
+FROM apache/spark-py:v3.5.0
+USER root
+RUN pip install --no-cache-dir spark-framework
+COPY pipelines/ /opt/pipelines/
+USER spark
+ENTRYPOINT ["python", "-m", "spark_framework.cli"]
+```
+
+```bash
+docker run --rm my-image /opt/pipelines/orders.json
+```
+
+  </TabItem>
+</Tabs>
+
+## Packaging pipelines
+
+The JSON files are code — version them with everything else.
+
+```
+repo/
+├── pipelines/
+│   ├── orders.json
+│   ├── customers.json
+│   └── shared/
+│       └── standard_filters.json
+├── jobs/
+│   └── run_daily.py
+└── tests/
+    └── test_pipelines.py
+```
+
+Because a pipeline is data, it is testable without a cluster: parse every file in CI and fail on the ones that do not, then run the small ones against sample data.
+
+```python
+import json, pathlib
+from spark_framework.core.config import PipelineConfig
+
+def test_every_pipeline_parses():
+    for path in pathlib.Path("pipelines").glob("*.json"):
+        PipelineConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+```
+
+## Scheduling
+
+Sparquet runs a pipeline; it does not decide when. Any scheduler works, because the entry point is a normal Python process:
+
+```bash
+python -m spark_framework.cli pipelines/orders.json
+```
+
+```python
+# Airflow
+PythonOperator(
+    task_id="orders",
+    python_callable=lambda **ctx: run_pipeline(
+        "pipelines/orders.json", since=ctx["data_interval_start"].isoformat()
+    ),
+)
+```
+
+Branch on the result rather than on exceptions — `PipelineResult` never raises:
+
+```python
+result = fw.run(config, params=params)
+if result.skipped:
+    return "nothing to do"
+if not result.success:
+    raise AirflowFailException(result.error)
+```
+
+## Dependencies per pipeline
+
+Connector packages are declared in the file, which keeps a job self-describing:
+
+```json
+{ "spark": { "configs": { "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.0" } } }
+```
+
+On a shared cluster, installing the package as a cluster library is faster — it is not resolved on every run.
+
+<Aside type="note">
+  The `spark` block only takes effect when the framework creates the session.
+  On Databricks the session already exists, so cluster settings win. Treat the
+  block as a development convenience, not a production guarantee.
+</Aside>
+
+## Logging
+
+Every log line is a JSON object on stderr, which drops straight into Datadog, CloudWatch or Splunk with no parser:
+
+```json
+{"timestamp":"2026-01-15T03:00:12.918Z","level":"INFO","message":"Pipeline finished","pipeline":"orders_curated","rows_written":41233}
+```
+
+Alert on `level: ERROR` and on validation failures from the report table — those two cover the failure modes that matter.

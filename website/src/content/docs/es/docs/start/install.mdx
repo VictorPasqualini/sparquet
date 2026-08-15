@@ -1,0 +1,131 @@
+---
+title: Instalación
+description: Instala el framework Sparquet con pip, añade los extras que necesites y ejecuta Sparquet Studio en local.
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
+
+## Requisitos
+
+| | |
+|---|---|
+| Python | 3.9 o superior |
+| Java | 11 o 17 — lo exige el propio Spark (`JAVA_HOME` apuntando a él) |
+| PySpark | 3.4 o superior, instalado como dependencia |
+| Node.js | 18.18+ — solo para Sparquet Studio |
+
+En una plataforma gestionada (Databricks, EMR, Dataproc, Synapse) Spark y Java ya están; solo instalas el framework.
+
+## El framework
+
+<Tabs>
+  <TabItem label="pip">
+
+```bash
+pip install spark-framework
+```
+
+  </TabItem>
+  <TabItem label="Desde el código">
+
+```bash
+git clone https://github.com/VictorPasqualini/sparquet.git
+cd sparquet
+pip install -e .
+```
+
+  </TabItem>
+  <TabItem label="Databricks">
+
+Añade `spark-framework` a las librerías del clúster, o instálalo en un cuaderno:
+
+```python
+%pip install spark-framework
+dbutils.library.restartPython()
+```
+
+  </TabItem>
+</Tabs>
+
+Comprueba la instalación:
+
+```python
+from spark_framework import SparkFramework
+print(SparkFramework)
+```
+
+### Extras opcionales
+
+| Extra | Instalación | Cuándo lo necesitas |
+|---|---|---|
+| Delta Lake (OSS) | `pip install "spark-framework[delta]"` | Tablas Delta fuera de Databricks |
+| Iceberg | paquete Spark en el clúster | Tablas Iceberg |
+| Kafka | paquete Spark en el clúster | Publicar en un tópico |
+
+Los paquetes de conector se declaran por pipeline, así el trabajo lleva su propia dependencia:
+
+```json
+{
+  "spark": {
+    "configs": {
+      "spark.jars.packages": "io.delta:delta-spark_2.12:3.2.0"
+    }
+  }
+}
+```
+
+<Aside type="caution" title="Windows">
+  Spark necesita los binarios nativos de Hadoop para tocar el sistema de
+  archivos en Windows. Descarga `winutils.exe` y `hadoop.dll`, ponlos en
+  `C:\hadoop\bin` y define `HADOOP_HOME=C:\hadoop`. Sin ellos, una ejecución
+  local se queda colgada en la primera escritura. WSL2 o Docker lo evita.
+</Aside>
+
+## Sparquet Studio
+
+El Studio es una aplicación estática — no necesita servidor para diseñar pipelines.
+
+<Steps>
+
+1. Clona el repositorio e instala:
+
+   ```bash
+   git clone https://github.com/VictorPasqualini/sparquet.git
+   cd sparquet/sparquet-studio
+   npm install
+   ```
+
+2. Arráncalo:
+
+   ```bash
+   npm run dev
+   ```
+
+3. Abre [http://localhost:5273](http://localhost:5273). El primer arranque crea un proyecto **Getting Started** con pipelines que funcionan.
+
+</Steps>
+
+Para alojarlo, genera el bundle estático y cópialo donde quieras:
+
+```bash
+npm run build      # → dist/
+npm run preview    # sirve el build en local
+```
+
+### El runner local (opcional)
+
+Diseñar solo necesita el navegador. *Ejecutar* desde el lienzo necesita Spark, así que el Studio incluye un pequeño servicio que levantas tú:
+
+```bash
+cd sparquet-studio
+pip install -r server/requirements.txt
+uvicorn server.main:app --port 8787
+```
+
+Imprime un token al arrancar; pégalo en **Settings → Local runner** del Studio. El flujo completo está en [Running pipelines](/docs/studio/running/).
+
+## Siguiente
+
+Escribe [tu primer pipeline](/es/docs/start/quickstart/) — cinco minutos, sin Studio.

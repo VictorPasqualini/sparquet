@@ -1,0 +1,186 @@
+---
+title: Validations
+description: Data quality rules in Sparquet — every validator, the failure policies, and the report written for each run.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Validations measure the DataFrame after every transformation and before any write. They **never modify data** — that separation is what makes the report trustworthy.
+
+```json
+{
+  "validations": {
+    "on_failure": "warn",
+    "report": { "format": "csv", "path": "/dq/orders", "mode": "append" },
+    "rules": [
+      { "type": "not_null", "columns": ["id", "customer_id"] },
+      { "type": "unique", "columns": ["id"] },
+      { "type": "range", "column": "quantity", "min": 1, "max": 10000 },
+      { "type": "regex", "column": "email", "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$" },
+      { "type": "row_count", "min": 1, "max": 5000000 },
+      {
+        "type": "custom_sql",
+        "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE revenue < 0",
+        "error_message": "Negative revenue found"
+      }
+    ]
+  }
+}
+```
+
+## Rules
+
+### `not_null`
+
+Fails when any listed column contains nulls. The failure count is the number of offending rows.
+
+```json
+{ "type": "not_null", "columns": ["id", "customer_id"] }
+```
+
+### `unique`
+
+Fails when the listed columns do not form a unique key. With several columns the uniqueness is over the **combination**, not each column separately.
+
+```json
+{ "type": "unique", "columns": ["order_id", "line_number"] }
+```
+
+### `range`
+
+Bounds a numeric or date column. At least one of `min` / `max` is required; both are inclusive.
+
+```json
+{ "type": "range", "column": "quantity", "min": 1, "max": 10000 }
+```
+
+Nulls pass this rule — pair it with `not_null` when the column is mandatory.
+
+### `regex`
+
+Checks a string column against a pattern.
+
+```json
+{ "type": "regex", "column": "document", "pattern": "^[0-9]{11}$" }
+```
+
+<Aside type="note">
+  Nulls count as failures here, unlike `range`. Remember JSON escaping: a
+  backslash in the pattern is written `\\`.
+</Aside>
+
+### `row_count`
+
+Bounds the size of the DataFrame — the cheapest guard against a silently empty load.
+
+```json
+{ "type": "row_count", "min": 1, "max": 5000000 }
+```
+
+`min` defaults to `0`; `max` is optional.
+
+### `custom_sql`
+
+Anything the other rules do not express. The query runs against a temp view named `_validation_df` and must return a **single boolean**: `true` means the rule passed.
+
+```json
+{
+  "type": "custom_sql",
+  "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE revenue < 0",
+  "error_message": "Negative revenue found"
+}
+```
+
+Use it for cross-column invariants (`ends_at > starts_at`), referential expectations inside the DataFrame, or business rules that only make sense together.
+
+## `on_failure`
+
+What the engine does when at least one rule fails.
+
+| Mode | Pipeline | Report | Use it when |
+|---|---|---|---|
+| `fail` (default) | aborts before any write | not written | bad data must never reach the destination |
+| `warn` | continues and writes | written | you want visibility without stopping the load |
+| `skip` | continues and writes | written | the rules are informational for now |
+
+<Aside type="caution">
+  In `fail` mode a violation aborts the run *before* the report is written, so a
+  dashboard fed only by the report will not see hard failures. If you need every
+  outcome recorded, use `warn` and let your orchestrator decide based on
+  `result.validation_results`.
+</Aside>
+
+The mode is compared case-sensitively — write it lowercase.
+
+## The report
+
+`report` accepts a full output configuration — any format, any mode, even its own transformations. One row per rule:
+
+| Column | Meaning |
+|---|---|
+| `pipeline` | the pipeline `name` |
+| `rule_type` | validator type |
+| `passed` | boolean |
+| `failed_count` | offending rows (0 when passed) |
+| `message` | human-readable failure detail |
+| `validated_at` | timestamp of the check |
+
+```json
+{
+  "report": {
+    "format": "delta",
+    "path": "quality.pipeline_report",
+    "mode": "append",
+    "partition_by": ["pipeline"]
+  }
+}
+```
+
+Appending every run into one table gives you a quality history you can chart: failure rate per rule, per pipeline, over time.
+
+## Reading the result in Python
+
+```python
+result = fw.run("orders.json")
+
+for check in result.validation_results:
+    status = "ok" if check.passed else f"{check.failed_count} rows"
+    print(f"{check.rule_type:12} {status:>12}  {check.message}")
+
+if any(not check.passed for check in result.validation_results):
+    notify_data_owner(result.pipeline_name)
+```
+
+## Choosing between a rule and a filter
+
+| Intent | Right tool |
+|---|---|
+| The row must not reach the destination | `filter` in `transformations` |
+| I need to know how many bad rows arrived | a validation rule |
+| Bad data means the load is wrong | a rule with `on_failure: "fail"` |
+| Bad data is expected but must be tracked | a rule with `warn` plus a `report` |
+
+## Custom validators
+
+```python
+from spark_framework.validation.base import BaseValidator, ValidationResult
+import pyspark.sql.functions as F
+
+class NoFutureDateValidator(BaseValidator):
+    def validate(self, df):
+        column = self.rule.params["column"]
+        failed = df.filter(F.col(column) > F.current_date()).count()
+        if failed:
+            return ValidationResult("no_future_date", False, f"{failed} future dates", failed)
+        return ValidationResult("no_future_date", True)
+
+fw.register_validator("no_future_date", NoFutureDateValidator)
+```
+
+```json
+{ "type": "no_future_date", "column": "ordered_at" }
+```
+
+See [Extending](/docs/reference/extending/).

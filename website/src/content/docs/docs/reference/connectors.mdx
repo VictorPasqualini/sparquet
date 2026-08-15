@@ -1,0 +1,114 @@
+---
+title: Connectors
+description: Every source and destination Sparquet supports — files, lakehouse tables, temp views and Kafka.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+A connector is chosen by the `format` field of an `input`, an `output`, or a join/union source. The same registry serves all three, and it is extensible — see [Adding your own](#adding-your-own).
+
+| Format | Read | Write | Notes |
+|---|:---:|:---:|---|
+| `parquet` | ✓ | ✓ | Spark native |
+| `delta` | ✓ | ✓ | MERGE upserts, time travel |
+| `iceberg` | ✓ | ✓ | MERGE INTO |
+| `csv` | ✓ | ✓ | `header` and `inferSchema` default to true |
+| `txt` | ✓ | ✓ | plain text, single `value` column |
+| `view` | ✓ | ✓ | Spark temp views, auto-cached |
+| `kafka` | — | ✓ | batch publish |
+
+## Files and lakehouse
+
+### Parquet
+
+```json
+{ "format": "parquet", "path": "/data/curated/orders", "mode": "overwrite", "partition_by": ["country"] }
+```
+
+Any Spark Parquet option passes through `options`. `path` is a directory of part files, not a single file.
+
+### CSV
+
+```json
+{ "format": "csv", "path": "/data/landing/orders", "options": { "sep": ";", "encoding": "UTF-8" } }
+```
+
+Defaults applied by the framework: `header: true` and `inferSchema: true` on read, `header: true` on write, `encoding: UTF-8` on both. `inferSchema` costs an extra pass over the data — set an explicit `cast` and turn it off for large, stable feeds.
+
+### Delta Lake
+
+```json
+// read a table, or a path, or a past version
+{ "format": "delta", "path": "catalog.schema.orders" }
+{ "format": "delta", "path": "/mnt/raw/orders", "options": { "versionAsOf": "5" } }
+{ "format": "delta", "path": "catalog.schema.orders", "options": { "timestampAsOf": "2026-01-01T00:00:00Z" } }
+
+// upsert
+{ "format": "delta", "path": "catalog.schema.orders", "mode": "merge",
+  "options": { "merge_keys": ["order_id"], "merge_condition": "T.deleted = false" } }
+```
+
+`path` is treated as a table name when it contains a dot and does not start with `/` or a storage scheme; otherwise as a path. In `merge_condition`, `T` is the target table and `S` the incoming DataFrame.
+
+Outside Databricks, install the OSS package: `pip install "spark-framework[delta]"`.
+
+### Iceberg
+
+```json
+{ "format": "iceberg", "path": "catalog.db.orders", "mode": "merge", "options": { "merge_keys": ["id"] } }
+```
+
+<Aside type="caution">
+  The Iceberg writer compares the mode against `"merge"` case-sensitively.
+  `"MERGE"` skips the merge branch and reaches `df.write.mode("MERGE")`, which
+  Spark rejects with *Unknown save mode* — nothing is written. Always lowercase.
+</Aside>
+
+### Text
+
+```json
+{ "format": "txt", "path": "/data/exports/lines", "mode": "overwrite" }
+```
+
+Reads into a single `value` column, and writes a DataFrame that must have exactly one string column — project it first with `select`.
+
+### Temp views
+
+```json
+{ "format": "view", "path": "orders_staging", "mode": "overwrite" }
+```
+
+Registers a Spark temp view, cached by default, so a later pipeline in the same session can read it as `{"format": "view", "path": "orders_staging"}`. This is the staging mechanism behind multi-pipeline jobs — one writes the view, the next consumes it.
+
+### Kafka
+
+```json
+{
+  "format": "kafka",
+  "path": "orders-events",
+  "mode": "append",
+  "transformations": [
+    { "type": "with_column", "column": "value", "expression": "to_json(payload)" }
+  ],
+  "options": {
+    "bootstrap_servers": "broker1:9092,broker2:9092",
+    "value_column": "value",
+    "key_column": "order_id"
+  }
+}
+```
+
+Write-only. `path` is the topic. The configured value and key columns are renamed to `value` and `key`, and every column outside `{key, value, topic, partition, timestamp, headers}` is dropped before the write. Requires `spark-sql-kafka` on the classpath.
+
+## Adding your own
+
+Register a reader or writer once and every pipeline in the process can use it:
+
+```python
+fw.register_reader("my_format", MyReader)   # class MyReader(BaseReader)
+fw.register_writer("my_format", MyWriter)   # class MyWriter(BaseWriter)
+```
+
+See [Extending](/docs/reference/extending/). Studio preserves unknown formats through import and export, so a custom connector does not break the canvas.

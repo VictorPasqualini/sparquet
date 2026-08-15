@@ -1,0 +1,86 @@
+---
+import logo from '../../assets/logo.svg'
+import { GITHUB_URL, UI, docsOf, type Locale } from '../../i18n/ui'
+
+interface Props {
+  locale: Locale
+}
+
+const { locale } = Astro.props
+const ui = UI[locale]
+const year = new Date().getFullYear()
+
+const columns = [
+  {
+    title: ui.footer.product,
+    links: [
+      { label: 'Sparquet Studio', href: docsOf(locale, 'studio/') },
+      { label: ui.nav.connectors, href: docsOf(locale, 'reference/connectors/') },
+      { label: 'Templates', href: docsOf(locale, 'studio/templates/') },
+    ],
+  },
+  {
+    title: ui.footer.docs,
+    links: [
+      { label: ui.nav.getStarted, href: docsOf(locale, 'start/quickstart/') },
+      { label: ui.nav.reference, href: docsOf(locale, 'reference/pipeline-json/') },
+      { label: 'CLI & Python API', href: docsOf(locale, 'reference/python-api/') },
+    ],
+  },
+  {
+    title: ui.footer.community,
+    links: [
+      { label: 'GitHub', href: GITHUB_URL },
+      { label: 'Issues', href: `${GITHUB_URL}/issues` },
+      { label: 'Contributing', href: `${GITHUB_URL}/blob/main/README.md` },
+    ],
+  },
+]
+---
+
+<footer class="rule-top mt-24 bg-ink-950">
+  <div class="mx-auto grid max-w-6xl gap-10 px-5 py-14 md:grid-cols-[1.4fr_1fr_1fr_1fr]">
+    <div>
+      <a
+        href={locale === 'en' ? '/' : `/${locale}/`}
+        class="flex items-center gap-2.5 text-[0.95rem] font-semibold tracking-tight text-white"
+      >
+        <img src={logo.src} alt="" width="28" height="28" class="rounded-md" />
+        Sparquet
+      </a>
+      <p class="mt-3 max-w-xs text-sm leading-relaxed text-ink-400">{ui.footer.tagline}</p>
+      <p class="mt-4 text-xs text-ink-500">{ui.footer.rights}</p>
+    </div>
+
+    {
+      columns.map((column) => (
+        <div>
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-ink-500">
+            {column.title}
+          </h2>
+          <ul class="mt-3 space-y-2">
+            {column.links.map((link) => (
+              <li>
+                <a
+                  href={link.href}
+                  class="text-sm text-ink-300 transition-colors hover:text-brand-400"
+                >
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </div>
+
+  <div class="rule-top">
+    <div
+      class="mx-auto flex max-w-6xl flex-col gap-2 px-5 py-6 text-xs text-ink-500 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <p>© {year} Sparquet · {ui.footer.license}</p>
+      <p>{ui.footer.builtWith}</p>
+    </div>
+  </div>
+</footer>

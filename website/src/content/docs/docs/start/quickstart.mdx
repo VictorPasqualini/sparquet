@@ -1,0 +1,164 @@
+---
+title: Your first pipeline
+description: Build, run and understand a complete Sparquet pipeline in five minutes — read a CSV, clean it, check its quality and write Parquet.
+sidebar:
+  order: 3
+---
+
+import { Aside, FileTree, Steps } from '@astrojs/starlight/components'
+
+Five minutes, one file, a real dataset on disk. No Studio, no cluster, no database.
+
+<Steps>
+
+1. ### Create some data
+
+   ```bash
+   mkdir -p sparquet-demo/data && cd sparquet-demo
+   ```
+
+   ```csv title="data/orders.csv"
+   id,customer,country,status,quantity,unit_price,ordered_at
+   1,Ada,BR,CONFIRMED,3,25.50,2026-01-04
+   2,Linus,PT,CANCELLED,1,80.00,2026-01-05
+   3,Grace,BR,CONFIRMED,2,15.00,2026-01-05
+   4,Alan,ES,CONFIRMED,7,9.90,2026-01-06
+   4,Alan,ES,CONFIRMED,7,9.90,2026-01-06
+   ```
+
+   The last row is a duplicate on purpose — the pipeline will remove it.
+
+2. ### Write the pipeline
+
+   ```json title="orders.json"
+   {
+     "name": "orders_curated",
+     "description": "Clean the order feed and land it as Parquet.",
+
+     "input": {
+       "format": "csv",
+       "path": "data/orders.csv"
+     },
+
+     "transformations": [
+       { "type": "filter", "condition": "status = 'CONFIRMED'" },
+       { "type": "cast", "columns": { "quantity": "int", "unit_price": "double", "ordered_at": "date" } },
+       { "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" },
+       { "type": "drop_duplicates", "columns": ["id"] }
+     ],
+
+     "validations": {
+       "on_failure": "warn",
+       "rules": [
+         { "type": "not_null", "columns": ["id", "customer"] },
+         { "type": "unique", "columns": ["id"] },
+         { "type": "row_count", "min": 1 }
+       ]
+     },
+
+     "output": {
+       "format": "parquet",
+       "path": "out/orders",
+       "mode": "overwrite",
+       "partition_by": ["country"]
+     }
+   }
+   ```
+
+3. ### Run it
+
+   ```python title="run.py"
+   from spark_framework import SparkFramework
+
+   fw = SparkFramework(spark={"app_name": "demo", "master": "local[*]"})
+   result = fw.run("orders.json")
+
+   print(result.summary())
+   for check in result.validation_results:
+       print(f"  {check.rule_type}: {'ok' if check.passed else check.message}")
+
+   fw.stop()
+   ```
+
+   ```bash
+   python run.py
+   ```
+
+   Or straight from the terminal, with no Python file at all:
+
+   ```bash
+   python -m spark_framework.cli orders.json
+   ```
+
+4. ### Read the result
+
+   <FileTree>
+   - sparquet-demo
+     - data
+       - orders.csv
+     - out
+       - orders
+         - country=BR
+           - part-0000….parquet
+         - country=ES
+           - part-0000….parquet
+     - orders.json
+     - run.py
+   </FileTree>
+
+   Three rows survive: the cancelled order is filtered out and the duplicate is dropped. `revenue` was computed, and the output is partitioned by country.
+
+</Steps>
+
+## What just happened
+
+The framework executed the document top to bottom:
+
+| Step | What ran | Where it is defined |
+|---|---|---|
+| 1 | Read `data/orders.csv` with header and inferred types | `input` |
+| 2 | Kept confirmed orders, fixed types, computed `revenue`, dropped duplicates — **in that order** | `transformations` |
+| 3 | Measured three quality rules without changing the data | `validations` |
+| 4 | Wrote Parquet partitioned by `country` | `output` |
+
+Two details worth internalizing now:
+
+- **Transformations run in the order you write them.** Filtering after a `select` that dropped the column fails — the array is a sequence, not a set.
+- **Validations report, they do not clean.** `not_null` counts nulls; it never removes rows. Use a `filter` for that. See [Validations](/docs/reference/validations/).
+
+<Aside type="tip" title="What is in the result?">
+  `result.summary()` gives you a status line. The full object carries
+  `rows_read`, `rows_written`, `validation_results`, `error` and `skipped` —
+  see [PipelineResult](/docs/reference/python-api/#pipelineresult).
+</Aside>
+
+## Change one thing
+
+Try each of these on the file you just wrote:
+
+**Write to two places at once** — replace `output` with `outputs`:
+
+```json
+"outputs": [
+  { "format": "parquet", "path": "out/orders", "mode": "overwrite", "partition_by": ["country"] },
+  { "format": "csv", "path": "out/orders_report", "mode": "overwrite", "columns": ["id", "customer", "revenue"] }
+]
+```
+
+**Make the country a parameter** — use a placeholder and pass it at run time:
+
+```json
+{ "type": "filter", "condition": "country = '{country}'" }
+```
+
+```python
+fw.run("orders.json", params={"country": "BR"})
+```
+
+**Fail the run on bad data** — change `on_failure` to `"fail"` and watch the pipeline stop before writing anything.
+
+## Next
+
+- [Your first flow in Studio](/docs/start/first-flow/) — the same pipeline, drawn on a canvas.
+- [Core concepts](/docs/start/concepts/) — the execution model behind what you just ran.
+- [Transformations](/docs/reference/transformations/) — all twenty, field by field.
