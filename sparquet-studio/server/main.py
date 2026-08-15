@@ -1,6 +1,6 @@
 """Sparquet Studio — local execution bridge.
 
-Runs a pipeline described by an HTTP body through the real SparkFramework and
+Runs a pipeline described by an HTTP body through the real Sparquet and
 returns counters, validations, a small data preview and the framework's own
 structured logs.
 
@@ -20,7 +20,7 @@ This is still a single-developer tool: keep it bound to 127.0.0.1 and never expo
 it to a network or the public internet.
 
 Run it from the `sparquet-studio` directory; this module inserts the repository
-root into sys.path so `spark_framework` is importable:
+root into sys.path so `sparquet` is importable:
 
     uvicorn server.main:app --port 8787
 """
@@ -50,7 +50,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 SERVICE_VERSION = "0.2.0"
-FRAMEWORK_LOGGER = "spark_framework"
+FRAMEWORK_LOGGER = "sparquet"
 DEFAULT_ORIGINS = ("http://localhost:5273", "http://127.0.0.1:5273")
 DEFAULT_PREVIEW_LIMIT = 50
 MAX_PREVIEW_LIMIT = 1000
@@ -72,7 +72,7 @@ def _framework_root() -> Path:
 
 def _bootstrap_sys_path() -> None:
     root = _framework_root()
-    if (root / "spark_framework" / "__init__.py").exists() and str(root) not in sys.path:
+    if (root / "sparquet" / "__init__.py").exists() and str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
 
@@ -101,6 +101,13 @@ class ValidationOut(BaseModel):
     failed_count: int = 0
 
 
+class OutputMetricOut(BaseModel):
+    format: str
+    path: str
+    mode: str = ""
+    rows_written: int = 0
+
+
 class PreviewOut(BaseModel):
     columns: List[str]
     rows: List[List[Any]]
@@ -123,6 +130,7 @@ class RunResponse(BaseModel):
     duration_ms: int = 0
     error: Optional[str] = None
     validations: List[ValidationOut] = Field(default_factory=list)
+    output_metrics: List[OutputMetricOut] = Field(default_factory=list)
     preview: Optional[PreviewOut] = None
     logs: List[LogOut] = Field(default_factory=list)
 
@@ -259,12 +267,12 @@ def _spark_available() -> bool:
 
 
 def _framework_version() -> Optional[str]:
-    module = sys.modules.get("spark_framework")
+    module = sys.modules.get("sparquet")
     if module is not None:
         version = getattr(module, "__version__", None)
         return str(version) if version else None
     # Reading the source keeps /health from importing pyspark
-    init_file = _framework_root() / "spark_framework" / "__init__.py"
+    init_file = _framework_root() / "sparquet" / "__init__.py"
     try:
         match = _VERSION_PATTERN.search(init_file.read_text(encoding="utf-8"))
     except OSError:
@@ -287,18 +295,18 @@ def _import(module_name: str) -> Any:
 
 
 def _get_framework() -> Any:
-    """One SparkFramework per process — the SparkSession is a process-global
+    """One Sparquet per process — the SparkSession is a process-global
     singleton, so recreating it per request would be both slow and useless."""
     global _framework
     if _framework is None:
-        _framework = _import("spark_framework").SparkFramework()
+        _framework = _import("sparquet").Sparquet()
     return _framework
 
 
 def _apply_params(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not params:
         return pipeline
-    template = _import("spark_framework.utils.template")
+    template = _import("sparquet.utils.template")
     rendered = template.apply_template(json.dumps(pipeline), params)
     parsed = json.loads(rendered)
     if not isinstance(parsed, dict):
@@ -309,7 +317,7 @@ def _apply_params(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) ->
 def _parse_config_error(
     pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]
 ) -> Optional[str]:
-    config_cls = _import("spark_framework").PipelineConfig
+    config_cls = _import("sparquet").PipelineConfig
     try:
         config_cls.from_dict(_apply_params(pipeline, params))
     except Exception as exc:
@@ -349,6 +357,20 @@ def _map_validations(results: Any) -> List[ValidationOut]:
                 passed=bool(getattr(item, "passed", False)),
                 message=str(getattr(item, "message", "") or ""),
                 failed_count=int(getattr(item, "failed_count", 0) or 0),
+            )
+        )
+    return out
+
+
+def _map_output_metrics(items: Any) -> List[OutputMetricOut]:
+    out: List[OutputMetricOut] = []
+    for item in items or []:
+        out.append(
+            OutputMetricOut(
+                format=str(getattr(item, "format", "") or ""),
+                path=str(getattr(item, "path", "") or ""),
+                mode=str(getattr(item, "mode", "") or ""),
+                rows_written=int(getattr(item, "rows_written", 0) or 0),
             )
         )
     return out
@@ -464,18 +486,18 @@ def _engine_registry(engine_attr: str, module_name: str, class_name: str) -> Dic
 
 @app.get("/capabilities", response_model=CapabilitiesResponse)
 def capabilities() -> CapabilitiesResponse:
-    factory = _import("spark_framework.io.factory")
+    factory = _import("sparquet.io.factory")
     return CapabilitiesResponse(
         transformations=sorted(
             _engine_registry(
-                "_transform_engine", "spark_framework.transform.engine", "TransformationEngine"
+                "_transform_engine", "sparquet.transform.engine", "TransformationEngine"
             )
         ),
         readers=sorted(factory.ReaderFactory._registry),
         writers=sorted(factory.WriterFactory._registry),
         validators=sorted(
             _engine_registry(
-                "_validation_engine", "spark_framework.validation.engine", "ValidationEngine"
+                "_validation_engine", "sparquet.validation.engine", "ValidationEngine"
             )
         ),
     )
@@ -545,6 +567,7 @@ def run(body: RunRequest) -> RunResponse:
             duration_ms=_elapsed_ms(started),
             error=getattr(result, "error", None),
             validations=_map_validations(getattr(result, "validation_results", [])),
+            output_metrics=_map_output_metrics(getattr(result, "output_metrics", [])),
             preview=preview,
             logs=logs,
         )

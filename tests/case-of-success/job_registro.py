@@ -1,6 +1,6 @@
 import traceback
 
-from sparquet import SparkFramework
+from sparquet import Sparquet
 
 # ---------------------------------------------------------------------------
 # Mapeamento declarativo dos registros: cada (tipo_ativo, registradora) aponta
@@ -77,7 +77,7 @@ except Exception as e:
     ) from e
 
 
-fw = SparkFramework()
+fw = Sparquet()
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 /**
  * Core transformations — the row/column shaping vocabulary of the framework.
  *
- * Every field below mirrors a JSON key that `spark_framework/transform/builtin.py`
+ * Every field below mirrors a JSON key that `sparquet/transform/builtin.py`
  * actually reads. The framework performs NO schema validation: unknown keys are
  * absorbed into `params` and ignored, required keys blow up at runtime as a
  * KeyError inside `PipelineResult.error`. This catalog is the only validation layer,

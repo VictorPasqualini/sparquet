@@ -19,7 +19,7 @@ sys.path.insert(0, REPO_ROOT)
 
 from pyspark.sql import SparkSession  # noqa: E402
 
-from sparquet import SparkFramework  # noqa: E402
+from sparquet import Sparquet  # noqa: E402
 
 CONF = os.path.join(REPO_ROOT, "examples", "01_ingestao_validacoes.json")
 REPORT_PATH = os.path.join(REPO_ROOT, "examples", "output", "01_validation_report")
@@ -27,7 +27,7 @@ OUTPUT_PATH = os.path.join(REPO_ROOT, "examples", "output", "01_customers")
 
 
 def main() -> int:
-    fw = SparkFramework(spark={"app_name": "exemplo-01-ingestao"})
+    fw = Sparquet(spark={"app_name": "exemplo-01-ingestao"})
     try:
         result = fw.run(CONF)
 

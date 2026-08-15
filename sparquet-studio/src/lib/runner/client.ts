@@ -12,7 +12,7 @@ export const DEFAULT_RUNNER_URL = 'http://127.0.0.1:8787'
 
 /**
  * Canonical setup commands, run from the `sparquet-studio` directory.
- * server/main.py adds the repository root to sys.path itself, so `spark_framework`
+ * server/main.py adds the repository root to sys.path itself, so `sparquet`
  * resolves without installing anything.
  */
 export const RUNNER_INSTALL_COMMAND = 'pip install -r server/requirements.txt'
@@ -301,6 +301,17 @@ function toValidations(value: unknown): RunResult['validations'] {
     }))
 }
 
+function toOutputMetrics(value: unknown): RunResult['outputMetrics'] {
+  return asArray(value)
+    .filter(isRecord)
+    .map((item) => ({
+      format: asString(item.format, ''),
+      path: asString(item.path, ''),
+      mode: optionalString(item.mode),
+      rowsWritten: asNumber(item.rows_written),
+    }))
+}
+
 function toPreview(value: unknown): RunResult['preview'] {
   if (!isRecord(value)) return undefined
   return {
@@ -329,6 +340,7 @@ function toRunResult(payload: Record<string, unknown>): RunResult {
     skipped: asBoolean(payload.skipped),
     error: optionalString(payload.error),
     validations: toValidations(payload.validations),
+    outputMetrics: toOutputMetrics(payload.output_metrics),
     preview: toPreview(payload.preview),
     logs,
   }

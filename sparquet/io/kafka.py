@@ -2,7 +2,61 @@ from __future__ import annotations
 
 from pyspark.sql import DataFrame
 
-from sparquet.io.base import BaseWriter
+from sparquet.io.base import BaseReader, BaseWriter
+
+
+class KafkaReader(BaseReader):
+    """Lê de um tópico Kafka em batch (Spark structured batch read).
+
+    Requer o conector 'spark-sql-kafka-0-10' no classpath (mesmo do writer).
+    Atende Amazon MSK: passe kafka.security.protocol=SASL_SSL e
+    kafka.sasl.mechanism=AWS_MSK_IAM em options (+ o jar aws-msk-iam-auth).
+
+    path = tópico assinado (subscribe). Para outras estratégias, informe
+    'assign' ou 'subscribePattern' em options no lugar do subscribe.
+
+    O DataFrame retornado tem o schema padrão do Kafka (key/value binários, topic,
+    partition, offset, timestamp, timestampType) — normalmente seguido de um
+    CAST(value AS STRING) numa transformação.
+
+    Opções (options):
+      bootstrap_servers         – alias amigável para kafka.bootstrap.servers
+      kafka.bootstrap.servers   – forma original do Spark
+      startingOffsets           – default 'earliest' (batch lê o tópico inteiro)
+      endingOffsets             – default 'latest'
+      kafka.security.protocol / kafka.sasl.* – auth (SASL/SSL, MSK IAM)
+
+    Exemplo JSON:
+      {
+        "format": "kafka",
+        "path": "meu-topico",
+        "options": { "bootstrap_servers": "broker:9092", "startingOffsets": "earliest" }
+      }
+    """
+
+    # Estratégias de origem mutuamente exclusivas do conector Kafka
+    _SELECTORS = ("subscribe", "assign", "subscribePattern")
+    # Em batch, sem offsets explícitos o Spark leria só as mensagens novas; os
+    # defaults abaixo fazem um read ler o tópico inteiro.
+    _BATCH_DEFAULTS = {"startingOffsets": "earliest", "endingOffsets": "latest"}
+
+    def read(self) -> DataFrame:
+        opts = dict(self.config.options)
+
+        if "bootstrap_servers" in opts:
+            opts["kafka.bootstrap.servers"] = opts.pop("bootstrap_servers")
+
+        if "kafka.bootstrap.servers" not in opts:
+            raise ValueError(
+                "KafkaReader: informe 'bootstrap_servers' em options. "
+                "Ex: { \"bootstrap_servers\": \"broker:9092\" }"
+            )
+
+        merged = {**self._BATCH_DEFAULTS, **opts}
+        if not any(sel in merged for sel in self._SELECTORS):
+            merged["subscribe"] = self.config.path
+
+        return self.spark.read.format("kafka").options(**merged).load()
 
 
 class KafkaWriter(BaseWriter):

@@ -115,6 +115,21 @@ function isBlank(value: unknown): boolean {
   return false
 }
 
+/**
+ * A param carries no user intent only when it is null/undefined or a blank string.
+ * Unlike `isBlank`, an empty map/list is NOT unset: for structural params
+ * (`struct.fields`, `group_by.agg`, `cast.columns`, `with_column.columns`,
+ * `rename.mappings`, …) an empty container is meaningful and must round-trip.
+ * Pruning it emits JSON the framework rejects (e.g. `with_column` with no `columns`
+ * falls into the single-column branch and raises ValueError; `struct` without
+ * `fields` raises KeyError).
+ */
+function isUnset(value: unknown): boolean {
+  if (value === undefined || value === null) return true
+  if (typeof value === 'string') return value.trim() === ''
+  return false
+}
+
 function orderKeys(record: JsonRecord, preferred: readonly string[]): JsonRecord {
   const out: JsonRecord = {}
   for (const key of preferred) {
@@ -353,7 +368,9 @@ function compileTransform(node: TransformNode, ctx: CompileContext): Transformat
   for (const [key, value] of Object.entries(params)) {
     if (key === 'type' || key === 'skip_if_false') continue
     if (hasSideInput && (key === 'with' || key === 'with_transformations')) continue
-    if (isBlank(value)) continue
+    // Prune only "unset" params (null/undefined/blank string); keep empty maps/lists
+    // so structural params round-trip instead of emitting framework-breaking JSON.
+    if (isUnset(value)) continue
     spec[key] = jsonClone(value)
   }
 

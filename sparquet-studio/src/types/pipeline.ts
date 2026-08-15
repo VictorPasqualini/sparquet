@@ -2,10 +2,10 @@
  * TypeScript mirror of the Sparquet pipeline JSON schema.
  *
  * Source of truth is the Python framework:
- *   spark_framework/core/config.py     — dataclasses and from_dict normalization
- *   spark_framework/transform/engine.py — _BUILTIN_TRANSFORMATIONS registry
- *   spark_framework/io/factory.py       — reader/writer registries
- *   spark_framework/validation/engine.py — validator registry
+ *   sparquet/core/config.py     — dataclasses and from_dict normalization
+ *   sparquet/transform/engine.py — _BUILTIN_TRANSFORMATIONS registry
+ *   sparquet/io/factory.py       — reader/writer registries
+ *   sparquet/validation/engine.py — validator registry
  *
  * These types stay intentionally permissive (index signatures on transformation
  * and rule specs) because the framework forwards every unknown key into
@@ -13,7 +13,28 @@
  */
 
 /** Formats that can be read (ReaderFactory registry). */
-export const READ_FORMATS = ['parquet', 'csv', 'delta', 'iceberg', 'txt', 'view'] as const
+export const READ_FORMATS = [
+  'parquet',
+  'csv',
+  'delta',
+  'iceberg',
+  'txt',
+  'view',
+  'kafka',
+  'postgresql',
+  'mysql',
+  'mariadb',
+  'sqlserver',
+  'oracle',
+  'bigquery',
+  'snowflake',
+  'redshift',
+  'mongodb',
+  'documentdb',
+  'dynamodb',
+  'cassandra',
+  'elasticsearch',
+] as const
 
 /** Formats that can be written (WriterFactory registry). */
 export const WRITE_FORMATS = [
@@ -24,6 +45,19 @@ export const WRITE_FORMATS = [
   'txt',
   'view',
   'kafka',
+  'postgresql',
+  'mysql',
+  'mariadb',
+  'sqlserver',
+  'oracle',
+  'bigquery',
+  'snowflake',
+  'redshift',
+  'mongodb',
+  'documentdb',
+  'dynamodb',
+  'cassandra',
+  'elasticsearch',
 ] as const
 
 export type ReadFormat = (typeof READ_FORMATS)[number]

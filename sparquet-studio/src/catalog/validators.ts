@@ -1,6 +1,6 @@
 /**
  * Built-in validation rules — the exact six keys of `_BUILTIN_VALIDATORS`
- * (spark_framework/validation/engine.py): not_null, unique, range, regex,
+ * (sparquet/validation/engine.py): not_null, unique, range, regex,
  * row_count, custom_sql. Anything else must be registered at runtime.
  *
  * Validations report on the DataFrame after transformations and before any write;

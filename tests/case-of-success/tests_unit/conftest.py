@@ -17,7 +17,7 @@ import os
 import pytest
 from pyspark.sql import SparkSession
 
-from sparquet import SparkFramework
+from sparquet import Sparquet
 
 # Diretorio das confs (um nivel acima de tests_unit/) e dos goldens.
 CONF_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,6 +48,6 @@ def spark() -> SparkSession:
 
 
 @pytest.fixture(scope="session")
-def fw(spark) -> SparkFramework:
-    # SparkFramework reusa a SparkSession ativa (criada pela fixture `spark`).
-    return SparkFramework()
+def fw(spark) -> Sparquet:
+    # Sparquet reusa a SparkSession ativa (criada pela fixture `spark`).
+    return Sparquet()

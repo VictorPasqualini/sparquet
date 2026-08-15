@@ -759,6 +759,50 @@ function RunReport({ run, mode }: { run: RunResult; mode: RunMode }) {
         </div>
       )}
 
+      {showMetrics && run.outputMetrics && run.outputMetrics.length > 1 && (
+        <section className="space-y-2">
+          <SectionTitle>Outputs</SectionTitle>
+          <div className="overflow-x-auto rounded-xl border border-line bg-surface">
+            <table className="w-full border-collapse text-left text-xs">
+              <thead>
+                <tr className="bg-surface-sunken text-2xs uppercase tracking-wider text-content-subtle">
+                  <th scope="col" className="px-2.5 py-1.5 font-medium">
+                    Destination
+                  </th>
+                  <th scope="col" className="px-2.5 py-1.5 font-medium">
+                    Format
+                  </th>
+                  <th scope="col" className="px-2.5 py-1.5 font-medium">
+                    Mode
+                  </th>
+                  <th scope="col" className="px-2.5 py-1.5 text-right font-medium">
+                    Rows
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {run.outputMetrics.map((out, index) => (
+                  <tr key={`${out.path}-${index}`} className="border-t border-line">
+                    <td className="px-2.5 py-1.5 font-mono text-2xs text-content">
+                      {out.path}
+                    </td>
+                    <td className="whitespace-nowrap px-2.5 py-1.5 text-2xs text-content-muted">
+                      {out.format}
+                    </td>
+                    <td className="whitespace-nowrap px-2.5 py-1.5 text-2xs text-content-muted">
+                      {out.mode || '—'}
+                    </td>
+                    <td className="px-2.5 py-1.5 text-right tabular-nums text-content-muted">
+                      {formatCount(out.rowsWritten)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {run.validations && run.validations.length > 0 && (
         <section className="space-y-2">
           <SectionTitle>Validations</SectionTitle>

@@ -232,12 +232,13 @@ describe('lintWorkflow', () => {
   })
 
   describe('io formats', () => {
-    it('flags a source using a write-only format', () => {
+    it('accepts kafka as a source now that batch read is supported', () => {
       const issues = lint(
         [source('src', { format: 'kafka', path: 'topic' }), sink('out')],
         [link('src', 'out')],
       )
-      expect(idsOf(issues)).toContain('format-read:src')
+      // kafka gained a batch reader — it is no longer flagged as write-only.
+      expect(idsOf(issues)).not.toContain('format-read:src')
     })
 
     it('accepts a readable source and a kafka sink', () => {

@@ -1,4 +1,4 @@
-# SparkFramework — Contexto para Claude
+# Sparquet — Contexto para Claude
 
 Framework Python/PySpark orientado a configuração JSON para pipelines de dados.
 Objetivo: produto reutilizável para qualquer caso de ingestão, transformação e qualidade de dados.
@@ -8,9 +8,9 @@ Objetivo: produto reutilizável para qualquer caso de ingestão, transformação
 ## Uso como biblioteca (ponto de entrada principal)
 
 ```python
-from sparquet import SparkFramework, Pipeline, PipelineResult, PipelineConfig
+from sparquet import Sparquet, Pipeline, PipelineResult, PipelineConfig
 
-fw = SparkFramework(spark={"app_name": "MeuJob", "master": "yarn"})
+fw = Sparquet(spark={"app_name": "MeuJob", "master": "yarn"})
 
 r1 = fw.run("pipeline_clientes.json")
 r2 = fw.run("pipeline_pedidos.json")
@@ -23,7 +23,7 @@ r5 = fw.run("pipeline.json", params={"tipo_ativo": "NC", "ids": ["A1", "A2"], "a
 fw.stop()
 ```
 
-`SparkFramework` em `framework.py` gerencia o singleton de SparkSession e compartilha os engines de transformação/validação entre todas as execuções.
+`Sparquet` em `framework.py` gerencia o singleton de SparkSession e compartilha os engines de transformação/validação entre todas as execuções.
 
 ### API pública completa
 
@@ -79,7 +79,7 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 
 | Módulo | Arquivo | Responsabilidade |
 |--------|---------|-----------------|
-| `SparkFramework` | `framework.py` | Entry point como lib |
+| `Sparquet` | `framework.py` | Entry point como lib |
 | `cli` | `cli.py` | Entry point de linha de comando |
 | `PipelineConfig` | `core/config.py` | Deserializa JSON em dataclasses |
 | `SparkContextManager` | `core/context.py` | Singleton do SparkSession; detecta Databricks/EMR/Dataproc/Synapse/local |
@@ -90,8 +90,16 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `DeltaReader/Writer` | `io/delta.py` | Implementação Delta Lake (com MERGE, time travel) |
 | `CsvReader/Writer` | `io/csv.py` | Implementação CSV com defaults de header/encoding |
 | `TxtReader/Writer` | `io/txt.py` | Arquivos texto plano (coluna `value`) |
-| `KafkaWriter` | `io/kafka.py` | Publicação batch em tópico Kafka |
+| `KafkaReader/Writer` | `io/kafka.py` | Leitura e publicação batch em tópico Kafka (MSK via SASL/IAM) |
 | `ViewReader/Writer` | `io/view.py` | Spark temp views (auto-cache) |
+| JDBC (`Postgres/MySql/MariaDb/SqlServer/Oracle`) | `io/jdbc.py` | Base JDBC + dialetos (driver/URL por banco) |
+| `BigQueryReader/Writer` | `io/bigquery.py` | Google BigQuery (spark-bigquery-connector) |
+| `SnowflakeReader/Writer` | `io/snowflake.py` | Snowflake (spark-snowflake) |
+| `RedshiftReader/Writer` | `io/redshift.py` | Amazon Redshift (staging em S3) |
+| `MongoReader/Writer` | `io/mongodb.py` | MongoDB e Amazon DocumentDB (mongo-spark) |
+| `DynamoDbReader/Writer` | `io/dynamodb.py` | Amazon DynamoDB (spark-dynamodb) |
+| `CassandraReader/Writer` | `io/cassandra.py` | Cassandra/ScyllaDB (spark-cassandra-connector) |
+| `ElasticsearchReader/Writer` | `io/elasticsearch.py` | Elasticsearch/OpenSearch (es-hadoop) |
 | `ReaderFactory/WriterFactory` | `io/factory.py` | Registry de formatos; extensível |
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
@@ -189,7 +197,7 @@ Como funciona:
   conjunto apto está vazio); string → `'valor'`.
 - O store é **compartilhado com os `with_transformations` aninhados** dos joins, então
   variáveis coletadas no escopo externo são visíveis nos reads de dentro.
-- O store é **zerado a cada `fw.run(...)`** (o engine é reusado no `SparkFramework`),
+- O store é **zerado a cada `fw.run(...)`** (o engine é reusado no `Sparquet`),
   evitando vazamento de variáveis entre execuções.
 - `{{var}}` cuja variável ainda não foi coletada fica **literal** (não dá erro) — é
   resolvido quando/se a variável passar a existir num escopo aninhado.
@@ -409,7 +417,27 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | `iceberg` | sim | sim | MERGE INTO nativo |
 | `txt` | sim | sim | Texto plano; coluna `value` |
 | `view` | sim | sim | Spark temp views; auto-cache |
-| `kafka` | não | sim | Publicação batch; requer conector Kafka no classpath |
+| `kafka` | sim | sim | Batch read/write; MSK via SASL/IAM; requer conector Kafka no classpath |
+| `postgresql` | sim | sim | JDBC; `path`=tabela; `url` ou `host`+`database` em options |
+| `mysql` | sim | sim | JDBC |
+| `mariadb` | sim | sim | JDBC |
+| `sqlserver` | sim | sim | JDBC |
+| `oracle` | sim | sim | JDBC (service name na `database`) |
+| `bigquery` | sim | sim | `path`=`projeto.dataset.tabela`; write via GCS/direct |
+| `snowflake` | sim | sim | Opções `sfXxx`; `path`=tabela |
+| `redshift` | sim | sim | Requer `url` + `tempdir` (S3) |
+| `mongodb` | sim | sim | `path`=coleção; `connection.uri`+`database` em options |
+| `documentdb` | sim | sim | Amazon DocumentDB (mesmo conector Mongo; URI com TLS) |
+| `dynamodb` | sim | sim | `path`=tabela; write é upsert por chave (append) |
+| `cassandra` | sim | sim | `path`=`keyspace.tabela`; append (upsert) |
+| `elasticsearch` | sim | sim | `path`=índice; Elasticsearch/OpenSearch |
+
+> Todos os conectores externos (JDBC, BigQuery, Snowflake, Redshift, Mongo,
+> DynamoDB, Cassandra, Elasticsearch, Kafka) exigem o **JAR do driver/conector no
+> classpath** do Spark (`spark.jars` / `spark.jars.packages`). O framework só monta a
+> chamada `.format(...).options(...)`; não empacota drivers. Cada `io/<fmt>.py`
+> documenta as opções de conexão; o catálogo do Studio (`formats.databases.ts`) as
+> descreve para a UI e a IA.
 
 ---
 
@@ -493,7 +521,7 @@ Cada output parte do **mesmo** df principal (materialize-o com `checkpoint` na �
 ### Novo formato IO
 
 ```python
-fw = SparkFramework()
+fw = Sparquet()
 fw.register_reader("meu_formato", MeuReader)   # class MeuReader(BaseReader)
 fw.register_writer("meu_formato", MeuWriter)   # class MeuWriter(BaseWriter)
 ```
@@ -531,7 +559,7 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 - `input` (singular) como fonte principal; múltiplas fontes via `join`/`union` em transformations.
 - `output` (singular) ou `outputs` (lista) — ambos aceitos; um único objeto é normalizado para lista internamente.
 - `columns` em output = projeção de colunas por destino; sem `columns` = escreve todas.
-- Factories são class-level registries — extensões em `SparkFramework` afetam todas as execuções.
+- Factories são class-level registries — extensões em `Sparquet` afetam todas as execuções.
 - `Pipeline` recebe engines injetáveis — útil para testes ou para injetar engines com transformações customizadas.
 - `PipelineResult` nunca lança exceção — erros ficam em `result.error`.
 - Logger sempre JSON estruturado (`utils/logger.py`).
@@ -577,7 +605,7 @@ Rules:
 Editor visual para os pipelines JSON, em `sparquet-studio/` (React 18 + TypeScript +
 Vite + Tailwind + React Flow). É o ponto de entrada de uso do framework: o usuário
 desenha o pipeline no canvas, o Studio compila para o mesmo JSON que o
-`SparkFramework` executa.
+`Sparquet` executa.
 
 ```bash
 cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
@@ -589,7 +617,7 @@ cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
 | Compilador | `src/lib/compiler/` | `compileGraph()` (grafo → JSON) e `pipelineToGraph()` (JSON → grafo) são inversos, com testes de round-trip sobre os confs de `examples/`. |
 | Linter | `src/lib/validation/lint.ts` | Regras client-side (merge sem `merge_keys`, `{{var}}` sem `collect`, `{param}` não declarado, etc). |
 | IA | `src/lib/ai/` | Cliente streaming multi-provider (Anthropic/OpenAI/Google/compatível), prompt gerado do catálogo, parser de proposta. |
-| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o pipeline com o `SparkFramework` real e devolve contadores, validações, preview e logs. |
+| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o pipeline com o `Sparquet` real e devolve contadores, validações, preview e logs. |
 | Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (projetos/workflows), settings. |
 
 **Regra de ouro ao evoluir o framework**: toda transformação, formato ou validator

@@ -1,4 +1,4 @@
-# SparkFramework — Documentação
+# Sparquet — Documentação
 
 Framework de pipelines Spark orientado a configuração JSON.  
 Permite criar pipelines de ingestão, transformação e qualidade de dados **sem escrever código**, apenas editando um arquivo `.json`.
@@ -114,7 +114,7 @@ framework-spark/
 
 | Campo      | Tipo   | Padrão        | Descrição                                      |
 |------------|--------|---------------|------------------------------------------------|
-| `app_name` | string | `SparkFramework` | Nome da aplicação Spark                     |
+| `app_name` | string | `Sparquet` | Nome da aplicação Spark                     |
 | `master`   | string | `local[*]`    | Master URL (local, yarn, k8s://, etc.)         |
 | `configs`  | object | `{}`          | Configs adicionais como `spark.sql.*`          |
 

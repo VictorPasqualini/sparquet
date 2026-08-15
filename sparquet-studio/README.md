@@ -31,7 +31,7 @@ If you know n8n, you already know the idea. This is that, for data engineering.
 | **AI that writes pipelines** | Describe what you need and get a complete, valid pipeline back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI, Google or any OpenAI-compatible endpoint. |
 | **Live linting** | 20+ rules run as you type: unreachable nodes, a `merge` write without `merge_keys`, a `{{var}}` no `collect` publishes, a `{param}` you never declared, `collect` before `checkpoint`, two sinks fighting over one path. |
 | **Round-trip JSON** | Import an existing config, edit it visually, export it byte-for-byte usable. The compiler is covered by tests that round-trip the framework's own example configs. |
-| **Run it locally** | An optional Python service executes the compiled JSON with the real `SparkFramework` and streams back counters, validation results, a data preview and the framework's structured logs. |
+| **Run it locally** | An optional Python service executes the compiled JSON with the real `Sparquet` and streams back counters, validation results, a data preview and the framework's structured logs. |
 | **Templates and lessons** | Ten working pipelines, from "CSV to Parquet" to Delta merge and runtime pushdown, plus six lessons that teach the language through the canvas. |
 | **Local-first** | Projects and workflows live in your browser (IndexedDB). No account, no server, no telemetry. Export the whole workspace as one JSON file whenever you want. |
 
@@ -120,7 +120,7 @@ pip install -r server/requirements.txt
 uvicorn server.main:app --port 8787
 ```
 
-It must run from `sparquet-studio/` — the module inserts the repository root into `sys.path` so `spark_framework` resolves without installing anything. `pyspark` and a working `JAVA_HOME` are required for real runs; on Windows you also need `winutils.exe` and `HADOOP_HOME`, or Spark will hang the first time it touches the filesystem ([details](server/README.md#windows)).
+It must run from `sparquet-studio/` — the module inserts the repository root into `sys.path` so `sparquet` resolves without installing anything. `pyspark` and a working `JAVA_HOME` are required for real runs; on Windows you also need `winutils.exe` and `HADOOP_HOME`, or Spark will hang the first time it touches the filesystem ([details](server/README.md#windows)).
 
 The Run panel then gives you: row counts, duration, per-rule validation results, a 50-row preview of the output DataFrame, and the framework's own structured logs.
 

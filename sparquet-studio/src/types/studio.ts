@@ -208,6 +208,13 @@ export interface RunResult {
     message?: string
     failedCount?: number
   }[]
+  /** Rows written per destination (counted on each output's final df before write). */
+  outputMetrics?: {
+    format: string
+    path: string
+    mode?: string
+    rowsWritten?: number
+  }[]
   preview?: {
     columns: string[]
     rows: unknown[][]
