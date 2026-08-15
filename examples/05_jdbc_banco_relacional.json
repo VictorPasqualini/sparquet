@@ -1,0 +1,84 @@
+{
+  "name": "05_jdbc_banco_relacional",
+  "description": "Ingestao de banco relacional via JDBC: le pedidos do Postgres em paralelo, enriquece com uma tabela do MySQL, grava o historico em Parquet e faz upsert do agregado de volta no Postgres. Demonstra conexao por host/database, credenciais por variavel de ambiente, leitura particionada, query pushdown, join entre bancos diferentes e mode merge (upsert). Exporte PG_PASSWORD e MYSQL_PASSWORD antes de rodar.",
+
+  "spark": {
+    "configs": {
+      "spark.jars.packages": "org.postgresql:postgresql:42.7.4,com.mysql:mysql-connector-j:9.1.0"
+    }
+  },
+
+  "input": {
+    "format": "postgres",
+    "path": "public.pedidos",
+    "options": {
+      "host": "db.interno",
+      "database": "vendas",
+      "user": "app",
+      "password_env": "PG_PASSWORD",
+      "partition_column": "id",
+      "lower_bound": 1,
+      "upper_bound": 5000000,
+      "num_partitions": 8,
+      "fetch_size": 10000
+    }
+  },
+
+  "transformations": [
+    { "type": "filter", "condition": "status = 'CONFIRMADO'" },
+    {
+      "type": "join",
+      "with": {
+        "format": "mysql",
+        "path": "ignorado_quando_ha_query",
+        "options": {
+          "host": "legado.interno",
+          "database": "cadastro",
+          "user": "leitura",
+          "password_env": "MYSQL_PASSWORD",
+          "query": "SELECT id AS cliente_id, segmento, uf FROM clientes WHERE ativo = 1"
+        }
+      },
+      "on": "cliente_id",
+      "how": "left"
+    },
+    { "type": "with_column", "column": "receita", "expression": "quantidade * preco_unitario" },
+    { "type": "checkpoint" },
+    {
+      "type": "group_by",
+      "by": ["cliente_id", "segmento", "uf"],
+      "agg": ["sum(receita) as receita_total", "count(*) as pedidos", "max(data_pedido) as ultimo_pedido"]
+    }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "not_null", "columns": ["cliente_id"] },
+      { "type": "unique", "columns": ["cliente_id"] },
+      { "type": "row_count", "min": 1 }
+    ]
+  },
+
+  "outputs": [
+    {
+      "format": "parquet",
+      "path": "/data/analytics/receita_por_cliente",
+      "mode": "overwrite",
+      "partition_by": ["uf"]
+    },
+    {
+      "format": "postgres",
+      "path": "analytics.receita_por_cliente",
+      "mode": "merge",
+      "options": {
+        "host": "db.interno",
+        "database": "vendas",
+        "user": "app",
+        "password_env": "PG_PASSWORD",
+        "merge_keys": ["cliente_id"],
+        "batch_size": 5000
+      }
+    }
+  ]
+}

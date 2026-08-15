@@ -94,6 +94,8 @@ That file runs as-is, and opens on the Studio canvas as nine connected nodes.
 
 **IO** — `parquet` `delta` `iceberg` `csv` `txt` `view` read and write; `kafka` write-only. Delta and Iceberg support `MERGE` upserts and Delta time travel on read.
 
+**Databases** — `postgres` `mysql` `sqlserver` `oracle` and a generic `jdbc` for anything else, as sources *and* destinations: parallel reads with `partition_column`, SQL pushdown with `query`, credentials from environment variables, and `mode: "merge"` upserts that run the database's own `ON CONFLICT` / `ON DUPLICATE KEY` / `MERGE`.
+
 **Validations** — `not_null` `unique` `range` `regex` `row_count` `custom_sql`, with `fail` / `warn` / `skip` policies and an optional per-rule report written to any sink.
 
 **Beyond the basics**

@@ -761,4 +761,142 @@ describe('lintWorkflow', () => {
       })
     }
   })
+
+  describe('database endpoints', () => {
+    const PG = {
+      host: 'db.internal',
+      database: 'sales',
+      user: 'app',
+      password_env: 'PG_PASSWORD',
+    }
+
+    it('accepts a postgres source wired to a parquet sink', () => {
+      const issues = lint(
+        [source('src', { format: 'postgres', path: 'public.orders', options: PG }), sink('out')],
+        [link('src', 'out')],
+      )
+      expect(issues.filter((issue) => issue.severity === 'error')).toEqual([])
+    })
+
+    it('flags a password stored in the pipeline file', () => {
+      const issues = lint(
+        [
+          source('src', {
+            format: 'postgres',
+            path: 'public.orders',
+            options: { host: 'db', database: 'sales', user: 'app', password: 's3cr3t' },
+          }),
+          sink('out'),
+        ],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'jdbc-inline-password:src')
+      expect(issue?.severity).toBe('warning')
+      expect(issue?.field).toBe('options.password')
+    })
+
+    it('stays quiet when the password comes from the environment', () => {
+      const issues = lint(
+        [source('src', { format: 'postgres', path: 'public.orders', options: PG }), sink('out')],
+        [link('src', 'out')],
+      )
+      expect(idsOf(issues)).not.toContain('jdbc-inline-password:src')
+    })
+
+    it('flags partition_by on a database destination', () => {
+      const issues = lint(
+        [
+          source('src'),
+          sink('out', {
+            format: 'mysql',
+            path: 'shop.orders',
+            mode: 'append',
+            partitionBy: ['uf'],
+            options: { host: 'db', database: 'shop', user: 'app', password_env: 'P' },
+          }),
+        ],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'jdbc-partition-by:out')
+      expect(issue?.severity).toBe('warning')
+    })
+
+    it('requires merge keys on a database upsert', () => {
+      const issues = lint(
+        [
+          source('src'),
+          sink('out', {
+            format: 'postgres',
+            path: 'analytics.revenue',
+            mode: 'merge',
+            options: PG,
+          }),
+        ],
+        [link('src', 'out')],
+      )
+      expect(idsOf(issues)).toContain('merge-keys:out')
+    })
+
+    it('accepts a database upsert that declares its keys', () => {
+      const issues = lint(
+        [
+          source('src'),
+          sink('out', {
+            format: 'postgres',
+            path: 'analytics.revenue',
+            mode: 'merge',
+            options: { ...PG, merge_keys: ['customer_id'] },
+          }),
+        ],
+        [link('src', 'out')],
+      )
+      expect(issues.filter((issue) => issue.severity === 'error')).toEqual([])
+    })
+
+    it('reports a connection with neither a URL nor a host', () => {
+      const issues = lint(
+        [source('src', { format: 'postgres', path: 'public.orders', options: {} }), sink('out')],
+        [link('src', 'out')],
+      )
+      expect(issues.some((issue) => issue.severity === 'error')).toBe(true)
+    })
+
+    it('reports a parallel read missing its bounds', () => {
+      const issues = lint(
+        [
+          source('src', {
+            format: 'postgres',
+            path: 'public.orders',
+            options: { ...PG, partition_column: 'id' },
+          }),
+          sink('out'),
+        ],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.field === 'options.partition_column')
+      expect(issue?.severity).toBe('error')
+      expect(issue?.message).toMatch(/lower_bound|upper_bound|num_partitions/)
+    })
+
+    it('mentions the driver package only when none is declared', () => {
+      const nodes = [
+        source('src', { format: 'postgres', path: 'public.orders', options: PG }),
+        sink('out'),
+      ]
+      const edges = [link('src', 'out')]
+
+      expect(idsOf(lint(nodes, edges))).toContain('jdbc-driver-package')
+
+      const withPackage = lintWorkflow({ nodes, edges }, {
+        ...SETTINGS,
+        spark: { configs: { 'spark.jars.packages': 'org.postgresql:postgresql:42.7.4' } },
+      }, [])
+      expect(idsOf(withPackage)).not.toContain('jdbc-driver-package')
+    })
+
+    it('says nothing about databases when no endpoint uses one', () => {
+      const issues = lint([source('src'), sink('out')], [link('src', 'out')])
+      expect(idsOf(issues).filter((id) => id.startsWith('jdbc-'))).toEqual([])
+    })
+  })
 })

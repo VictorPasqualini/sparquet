@@ -549,7 +549,7 @@ const checkSinks = (ctx: LintContext): void => {
           message: `Write mode "merge" is not supported by ${def.label}.`,
           nodeId: node.id,
           field: 'mode',
-          hint: 'Only delta and iceberg implement MERGE. Every other writer hands the string to df.write.mode(), where Spark raises "Unknown save mode".',
+          hint: 'Only delta, iceberg and the JDBC connectors implement MERGE. Every other writer hands the string to df.write.mode(), where Spark raises "Unknown save mode".',
         })
       } else if (def.id === 'iceberg' && writeMode !== 'merge') {
         ctx.issues.push({
@@ -975,6 +975,103 @@ const checkOutputColumns = (ctx: LintContext): void => {
  * express. Issue ids are derived from rule + node so they stay stable across runs
  * and can be used as React keys.
  */
+
+/* ------------------------------------------------------------------ database */
+
+/** Formats routed to the JDBC connector, aliases included (io/factory.py). */
+const JDBC_FORMATS = new Set([
+  'jdbc',
+  'postgres',
+  'postgresql',
+  'mysql',
+  'sqlserver',
+  'mssql',
+  'oracle',
+])
+
+const isJdbc = (format: unknown): boolean => JDBC_FORMATS.has(text(format).toLowerCase())
+
+/**
+ * Rules that only make sense for a database endpoint. Everything statically
+ * decidable is already covered by the catalog field validators; these are the
+ * cross-field and cross-node facts a single field cannot see.
+ */
+const checkDatabases = (ctx: LintContext, settings: WorkflowSettings): void => {
+  const endpoints: { node: StudioNode; options: Record<string, unknown>; format: string }[] = []
+
+  for (const node of ctx.sources) {
+    if (isJdbc(node.data.format)) {
+      endpoints.push({ node, options: node.data.options ?? {}, format: node.data.format })
+    }
+  }
+  for (const node of ctx.sinks) {
+    if (isJdbc(node.data.format)) {
+      endpoints.push({ node, options: node.data.options ?? {}, format: node.data.format })
+    }
+  }
+
+  for (const { node, options } of endpoints) {
+    if (text(options.password) !== '' && text(options.password_env) === '') {
+      ctx.issues.push({
+        id: `jdbc-inline-password:${node.id}`,
+        severity: 'warning',
+        message: 'The database password is stored in the pipeline file.',
+        nodeId: node.id,
+        field: 'options.password',
+        hint: 'Use options.password_env with the name of an environment variable, so the compiled JSON can be committed without leaking the credential.',
+      })
+    }
+
+    if (text(options.user) === '' && text(options.user_env) === '') {
+      ctx.issues.push({
+        id: `jdbc-no-user:${node.id}`,
+        severity: 'info',
+        message: 'No database user is configured.',
+        nodeId: node.id,
+        field: 'options.user',
+        hint: 'Fine when the URL already carries the credentials or the driver authenticates another way (integrated security, IAM); otherwise set user and password_env.',
+      })
+    }
+  }
+
+  for (const node of ctx.sinks) {
+    if (!isJdbc(node.data.format)) continue
+    if ((node.data.partitionBy ?? []).length > 0) {
+      ctx.issues.push({
+        id: `jdbc-partition-by:${node.id}`,
+        severity: 'warning',
+        message: 'A database destination ignores partition_by.',
+        nodeId: node.id,
+        field: 'partitionBy',
+        hint: 'Partitioning is a filesystem concept; the JDBC writer logs a warning and writes every row into the table. Drop it, or partition the table on the database side.',
+      })
+    }
+  }
+
+  if (endpoints.length === 0) return
+
+  // The driver JAR is the single most common first-run failure, and it fails at
+  // connection time — long after the pipeline looked fine.
+  const packages = text(settings.spark?.configs?.['spark.jars.packages']).toLowerCase()
+  const declared =
+    packages.includes('postgresql') ||
+    packages.includes('mysql') ||
+    packages.includes('mssql') ||
+    packages.includes('ojdbc') ||
+    packages.includes('jdbc')
+
+  if (!declared) {
+    const first = endpoints[0]
+    ctx.issues.push({
+      id: 'jdbc-driver-package',
+      severity: 'info',
+      message: 'No JDBC driver package is declared in the Spark config.',
+      nodeId: first?.node.id,
+      hint: 'Databricks and EMR clusters usually ship the driver already. Otherwise add spark.jars.packages under the pipeline Spark settings, e.g. org.postgresql:postgresql:42.7.4.',
+    })
+  }
+}
+
 export function lintWorkflow(
   graph: StudioGraph,
   settings: WorkflowSettings,
@@ -989,6 +1086,7 @@ export function lintWorkflow(
   checkValidationRules(ctx)
   checkPlaceholders(ctx, settings, params)
   checkOutputColumns(ctx)
+  checkDatabases(ctx, settings)
 
   const seen = new Set<string>()
   return ctx.issues

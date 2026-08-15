@@ -27,7 +27,8 @@ If you know n8n, you already know the idea. This is that, for data engineering.
 | | |
 |---|---|
 | **Visual pipeline editor** | Drag sources, transformations, validations and destinations onto a canvas. Joins and unions take a second input, so branching pipelines read like a diagram instead of nested JSON. |
-| **Every Sparquet feature, typed** | All 20 transformations, 7 IO formats and 6 validators, with per-field help, defaults and the gotchas that only live in the framework source (positional `union`, `merge_keys`, `{{runtime}}` pushdown, dot-path `struct`, …). |
+| **Database connectors** | PostgreSQL, MySQL, SQL Server, Oracle and generic JDBC, as sources and destinations — parallel reads, SQL pushdown, environment-variable credentials and upserts, all from the same forms. |
+| **Every Sparquet feature, typed** | All 20 transformations, 12 IO formats and 6 validators, with per-field help, defaults and the gotchas that only live in the framework source (positional `union`, `merge_keys`, `{{runtime}}` pushdown, dot-path `struct`, …). |
 | **AI that writes pipelines** | Describe what you need and get a complete, valid pipeline back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI, Google or any OpenAI-compatible endpoint. |
 | **Live linting** | 20+ rules run as you type: unreachable nodes, a `merge` write without `merge_keys`, a `{{var}}` no `collect` publishes, a `{param}` you never declared, `collect` before `checkpoint`, two sinks fighting over one path. |
 | **Round-trip JSON** | Import an existing config, edit it visually, export it byte-for-byte usable. The compiler is covered by tests that round-trip the framework's own example configs. |

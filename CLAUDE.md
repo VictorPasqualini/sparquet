@@ -237,7 +237,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
   },
 
   "input": {                            // obrigatório (ignorado quando input_df é injetado)
-    "format": "csv|parquet|iceberg|delta|txt|view",
+    "format": "csv|parquet|iceberg|delta|txt|view|jdbc|postgres|mysql|sqlserver|oracle",
     "path": "string",
     // Delta: suporta time travel via options
     "options": {
@@ -355,7 +355,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 
   // Saída única (shorthand):
   "output": {
-    "format": "csv|parquet|iceberg|delta|txt|kafka|view",
+    "format": "csv|parquet|iceberg|delta|txt|kafka|view|jdbc|postgres|mysql|sqlserver|oracle",
     "path": "string",
     "mode": "overwrite|append|merge",
     "partition_by": ["col"],
@@ -410,6 +410,64 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | `txt` | sim | sim | Texto plano; coluna `value` |
 | `view` | sim | sim | Spark temp views; auto-cache |
 | `kafka` | não | sim | Publicação batch; requer conector Kafka no classpath |
+| `jdbc` | sim | sim | Qualquer banco com driver JDBC; exige `url` e `driver` em `options` |
+| `postgres` | sim | sim | Apelido de `jdbc` com driver/porta do PostgreSQL (`postgresql` também aceito) |
+| `mysql` | sim | sim | Apelido de `jdbc` com driver/porta do MySQL |
+| `sqlserver` | sim | sim | Apelido de `jdbc` com driver/porta do SQL Server (`mssql` também aceito) |
+| `oracle` | sim | sim | Apelido de `jdbc` com driver/porta do Oracle |
+
+### Conectores de banco (JDBC)
+
+O JAR do driver precisa estar no classpath — fora do Databricks, declare no próprio JSON:
+`"spark": { "configs": { "spark.jars.packages": "org.postgresql:postgresql:42.7.4" } }`.
+
+```jsonc
+// Leitura: path = tabela; use options.query para SQL livre (pushdown manual)
+{
+  "format": "postgres",
+  "path": "public.pedidos",
+  "options": {
+    "host": "db.interno", "database": "vendas", "port": 5432,   // ou "url": "jdbc:postgresql://..."
+    "user": "app", "password_env": "PG_PASSWORD",               // *_env lê variável de ambiente
+    "query": "SELECT id, total FROM pedidos WHERE dt >= '2026-01-01'",
+    // leitura paralela: as 4 chaves andam juntas, senão a leitura usa 1 conexão só
+    "partition_column": "id", "lower_bound": 1, "upper_bound": 5000000, "num_partitions": 8,
+    "fetch_size": 10000
+  }
+}
+
+// Escrita: append | overwrite | ignore | error | merge (upsert)
+{
+  "format": "postgres",
+  "path": "analytics.receita_por_cliente",
+  "mode": "merge",
+  "options": {
+    "host": "db.interno", "database": "vendas",
+    "user": "app", "password_env": "PG_PASSWORD",
+    "merge_keys": ["cliente_id"],              // obrigatório no merge; exige constraint única
+    "merge_update_columns": ["receita_total"], // opcional: restringe o que o UPDATE toca
+    "batch_size": 5000,
+    "truncate_table": true                     // overwrite: TRUNCATE em vez de DROP+CREATE
+  }
+}
+```
+
+**Credenciais**: prefira `user_env` / `password_env` (nome da variável de ambiente) para
+manter segredo fora do JSON versionado. `user` / `password` literais funcionam e aceitam
+`{param}` de template, mas transformam a conf em segredo.
+
+**`mode: "merge"`** grava um staging temporário (`<tabela>_sparquet_stg_<hash>`) e roda o
+upsert nativo do banco: `ON CONFLICT` no Postgres, `ON DUPLICATE KEY` no MySQL, `MERGE` no
+SQL Server e Oracle. Precisa de constraint única sobre `merge_keys` e de uma sessão Spark
+clássica (usa a JVM; não funciona em Spark Connect).
+
+**Aliases de options** (snake_case → nome do Spark): `partition_column`→`partitionColumn`,
+`lower_bound`→`lowerBound`, `upper_bound`→`upperBound`, `num_partitions`→`numPartitions`,
+`fetch_size`→`fetchsize`, `batch_size`→`batchsize`, `isolation_level`→`isolationLevel`,
+`truncate_table`→`truncate`, `query_timeout`→`queryTimeout`,
+`session_init_statement`→`sessionInitStatement`, `push_down_predicate`→`pushDownPredicate`,
+`create_table_options`→`createTableOptions`, `create_table_column_types`→`createTableColumnTypes`.
+Nomes originais em camelCase continuam válidos.
 
 ---
 
