@@ -1,0 +1,79 @@
+---
+title: O inspector
+description: Editando campos de nós no Sparquet Studio — formulários tipados gerados do catálogo, com ajuda, exemplos e validação no lugar.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Selecione um nó e o inspector mostra exatamente os campos que o tipo daquele nó lê — nem mais, nem menos. Os formulários são gerados do mesmo catálogo que alimenta o linter e o assistente de IA, então o que você vê é o que o framework suporta.
+
+## Anatomia
+
+| Parte | Propósito |
+|---|---|
+| Header | Ícone do nó, label editável, chip de tipo e um menu (duplicar, mutar, deletar, copiar JSON do nó) |
+| Issues | Achados do linter para este nó, cada um linkando o campo que o causou |
+| Fields | Os parâmetros do nó, agrupados em main e advanced |
+| Run condition | `skip_if_false`, para toda transformação |
+| Worth knowing | Comportamentos que costumam viver só no código-fonte do framework |
+| Examples | Snippets válidos para este tipo de nó |
+| Notes | Anotação livre, nunca compilada |
+
+## Tipos de campo
+
+O widget segue o formato JSON que o framework espera:
+
+| Widget | Para | Notas |
+|---|---|---|
+| Text | nomes, paths, valores únicos | |
+| SQL | condições, expressões, queries | monoespaçado; destaca placeholders `{param}` e `{{variable}}` que detecta |
+| Number / Toggle | opções numéricas e booleanas | |
+| Select | escolhas fixas (`how`, `mode`, `method`) | só os valores que o framework aceita |
+| Chips | listas ordenadas de strings (`columns`, `by`, `merge_keys`) | cole uma lista separada por vírgula para adicionar várias de uma vez |
+| Expression rows | mapas ordenados (`agg`, `with_column.columns`) | a ordem é preservada porque é significativa |
+| Key/value rows | mapas ordenados (`cast.columns`, `rename.mappings`) | a ordem importa para `rename` |
+| JSON | estruturas aninhadas (`struct.fields`, `pivot`) | feedback de parse ao vivo abaixo do box |
+
+Widgets ordenados existem porque a ordem é semântica no framework: `rename` aplica os mapeamentos em sequência, e `with_column.columns` deixa uma expressão posterior usar uma coluna criada por uma anterior.
+
+## Fontes e destinos
+
+Escolher um formato reescreve o formulário para as opções daquele conector — as que ele realmente lê, com os defaults do framework preenchidos. Trocar o formato descarta opções que o novo não define, então um config nunca carrega chaves mortas de uma escolha anterior.
+
+Destinos acrescentam:
+
+- **Write mode**, restrito aos modos que aquele formato suporta
+- **Partition by**, escondido para conectores onde não faz sentido
+- **Column projection**, um toggle mais uma lista de chips
+- **Options**, incluindo os campos de merge que só aparecem no modo merge
+
+## Validações
+
+O nó de validations tem formulário próprio: a política `on_failure` com uma explicação de uma linha de cada modo, uma lista de regras onde cada regra renderiza seus próprios campos, e um destino de report opcional que reusa o formulário de output completo.
+
+## Condição de execução
+
+Toda transformação carrega `skip_if_false`. O inspector documenta os três casos no lugar: um valor vazio pula o passo, uma expressão booleana o pula quando falsa, qualquer outra coisa o executa.
+
+<Aside type="note">
+  A expressão enxerga só literais — os valores já substituídos — nunca colunas do
+  DataFrame. É uma chave por execução, não um filtro de linha.
+</Aside>
+
+## Vale saber
+
+Cada tipo de nó carrega os gotchas que custam tempo real de depuração:
+
+- entradas de `select` passam por `F.expr`, então nomes de coluna estranhos precisam de crases
+- `union` casa por **posição** a menos que `allow_missing_columns` esteja ligado
+- `group_by.agg` recebe expressões SQL completas com aliases, nunca um mapa
+- `merge` precisa de uma restrição de unicidade nas merge keys
+- `collect` dispara uma action no driver, então vem depois de um `checkpoint`
+
+Eles vivem ao lado do campo a que se aplicam, que é onde são úteis.
+
+## Pulando de uma issue
+
+Issues no painel — e o badge num nó — linkam direto para o campo que as causou. O Studio abre seções recolhidas e rola o controle para a vista, então um resultado de lint fica a um clique da correção.

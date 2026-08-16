@@ -1,0 +1,103 @@
+---
+title: Sparquet Studio
+description: O editor visual de pipelines Sparquet — o que é, como guarda seu trabalho e como mapeia um canvas no JSON que o framework roda.
+sidebar:
+  order: 1
+  label: Visão geral
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components'
+
+O Studio é uma aplicação de navegador que edita pipelines Sparquet num canvas de nós. Não é um produto separado com formato próprio: ele lê o JSON do pipeline e escreve o JSON do pipeline.
+
+```bash
+cd sparquet-studio
+npm install
+npm run dev          # http://localhost:5273
+```
+
+<CardGrid>
+  <Card title="Local first">
+    Projetos e workflows vivem no IndexedDB do seu navegador. Sem conta, sem
+    servidor, sem telemetria. Exporte o workspace inteiro como um JSON.
+  </Card>
+  <Card title="Sem lock-in">
+    O canvas compila para o arquivo que a CLI roda. Delete o Studio e todo
+    pipeline continua funcionando.
+  </Card>
+  <Card title="Documentado no lugar">
+    Todo campo carrega as mesmas notas desta referência, incluindo os
+    comportamentos que normalmente vivem só no código-fonte do framework.
+  </Card>
+  <Card title="Runner opcional">
+    Aponte para um pequeno serviço local e execute pipelines pelo canvas, com
+    contadores, validações e um preview dos dados.
+  </Card>
+</CardGrid>
+
+## O layout
+
+| Área | O que faz |
+|---|---|
+| **Palette** (esquerda) | Toda fonte, transformação, validator e destino. Arraste para o canvas, ou clique para anexar após o último nó. |
+| **Canvas** (centro) | O pipeline como nós conectados. Da esquerda para a direita é a ordem de execução. |
+| **Inspector** (direita) | Os campos do nó selecionado, com ajuda, exemplos e gotchas. |
+| **JSON panel** | O pipeline compilado, ao vivo. Também a superfície de import. |
+| **Issues panel** | Resultados de lint enquanto você digita, cada um linkando o nó e o campo. |
+| **Run panel** | Execução pelo runner local. |
+| **Status bar** | Contagem de nós, validade, estado de salvamento. |
+
+Os painéis compartilham uma coluna à direita, em abas e redimensionável — <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>E</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd> e <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd> alternam entre eles.
+
+## Projetos e workflows
+
+Um **workflow** é um pipeline. Um **projeto** agrupa workflows relacionados — geralmente um por domínio: `Sales`, `Billing`, `CRM`.
+
+Ambos vivem no seu navegador. **Settings → Data** exporta tudo como um único bundle JSON e o reimporta, que é como você move um workspace entre máquinas ou compartilha um conjunto de pipelines com um colega.
+
+<Aside type="caution">
+  O armazenamento do navegador é por navegador e por perfil. Limpar os dados do
+  site apaga seu workspace. Commite os pipelines compilados no git — eles são o
+  artefato que importa, e o Studio pode reimportar qualquer um deles.
+</Aside>
+
+## Como o canvas vira o arquivo
+
+Duas regras definem todo o mapeamento:
+
+**A cadeia compartilhada é o pipeline principal.** O que todo destino tem em comum vira o `transformations` de topo. Depois que o grafo se ramifica, cada branch vira o `transformations` daquele destino.
+
+**Um join ou union pega a segunda fonte do seu segundo input.** A cadeia que alimenta aquele handle vira `with` mais `with_transformations`.
+
+Todo o resto é campo de nó. Sticky notes nunca compilam; nós mutados são pulados.
+
+<Aside type="tip">
+  Aperte <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd> a qualquer momento para ver exatamente o
+  que seu desenho produz. Se o JSON não é o que você esperava, o grafo não é o
+  que você pensava — o painel é o jeito mais rápido de aprender o mapeamento.
+</Aside>
+
+## Importando o que você já tem
+
+Abra o painel JSON, mude para **Edit**, cole um pipeline e clique em **Apply to canvas**. O Studio o organiza automaticamente. Tipos de transformação desconhecidos — os customizados que você registrou — são preservados intactos no import e export.
+
+## Verificando uma mudança
+
+O Studio traz suas próprias checagens:
+
+```bash
+npm run typecheck   # TypeScript, zero erros esperados
+npm run test        # testes unitários, incluindo round-trips do compiler
+npm run lint        # eslint
+npm run smoke       # passada end-to-end num Chrome real
+```
+
+O compiler é coberto por testes de round-trip sobre os pipelines de exemplo do próprio framework: importa cada um, compila de volta e compara. Esse teste é o que garante que o canvas nunca muda seu arquivo silenciosamente.
+
+## Próximo
+
+- [O canvas](/pt/docs/studio/canvas/) — conexões, branching, controle por teclado
+- [O inspector](/pt/docs/studio/inspector/) — editando campos de nós
+- [Assistente de IA](/pt/docs/studio/ai-assistant/) — gerando e modificando pipelines
+- [Executando pipelines](/pt/docs/studio/running/) — o runner local
+- [Templates e lições](/pt/docs/studio/templates/) — o jeito mais rápido de aprender um recurso

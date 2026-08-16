@@ -49,4 +49,9 @@ sparquet = "sparquet.cli:main"
 version = { attr = "sparquet.__version__" }
 
 [tool.setuptools.packages.find]
-exclude = ["tests*", "examples*", "docs*"]
+# Distribuição é SÓ o projeto sparquet: os pacotes `sparquet` e `sparquet_cola`
+# (o motor de DQ, ainda embutido — vira pacote PyPI próprio no futuro, ver
+# BACKLOG §7). Lista explícita (não `exclude`) para que os outros projetos do
+# monorepo — `sparquet-studio/` (frontend) e `website/` — e qualquer pasta nova
+# nunca entrem no wheel/sdist por acidente.
+include = ["sparquet", "sparquet.*", "sparquet_cola", "sparquet_cola.*"]

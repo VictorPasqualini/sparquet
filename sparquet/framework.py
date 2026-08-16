@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from pyspark.sql import DataFrame
 
@@ -42,10 +42,17 @@ class Sparquet:
         fw.run("config.json")
     """
 
-    def __init__(self, spark: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        spark: Optional[Dict[str, Any]] = None,
+        input_view: Optional[Union[str, Dict[str, Any]]] = None,
+    ) -> None:
         self._spark_config = SparkConfig.from_dict(spark or {})
         self._transform_engine = TransformationEngine()
         self._validation_engine = ValidationEngine()
+        # Registra (e cacheia) o df de entrada como temp view em toda execução, para
+        # permitir self-join / SQL sobre a entrada sem reler a base. Ver `run()`.
+        self._input_view = input_view
         SparkContextManager.get_or_create(self._spark_config)
 
     # ------------------------------------------------------------------
@@ -58,6 +65,7 @@ class Sparquet:
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
+        input_view: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um arquivo JSON.
 
@@ -70,10 +78,21 @@ class Sparquet:
             params:      Valores de runtime substituídos como {chave} no JSON antes do
                          parse. Listas viram SQL IN (ex: 'a', 'b'); booleanos viram
                          "true"/"" (vazio = falsy dispara skip_if_false).
+            input_view:  se informado, registra (e cacheia) o df de entrada como uma
+                         temp view antes das transformações. Permite self-join / SQL
+                         sobre a entrada sem reler a base (ex: um `join` com
+                         `{"format":"view","path":"<input_view>"}`). Sobrepõe o default
+                         passado no construtor. Aceita:
+                         - uma **string** (nome da view, escopo "session"), ou
+                         - um **dict** `{"name": "<nome>", "type": "session"|"global"}`
+                           — use `"type": "global"` para uma global temp view visível a
+                           toda a aplicação (lida como `global_temp.<nome>`).
         """
         config = self._load_config(config_path, params)
         self._apply_spark_override(config)
-        return self._execute(config, input_df=input_df, columns=columns)
+        return self._execute(
+            config, input_df=input_df, columns=columns, input_view=input_view,
+        )
 
     def run_from_dict(
         self,
@@ -81,11 +100,14 @@ class Sparquet:
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
+        input_view: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> PipelineResult:
         """Executa um pipeline a partir de um dicionário Python."""
         pipeline_config = self._load_config_from_dict(config, params)
         self._apply_spark_override(pipeline_config)
-        return self._execute(pipeline_config, input_df=input_df, columns=columns)
+        return self._execute(
+            pipeline_config, input_df=input_df, columns=columns, input_view=input_view,
+        )
 
     # ------------------------------------------------------------------
     # Registro de extensões
@@ -128,6 +150,7 @@ class Sparquet:
         config: PipelineConfig,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        input_view: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> PipelineResult:
         pipeline = Pipeline(
             config,
@@ -135,6 +158,7 @@ class Sparquet:
             validation_engine=self._validation_engine,
             input_df=input_df,
             columns=columns,
+            input_view=input_view if input_view is not None else self._input_view,
         )
         return pipeline.run()
 

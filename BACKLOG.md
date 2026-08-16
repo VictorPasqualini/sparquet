@@ -30,6 +30,28 @@ Rodada de evolução — capacidades já no código, com testes e entrada no cat
   (use `with_column`).
 - **Fix**: heurística path-vs-tabela do Delta agora é *scheme-agnostic* (cobre
   `s3a://`, `abfs://`, etc., não só `s3://`).
+- **`sparquet_cola`**: o motor de validação virou uma **biblioteca separável**
+  (pacote top-level `sparquet_cola/`, só depende de pyspark, API `Cola`). O bloco
+  JSON continua `validations`; `sparquet.validation.*` são shims de compat.
+- **`sql` failed_rows**: além do invariante booleano, o `sql` aceita `failed_rows`
+  (query que retorna as linhas ruins) + `output` próprio para gravá-las.
+- **Quarentena** (§3 item resolvido): `validations.outputs` (`valid`/`invalid`)
+  roteia linhas para destinos próprios, apartado da saída principal.
+- **Formatos de arquivo**: `json`, `orc`, `avro`, `xml`, `binary` (só leitura) e
+  `hudi` (upsert via `hoodie.*`).
+- **OpenSearch separado** do Elasticsearch — conector próprio (`opensearch`,
+  prefixo `opensearch.*`). Cassandra/ScyllaDB e ES/OpenSearch documentados.
+- **Input em temp view** (`input_view` na chamada do Sparquet): registra e cacheia
+  a entrada para self-join/SQL sem reler a base.
+- **Temp view global vs sessão**: `view` ganhou `options.scope`
+  (`session`/`global`); o `input_view` aceita `{"name": ..., "type": "session"|"global"}`.
+
+- **CI/CD de release** (resolve §5): GitHub Actions `ci.yml` (testes em push/PR,
+  matriz Python) + `publish.yml` (testes → build + `twine check` → publish no PyPI em
+  release; TestPyPI em execução manual), via Trusted Publishing OIDC.
+- **`input_view` unificado**: o escopo da temp view de entrada agora vai dentro de
+  `input_view` (`"orders"` ou `{"name": "orders", "type": "global"}`); o antigo
+  `input_view_scope` foi removido.
 
 Pendências abaixo já descontam o que foi entregue.
 
@@ -47,23 +69,33 @@ deve preservar: ortogonalidade (capacidades não se acoplam), extensibilidade vi
 ## 2. Conectores de IO (novos formatos)
 
 Cada formato é um par `BaseReader`/`BaseWriter` registrado nas factories. Hoje
-(read+write): `parquet`, `csv`, `delta`, `iceberg`, `txt`, `view`, `kafka`,
+(read+write, salvo indicado): `parquet`, `csv`, `delta`, `iceberg`, `txt`, `view`,
+`json`, `orc`, `avro`, `xml`, `hudi`, `binary` (só leitura), `kafka` (batch),
 `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle`, `bigquery`, `snowflake`,
-`redshift`, `mongodb`, `documentdb`, `dynamodb`, `cassandra`, `elasticsearch`.
+`redshift`, `mongodb`, `documentdb`, `dynamodb`, `cassandra`, `elasticsearch`,
+`opensearch`.
+
+Decisões tomadas:
+
+- **`json` / `orc` / `avro` / `xml` / `binary` / `hudi`**: ✅ **feito**.
+- **Elasticsearch × OpenSearch**: ✅ **separados** (conectores distintos, `es.*` vs `opensearch.*`).
+- **Cassandra × ScyllaDB**: ✅ **uma classe só** — Scylla usa o MESMO spark-cassandra-connector (não há conector separado); deixado explícito na classe/doc.
+- **DynamoDB via RDD**: ✅ **descartado** — mantido o conector DataFrame (spark-dynamodb), que integra ao modelo do framework.
+- **Streaming (readStream/writeStream)**: mantido **batch-only** por ora — streaming exige caminho de execução próprio (ver §6).
 
 Pendentes / candidatos:
 
-| Conector | Leitura | Escrita | Notas |
-|---|---|---|---|
-| `json` | ☐ | ☐ | multiline, schema inference, `to_json`/`from_json` já existem em transformações |
-| `avro` | ☐ | ☐ | requer `spark-avro`; schema registry (futuro) |
-| `orc` | ☐ | ☐ | nativo Spark |
-| `rest`/`http` | ☐ | ☐ | ingestão de APIs (paginação, auth) — decidido adiar (não é fonte Spark nativa); via reader custom |
-| `sqs` | ☐ | ☐ | não é fonte Spark nativa → reader/writer driver-side com boto3 (adiado) |
-| `excel`/`xml` | ☐ | ☐ | nichos; via libs externas (`spark-excel`, `spark-xml`) |
+| Conector | Notas |
+|---|---|
+| `rest`/`http` | ingestão de APIs — adiado (não é fonte Spark nativa); via reader custom/boto3 |
+| `sqs` | não é fonte Spark nativa → reader/writer driver-side com boto3 (adiado) |
+| `kinesis` | AWS Kinesis — via conector do provedor; é essencialmente **streaming** (ver §6) |
+| `excel` | nicho; via `spark-excel` |
 
-> Kafka streaming (hoje só batch read/write) e o *stream* contínuo em geral seguem
-> fora de escopo do modelo batch atual.
+- [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
+      (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
+      Falta um **helper de 1ª classe** para configurar chaves/roles por provedor de
+      forma padronizada (perfil de credenciais reutilizável entre pipelines).
 
 Diretriz: manter o reader/writer fino; opções específicas via `options`. Formatos
 que exigem dependência extra entram como `optional-dependencies` no pyproject
@@ -89,13 +121,11 @@ Evolução ainda proposta:
 1. **`reference`/reconciliação cross-dataset** — comparar contagem/soma do df contra
    outra fonte (tabela/view) por chave; `failed_count` por grupo. (O `sql` cobre isso
    hoje de forma manual; falta o validator dedicado — SODA tem `reconciliation`.)
-2. **Quarentena** — em vez de `fail`/`warn`, rotear linhas inválidas para um destino
-   de quarentena (split good/bad) sem abortar.
-3. **Data contract versionado** — evoluir o `schema` para nullability/constraints
+2. **Data contract versionado** — evoluir o `schema` para nullability/constraints
    ricos, versionado por pipeline e validado antes de transformar.
-4. **Lineage / observabilidade** — registrar fonte→destino, contagens/tempo por etapa
+3. **Lineage / observabilidade** — registrar fonte→destino, contagens/tempo por etapa
    (ver §4) e versão da config; expor para catálogo.
-5. **Otimização de métricas** — hoje cada `check` roda sua própria action; batelar as
+4. **Otimização de métricas** — hoje cada `check` roda sua própria action; batelar as
    agregações de vários checks numa passada só.
 
 Princípio de DQ: **validações reportam, transformações mudam** — manter essa
@@ -122,8 +152,44 @@ separação ao evoluir.
 
 ## 5. Empacotamento / distribuição / CI
 
-- [ ] **CI de release** — rodar testes + build + publish no PyPI ao criar uma tag
-      (ver [docs/DEPLOY_PYPI.md](docs/DEPLOY_PYPI.md)).
-- [ ] **Matriz de versões** Python × PySpark no CI.
+- ✅ **CI de release** — GitHub Actions: `ci.yml` (testes em push/PR) e `publish.yml`
+      (testes → build + `twine check` → publish). Release publicado → PyPI; execução
+      manual → TestPyPI (ensaio). Trusted Publishing (OIDC), sem token manual. Ver
+      [docs/DEPLOY_PYPI.md](docs/DEPLOY_PYPI.md) §8.
+- [ ] **Matriz de versões** — CI já cobre Python (3.9/3.11/3.12); falta variar
+      **PySpark** (ex: 3.4 × 3.5) na matriz.
 - Base atual: versão única via `__version__` (pyproject `dynamic`); publicação no
-  PyPI já documentada.
+  PyPI documentada e automatizada via CI.
+
+---
+
+## 6. Performance
+
+Já entregue:
+
+- ✅ **Input em temp view** (`input_view`, string ou `{"name","type"}`) — self-join / SQL sobre a entrada sem reler a base.
+- ✅ **Broadcast join** (`broadcast` no `join`) — map-side, sem shuffle.
+- ✅ **Doc: `filter`/`select` primeiro** — recomendação no guia de performance + convenção no CLAUDE.md.
+- ✅ (parcial) pushdown já disponível: `collect` + `{{var}}` (IN literal → data skipping), `checkpoint`, `partitionColumn`/`fetchsize` (JDBC), `partition_by` / `compression` / `maxRecordsPerFile` via `options`, e a heurística de path do Delta corrigida.
+
+Pendente:
+
+- [ ] **Ler sempre com partição / estratégia de leitura** — orientar (e onde fizer sentido, automatizar) leitura particionada com *partition pruning* por padrão, em vez de scan total.
+- [ ] **Hash para `partitionBy`** — particionamento por hash de coluna (buckets) para evitar skew e *small files* na escrita.
+- [ ] **Avaliar Apache DataFusion Comet** — acelerador vetorizado do Spark; medir ganho real e o custo de dependência antes de recomendar.
+- [ ] **Análise consolidada de opções de tuning** — mapear/expor/documentar e decidir o que vira opção declarativa vs recomendação de doc: `vacuum`, `optimize`, `z-order`, `repartition`, `coalesce`, `partitionBy`, `bucketBy`, `clustering`/`clusterBy`, `compression`, `persist`/`cache`, `checkpoint`, `maxRecordsPerFile`, broadcast automático (`spark.sql.autoBroadcastJoinThreshold`), *partition pruning*, *predicate pushdown*, problema de *small files*, `shuffle` (partitions/skew), *garbage collection* e `checkpointLocation` (streaming).
+
+> Streaming (readStream/writeStream, `checkpointLocation`, output modes, Kinesis) é
+> um eixo à parte — o modelo atual é batch. Decisão registrada em §2.
+
+---
+
+## 7. Produtos / estratégia
+
+- [ ] **`sparquet-cola` como repositório/pacote separado** — a lib de DQ já é
+      separável (só depende de pyspark). Extrair para um repo próprio e publicar no
+      PyPI como **`sparquet-cola`** (import `sparquet_cola`), lib open-source de
+      testes/qualidade de dados com Spark. Import com underscore, distribuição com hífen.
+- [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
+      (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
+      mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.

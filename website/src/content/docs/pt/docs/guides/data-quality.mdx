@@ -1,0 +1,205 @@
+---
+title: Qualidade de dados na prática
+description: Como projetar validações que capturam problemas reais no Sparquet — quais regras adicionar, qual política de falha escolher e o que fazer com o relatório.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Todo pipeline deveria responder a uma pergunta antes de gravar: *estes dados são bons o suficiente para publicar?* As validações são como essa resposta passa a fazer parte do arquivo.
+
+## Comece com quatro regras
+
+Para quase qualquer conjunto de dados, estas quatro capturam a maioria dos incidentes:
+
+```json
+{
+  "validations": {
+    "on_failure": "warn",
+    "rules": [
+      { "type": "row_count", "min": 1 },
+      { "type": "not_null", "columns": ["id"] },
+      { "type": "unique", "columns": ["id"] },
+      { "type": "range", "column": "amount", "min": 0 }
+    ]
+  }
+}
+```
+
+- **`row_count`** captura a carga vazia silenciosa — uma fonte a montante que não chegou, um filtro que não casou com nada.
+- **`not_null` na chave** captura um join quebrado ou uma coluna de origem renomeada.
+- **`unique` na chave** captura a leitura duplicada e o join que multiplica linhas.
+- **`range`** captura erros de unidade e inversões de sinal.
+
+## Escolha a política de falha de forma deliberada
+
+| Política | O pipeline | O relatório | Quando é a escolha certa |
+|---|---|---|---|
+| `fail` | aborta antes de gravar | **não é gravado** | O destino alimenta algo que jamais pode ver linhas ruins |
+| `warn` | grava mesmo assim | gravado | Você quer histórico e sinal, não uma carga interrompida |
+| `skip` | grava mesmo assim | gravado | As regras ainda estão sendo calibradas |
+
+<Aside type="caution">
+  No modo `fail`, a execução aborta antes de o relatório ser gravado, então um
+  dashboard alimentado apenas por aquela tabela nunca verá falhas graves. Se você
+  precisa registrar todos os desfechos, use `warn` e deixe o orquestrador decidir
+  a partir de `result.validation_results`.
+</Aside>
+
+```python
+result = fw.run("orders.json")
+failed = [check for check in result.validation_results if not check.passed]
+if failed:
+    alert(f"{result.pipeline_name}: {len(failed)} rules failed")
+    raise SystemExit(1)          # your policy, in your orchestrator
+```
+
+## Persista o relatório
+
+```json
+{
+  "report": {
+    "format": "delta",
+    "path": "quality.pipeline_report",
+    "mode": "append",
+    "partition_by": ["pipeline"]
+  }
+}
+```
+
+Cada execução acrescenta uma linha por regra: `pipeline`, `rule_type`, `check_name`, `severity`, `passed`, `failed_count`, `metric_value`, `message`, `validated_at`. Apontar todos os pipelines para a mesma tabela dá de graça um histórico de qualidade, e três gráficos que valem a pena ter:
+
+- taxa de falha por regra ao longo do tempo — qual verificação realmente justifica sua existência
+- tendência de `failed_count` por pipeline — degradação antes de virar incidente
+- regras que nunca falham — ou os dados são sólidos ou a regra está errada
+
+## Regras para as coisas que de fato quebram
+
+Uma vez que o básico está no lugar, as regras valiosas são as regras de domínio. `sql` cobre isso: a query roda contra `_validation_df` e deve retornar um único booleano.
+
+```json
+{
+  "type": "sql",
+  "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ends_at < starts_at",
+  "error_message": "Contracts ending before they start"
+}
+```
+
+```json
+{
+  "type": "sql",
+  "query": "SELECT ABS(SUM(debit) - SUM(credit)) < 0.01 FROM _validation_df",
+  "error_message": "Ledger does not balance"
+}
+```
+
+```json
+{
+  "type": "sql",
+  "query": "SELECT COUNT(DISTINCT currency) = 1 FROM _validation_df",
+  "error_message": "Mixed currencies in a single settlement batch"
+}
+```
+
+Essas três valem mais do que uma dúzia de verificações de nulo, porque codificam o que o negócio considera impossível.
+
+## Verificações de métrica com faixa de aviso
+
+A regra `check` mede uma métrica e a compara com um threshold, no estilo SODA-Core — e pode *avisar* antes de *falhar*. Essa faixa de dois níveis é o que permite a um pipeline degradar visivelmente sem parar:
+
+```json
+{ "type": "check", "name": "missing cpf", "metric": "missing_percent",
+  "column": "cpf", "warn": "= 0", "must_be": "< 1%" }
+```
+
+Zero valores ausentes é o alvo (`warn`), qualquer coisa até 1% é tolerada (`must_be`) e acima de 1% a verificação falha. Um `warn` é registrado e aparece no relatório, mas nunca aborta a execução, mesmo sob `on_failure: "fail"` — então você recebe um sinal antecipado sem um alarme falso.
+
+O mesmo formato cobre a maioria das guardas de métrica:
+
+```json
+{ "type": "check", "metric": "freshness", "column": "updated_at", "must_be": "< 1d" }
+{ "type": "check", "metric": "invalid_percent", "column": "email", "valid_format": "email", "must_be": "< 5%" }
+{ "type": "check", "metric": "avg", "column": "amount", "must_be": "between 10 and 100" }
+```
+
+Para expectativas estruturais — as colunas e os tipos dos quais um consumidor a jusante depende — a regra `schema` falha rápido quando uma origem silenciosamente descarta uma coluna ou muda um tipo:
+
+```json
+{ "type": "schema", "required_columns": ["id", "amount"], "column_types": { "id": "bigint", "amount": "double" } }
+```
+
+Veja a [referência de validações](/pt/docs/reference/validations/#check) para todas as métricas e o DSL completo de thresholds.
+
+## Valide, não limpe
+
+```json
+// removes the rows
+{ "type": "filter", "condition": "id IS NOT NULL" }
+
+// counts them, changes nothing
+{ "type": "not_null", "columns": ["id"] }
+```
+
+Ambos pertencem à maioria dos pipelines, e respondem a perguntas diferentes. Um filtro mantém o destino limpo; uma regra diz o quão suja estava a origem. Só a regra pode te dizer que a fonte está degradando.
+
+<Aside type="tip" title="A ordem importa">
+  As validações rodam **depois** de cada transformação principal, então medem os
+  dados que você está prestes a gravar, não a origem bruta. Para verificar a
+  origem, rode um pequeno pipeline cuja única função seja lê-la e validá-la.
+</Aside>
+
+## Proteja um merge com uma regra de unicidade
+
+Delta e Iceberg lançam *multiple source rows matched* quando o DataFrame de entrada tem mais de uma linha por chave de merge. Uma regra transforma esse crash em tempo de execução em um relatório claro:
+
+```json
+{
+  "validations": {
+    "on_failure": "fail",
+    "rules": [{ "type": "unique", "columns": ["order_id"] }]
+  },
+  "output": {
+    "format": "delta",
+    "path": "analytics.orders",
+    "mode": "merge",
+    "options": { "merge_keys": ["order_id"] }
+  }
+}
+```
+
+A mesma guarda cabe em qualquer escrita incremental chaveada por um id de negócio.
+
+## Duas silvers: quarentena ou saídas do pipeline?
+
+Uma necessidade recorrente: a partir de uma tabela bronze, produzir uma silver **válida** e uma silver **inválida**. Há duas formas honestas de fazer isso, e a certa depende do que "inválido" significa.
+
+- **`validations.outputs`** (quarentena) — a separação é *derivada das regras*: uma linha é inválida quando falha em uma verificação de nível de linha (`not_null`, `range`, `regex`, `unique`, ou um `check` sobre uma métrica `missing_*`/`invalid_*`). Uma definição declarativa única de "inválido", escrita ao lado das métricas, rodando à parte da saída principal — você nem precisa de um `output` principal. Melhor quando **inválido significa literalmente "falhou nas regras de qualidade de dados"**.
+- **Dois `outputs` do pipeline**, cada um com sua própria transformação `filter` — a separação é *lógica de negócio* que você escreve à mão. Melhor quando "inválido" é uma regra de domínio não relacionada à qualidade, ou quando os dois ramos precisam de formas diferentes (colunas, joins, payloads).
+
+Regra de bolso: se você fosse escrever a mesma condição duas vezes — uma como validação e uma como filtro — use `validations.outputs` e deixe as verificações serem a única fonte de verdade. Se os ramos divergem em significado ou forma, use as saídas do pipeline.
+
+```json
+"validations": {
+  "rules": [
+    { "type": "not_null", "columns": ["id"] },
+    { "type": "check", "metric": "invalid_count", "column": "email", "valid_format": "email", "must_be": "= 0" }
+  ],
+  "outputs": {
+    "valid":   { "format": "delta", "path": "silver.orders_ok",         "mode": "overwrite" },
+    "invalid": { "format": "delta", "path": "silver.orders_quarantine", "mode": "overwrite" }
+  }
+}
+```
+
+Para uma quarentena direcionada das linhas ofensoras de uma única regra, uma regra `sql` com `failed_rows` mais seu próprio `output` grava exatamente essas linhas. Todo o motor é a biblioteca autônoma [`sparquet_cola`](/pt/docs/guides/sparquet-cola/) — utilizável por conta própria em qualquer job Spark.
+
+## Um checklist
+
+- `row_count` com um `min` em todo pipeline
+- `not_null` e `unique` na chave de negócio
+- `range` em dinheiro, quantidades e datas
+- `regex` em identificadores com formato fixo (documentos, códigos)
+- um `sql` para a invariante que seu domínio consideraria impossível
+- `warn` mais um relatório persistido, a menos que o destino realmente não tolere linhas ruins
+- uma regra `unique` onde quer que um merge grave

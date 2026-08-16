@@ -9,6 +9,7 @@
 
 import type { FieldOption, FieldSpec, FormatDef } from '@/catalog/types'
 import { DATABASE_FORMATS } from './formats.databases'
+import { FILE_FORMATS } from './formats.files'
 
 /**
  * The framework never coerces option values and PySpark stringifies whatever it
@@ -718,7 +719,19 @@ export const FORMATS: FormatDef[] = [
     modes: ['overwrite'],
     supportsPartitioning: false,
     supportsMerge: false,
-    readOptions: [],
+    readOptions: [
+      {
+        key: 'scope',
+        label: 'Scope',
+        type: 'select',
+        options: [
+          { value: 'session', label: 'session' },
+          { value: 'global', label: 'global' },
+        ],
+        help: 'global reads a global temp view (global_temp.<name>); a dotted path is used as-is.',
+        group: 'advanced',
+      },
+    ],
     writeOptions: [
       {
         key: 'cache',
@@ -732,6 +745,18 @@ export const FORMATS: FormatDef[] = [
           typeof value === 'boolean'
             ? 'cache must be the string "true" or "false", not a JSON boolean.'
             : null,
+      },
+      {
+        key: 'scope',
+        label: 'Scope',
+        type: 'select',
+        options: [
+          { value: 'session', label: 'session — this session only' },
+          { value: 'global', label: 'global — whole application' },
+        ],
+        default: 'session',
+        help: 'global uses createOrReplaceGlobalTempView (visible to every session of the app, in the global_temp database).',
+        group: 'advanced',
       },
     ],
     gotchas: [
@@ -969,5 +994,6 @@ export const FORMATS: FormatDef[] = [
     ],
   },
 
+  ...FILE_FORMATS,
   ...DATABASE_FORMATS,
 ]

@@ -127,5 +127,55 @@ Também há o entrypoint de CLI `sparquet` (definido em `[project.scripts]`).
 - [ ] `twine upload dist/*` no PyPI.
 - [ ] Tag git da versão: `git tag v<versão> && git push --tags`.
 
-> Futuro (ver [BACKLOG.md](../BACKLOG.md) §5): automatizar build+publish via CI ao
-> criar uma tag de versão.
+---
+
+## 8. Deploy automatizado (CI/CD)
+
+O fluxo das seções 3–5 já está automatizado em GitHub Actions — na prática, publicar
+uma release faz tudo (testes → build → publish). Os passos manuais acima continuam
+válidos como fallback ou para publicar de uma máquina local.
+
+### Workflows
+
+| Arquivo | Dispara em | O que faz |
+|---|---|---|
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push / PR na `main` | roda os testes puros numa matriz Python (3.9 / 3.11 / 3.12) |
+| [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) | **Release publicado** | testes → build (`+ twine check`) → **publish no PyPI** |
+| idem | **execução manual** (Actions → *Run workflow*) | mesma esteira, mas **publish no TestPyPI** (ensaio) |
+
+Em `publish.yml` o `build`/`publish` só rodam se o job de `test` passar — o teste é o
+portão do release.
+
+### Trusted Publishing (OIDC) — sem token manual
+
+A publicação usa o [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) do
+PyPI: o GitHub Actions troca um token OIDC de curta duração, então **não há token/segredo
+de API** guardado no repo (por isso `permissions: id-token: write` nos jobs de publish).
+
+Configuração (uma vez, em cada índice):
+
+1. Em **pypi.org** → projeto `sparquet` → *Manage → Publishing* → **Add a trusted publisher**
+   (GitHub). Se o projeto ainda não existe, use *pending publisher* (Account → Publishing).
+2. Preencha: owner `VictorPasqualini`, repositório `sparquet`, workflow `publish.yml`,
+   environment `pypi`.
+3. Repita em **test.pypi.org** com environment `testpypi`.
+
+> Alternativa por token: se preferir não usar OIDC, remova o bloco `permissions` e passe
+> `password: ${{ secrets.PYPI_API_TOKEN }}` ao `pypa/gh-action-pypi-publish`.
+
+### Publicar uma versão (fluxo recomendado)
+
+```bash
+# 1. bump da versão + commit
+#    edite __version__ em sparquet/__init__.py
+git add sparquet/__init__.py && git commit -m "release: v0.2.2"
+
+# 2. (opcional) ensaio no TestPyPI: Actions → "Publish to PyPI" → Run workflow
+
+# 3. tag + release no GitHub → dispara o publish no PyPI real
+git tag v0.2.2 && git push --tags
+gh release create v0.2.2 --generate-notes
+```
+
+> A versão do pacote vem do `__version__` (não da tag). Mantenha a tag e o `__version__`
+> em sincronia para evitar confusão.

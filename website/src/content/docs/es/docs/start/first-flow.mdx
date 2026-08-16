@@ -1,0 +1,113 @@
+---
+title: Tu primer flujo en Studio
+description: Dibuja un pipeline en el lienzo de Sparquet Studio, míralo compilarse a JSON y ejecútalo localmente.
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+Studio es un editor para el archivo que escribiste en la [guía rápida](/es/docs/start/quickstart/). Mismo documento, distinto dispositivo de entrada.
+
+<Steps>
+
+1. ### Abre Studio
+
+   ```bash
+   cd sparquet-studio
+   npm install
+   npm run dev
+   ```
+
+   Ve a [http://localhost:5273](http://localhost:5273). El primer inicio crea un proyecto **Getting Started** con pipelines funcionales — abre uno para explorar, o sigue la guía y construye el tuyo.
+
+2. ### Crea un proyecto y un workflow
+
+   Los proyectos agrupan pipelines relacionados; uno por dominio mantiene los nombres cortos. Haz clic en **New project**, nómbralo `Sales`, luego **New workflow** dentro de él y llámalo `Orders curated`.
+
+   Aterrizas en un lienzo vacío con la paleta de nodos a la izquierda y el inspector a la derecha.
+
+3. ### Agrega una fuente
+
+   Arrastra **CSV** desde *Sources* al lienzo. El inspector se abre a la derecha con los campos que ese formato realmente lee.
+
+   Establece **Path** en `data/orders.csv`. Deja las opciones como están — `header` e `inferSchema` ya están activos, coincidiendo con los valores por defecto del framework.
+
+4. ### Agrega transformaciones
+
+   Arrastra **Filter** al lienzo y conecta el handle derecho del nodo CSV a su handle izquierdo. En el inspector, establece **Condition** en:
+
+   ```sql
+   status = 'CONFIRMED'
+   ```
+
+   Agrega **Cast**, **With column** y **Drop duplicates** de la misma forma, encadenados de izquierda a derecha. El orden en el lienzo *es* el orden en el array `transformations`.
+
+   <Aside type="tip">
+     Haz doble clic en el lienzo vacío para un cuadro de búsqueda de agregado
+     rápido, o presiona <kbd>/</kbd> para enfocar la búsqueda de la paleta. Cada
+     campo lleva un botón de información con las mismas notas que encuentras en
+     esta referencia.
+   </Aside>
+
+5. ### Agrega reglas de calidad
+
+   Arrastra **Validations** al lienzo y conéctalo después de la última transformación. Establece **On failure** en `warn`, luego agrega dos reglas: `not_null` sobre `id`, y `unique` sobre `id`.
+
+   Las validaciones siempre se ejecutan después de todas las transformaciones principales y antes de cualquier escritura — la posición en el lienzo lo refleja.
+
+6. ### Agrega un destino
+
+   Arrastra **Parquet** desde *Destinations*, conecta el nodo de validaciones a él, y establece:
+
+   - **Path**: `out/orders`
+   - **Write mode**: `overwrite`
+   - **Partition by**: `country`
+
+7. ### Lee el archivo que acabas de dibujar
+
+   Presiona <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd>.
+
+   El panel JSON muestra el pipeline compilado — exactamente el documento que el framework ejecuta. Cópialo, descárgalo o hazle commit junto a tu job. Nada se genera a tus espaldas; lo que ves es lo que se ejecuta.
+
+8. ### Revisa el linter
+
+   Presiona <kbd>Ctrl/⌘</kbd>+<kbd>E</kbd> para el panel de Issues. Se ejecuta mientras escribes y detecta los errores que Spark solo reporta después de minutos de cómputo: un merge sin claves, una variable de runtime que nada publica, un parámetro que nunca declaraste, una salida escribiendo en una ruta que otra salida ya reclamó.
+
+   Haz clic en un issue para saltar al nodo y al campo que lo causó.
+
+9. ### Ejecútalo
+
+   Presiona <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd> para el panel de ejecución. Si el runner local aún no se ha iniciado, el panel muestra los dos comandos que necesitas:
+
+   ```bash
+   cd sparquet-studio
+   pip install -r server/requirements.txt
+   uvicorn server.main:app --port 8787
+   ```
+
+   El runner imprime un token — pégalo en el panel. Luego **Run pipeline** ejecuta el JSON compilado con el framework real y devuelve conteos de filas, resultados de validación por regla, una vista previa de 50 filas y los propios logs del framework.
+
+</Steps>
+
+## La correspondencia, en una tabla
+
+| En el lienzo | En el archivo |
+|---|---|
+| Nodo de fuente | `input` |
+| Nodos de transformación en la cadena compartida | `transformations` |
+| Nodo de validaciones | `validations` |
+| Nodo de destino | `output` / `outputs` |
+| Nodos después de que el grafo se bifurca | las `transformations` propias de ese destino |
+| Segundo input de un `join` / `union` | `with` más `with_transformations` |
+| Nota adhesiva | nada — las anotaciones nunca compilan |
+
+## Importa lo que ya tienes
+
+¿Ya tienes un JSON de pipeline? Abre el panel JSON, cambia a **Edit**, pega el archivo y haz clic en **Apply to canvas**. Studio lo distribuye y cada nodo se vuelve editable. Los tipos de transformación desconocidos — los personalizados que registraste tú mismo — se conservan intactos a través del ida y vuelta.
+
+## Siguiente
+
+- [El lienzo](/es/docs/studio/canvas/) — conexiones, ramificación, control por teclado.
+- [Asistente de IA](/es/docs/studio/ai-assistant/) — describe un pipeline en lugar de dibujarlo.
+- [Conceptos fundamentales](/es/docs/start/concepts/) — qué se ejecuta y cuándo, y por qué el grafo se corresponde como lo hace.

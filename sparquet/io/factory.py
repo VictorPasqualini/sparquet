@@ -6,13 +6,19 @@ from pyspark.sql import SparkSession
 
 from sparquet.core.config import InputConfig, OutputConfig
 from sparquet.io.base import BaseReader, BaseWriter
+from sparquet.io.avro import AvroReader, AvroWriter
 from sparquet.io.bigquery import BigQueryReader, BigQueryWriter
+from sparquet.io.binary import BinaryReader
 from sparquet.io.cassandra import CassandraReader, CassandraWriter
 from sparquet.io.csv import CsvReader, CsvWriter
 from sparquet.io.delta import DeltaReader, DeltaWriter
 from sparquet.io.dynamodb import DynamoDbReader, DynamoDbWriter
 from sparquet.io.elasticsearch import ElasticsearchReader, ElasticsearchWriter
+from sparquet.io.hudi import HudiReader, HudiWriter
 from sparquet.io.iceberg import IcebergReader, IcebergWriter
+from sparquet.io.json import JsonReader, JsonWriter
+from sparquet.io.orc import OrcReader, OrcWriter
+from sparquet.io.xml import XmlReader, XmlWriter
 from sparquet.io.jdbc import (
     MariaDbReader,
     MariaDbWriter,
@@ -27,6 +33,7 @@ from sparquet.io.jdbc import (
 )
 from sparquet.io.kafka import KafkaReader, KafkaWriter
 from sparquet.io.mongodb import MongoReader, MongoWriter
+from sparquet.io.opensearch import OpenSearchReader, OpenSearchWriter
 from sparquet.io.parquet import ParquetReader, ParquetWriter
 from sparquet.io.redshift import RedshiftReader, RedshiftWriter
 from sparquet.io.snowflake import SnowflakeReader, SnowflakeWriter
@@ -41,6 +48,12 @@ _READERS: Dict[str, Type[BaseReader]] = {
     "delta": DeltaReader,
     "txt": TxtReader,
     "view": ViewReader,
+    "json": JsonReader,
+    "orc": OrcReader,
+    "avro": AvroReader,
+    "xml": XmlReader,
+    "binary": BinaryReader,  # read-only (binaryFile)
+    "hudi": HudiReader,
     # Relacionais (JDBC)
     "postgresql": PostgresReader,
     "mysql": MySqlReader,
@@ -57,6 +70,7 @@ _READERS: Dict[str, Type[BaseReader]] = {
     "dynamodb": DynamoDbReader,
     "cassandra": CassandraReader,
     "elasticsearch": ElasticsearchReader,
+    "opensearch": OpenSearchReader,
     # Streaming (leitura batch)
     "kafka": KafkaReader,
 }
@@ -69,6 +83,11 @@ _WRITERS: Dict[str, Type[BaseWriter]] = {
     "delta": DeltaWriter,
     "txt": TxtWriter,
     "view": ViewWriter,
+    "json": JsonWriter,
+    "orc": OrcWriter,
+    "avro": AvroWriter,
+    "xml": XmlWriter,
+    "hudi": HudiWriter,
     # Relacionais (JDBC)
     "postgresql": PostgresWriter,
     "mysql": MySqlWriter,
@@ -85,6 +104,7 @@ _WRITERS: Dict[str, Type[BaseWriter]] = {
     "dynamodb": DynamoDbWriter,
     "cassandra": CassandraWriter,
     "elasticsearch": ElasticsearchWriter,
+    "opensearch": OpenSearchWriter,
     # Streaming
     "kafka": KafkaWriter,
 }

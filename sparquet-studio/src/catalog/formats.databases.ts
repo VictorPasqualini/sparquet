@@ -548,9 +548,9 @@ const elasticsearch: FormatDef = {
   icon: 'Search',
   canRead: true,
   canWrite: true,
-  summary: 'Elasticsearch / OpenSearch indices via elasticsearch-hadoop.',
+  summary: 'Elasticsearch indices via elasticsearch-hadoop (es.* options).',
   description:
-    'Reads and writes Elasticsearch (and OpenSearch) indices. The path is the index/resource; cluster contact and auth go in options. A query DSL can be pushed on read, and a column can become the document _id on write.',
+    'Reads and writes Elasticsearch indices. The path is the index/resource; cluster contact and auth go in options. A query DSL can be pushed on read, and a column can become the document _id on write.\n\nFor OpenSearch use the separate `opensearch` format — it has its own connector and `opensearch.*` options.',
   pathLabel: 'Index',
   pathPlaceholder: 'clientes',
   pathHelp: 'Index/resource passed to load()/save() (e.g. "clientes" or "clientes/_doc").',
@@ -578,7 +578,7 @@ const elasticsearch: FormatDef = {
     'Requires the elasticsearch-spark (es-hadoop) JAR matching your Spark/Scala version.',
     'update/upsert need es.mapping.id — without an id column every write creates a new document.',
     'Managed/cloud clusters usually need es.nodes.wan.only=true.',
-    'OpenSearch works through the same connector; very new ES/OS majors may need a compatibility header.',
+    'For OpenSearch use the `opensearch` format (its own connector + opensearch.* options), not this one.',
   ],
   examples: [
     {
@@ -588,6 +588,57 @@ const elasticsearch: FormatDef = {
   "path": "clientes",
   "mode": "append",
   "options": { "es.nodes": "es.internal", "es.port": "9200", "es.mapping.id": "id" }
+}`,
+    },
+  ],
+}
+
+const opensearch: FormatDef = {
+  id: 'opensearch',
+  label: 'OpenSearch',
+  icon: 'Search',
+  canRead: true,
+  canWrite: true,
+  summary: 'OpenSearch indices via opensearch-hadoop (opensearch.* options).',
+  description:
+    'Reads and writes OpenSearch indices. OpenSearch has its OWN connector (opensearch-hadoop), distinct from Elasticsearch — the option prefix is `opensearch.*`. The path is the index/resource; a query DSL can be pushed on read, and a column can become the document _id on write.',
+  pathLabel: 'Index',
+  pathPlaceholder: 'clientes',
+  pathHelp: 'Index/resource passed to load()/save() (e.g. "clientes" or "clientes/_doc").',
+  modes: ['overwrite', 'append'],
+  supportsPartitioning: false,
+  supportsMerge: false,
+  readOptions: [
+    { key: 'opensearch.nodes', label: 'Nodes', type: 'text', placeholder: 'os.internal' },
+    { key: 'opensearch.port', label: 'Port', type: 'text', placeholder: '9200' },
+    { key: 'opensearch.net.http.auth.user', label: 'User', type: 'text', group: 'advanced' },
+    { key: 'opensearch.net.http.auth.pass', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'opensearch.nodes.wan.only', label: 'WAN only', type: 'select', options: BOOL_OPTIONS, help: 'true for managed/cloud clusters behind a proxy.', group: 'advanced' },
+    { key: 'opensearch.query', label: 'Query DSL', type: 'json', rows: 4, placeholder: '{ "query": { "match_all": {} } }', group: 'advanced' },
+  ],
+  writeOptions: [
+    { key: 'opensearch.nodes', label: 'Nodes', type: 'text', placeholder: 'os.internal' },
+    { key: 'opensearch.port', label: 'Port', type: 'text', placeholder: '9200' },
+    { key: 'opensearch.net.http.auth.user', label: 'User', type: 'text', group: 'advanced' },
+    { key: 'opensearch.net.http.auth.pass', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'opensearch.nodes.wan.only', label: 'WAN only', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
+    { key: 'opensearch.mapping.id', label: 'Id column', type: 'text', help: 'DataFrame column used as the document _id.', group: 'advanced' },
+    { key: 'opensearch.write.operation', label: 'Write operation', type: 'select', options: [{ value: 'index', label: 'index' }, { value: 'create', label: 'create' }, { value: 'update', label: 'update' }, { value: 'upsert', label: 'upsert' }], group: 'advanced' },
+  ],
+  gotchas: [
+    'Requires the opensearch-spark (opensearch-hadoop) JAR matching your Spark/Scala version — NOT the Elasticsearch one.',
+    'Option prefix is opensearch.* (not es.*).',
+    'update/upsert need opensearch.mapping.id.',
+    'Managed clusters usually need opensearch.nodes.wan.only=true.',
+  ],
+  examples: [
+    {
+      title: 'Index a DataFrame keyed by id',
+      json: `{
+  "format": "opensearch",
+  "path": "clientes",
+  "mode": "append",
+  "options": { "opensearch.nodes": "os.internal", "opensearch.port": "9200", "opensearch.mapping.id": "id" }
 }`,
     },
   ],
@@ -607,4 +658,5 @@ export const DATABASE_FORMATS: FormatDef[] = [
   dynamodb,
   cassandra,
   elasticsearch,
+  opensearch,
 ]

@@ -1,0 +1,287 @@
+---
+title: Ejecuta localmente, de principio a fin
+description: Un recorrido completo desde una máquina en blanco hasta un pipeline ejecutándose en el lienzo de Sparquet Studio — Java, Python, los shims de Hadoop para Windows, el servidor de desarrollo de Studio y el runner local opcional.
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
+
+Esta página parte de una máquina sin nada instalado y termina con un pipeline que construiste en el lienzo, ejecutado contra Spark real, mostrando su resultado. Une las páginas de [instalación](/es/docs/start/install/) y [ejecución de pipelines](/es/docs/studio/running/) en un solo camino ordenado — síguelo de arriba abajo la primera vez.
+
+Las piezas que instalas:
+
+1. **Java (JDK 17)** — Spark corre sobre la JVM.
+2. **Python + Sparquet + PySpark** — el framework y su motor.
+3. **Los shims de Hadoop** — solo en Windows, y la razón individual más común de que una primera ejecución se cuelgue.
+4. **Sparquet Studio** — la aplicación de navegador donde diseñas.
+5. **El runner local** — el pequeño servicio que permite a Studio ejecutar contra tu Spark.
+
+## 1. Java (JDK 17)
+
+Spark necesita un JDK y `JAVA_HOME` apuntando a él. **JDK 17** funciona tanto para Spark 3.5 como para Spark 4 (Java 11 también funciona para Spark 3.x).
+
+<Tabs>
+  <TabItem label="macOS">
+
+```bash
+brew install openjdk@17
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+```
+
+  </TabItem>
+  <TabItem label="Linux">
+
+```bash
+sudo apt-get install -y openjdk-17-jdk        # Debian/Ubuntu
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+```
+
+  </TabItem>
+  <TabItem label="Windows">
+
+Instala **Temurin 17** (Adoptium) u otro OpenJDK 17, luego establece `JAVA_HOME`:
+
+```powershell
+setx JAVA_HOME "C:\Program Files\Eclipse Adoptium\jdk-17"
+```
+
+Abre una terminal nueva para que la variable tome efecto.
+
+  </TabItem>
+</Tabs>
+
+Verifica — la versión debe ser 17 y `JAVA_HOME` debe estar establecido:
+
+```bash
+java -version
+echo $JAVA_HOME        # PowerShell: echo $env:JAVA_HOME
+```
+
+<Aside type="caution">
+  Un `JAVA_HOME` ausente o incorrecto es el error de primera ejecución más común
+  fuera de una plataforma gestionada. Spark falla al arrancar con un error de JVM
+  o de gateway en lugar de un mensaje claro sobre Java.
+</Aside>
+
+## 2. Python, Sparquet y PySpark
+
+Sparquet necesita Python 3.9+; PySpark viene como dependencia. Usa un entorno virtual para que la instalación quede aislada.
+
+<Tabs>
+  <TabItem label="macOS / Linux">
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install sparquet pyspark
+```
+
+  </TabItem>
+  <TabItem label="Windows">
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install sparquet pyspark
+```
+
+  </TabItem>
+  <TabItem label="From source">
+
+```bash
+git clone https://github.com/VictorPasqualini/sparquet.git
+cd sparquet
+pip install -e . pyspark
+```
+
+  </TabItem>
+</Tabs>
+
+Para tablas de Delta Lake fuera de Databricks, agrega el extra: `pip install "sparquet[delta]"`.
+
+Verifica que el import se resuelva:
+
+```python
+from sparquet import Sparquet
+print(Sparquet)
+```
+
+## 3. Solo Windows — los shims de Hadoop
+
+<Aside type="danger" title="No omitas esto en Windows">
+  Spark necesita los shims nativos de Hadoop para tocar el sistema de archivos
+  local en Windows. Sin ellos, una ejecución local **se cuelga la primera vez que
+  escribe un archivo**, o falla con `NativeIO$Windows` — y nada del error apunta a
+  la causa real.
+</Aside>
+
+<Steps>
+
+1. Descarga `winutils.exe` y `hadoop.dll` que coincidan con tu versión de Hadoop (la que PySpark empaquetó).
+2. Coloca ambos en `C:\hadoop\bin`.
+3. Establece `HADOOP_HOME` y agrega su `bin` al `PATH`:
+
+   ```powershell
+   setx HADOOP_HOME "C:\hadoop"
+   setx PATH "$env:PATH;C:\hadoop\bin"
+   ```
+
+4. Abre una terminal nueva para que las variables se apliquen.
+
+</Steps>
+
+WSL2 o Docker evitan esto por completo — dentro de un entorno Linux no hay nada adicional que instalar.
+
+## 4. Confirma que Spark funciona
+
+Antes de conectar Studio, comprueba el runtime de principio a fin. Crea un CSV de una línea para leer:
+
+```bash
+printf 'id,amount\n1,10\n2,20\n' > orders.csv
+```
+
+Guarda este pipeline como `hello.json`:
+
+```json
+{
+  "name": "hello_local",
+  "input": { "format": "csv", "path": "orders.csv" },
+  "transformations": [
+    { "type": "filter", "condition": "amount > 0" }
+  ],
+  "output": { "format": "csv", "path": "./out/hello", "mode": "overwrite" }
+}
+```
+
+Ejecútalo a través de la CLI:
+
+```bash
+python -m sparquet.cli hello.json
+```
+
+Si imprime un resultado estructurado que termina con un conteo de filas escritas y
+deja archivos part bajo `./out/hello`, tu configuración de Java + PySpark + (en
+Windows) Hadoop es correcta y el runner de Studio también funcionará.
+
+<Aside type="tip">
+  En Windows, una ejecución que se cuelga aquí — sin imprimir nunca el resultado
+  final — casi siempre son los shims de Hadoop faltantes del paso 3, no un problema
+  con el pipeline.
+</Aside>
+
+## 5. Sparquet Studio
+
+Studio es una aplicación de navegador estática; diseñar no necesita servidor.
+
+<Steps>
+
+1. Clona e instala:
+
+   ```bash
+   git clone https://github.com/VictorPasqualini/sparquet.git
+   cd sparquet/sparquet-studio
+   npm install
+   ```
+
+2. Inicia el servidor de desarrollo:
+
+   ```bash
+   npm run dev
+   ```
+
+3. Abre [http://localhost:5273](http://localhost:5273). El primer inicio siembra un proyecto **Getting Started** con pipelines funcionales.
+
+</Steps>
+
+Node.js 18.18+ es necesario solo para este paso.
+
+## 6. El runner local
+
+Diseñar funciona sin conexión. **Ejecutar** desde el lienzo necesita Spark, así que Studio se comunica con un pequeño servicio FastAPI que corres tú mismo contra el mismo entorno de Python del paso 2.
+
+<Steps>
+
+1. Instala sus dependencias:
+
+   ```bash
+   cd sparquet-studio
+   pip install -r server/requirements.txt
+   ```
+
+2. Inícialo **desde el directorio `sparquet-studio`** — el módulo inserta la raíz del repositorio en `sys.path`, de modo que `sparquet` se resuelve incluso sin instalar el paquete:
+
+   ```bash
+   uvicorn server.main:app --port 8787
+   ```
+
+   Se enlaza a `127.0.0.1` por defecto. Déjalo ahí — nunca lo expongas a una red.
+
+3. Copia el token que imprime al arrancar:
+
+   ```
+   ========================================================================
+   Sparquet Studio runner token (this session only):
+       S3yhI-6191J6wu2xz7bCX9YpafB0GOLo
+   ========================================================================
+   ```
+
+4. Pégalo en **Settings → Local runner → Runner token** en Studio (o en la tarjeta que el panel de ejecución muestra la primera vez que se rechaza una ejecución).
+
+</Steps>
+
+El token cambia en cada reinicio. Para fijarlo, establece `SPARQUET_STUDIO_TOKEN` antes de arrancar:
+
+```bash
+SPARQUET_STUDIO_TOKEN=my-local-token uvicorn server.main:app --port 8787
+```
+
+```powershell
+$env:SPARQUET_STUDIO_TOKEN = "my-local-token"; uvicorn server.main:app --port 8787
+```
+
+<Aside type="danger" title="Por qué existe el token">
+  El runner ejecuta trabajo arbitrario de Spark con tus permisos. Sin el token,
+  cualquier página web que visites podría hacer POST de un pipeline a
+  `127.0.0.1:8787` y ejecutarlo. `/run` y `/validate` requieren el token y
+  verifican el `Origin` de la solicitud.
+</Aside>
+
+La misma regla de Windows aplica al runner: sin `winutils.exe` y `HADOOP_HOME` (paso 3), un `/run` nunca termina. `GET /health` reporta `spark_available` solo a partir del import, así que puede leer `ok` en una máquina donde una ejecución real aún no puede escribir archivos.
+
+## 7. Construye y ejecuta un pipeline
+
+<Steps>
+
+1. En Studio, arrastra un nodo de **input** al lienzo y apúntalo a una fuente que puedas leer localmente — una ruta CSV o Parquet, por ejemplo.
+2. Agrega una transformación o dos (un `filter`, un `with_column`), luego un nodo de **output** que escriba en algún lugar local.
+3. Abre el panel de ejecución con <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>.
+4. Presiona **Run pipeline**. Studio compila el lienzo al mismo JSON que el framework ejecuta, y lo envía al runner.
+
+</Steps>
+
+<Aside type="note">
+  Los errores de lint bloqueantes desactivan el botón Run con un tooltip que explica
+  por qué, y aparece una advertencia cuando un destino escribe con `overwrite` — la
+  ejecución es real. **Validate only** parsea la configuración sin tocar Spark.
+</Aside>
+
+## 8. Lee el resultado
+
+El panel de ejecución reporta todo lo que la ejecución produjo:
+
+| Sección | Qué te dice |
+|---|---|
+| Status | éxito, omitida (se disparó un `stop_if_empty`) o error, con el mensaje |
+| Metrics | filas leídas, filas escritas, duración |
+| Validations | una fila por regla: aprobada, conteo de fallos, mensaje |
+| Preview | hasta 50 filas del DataFrame de salida |
+| Logs | los propios registros estructurados del framework para esta ejecución |
+
+Una ejecución omitida no es un fallo — `stop_if_empty` la terminó porque no había nada que procesar.
+
+## Siguiente
+
+- El flujo completo de ejecución, endpoints y solución de problemas: [Ejecución de pipelines](/es/docs/studio/running/).
+- Escribe un pipeline a mano en su lugar: [Tu primer pipeline](/es/docs/start/quickstart/).
+- A qué compila cada nodo: la [referencia del pipeline](/es/docs/reference/pipeline-json/).

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -69,12 +69,21 @@ class Pipeline:
         validation_engine: Optional[ValidationEngine] = None,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        input_view: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> None:
         self.config = config
         self._transform_engine = transform_engine or TransformationEngine()
         self._validation_engine = validation_engine or ValidationEngine()
         self._input_df = input_df
         self._columns: Dict[str, Any] = columns or {}
+        # input_view aceita uma string (nome, escopo "session") ou um dict
+        # {"name": ..., "type": "session"|"global"}. Normaliza para nome + escopo.
+        if isinstance(input_view, dict):
+            self._input_view = input_view.get("name")
+            self._input_view_scope = input_view.get("type", "session")
+        else:
+            self._input_view = input_view
+            self._input_view_scope = "session"
 
     @classmethod
     def from_file(cls, path: str) -> Pipeline:
@@ -110,6 +119,21 @@ class Pipeline:
                 df = df.withColumn(col_name, F.lit(value))
             if self._columns:
                 log.info("Colunas injetadas", colunas=list(self._columns))
+
+            # Registra (e cacheia) a entrada como temp view, se pedido — permite
+            # self-join / SQL sobre a entrada sem reler a base (o cache evita
+            # recomputar a linhagem da fonte a cada leitura da view).
+            if self._input_view:
+                df.cache()
+                if self._input_view_scope == "global":
+                    df.createOrReplaceGlobalTempView(self._input_view)
+                else:
+                    df.createOrReplaceTempView(self._input_view)
+                log.info(
+                    "Entrada registrada como temp view",
+                    view=self._input_view,
+                    scope=self._input_view_scope,
+                )
 
             # O engine é reusado entre execuções no Sparquet; zera o store
             # de runtime para não vazar variáveis coletadas de um run anterior.

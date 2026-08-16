@@ -20,6 +20,12 @@ export const READ_FORMATS = [
   'iceberg',
   'txt',
   'view',
+  'json',
+  'orc',
+  'avro',
+  'xml',
+  'binary',
+  'hudi',
   'kafka',
   'postgresql',
   'mysql',
@@ -34,6 +40,7 @@ export const READ_FORMATS = [
   'dynamodb',
   'cassandra',
   'elasticsearch',
+  'opensearch',
 ] as const
 
 /** Formats that can be written (WriterFactory registry). */
@@ -44,6 +51,11 @@ export const WRITE_FORMATS = [
   'iceberg',
   'txt',
   'view',
+  'json',
+  'orc',
+  'avro',
+  'xml',
+  'hudi',
   'kafka',
   'postgresql',
   'mysql',
@@ -58,6 +70,7 @@ export const WRITE_FORMATS = [
   'dynamodb',
   'cassandra',
   'elasticsearch',
+  'opensearch',
 ] as const
 
 export type ReadFormat = (typeof READ_FORMATS)[number]

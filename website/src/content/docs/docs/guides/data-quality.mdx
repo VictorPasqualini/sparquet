@@ -170,6 +170,30 @@ Delta and Iceberg raise *multiple source rows matched* when the incoming DataFra
 
 The same guard belongs on any incremental write keyed by a business id.
 
+## Two silvers: quarantine or pipeline outputs?
+
+A recurring need: from one bronze table, produce a **valid** silver and an **invalid** silver. There are two honest ways to do it, and the right one depends on what "invalid" means.
+
+- **`validations.outputs`** (quarantine) — the split is *derived from the rules*: a row is invalid when it fails a row-level check (`not_null`, `range`, `regex`, `unique`, or a `check` on a `missing_*`/`invalid_*` metric). One declarative definition of "invalid", written next to the metrics, running apart from the main output — you don't even need a main `output`. Best when **invalid literally means "failed the data-quality rules"**.
+- **Two pipeline `outputs`**, each with its own `filter` transformation — the split is *business logic* you write by hand. Best when "invalid" is a domain rule unrelated to quality, or when the two branches need different shapes (columns, joins, payloads).
+
+Rule of thumb: if you would otherwise write the same condition twice — once as a validation and once as a filter — use `validations.outputs` and let the checks be the single source of truth. If the branches diverge in meaning or shape, use pipeline outputs.
+
+```json
+"validations": {
+  "rules": [
+    { "type": "not_null", "columns": ["id"] },
+    { "type": "check", "metric": "invalid_count", "column": "email", "valid_format": "email", "must_be": "= 0" }
+  ],
+  "outputs": {
+    "valid":   { "format": "delta", "path": "silver.orders_ok",         "mode": "overwrite" },
+    "invalid": { "format": "delta", "path": "silver.orders_quarantine", "mode": "overwrite" }
+  }
+}
+```
+
+For a targeted quarantine of a single rule's offending rows, a `sql` rule with `failed_rows` plus its own `output` writes exactly those rows. The whole engine is the standalone [`sparquet_cola`](/docs/guides/sparquet-cola/) library — usable on its own in any Spark job.
+
 ## A checklist
 
 - `row_count` with a `min` on every pipeline

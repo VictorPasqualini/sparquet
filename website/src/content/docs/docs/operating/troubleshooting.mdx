@@ -16,7 +16,7 @@ Neither key is present. One of them is required.
 An `input`, an `output` or a join/union `with` is missing a required field. `input` must be complete even when you inject a DataFrame with `input_df` — the block still has to parse.
 
 **`Read format 'x' not supported`**
-The format is not in the reader registry. Check spelling, and remember `kafka` is write-only. Custom formats must be registered before the run.
+The format is not in the reader registry. Check spelling; `binary` is read-only (no writer), while `kafka` reads and writes. Custom formats must be registered before the run.
 
 ## Nothing was written
 

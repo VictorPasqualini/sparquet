@@ -1,0 +1,52 @@
+---
+title: Plantillas y lecciones
+description: Diez pipelines funcionales y seis lecciones guiadas que vienen con Sparquet Studio.
+sidebar:
+  order: 6
+---
+
+Studio viene con pipelines que realmente corren. Abrir uno y leer su JSON suele ser más rápido que leer una página de referencia.
+
+## Plantillas
+
+**Templates** en la barra lateral. Cada tarjeta trae lo que el pipeline demuestra; **Preview** muestra el JSON antes de comprometerte con nada, **Use template** lo copia a un proyecto como un nuevo workflow.
+
+| Plantilla | Nivel | Qué enseña |
+|---|---|---|
+| CSV to Parquet | starter | Las cuatro transformaciones del día a día, y por qué el orden importa |
+| Ingestion with data quality | starter | Validaciones, `on_failure: warn` y un report persistido |
+| Join and runtime pushdown | intermediate | `checkpoint` → `collect` → `{{variable}}` dentro de `with_transformations` |
+| Nested payload and multi-output | intermediate | dot-paths de `struct`, dos destinos desde un DataFrame |
+| Delta merge (upsert) | intermediate | `mode: merge`, `merge_keys` y la regla de unicidad que lo protege |
+| Aggregation with group_by and pivot | intermediate | Expresiones de agregación SQL completas, valores de pivot listados |
+| Union and dedupe | intermediate | Union por posición vs por nombre, deduplicación |
+| Staging view handoff | intermediate | Varios pipelines componiendo por una temp view |
+| Kafka publication | advanced | `struct` → `to_json` → tópico, como transformación por destino |
+| Parameterized pipeline | advanced | `{param}` y branching con `skip_if_false` |
+
+Cada plantilla es JSON Sparquet real, importado por el mismo compilador que cualquier otro archivo — y cubierto por un test que hace el lint de todas sin un solo error.
+
+## Lecciones
+
+**Learn** en la barra lateral tiene seis lecciones que se apoyan unas en otras. Cada una tiene secciones, snippets ejecutables y una lista de verificación que recuerda lo que marcaste.
+
+1. **Tu primer pipeline en cinco minutos** — la forma del documento y la ejecución
+2. **Pensar en nodos** — cómo el grafo mapea al archivo, incluyendo forks y joins
+3. **Transformaciones que importan** — `select` vs `with_column` vs `struct`, y dónde gana cada una
+4. **Unir y enriquecer** — semántica de join, y pushdown con `collect` + `{{variable}}`
+5. **Calidad de datos** — validators, políticas `on_failure` y lectura del report
+6. **Ir a producción** — parámetros, includes, checkpoints, escritura merge y correr en un cluster
+
+Las lecciones enlazan a la plantilla que las demuestra, así leer y hacer quedan a un clic de distancia.
+
+## Empezar desde una plantilla en la práctica
+
+El camino más rápido a un nuevo pipeline rara vez es un canvas en blanco:
+
+1. Encuentra la plantilla más cercana a tu caso.
+2. **Use template** en el proyecto correcto.
+3. Cambia los paths de origen y destino.
+4. Lee el panel Issues — señalará lo que el cambio invalidó.
+5. Córrelo con el runner local contra una porción pequeña de datos.
+
+Para algo genuinamente nuevo, descríbelo al [asistente de IA](/es/docs/studio/ai-assistant/) y edita lo que redacte.

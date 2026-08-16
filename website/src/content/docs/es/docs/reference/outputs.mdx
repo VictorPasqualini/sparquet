@@ -1,0 +1,164 @@
+---
+title: Salidas
+description: Escritura de resultados en Sparquet — modos de escritura, múltiples destinos, transformaciones por destino y proyecciones de columnas.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Un pipeline escribe un destino con `output`, o varios con `outputs`. Cada destino se configura de forma independiente, y todos parten del mismo DataFrame transformado.
+
+```json
+{
+  "outputs": [
+    { "format": "delta", "path": "analytics.orders", "mode": "overwrite" },
+    { "format": "csv", "path": "/exports/summary", "columns": ["id", "revenue"] }
+  ]
+}
+```
+
+## Campos
+
+| Clave | Tipo | Default | Propósito |
+|---|---|---|---|
+| `format` | string | — | conector, en minúsculas al parsear |
+| `path` | string | — | ruta, tabla, vista o tópico |
+| `mode` | string | `overwrite` | comportamiento de escritura |
+| `partition_by` | list | `[]` | particionamiento físico, solo formatos de archivo |
+| `columns` | list | todas | proyección de columnas para este destino |
+| `options` | object | `{}` | opciones del conector |
+| `transformations` | list | `[]` | reformateo solo para este destino |
+
+## Modos de escritura
+
+| Modo | Comportamiento |
+|---|---|
+| `overwrite` | reemplaza el destino |
+| `append` | agrega filas |
+| `merge` | upsert — Delta e Iceberg |
+
+`merge` requiere `options.merge_keys`:
+
+```json
+{
+  "format": "delta",
+  "path": "analytics.orders",
+  "mode": "merge",
+  "options": {
+    "merge_keys": ["order_id"],
+    "merge_condition": "T.deleted = false"
+  }
+}
+```
+
+`T` es la tabla destino, `S` el DataFrame entrante.
+
+<Aside type="caution">
+  Delta lanza *multiple source rows matched* cuando el DataFrame entrante tiene
+  más de una fila por clave de merge. Agrega una validación `unique` sobre esas columnas para
+  que el pipeline te avise antes de que lo haga la escritura.
+</Aside>
+
+## Proyección de columnas
+
+`columns` selecciona lo que este destino escribe, sin tocar los demás:
+
+```json
+{
+  "outputs": [
+    { "format": "parquet", "path": "/dw/orders_full" },
+    { "format": "csv", "path": "/exports/finance", "columns": ["order_id", "revenue", "country"] }
+  ]
+}
+```
+
+<Aside type="note">
+  Estos son nombres de columna simples, no expresiones SQL — la proyección es un
+  `df.select(*columns)`. Un nombre que no existe lanza una excepción y hace fallar el pipeline
+  completo. Para columnas calculadas, usa `transformations` más abajo.
+</Aside>
+
+## Transformaciones por destino
+
+Cuando los destinos necesitan *formas* diferentes — no solo columnas diferentes — dale a cada uno su propia cadena. Se ejecuta después de las validaciones, solo sobre ese destino.
+
+```json
+{
+  "outputs": [
+    {
+      "format": "kafka",
+      "path": "orders-events",
+      "transformations": [
+        { "type": "struct", "column": "payload", "fields": { "id": "order_id", "total": "revenue" } },
+        { "type": "with_column", "column": "value", "expression": "to_json(payload)" }
+      ],
+      "options": { "bootstrap_servers": "broker:9092", "value_column": "value" }
+    },
+    {
+      "format": "delta",
+      "path": "analytics.customer_revenue",
+      "mode": "merge",
+      "transformations": [
+        {
+          "type": "group_by",
+          "by": ["customer_id"],
+          "agg": ["sum(revenue) as revenue", "count(*) as orders"]
+        }
+      ],
+      "options": { "merge_keys": ["customer_id"] }
+    }
+  ]
+}
+```
+
+Todos los tipos de transformación están disponibles aquí, incluyendo `join` y las `{{variables}}` de runtime.
+
+<Aside type="tip" title="Checkpoint antes de ramificar">
+  Cada destino vuelve a leer el mismo DataFrame. Sin un `checkpoint` como
+  última transformación principal, Spark recalcula todo el linaje una vez por
+  destino — la causa más común de un pipeline que es N veces
+  más lento de lo que debería.
+</Aside>
+
+## Orden de operaciones por destino
+
+Para cada destino, en este orden:
+
+1. sus propias `transformations`
+2. la proyección `columns`
+3. la escritura
+
+Lo que significa que una proyección ve las columnas que produjeron las propias transformaciones del destino, no aquellas con las que terminó la cadena principal.
+
+## Staging entre pipelines
+
+Las vistas temporales convierten un conjunto de pipelines en un job componible: varios pipelines escriben la misma vista de staging, y uno final la valida y la publica.
+
+```json
+// pipeline 1..N
+{ "output": { "format": "view", "path": "orders_staging", "mode": "overwrite" } }
+
+// final pipeline
+{ "input": { "format": "view", "path": "orders_staging" } }
+```
+
+Todos deben ejecutarse en la misma sesión de Spark — el mismo proceso — que es exactamente lo que hace `Sparquet` cuando llamas a `run()` varias veces sobre una misma instancia.
+
+## Lo que devuelve
+
+```python
+result = fw.run("pipeline.json")
+result.rows_written        # total across every destination
+
+for m in result.output_metrics:
+    print(m.format, m.mode, m.path, m.rows_written)
+```
+
+Cada destino reporta sus propias `OutputMetrics` (`format`, `path`, `mode`, `rows_written`) en `result.output_metrics`. El conteo se toma sobre el DataFrame final de ese destino — después de sus propias `transformations` y proyección de columnas, justo antes de la escritura — así que es exacto incluso cuando una cadena por destino explota o agrega filas.
+
+<Aside type="note">
+  `result.rows_written` es la **suma** de esos conteos por destino, no una
+  única medición del DataFrame principal. Un destino que agrega filas
+  aporta su propio conteo reducido al total.
+</Aside>

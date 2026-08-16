@@ -95,9 +95,22 @@ Anything the other rules do not express. The query runs against a temp view name
 
 Use it for cross-column invariants (`ends_at > starts_at`), referential expectations inside the DataFrame, or business rules that only make sense together.
 
+**Two modes.** Besides the boolean `query`, the `sql` rule accepts **`failed_rows`** — a query that returns the *offending rows* (SODA-style "failed rows"). The check fails if any come back, `failed_count` is their number, and an optional per-rule `output` writes exactly those rows to a sink:
+
+```json
+{
+  "type": "sql",
+  "failed_rows": "SELECT * FROM _validation_df WHERE revenue < 0",
+  "output": { "format": "delta", "path": "dq.negative_revenue", "mode": "overwrite" }
+}
+```
+
+Use `query` when you only need pass/fail; use `failed_rows` when you want to *see and keep* the bad rows for debugging or a targeted quarantine.
+
 <Aside type="note">
   This rule was called `custom_sql` in earlier releases. It is now `sql`, with
-  identical behavior; update old configs.
+  identical behavior. The whole validation engine is the standalone
+  [`sparquet_cola`](/docs/guides/sparquet-cola/) library — same rule `type`s.
 </Aside>
 
 ### `check`
@@ -211,6 +224,33 @@ Because a `warn` keeps `passed = True`, an orchestrator filtering on `not check.
 ```
 
 Appending every run into one table gives you a quality history you can chart: failure rate per rule, per pipeline, over time.
+
+## Row-level quarantine (`validations.outputs`)
+
+Where `report` persists *metrics*, `validations.outputs` routes the *rows themselves* — apart from the main `output(s)`. Keys `valid` and `invalid`, each a full output sink:
+
+```json
+"validations": {
+  "on_failure": "warn",
+  "rules": [
+    { "type": "not_null", "columns": ["id"] },
+    { "type": "check", "metric": "invalid_count", "column": "email", "valid_format": "email", "must_be": "= 0" }
+  ],
+  "outputs": {
+    "valid":   { "format": "delta", "path": "silver.orders_ok",         "mode": "overwrite" },
+    "invalid": { "format": "delta", "path": "silver.orders_quarantine", "mode": "overwrite" }
+  }
+}
+```
+
+A row is **invalid** when it violates any *row-level* rule — `not_null`, `range`, `regex`, `unique`, and the `check` rule with a `missing_*` / `invalid_*` metric. Aggregate rules (`row_count`, `avg`, `freshness`, `duplicate_count`, `schema`, boolean `sql`) describe the table, not individual rows, so they do not contribute to the split.
+
+<Aside type="tip">
+  `validations.outputs` is the "bronze → valid silver + invalid silver" split when
+  *invalid means "failed the DQ rules"*. If the split is business logic unrelated to
+  quality, do it with two entries in the pipeline `outputs` and a `filter` per
+  destination instead. See the data-quality guide for the trade-off.
+</Aside>
 
 ## Reading the result in Python
 

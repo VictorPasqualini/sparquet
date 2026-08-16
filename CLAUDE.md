@@ -451,7 +451,13 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | `delta` | sim | sim | Unity Catalog ou path; time travel; MERGE |
 | `iceberg` | sim | sim | MERGE INTO nativo |
 | `txt` | sim | sim | Texto plano; coluna `value` |
-| `view` | sim | sim | Spark temp views; auto-cache |
+| `view` | sim | sim | Spark temp views; auto-cache; `scope` session/global |
+| `json` | sim | sim | JSON nativo (JSON Lines; `multiLine` p/ 1 doc por arquivo) |
+| `orc` | sim | sim | ORC colunar nativo |
+| `avro` | sim | sim | Requer `spark-avro` no classpath |
+| `xml` | sim | sim | Requer `spark-xml`; `rowTag` obrigatório |
+| `binary` | sim | **não** | `binaryFile` (só leitura): path/modificationTime/length/content |
+| `hudi` | sim | sim | Requer bundle Hudi; upsert/partição via opções `hoodie.*` |
 | `kafka` | sim | sim | Batch read/write; MSK via SASL/IAM; requer conector Kafka no classpath |
 | `postgresql` | sim | sim | JDBC; `path`=tabela; `url` ou `host`+`database` em options |
 | `mysql` | sim | sim | JDBC |
@@ -464,15 +470,16 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | `mongodb` | sim | sim | `path`=coleção; `connection.uri`+`database` em options |
 | `documentdb` | sim | sim | Amazon DocumentDB (mesmo conector Mongo; URI com TLS) |
 | `dynamodb` | sim | sim | `path`=tabela; write é upsert por chave (append) |
-| `cassandra` | sim | sim | `path`=`keyspace.tabela`; append (upsert) |
-| `elasticsearch` | sim | sim | `path`=índice; Elasticsearch/OpenSearch |
+| `cassandra` | sim | sim | `path`=`keyspace.tabela`; append (upsert); **mesma classe atende Cassandra e ScyllaDB** |
+| `elasticsearch` | sim | sim | `path`=índice; **mesma classe atende Elasticsearch e OpenSearch** |
 
-> Todos os conectores externos (JDBC, BigQuery, Snowflake, Redshift, Mongo,
-> DynamoDB, Cassandra, Elasticsearch, Kafka) exigem o **JAR do driver/conector no
-> classpath** do Spark (`spark.jars` / `spark.jars.packages`). O framework só monta a
-> chamada `.format(...).options(...)`; não empacota drivers. Cada `io/<fmt>.py`
-> documenta as opções de conexão; o catálogo do Studio (`formats.databases.ts`) as
-> descreve para a UI e a IA.
+> Conectores externos exigem o **JAR do driver/conector no classpath** do Spark
+> (`spark.jars` / `spark.jars.packages`): JDBC, BigQuery, Snowflake, Redshift, Mongo,
+> DynamoDB, Cassandra, Elasticsearch, Kafka, **Avro (`spark-avro`), XML (`spark-xml`)
+> e Hudi (`hudi-spark-bundle`)**. `parquet`/`csv`/`delta`/`iceberg`/`txt`/`view`/`json`/
+> `orc`/`binary` são nativos. O framework só monta `.format(...).options(...)`; não
+> empacota drivers. Cada `io/<fmt>.py` documenta as opções; o catálogo do Studio
+> (`formats.databases.ts`, `formats.files.ts`) as descreve para a UI e a IA.
 
 ---
 
@@ -599,6 +606,10 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 - `PipelineResult` nunca lança exceção — erros ficam em `result.error`.
 - Logger sempre JSON estruturado (`utils/logger.py`).
 - `SparkContextManager` detecta o ambiente automaticamente (Databricks reusa sessão ativa; outros criam via builder).
+- **`filter`/`select` primeiro**: comece a cadeia de `transformations` reduzindo linhas (`filter`) e colunas (`select`) antes de joins/structs/group_by pesados — menos dados por todo o resto do pipeline (o Spark empurra parte, mas colocar explícito ajuda o planner e a legibilidade).
+- **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`).
+- **temp view (`view`) global vs sessão**: `options.scope` = `session` (default) ou `global` (`global_temp.<nome>`, visível a toda a aplicação Spark).
+- **sparquet_cola** distribuível: como lib separada o nome PyPI será `sparquet-cola` (hífen); o import é sempre `sparquet_cola` (underscore — convenção Python).
 
 ---
 

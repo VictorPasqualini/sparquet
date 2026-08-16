@@ -1,0 +1,115 @@
+---
+title: O canvas
+description: Construindo pipelines no canvas do Sparquet Studio — adicionar nós, conectá-los, ramificar e controlar pelo teclado.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+## Adicionando nós
+
+Três formas, todas equivalentes:
+
+- **Arraste** um item da palette para o canvas.
+- **Clique** num item da palette — o nó cai após o último, já organizado.
+- **Duplo-clique** no canvas vazio para uma busca de adição rápida; digite, aperte <kbd>Enter</kbd>.
+
+Aperte <kbd>/</kbd> em qualquer lugar para focar a busca da palette.
+
+## Tipos de nó
+
+| Nó | Compila para | Inputs |
+|---|---|---|
+| Source | `input`, ou um `with` de join/union | nenhum |
+| Transformation | uma entrada de `transformations` | um (dois para `join` e `union`) |
+| Validations | o bloco `validations` | um |
+| Destination | uma entrada de `outputs` | um |
+| Note | nada | nenhum |
+
+Um nó mostra seu parâmetro mais significativo sob o título — a condição de um filter, a expressão de uma coluna calculada, o tipo e a chave do join — então um pipeline é legível sem abrir nada.
+
+## Conectando
+
+Arraste do handle direito de um nó para o handle esquerdo do próximo. As conexões são validadas enquanto você desenha: o Studio recusa um link para uma source, um self-link e qualquer coisa que criaria um ciclo.
+
+Cada input handle recebe **uma** conexão. Soltar uma segunda substitui a primeira, que é o jeito mais rápido de emendar um nó para fora de uma cadeia.
+
+**Pelo teclado**: foque um nó, aperte <kbd>C</kbd>, <kbd>Tab</kbd> até o alvo, então <kbd>C</kbd> de novo. <kbd>Escape</kbd> cancela. A toolbar do nó tem as mesmas ações em *Connect to…*.
+
+## Ramificando para vários destinos
+
+Conecte o mesmo nó a dois destinos e o grafo se ramifica. Tudo antes do fork fica no `transformations` principal; tudo depois pertence àquele destino.
+
+```
+source → filter → cast ─┬─→ group_by → delta        ← group_by é o próprio da saída delta
+                        └─→ parquet                  ← filter e cast são compartilhados
+```
+
+<Aside type="tip" title="Checkpoint antes de um fork">
+  Cada destino relê o mesmo DataFrame, então coloque um `checkpoint` como a
+  última transformação compartilhada. Sem ele o Spark recomputa a linhagem
+  inteira uma vez por destino.
+</Aside>
+
+## Joins e unions
+
+Esses nós têm **dois** inputs. O da esquerda continua a cadeia principal; o da direita pega a segunda fonte.
+
+```
+                 ┌── delta(customers) → filter → select ──┐   ← with + with_transformations
+source → filter ─┴──────────────────────────────────────→ join → destination
+```
+
+Tudo entre a fonte lateral e o join vira `with_transformations`, aplicado ao lado direito antes do join rodar.
+
+<Aside type="caution">
+  `union` não tem `with_transformations` no framework, então o Studio marca uma
+  cadeia lateral não-vazia como erro em vez de compilar algo que seria ignorado
+  silenciosamente em runtime.
+</Aside>
+
+## Mutar e deletar
+
+Mute uma transformação (o olho da toolbar, ou o menu do inspector) para mantê-la no canvas excluindo-a do JSON compilado — o jeito mais rápido de testar se um passo é o problema, sem perder a configuração.
+
+Deletar remove o nó e suas conexões num único passo de undo.
+
+## Layout
+
+<kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>L</kbd> reroda o layout automático: da esquerda para a direita, cadeias laterais empilhadas sob o nó que alimentam. As posições são salvas com o workflow, então um grafo arrumado continua arrumado.
+
+## Teclado
+
+| Atalho | Ação |
+|---|---|
+| <kbd>Ctrl/⌘</kbd>+<kbd>K</kbd> | Command palette |
+| <kbd>Ctrl/⌘</kbd>+<kbd>S</kbd> | Salvar agora (edições autosalvam mesmo assim) |
+| <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> / <kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> | Desfazer / refazer |
+| <kbd>Ctrl/⌘</kbd>+<kbd>D</kbd> | Duplicar seleção |
+| <kbd>Delete</kbd> | Remover seleção |
+| <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd> | Painel Run |
+| <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd> | Painel JSON |
+| <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd> | Assistente de IA |
+| <kbd>Ctrl/⌘</kbd>+<kbd>E</kbd> | Painel Issues |
+| <kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>L</kbd> | Auto-layout |
+| <kbd>C</kbd> | Iniciar / completar uma conexão a partir do nó focado |
+| <kbd>/</kbd> | Focar a busca da palette |
+
+## O painel de issues
+
+O lint roda enquanto você digita. Ele reporta o que é estaticamente decidível e fica quieto sobre o resto — um falso positivo custa mais que um aviso ausente.
+
+| Severidade | Exemplos |
+|---|---|
+| **Error** | sem destino; um nó órfão; um campo obrigatório vazio; `merge` sem `merge_keys`; um destino `binary` (formato só de leitura); duas entradas principais num nó |
+| **Warning** | um `collect` sem `checkpoint` a montante; um `{{variable}}` que ninguém publica; um `{param}` nunca declarado; dois destinos escrevendo no mesmo path; uma `union` posicional |
+| **Info** | um nó `debug` deixado no pipeline; sem bloco de validations |
+
+Clique em qualquer issue para selecionar o nó e pular ao campo problemático.
+
+## Salvando
+
+Edições autosalvam um instante depois que você para de digitar; a status bar mostra *Saved* ou *Unsaved*. <kbd>Ctrl/⌘</kbd>+<kbd>S</kbd> força. Fechar um workflow descarrega o que estava pendente, então navegar para longe nunca perde as últimas teclas.
+
+O histórico de undo cobre mudanças estruturais e edições de campo, agrupando digitação rápida num passo só, para que um único undo volte uma palavra em vez de um caractere.
