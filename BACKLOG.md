@@ -52,6 +52,10 @@ Rodada de evolução — capacidades já no código, com testes e entrada no cat
 - **`input_view` unificado**: o escopo da temp view de entrada agora vai dentro de
   `input_view` (`"orders"` ou `{"name": "orders", "type": "global"}`); o antigo
   `input_view_scope` foi removido.
+- **`sparquet-cola` extraído** (resolve §7): o motor de DQ virou um pacote/repo próprio
+  (`../sparquet-cola`), com pyproject + CI/publish + README trilíngue + docs. O `sparquet`
+  passou a declará-lo em `dependencies`; `packages.find` do sparquet agora empacota só
+  `sparquet` (o `sparquet_cola` vem do PyPI).
 
 Pendências abaixo já descontam o que foi entregue.
 
@@ -186,10 +190,13 @@ Pendente:
 
 ## 7. Produtos / estratégia
 
-- [ ] **`sparquet-cola` como repositório/pacote separado** — a lib de DQ já é
-      separável (só depende de pyspark). Extrair para um repo próprio e publicar no
-      PyPI como **`sparquet-cola`** (import `sparquet_cola`), lib open-source de
-      testes/qualidade de dados com Spark. Import com underscore, distribuição com hífen.
+- ✅ **`sparquet-cola` como repositório/pacote separado** — extraído para repo próprio
+      (`../sparquet-cola`, GitHub `VictorPasqualini/sparquet-cola`) com pyproject,
+      CI/publish (mesmo padrão do sparquet), README trilíngue e docs. **Publicado no PyPI**
+      como **`sparquet-cola`** 0.1.0 (import `sparquet_cola`). O `sparquet` o declara em
+      `dependencies` (`sparquet-cola>=0.1.0`, sem cap — mantido retrocompatível) e é
+      validado contra o pacote do PyPI;
+      os shims `sparquet.validation.*` seguem reexportando dele.
 - [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
       (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
       mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.

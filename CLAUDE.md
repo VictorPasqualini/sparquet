@@ -104,7 +104,7 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
 | `ValidationEngine` | `validation/engine.py` | Adaptador fino sobre o `sparquet_cola`; respeita `on_failure` e severidade (warn não aborta); `split(df, config)` → valid/invalid |
-| **`sparquet_cola`** (lib de DQ) | `sparquet_cola/` (pacote top-level) | Motor de qualidade de dados **separável** (só depende de pyspark). `Cola` (run/split/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/`check`/`schema`), `thresholds`. O bloco JSON continua `validations`; o branding Cola é interno. Ver `sparquet_cola/__init__.py` |
+| **`sparquet_cola`** (lib de DQ) | **pacote/repo separado** (`../sparquet-cola`, publicado no PyPI; dependência `sparquet-cola>=0.1.0`) | Motor de qualidade de dados (só depende de pyspark). `Cola` (run/split/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/`check`/`schema`), `thresholds`. O bloco JSON continua `validations`; o branding Cola é interno. Import `sparquet_cola` (não vive mais dentro do repo do sparquet). |
 | `sparquet.validation.*` | `validation/{base,builtin,checks,thresholds}.py` | Shims de compat que reexportam do `sparquet_cola` com os nomes históricos (`BaseValidator`, `ValidationResult`, `*Validator`) |
 | `apply_template` | `utils/template.py` | Substitui `{chave}` no JSON bruto antes do parse; formata listas/booleanos para SQL |
 | `resolve_includes` | `utils/includes.py` | Expande diretivas `$include` em transformations |
@@ -609,7 +609,7 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 - **`filter`/`select` primeiro**: comece a cadeia de `transformations` reduzindo linhas (`filter`) e colunas (`select`) antes de joins/structs/group_by pesados — menos dados por todo o resto do pipeline (o Spark empurra parte, mas colocar explícito ajuda o planner e a legibilidade).
 - **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`).
 - **temp view (`view`) global vs sessão**: `options.scope` = `session` (default) ou `global` (`global_temp.<nome>`, visível a toda a aplicação Spark).
-- **sparquet_cola** distribuível: como lib separada o nome PyPI será `sparquet-cola` (hífen); o import é sempre `sparquet_cola` (underscore — convenção Python).
+- **sparquet_cola** é um pacote/repo separado (`../sparquet-cola`), publicado no PyPI e declarado em `dependencies` do sparquet como `sparquet-cola>=0.1.0` (sem cap — a lib é mantida sempre retrocompatível). Nome PyPI com hífen (`sparquet-cola`); o import é sempre `sparquet_cola` (underscore — convenção Python). Alterações no motor de DQ são feitas no repo `sparquet-cola` (publique uma nova versão lá antes de o sparquet a consumir).
 
 ---
 

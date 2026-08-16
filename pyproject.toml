@@ -30,6 +30,11 @@ classifiers = [
 ]
 dependencies = [
     "pyspark>=3.4.0",
+    # Motor de qualidade de dados, extraído para pacote próprio (repo/PyPI
+    # separados). O bloco `validations` e os shims `sparquet.validation.*`
+    # rodam sobre ele. O sparquet-cola é mantido sempre retrocompatível, então
+    # sem cap de versão. Import: `sparquet_cola`.
+    "sparquet-cola>=0.1.0",
 ]
 
 [project.urls]
@@ -49,9 +54,8 @@ sparquet = "sparquet.cli:main"
 version = { attr = "sparquet.__version__" }
 
 [tool.setuptools.packages.find]
-# Distribuição é SÓ o projeto sparquet: os pacotes `sparquet` e `sparquet_cola`
-# (o motor de DQ, ainda embutido — vira pacote PyPI próprio no futuro, ver
-# BACKLOG §7). Lista explícita (não `exclude`) para que os outros projetos do
-# monorepo — `sparquet-studio/` (frontend) e `website/` — e qualquer pasta nova
-# nunca entrem no wheel/sdist por acidente.
-include = ["sparquet", "sparquet.*", "sparquet_cola", "sparquet_cola.*"]
+# Distribuição é SÓ o pacote `sparquet`. O motor de DQ `sparquet_cola` agora é um
+# pacote separado (declarado em dependencies). Lista explícita (não `exclude`)
+# para que os outros projetos do monorepo — `sparquet-studio/` (frontend) e
+# `website/` — e qualquer pasta nova nunca entrem no wheel/sdist por acidente.
+include = ["sparquet", "sparquet.*"]

@@ -94,7 +94,7 @@ That file runs as-is, and opens on the Studio canvas as nine connected nodes.
 
 **IO** — `parquet` `delta` `iceberg` `csv` `txt` `view` `kafka` read and write; relational via JDBC (`postgresql` `mysql` `mariadb` `sqlserver` `oracle`); warehouses (`bigquery` `snowflake` `redshift`); NoSQL/search (`mongodb` `documentdb` `dynamodb` `cassandra` `elasticsearch`). Delta and Iceberg support `MERGE` upserts and Delta time travel; external connectors need their driver JAR on the Spark classpath.
 
-**Validations** — powered by **`sparquet_cola`**, a separable data-quality library (pyspark-only, usable standalone). Rules: `not_null` `unique` `range` `regex` `row_count` `sql` (boolean invariant OR `failed_rows` mode), plus SODA-style `check` (a metric vs a warn/fail threshold) and `schema` (columns and types). `fail` / `warn` / `skip` policies, an optional per-rule metrics report, and row-level **quarantine** (`validations.outputs`: split valid/invalid to their own sinks) — all written apart from the main output.
+**Validations** — powered by **[`sparquet-cola`](https://github.com/VictorPasqualini/sparquet-cola)**, a standalone data-quality library (pyspark-only) that installs as a dependency (`pip install sparquet-cola`) and is usable on its own. Rules: `not_null` `unique` `range` `regex` `row_count` `sql` (boolean invariant OR `failed_rows` mode), plus SODA-style `check` (a metric vs a warn/fail threshold) and `schema` (columns and types). `fail` / `warn` / `skip` policies, an optional per-rule metrics report, and row-level **quarantine** (`validations.outputs`: split valid/invalid to their own sinks) — all written apart from the main output.
 
 **Beyond the basics**
 

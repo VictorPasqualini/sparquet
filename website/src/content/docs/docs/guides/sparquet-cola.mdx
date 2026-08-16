@@ -13,10 +13,11 @@ It depends **only on `pyspark`**. That is deliberate: you can drop it into any S
 
 ## Install and import
 
-`sparquet_cola` ships inside the Sparquet distribution:
+`sparquet-cola` is its own package ([repo](https://github.com/VictorPasqualini/sparquet-cola)). Install it standalone, or get it automatically as a dependency of `sparquet`:
 
 ```bash
-pip install sparquet
+pip install sparquet-cola   # standalone (pyspark only)
+pip install sparquet        # the framework — brings sparquet-cola along
 ```
 
 ```python

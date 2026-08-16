@@ -39,7 +39,6 @@ jobs:
           python tests/io/test_connectors.py
           python tests/io/test_delta_path.py
           python tests/validation/test_soda_checks.py
-          python tests/validation/test_cola_lib.py
 
   # 2) Build do sdist + wheel e checagem de metadados (twine check).
   build:
