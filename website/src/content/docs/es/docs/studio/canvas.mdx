@@ -1,6 +1,6 @@
 ---
 title: El canvas
-description: Construir pipelines en el canvas de Sparquet Studio — añadir nodos, conectarlos, ramificar y controlarlo desde el teclado.
+description: Construir un Job en el canvas de Sparquet Studio — añadir nodos, conectarlos, ramificar y controlarlo desde el teclado.
 sidebar:
   order: 2
 ---
@@ -27,7 +27,7 @@ Pulsa <kbd>/</kbd> en cualquier lugar para enfocar la búsqueda de la palette.
 | Destination | una entrada de `outputs` | uno |
 | Note | nada | ninguno |
 
-Un nodo muestra su parámetro más significativo bajo el título — la condición de un filter, la expresión de una columna calculada, el tipo y la clave del join — así que un pipeline es legible sin abrir nada.
+Un nodo muestra su parámetro más significativo bajo el título — la condición de un filter, la expresión de una columna calculada, el tipo y la clave del join — así que un Job es legible sin abrir nada.
 
 ## Conectar
 
@@ -77,7 +77,7 @@ Borrar quita el nodo y sus conexiones en un solo paso de undo.
 
 ## Layout
 
-<kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>L</kbd> re-ejecuta el layout automático: de izquierda a derecha, cadenas laterales apiladas bajo el nodo que alimentan. Las posiciones se guardan con el workflow, así que un grafo ordenado sigue ordenado.
+<kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>L</kbd> re-ejecuta el layout automático: de izquierda a derecha, cadenas laterales apiladas bajo el nodo que alimentan. Las posiciones se guardan con el Job, así que un grafo ordenado sigue ordenado.
 
 ## Teclado
 
@@ -104,12 +104,12 @@ El lint corre mientras escribes. Reporta lo que es estáticamente decidible y se
 |---|---|
 | **Error** | sin destino; un nodo huérfano; un campo obligatorio vacío; `merge` sin `merge_keys`; un destino `binary` (formato de solo lectura); dos entradas principales a un nodo |
 | **Warning** | un `collect` sin `checkpoint` aguas arriba; un `{{variable}}` que nadie publica; un `{param}` nunca declarado; dos destinos escribiendo el mismo path; una `union` posicional |
-| **Info** | un nodo `debug` dejado en el pipeline; sin bloque de validations |
+| **Info** | un nodo `debug` dejado en el Job; sin bloque de validations |
 
 Haz clic en cualquier issue para seleccionar el nodo y saltar al campo problemático.
 
 ## Guardar
 
-Las ediciones autoguardan un instante después de que dejas de escribir; la status bar muestra *Saved* o *Unsaved*. <kbd>Ctrl/⌘</kbd>+<kbd>S</kbd> lo fuerza. Cerrar un workflow descarga lo pendiente, así que navegar a otro lado nunca pierde las últimas teclas.
+Las ediciones autoguardan un instante después de que dejas de escribir; la status bar muestra *Saved* o *Unsaved*. <kbd>Ctrl/⌘</kbd>+<kbd>S</kbd> lo fuerza. Cerrar un Job descarga lo pendiente, así que navegar a otro lado nunca pierde las últimas teclas.
 
 El historial de undo cubre cambios estructurales y ediciones de campo, agrupando la escritura rápida en un solo paso, para que un único undo retroceda una palabra en vez de un carácter.

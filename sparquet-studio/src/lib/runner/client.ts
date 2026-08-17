@@ -6,7 +6,14 @@
  */
 
 import type { PipelineSpec } from '@/types/pipeline'
-import type { RunLogLine, RunResult, RunStatus } from '@/types/studio'
+import type {
+  PipelineRunResult,
+  PipelineStageResult,
+  RunLogLine,
+  RunResult,
+  RunStatus,
+  StepStatus,
+} from '@/types/studio'
 
 export const DEFAULT_RUNNER_URL = 'http://127.0.0.1:8787'
 
@@ -72,13 +79,30 @@ export interface RunnerValidation {
 /** Values accepted by the framework's `{param}` template substitution. */
 export type RunParamValue = string | number | boolean | string[] | number[]
 
-export interface RunPipelineRequest {
+export interface RunJobRequest {
   pipeline: PipelineSpec
   params?: Record<string, RunParamValue>
   /** Preview rows requested from `PipelineResult.output_df`. Server default: 50. */
   limit?: number
   /** Parse the config and return without touching Spark. */
   dryRun?: boolean
+}
+
+/** One stage of a pipeline run, already in execution order. */
+export interface RunPipelineStageRequest {
+  /** Echoed back on every stage event, so the canvas can find the box. */
+  id: string
+  name?: string
+  pipeline: PipelineSpec
+  params?: Record<string, RunParamValue>
+}
+
+export interface RunPipelineRequest {
+  stages: RunPipelineStageRequest[]
+  /** Preview rows requested from the LAST stage. Server default: 50. */
+  limit?: number
+  /** Stop at the first failing stage. Server default: true. */
+  stopOnError?: boolean
 }
 
 /* ------------------------------------------------------------------ narrow */
@@ -227,7 +251,7 @@ export async function fetchCapabilities(
   }
 }
 
-export async function validatePipeline(
+export async function validateJob(
   baseUrl: string = DEFAULT_RUNNER_URL,
   pipeline: PipelineSpec,
   signal?: AbortSignal,
@@ -242,9 +266,9 @@ export async function validatePipeline(
   }
 }
 
-export async function runPipeline(
+export async function runJob(
   baseUrl: string = DEFAULT_RUNNER_URL,
-  body: RunPipelineRequest,
+  body: RunJobRequest,
   signal?: AbortSignal,
   token?: string,
 ): Promise<RunResult> {
@@ -267,6 +291,325 @@ export async function runPipeline(
   return toRunResult(payload)
 }
 
+/* ---------------------------------------------------------------- streaming */
+
+export interface JobStreamHandlers {
+  /** The runner accepted the run and started the worker thread. */
+  onStart?: (pipelineName?: string) => void
+  onLog?: (line: RunLogLine) => void
+  /** Progress of a single transformation, by its 0-based index in the pipeline. */
+  onStep?: (index: number, status: StepStatus, type?: string, scope?: string) => void
+  onResult: (result: RunResult) => void
+  /** The runner emitted an `error` event (the stream still ends normally). */
+  onError?: (message: string) => void
+}
+
+/**
+ * Step markers are ordinary pipeline logs flagged with `context.step`; the
+ * message decides the status. Kept verbatim — the runner emits these strings.
+ */
+const STEP_STATUS_BY_MESSAGE: Record<string, StepStatus> = {
+  'Transformation started': 'running',
+  'Transformation applied': 'success',
+  'Transformacao pulada': 'skipped',
+  // The read and the writes are the steps that really touch data, so they carry
+  // their own markers (scope 'input' / 'output') alongside the transformations.
+  'Input started': 'running',
+  'Leitura concluida': 'success',
+  'Output started': 'running',
+  'Output written': 'success',
+}
+
+interface SseFrame {
+  event: string
+  data: string
+}
+
+/**
+ * Splits one `\n\n`-delimited SSE frame into its event name and payload.
+ * Comment lines (`:`) and unknown fields are ignored; multiple `data:` lines
+ * are joined with newlines, as the spec requires.
+ */
+function parseSseFrame(chunk: string): SseFrame | null {
+  let event = 'message'
+  const data: string[] = []
+
+  for (const raw of chunk.split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+    if (!line || line.startsWith(':')) continue
+    const separator = line.indexOf(':')
+    const field = separator === -1 ? line : line.slice(0, separator)
+    const value = separator === -1 ? '' : line.slice(separator + 1).replace(/^ /, '')
+    if (field === 'event') event = value
+    else if (field === 'data') data.push(value)
+  }
+
+  return data.length > 0 ? { event, data: data.join('\n') } : null
+}
+
+/** Emits `onStep` when the log line is one of the runner's step markers. */
+function dispatchStep(line: RunLogLine, handlers: JobStreamHandlers): void {
+  const context = line.context
+  if (!handlers.onStep || !context || context.step !== true) return
+  const status = STEP_STATUS_BY_MESSAGE[line.message]
+  if (!status) return
+  const index = context.index
+  if (typeof index !== 'number' || !Number.isFinite(index)) return
+  // `scope` tells the panel which lane the index counts in: the main
+  // transformation chain (default), the source node, or the outputs.
+  const scope = optionalString(context.scope) ?? 'transformation'
+  handlers.onStep(index, status, optionalString(context.type), scope)
+}
+
+function dispatchSseFrame(frame: SseFrame, handlers: JobStreamHandlers): void {
+  const payload = safeParse(frame.data)
+
+  switch (frame.event) {
+    case 'start':
+      handlers.onStart?.(isRecord(payload) ? optionalString(payload.pipeline_name) : undefined)
+      return
+    case 'log': {
+      const line = toLogLine(payload)
+      if (!line) return
+      handlers.onLog?.(line)
+      dispatchStep(line, handlers)
+      return
+    }
+    case 'result':
+      // The `result` payload is byte-for-byte what POST /run returns.
+      handlers.onResult(toRunResult(expectRecord(payload)))
+      return
+    case 'error':
+      handlers.onError?.(
+        (isRecord(payload) ? optionalString(payload.error) : undefined) ??
+          'The local runner failed to execute the job.',
+      )
+      return
+    default:
+      // Forward compatibility: unknown events are simply skipped.
+      return
+  }
+}
+
+/**
+ * POSTs to an SSE endpoint and hands every frame to `onFrame`. Resolves when the
+ * stream ends; the outcome arrives through the frames, never as a return value.
+ *
+ * Shared by the job and the pipeline streams: they differ only in the path they
+ * open and the events they understand, never in the transport or its failures.
+ */
+async function postEventStream(
+  baseUrl: string,
+  path: string,
+  body: unknown,
+  onFrame: (frame: SseFrame) => void,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<void> {
+  const init = jsonPost(body, token)
+  const headers = { ...(init.headers as Record<string, string>), accept: 'text/event-stream' }
+
+  let response: Response
+  try {
+    response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, { ...init, headers, signal })
+  } catch (error) {
+    // An aborted request is the caller's own doing, not a missing runner.
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new RunnerError(RUNNER_UNREACHABLE_MESSAGE, 'unreachable', undefined, error)
+  }
+
+  if (!response.ok) {
+    throw new RunnerError(await readErrorMessage(response), 'http', response.status)
+  }
+
+  if (!response.body) {
+    throw new RunnerError(
+      'The local runner returned a malformed response.',
+      'malformed',
+      response.status,
+    )
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const drain = (final: boolean) => {
+    // SSE frames are separated by a blank line; anything after the last one is a
+    // partial frame and stays in the buffer until more bytes arrive.
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary !== -1) {
+      const chunk = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      const frame = parseSseFrame(chunk)
+      if (frame) onFrame(frame)
+      boundary = buffer.indexOf('\n\n')
+    }
+    if (final && buffer.trim()) {
+      const frame = parseSseFrame(buffer)
+      buffer = ''
+      if (frame) onFrame(frame)
+    }
+  }
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      drain(false)
+    }
+    buffer += decoder.decode()
+    drain(true)
+  } catch (error) {
+    if (isRunnerError(error)) throw error
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new RunnerError(
+      'The local runner closed the stream unexpectedly.',
+      'malformed',
+      response.status,
+      error,
+    )
+  } finally {
+    // Releasing lets an aborted fetch tear the connection down immediately.
+    reader.releaseLock()
+  }
+}
+
+/**
+ * Streams a run over Server-Sent Events, so the UI can paint per-step status and
+ * logs while Spark works. Resolves when the stream ends; the outcome arrives
+ * through `onResult` (or `onError`), never as a return value.
+ *
+ * Fails with the same `RunnerError` kinds as `runJob` — notably HTTP 409
+ * when another run already holds the runner's lock.
+ */
+export async function runJobStream(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: RunJobRequest,
+  handlers: JobStreamHandlers,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<void> {
+  await postEventStream(
+    baseUrl,
+    '/run/stream',
+    {
+      pipeline: body.pipeline,
+      params: body.params,
+      limit: body.limit,
+      dry_run: body.dryRun,
+    },
+    (frame) => dispatchSseFrame(frame, handlers),
+    signal,
+    token,
+  )
+}
+
+/* ----------------------------------------------------------- pipeline streaming */
+
+export interface PipelineStreamHandlers {
+  /** The runner accepted the pipeline and knows how many stages it holds. */
+  onStart?: (total: number) => void
+  /** A stage began. `index` is 0-based in the sequence that was submitted. */
+  onStageStart?: (stage: { index: number; id: string; name?: string }) => void
+  /** A log line, carrying `stageId` when the runner attributed it to a stage. */
+  onLog?: (line: RunLogLine) => void
+  onStageResult?: (result: PipelineStageResult) => void
+  onResult: (result: PipelineRunResult) => void
+  /** The runner emitted a fatal `error` event; the stream ends after it. */
+  onError?: (message: string) => void
+}
+
+function dispatchPipelineFrame(frame: SseFrame, handlers: PipelineStreamHandlers): void {
+  const payload = safeParse(frame.data)
+
+  switch (frame.event) {
+    case 'start':
+      handlers.onStart?.(isRecord(payload) ? asNumber(payload.total) : 0)
+      return
+    case 'stage_start': {
+      if (!isRecord(payload)) return
+      const id = optionalString(payload.id)
+      if (!id) return
+      handlers.onStageStart?.({
+        index: asNumber(payload.index),
+        id,
+        name: optionalString(payload.name),
+      })
+      return
+    }
+    case 'log': {
+      const line = toLogLine(payload)
+      if (line) handlers.onLog?.(line)
+      return
+    }
+    case 'stage_result': {
+      const stage = toPipelineStageResult(payload)
+      if (stage) handlers.onStageResult?.(stage)
+      return
+    }
+    case 'result':
+      handlers.onResult(toPipelineRunResult(expectRecord(payload)))
+      return
+    case 'error':
+      handlers.onError?.(
+        (isRecord(payload) ? optionalString(payload.error) : undefined) ??
+          'The local runner failed to execute the pipeline.',
+      )
+      return
+    default:
+      // Forward compatibility: unknown events are simply skipped.
+      return
+  }
+}
+
+/**
+ * Runs several pipelines in sequence on the runner, streaming per-stage progress.
+ *
+ * `body.stages` is already in execution order — the runner does not reorder and
+ * does not know about links; ordering is the Studio's job (`planPipelineRun`).
+ */
+export async function runPipelineStream(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: RunPipelineRequest,
+  handlers: PipelineStreamHandlers,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<void> {
+  try {
+    await postEventStream(
+      baseUrl,
+      '/run/flow/stream',
+      {
+        stages: body.stages.map((stage) => ({
+          id: stage.id,
+          name: stage.name,
+          pipeline: stage.pipeline,
+          params: stage.params,
+        })),
+        limit: body.limit,
+        stop_on_error: body.stopOnError,
+      },
+      (frame) => dispatchPipelineFrame(frame, handlers),
+      signal,
+      token,
+    )
+  } catch (error) {
+    // A runner that predates pipeline runs answers 404 with FastAPI's bare "Not Found",
+    // which reads like a broken URL. Name the actual problem instead.
+    if (isRunnerError(error) && error.status === 404) {
+      throw new RunnerError(
+        'This runner cannot run pipelines yet: it has no /run/flow/stream endpoint. Update the local runner and try again.',
+        'http',
+        404,
+        error,
+      )
+    }
+    throw error
+  }
+}
+
 /* ------------------------------------------------------------------ mapping */
 
 const LOG_LEVELS: Record<string, RunLogLine['level']> = {
@@ -278,15 +621,27 @@ const LOG_LEVELS: Record<string, RunLogLine['level']> = {
   critical: 'error',
 }
 
+const LOG_SOURCES: RunLogLine['source'][] = ['pipeline', 'stdout', 'spark']
+
+function toLogSource(value: unknown): RunLogLine['source'] | undefined {
+  return LOG_SOURCES.find((source) => source === value)
+}
+
 function toLogLine(value: unknown): RunLogLine | null {
   if (!isRecord(value)) return null
   const parsed = Date.parse(asString(value.timestamp))
   const context = isRecord(value.context) ? value.context : undefined
+  // `source` only exists on the streaming endpoint; /run logs stay unlabelled.
+  const source = toLogSource(value.source)
+  // `stage_id` only exists on a pipeline stream, where a line belongs to one stage.
+  const stageId = optionalString(value.stage_id)
   return {
     ts: Number.isNaN(parsed) ? Date.now() : parsed,
     level: LOG_LEVELS[asString(value.level).toLowerCase()] ?? 'info',
     message: asString(value.message),
+    ...(source ? { source } : {}),
     ...(context ? { context } : {}),
+    ...(stageId ? { stageId } : {}),
   }
 }
 
@@ -324,6 +679,48 @@ function toPreview(value: unknown): RunResult['preview'] {
 function toStatus(payload: Record<string, unknown>): RunStatus {
   if (!asBoolean(payload.success)) return 'error'
   return asBoolean(payload.skipped) ? 'skipped' : 'success'
+}
+
+/** `null` when the payload carries no stage id — an event nothing can be pinned to. */
+function toPipelineStageResult(value: unknown): PipelineStageResult | null {
+  if (!isRecord(value)) return null
+  const id = optionalString(value.id)
+  if (!id) return null
+
+  const success = asBoolean(value.success)
+  const skipped = asBoolean(value.skipped)
+  return {
+    index: asNumber(value.index),
+    id,
+    ...(optionalString(value.name) ? { name: optionalString(value.name) } : {}),
+    // A skipped stage still succeeded: `stop_if_empty` is a graceful early exit.
+    status: !success ? 'error' : skipped ? 'skipped' : 'success',
+    rowsRead: asNumber(value.rows_read),
+    rowsWritten: asNumber(value.rows_written),
+    durationMs: asNumber(value.duration_ms),
+    error: optionalString(value.error),
+    validations: toValidations(value.validations),
+    outputMetrics: toOutputMetrics(value.output_metrics),
+  }
+}
+
+/**
+ * The `result` event of a pipeline. Logs are NOT part of it — they arrived one by one
+ * as `log` events — so the caller keeps the lines it streamed.
+ */
+function toPipelineRunResult(payload: Record<string, unknown>): PipelineRunResult {
+  const stages = asArray(payload.stages)
+    .map(toPipelineStageResult)
+    .filter((stage): stage is PipelineStageResult => stage !== null)
+
+  return {
+    status: asBoolean(payload.success) ? 'success' : 'error',
+    durationMs: asNumber(payload.duration_ms),
+    stages,
+    preview: toPreview(payload.preview),
+    error: optionalString(payload.error),
+    logs: [],
+  }
 }
 
 function toRunResult(payload: Record<string, unknown>): RunResult {

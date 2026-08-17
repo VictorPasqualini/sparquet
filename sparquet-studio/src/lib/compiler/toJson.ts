@@ -28,7 +28,7 @@ import type {
   TransformNode,
   ValidationIssue,
   ValidationsNode,
-  WorkflowSettings,
+  JobSettings,
 } from '@/types/studio'
 import {
   chainToSink,
@@ -44,7 +44,7 @@ import {
 } from '@/lib/compiler/graph'
 
 export interface CompileResult {
-  /** `null` when a structural error makes the workflow impossible to express. */
+  /** `null` when a structural error makes the job impossible to express. */
   pipeline: PipelineSpec | null
   issues: ValidationIssue[]
 }
@@ -400,14 +400,14 @@ function reportChainProblem(
 
 export function compileGraph(
   graph: StudioGraph,
-  settings: WorkflowSettings,
+  settings: JobSettings,
   params?: readonly ParamDefinition[],
 ): CompileResult {
   const issues = createIssues()
   const sinks = graph.nodes.filter(isSinkNode).filter((node) => !isDisabled(node))
 
   if (sinks.length === 0) {
-    issues.error('The workflow has no destination.', {
+    issues.error('The job has no destination.', {
       hint: 'Add a destination node and connect the end of the chain to it.',
     })
     return { pipeline: null, issues: issues.items }
@@ -559,7 +559,7 @@ function reportUnknownParams(
     if (defined.has(key) || reported.has(key)) continue
     reported.add(key)
     issues.warning(`The pipeline uses {${key}}, but no parameter with that name is defined.`, {
-      hint: 'Add it to the workflow parameters, or the placeholder stays literal at run time.',
+      hint: 'Add it to the job parameters, or the placeholder stays literal at run time.',
     })
   }
 }

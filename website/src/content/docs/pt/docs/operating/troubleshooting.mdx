@@ -71,7 +71,7 @@ Abra o painel Issues. Erros que bloqueiam: sem destino, um nó órfão, um campo
 O grafo ainda não compila — o painel mostra os problemas que bloqueiam.
 
 **`Local runner not detected`**
-O serviço não está rodando, ou a URL em **Settings → Local runner** não bate. Veja [Executando pipelines](/pt/docs/studio/running/).
+O serviço não está rodando, ou a URL em **Settings → Local runner** não bate. Veja [Executando um Job](/pt/docs/studio/running/).
 
 **Uma execução retorna 401**
 O runner exige o token dele. Copie o que é impresso no terminal para o Settings, ou inicie-o com `SPARQUET_STUDIO_TOKEN` para fixar um valor estável.
@@ -80,7 +80,7 @@ O runner exige o token dele. Copie o que é impresso no terminal para o Settings
 Outra execução está em andamento. O serviço serializa as execuções para proteger a SparkSession compartilhada.
 
 **Meu trabalho sumiu**
-O Studio guarda projetos no IndexedDB do navegador. Limpar os dados do site os apaga, e um navegador ou perfil diferente tem a própria cópia. Exporte em **Settings → Data**, e commite os pipelines compilados no git.
+O Studio guarda seus Workflows no IndexedDB do navegador. Limpar os dados do site os apaga, e um navegador ou perfil diferente tem a própria cópia. Exporte em **Settings → Data**, e commite os pipelines compilados no git.
 
 ## Ambiente
 

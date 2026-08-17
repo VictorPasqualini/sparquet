@@ -11,9 +11,9 @@ import { nanoid } from 'nanoid'
 import { autoLayout, pipelineToGraph } from '@/lib/compiler'
 import { inferParams } from '@/lib/params'
 import type { PipelineSpec } from '@/types/pipeline'
-import type { Workflow, WorkflowTemplate } from '@/types/studio'
+import type { Job, JobTemplate } from '@/types/studio'
 
-export const TEMPLATES: WorkflowTemplate[] = [
+export const TEMPLATES: JobTemplate[] = [
   {
     id: 'csv-to-parquet',
     name: 'CSV to Parquet',
@@ -595,17 +595,17 @@ export const TEMPLATES: WorkflowTemplate[] = [
   },
 ]
 
-export function getTemplate(id: string): WorkflowTemplate | undefined {
+export function getTemplate(id: string): JobTemplate | undefined {
   return TEMPLATES.find((template) => template.id === id)
 }
 
-export function templateToWorkflow(template: WorkflowTemplate, projectId: string): Workflow {
+export function templateToJob(template: JobTemplate, workflowId: string): Job {
   const imported = pipelineToGraph(template.pipeline)
   const now = Date.now()
 
   return {
     id: nanoid(10),
-    projectId,
+    workflowId,
     name: template.name,
     description: template.summary,
     tags: [...template.tags],

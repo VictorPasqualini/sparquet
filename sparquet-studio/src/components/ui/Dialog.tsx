@@ -14,7 +14,7 @@ export interface ModalProps {
   children: ReactNode
   footer?: ReactNode
   size?: 'sm' | 'md' | 'lg' | 'xl'
-  /** Hides the close button for flows that must be completed. */
+  /** Hides the close button for pipelines that must be completed. */
   dismissible?: boolean
 }
 
@@ -98,7 +98,7 @@ export interface ConfirmOptions {
  * Imperative confirmation modal.
  *
  * const [confirm, confirmDialog] = useConfirm()
- * if (await confirm({ title: 'Delete project', message: '…' })) { … }
+ * if (await confirm({ title: 'Delete workflow', message: '…' })) { … }
  */
 export function useConfirm(): [
   (options: ConfirmOptions) => Promise<boolean>,

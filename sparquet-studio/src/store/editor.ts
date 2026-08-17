@@ -13,7 +13,15 @@ import { create } from 'zustand'
 import { defaultsFor, getFormat, getTransformation } from '@/catalog'
 import {
   autoLayout,
+  chainToSink,
   compileGraph,
+  isCompilable,
+  isDisabled,
+  isSinkNode,
+  isSourceNode,
+  isTransformNode,
+  isValidationsNode,
+  longestCommonPrefix,
   NODE_RENDER_SIZE,
   NOTE_RENDER_SIZE,
   pipelineToGraph,
@@ -21,19 +29,20 @@ import {
 } from '@/lib/compiler'
 import { mergeParams } from '@/lib/params'
 import * as db from '@/lib/storage/db'
-import { lintWorkflow } from '@/lib/validation/lint'
+import { lintJob } from '@/lib/validation/lint'
 import type { PipelineSpec } from '@/types/pipeline'
 import { HANDLE } from '@/types/studio'
 import type {
   ParamDefinition,
   RunResult,
+  StepStatus,
   StudioEdge,
   StudioGraph,
   StudioNode,
   StudioNodeData,
   ValidationIssue,
-  Workflow,
-  WorkflowSettings,
+  Job,
+  JobSettings,
 } from '@/types/studio'
 
 import { useLibraryStore } from './library'
@@ -48,47 +57,49 @@ interface Snapshot {
   nodes: StudioNode[]
   edges: StudioEdge[]
   params: ParamDefinition[]
-  settings: WorkflowSettings
+  settings: JobSettings
 }
 
 /** Everything a write persists, captured synchronously so `close()` can flush it. */
 interface PendingWrite {
-  workflow: Workflow
+  job: Job
   nodes: StudioNode[]
   edges: StudioEdge[]
   params: ParamDefinition[]
-  settings: WorkflowSettings
+  settings: JobSettings
 }
 
 export type PanelId = 'inspector' | 'json' | 'ai' | 'run' | 'issues'
 
 interface EditorState {
-  workflow: Workflow | null
+  job: Job | null
   nodes: StudioNode[]
   edges: StudioEdge[]
   params: ParamDefinition[]
-  settings: WorkflowSettings
+  settings: JobSettings
 
   selectedNodeId: string | null
   issues: ValidationIssue[]
   dirty: boolean
   saving: boolean
   lastSavedAt: number | null
-  /** The stored record when another tab saved this workflow first. */
-  conflict: Workflow | null
+  /** The stored record when another tab saved this job first. */
+  conflict: Job | null
 
   past: Snapshot[]
   future: Snapshot[]
 
   run: RunResult | null
   running: boolean
+  /** Live status of each node the current run has reached, keyed by node id. */
+  stepStatus: Record<string, StepStatus>
 
   /** The right-hand panel is a single tabbed surface; null means collapsed. */
   activePanel: PanelId | null
   panelWidth: number
 
   /* lifecycle */
-  open: (workflow: Workflow) => void
+  open: (job: Job) => void
   close: () => void
   save: () => Promise<void>
   dismissConflict: () => void
@@ -114,7 +125,7 @@ interface EditorState {
   layout: () => void
 
   /* metadata */
-  setSettings: (patch: Partial<WorkflowSettings>) => void
+  setSettings: (patch: Partial<JobSettings>) => void
   setParams: (params: ParamDefinition[]) => void
 
   /* history */
@@ -131,6 +142,17 @@ interface EditorState {
   /* run */
   setRun: (run: RunResult | null) => void
   setRunning: (running: boolean) => void
+  /**
+   * Marks one node. `type` is the transformation type the runner reported; it is
+   * accepted so callers can forward the event as-is, but the node already knows
+   * its own type, so nothing is stored.
+   */
+  setStepStatus: (nodeId: string, status: StepStatus, type?: string) => void
+  /** Replaces the whole map — how a run start seeds every node to `pending`. */
+  setStepStatuses: (statuses: Record<string, StepStatus>) => void
+  clearStepStatus: () => void
+  /** Node ids behind the compiled `transformations`, in the runner's index order. */
+  transformNodeIdsInOrder: () => string[]
 
   /* panels */
   togglePanel: (panel: PanelId, open?: boolean) => void
@@ -144,7 +166,7 @@ function clampPanelWidth(width: number): number {
   return Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width)))
 }
 
-const EMPTY_SETTINGS: WorkflowSettings = {
+const EMPTY_SETTINGS: JobSettings = {
   pipelineName: 'pipeline',
   description: '',
   spark: {},
@@ -231,31 +253,31 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
   /** Snapshots what a write must persist; null when there is nothing pending. */
   const capture = (): PendingWrite | null => {
-    const { workflow, nodes, edges, params, settings, dirty } = get()
-    if (!workflow || !dirty) return null
-    return { workflow, nodes, edges, params, settings }
+    const { job, nodes, edges, params, settings, dirty } = get()
+    if (!job || !dirty) return null
+    return { job, nodes, edges, params, settings }
   }
 
-  const write = async ({ workflow, nodes, edges, params, settings }: PendingWrite) => {
+  const write = async ({ job, nodes, edges, params, settings }: PendingWrite) => {
     set({ saving: true })
-    const stored = await db.getWorkflow(workflow.id)
+    const stored = await db.getJob(job.id)
     // A stored revision this tab did not write means someone else saved first.
-    const ours = lastWrite?.id === workflow.id && lastWrite.revision === stored?.revision
-    const conflict = stored && stored.revision !== workflow.revision && !ours ? stored : null
-    const next: Workflow = {
-      ...workflow,
+    const ours = lastWrite?.id === job.id && lastWrite.revision === stored?.revision
+    const conflict = stored && stored.revision !== job.revision && !ours ? stored : null
+    const next: Job = {
+      ...job,
       graph: { nodes, edges },
       params,
       settings,
       updatedAt: Date.now(),
-      revision: Math.max(workflow.revision, stored?.revision ?? 0) + 1,
+      revision: Math.max(job.revision, stored?.revision ?? 0) + 1,
     }
-    await db.saveWorkflow(next)
+    await db.saveJob(next)
     lastWrite = { id: next.id, revision: next.revision }
-    useLibraryStore.getState().upsertWorkflow(next)
+    useLibraryStore.getState().upsertJob(next)
     set((state) => {
-      // The editor moved on (closed or switched workflow): only the write mattered.
-      if (state.workflow?.id !== workflow.id) return { saving: false }
+      // The editor moved on (closed or switched job): only the write mattered.
+      if (state.job?.id !== job.id) return { saving: false }
       // Edits that landed while the write was in flight are not part of `next`;
       // keep `dirty` so the save they scheduled still persists them.
       const settled =
@@ -264,7 +286,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         state.params === params &&
         state.settings === settings
       return {
-        workflow: next,
+        job: next,
         saving: false,
         lastSavedAt: next.updatedAt,
         dirty: settled ? false : state.dirty,
@@ -298,7 +320,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   }
 
   return {
-    workflow: null,
+    job: null,
     nodes: [],
     edges: [],
     params: [],
@@ -316,31 +338,32 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     run: null,
     running: false,
+    stepStatus: {},
 
     activePanel: 'inspector',
     panelWidth: 400,
 
-    open: (workflow) => {
+    open: (job) => {
       const current = get()
-      // Re-opening the same workflow would swap in node objects that React Flow
+      // Re-opening the same job would swap in node objects that React Flow
       // has not measured yet. Because the DOM elements keep their size, no
       // ResizeObserver fires, the nodes stay hidden and no edge is ever drawn.
-      if (current.workflow?.id === workflow.id) return
+      if (current.job?.id === job.id) return
 
       if (autosaveTimer) {
         clearTimeout(autosaveTimer)
         autosaveTimer = null
       }
-      // Whatever the previous workflow still owed the disk must land before the
+      // Whatever the previous job still owed the disk must land before the
       // state that holds it is replaced.
       void flush()
       forgetCoalescing()
       set({
-        workflow,
-        nodes: workflow.graph.nodes,
-        edges: workflow.graph.edges,
-        params: workflow.params,
-        settings: workflow.settings,
+        job,
+        nodes: job.graph.nodes,
+        edges: job.graph.edges,
+        params: job.params,
+        settings: job.settings,
         selectedNodeId: null,
         issues: [],
         dirty: false,
@@ -350,7 +373,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         future: [],
         run: null,
         running: false,
-        lastSavedAt: workflow.updatedAt,
+        stepStatus: {},
+        lastSavedAt: job.updatedAt,
       })
       get().lint()
     },
@@ -369,7 +393,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       void flush()
       forgetCoalescing()
       set({
-        workflow: null,
+        job: null,
         nodes: [],
         edges: [],
         params: [],
@@ -382,6 +406,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         past: [],
         future: [],
         run: null,
+        stepStatus: {},
       })
     },
 
@@ -419,7 +444,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     onEdgesChange: (changes) => {
       // Clicking an edge is not an edit: selection never enters history nor dirties
-      // the workflow. Mirrors the `select` handling in onNodesChange.
+      // the job. Mirrors the `select` handling in onNodesChange.
       const structural = changes.some((change) => change.type !== 'select')
       const apply = () =>
         set((state) => ({ edges: applyEdgeChanges(changes, state.edges) as StudioEdge[] }))
@@ -654,7 +679,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     lint: () => {
       const { nodes, edges, settings, params } = get()
       const compileIssues = compileGraph({ nodes, edges }, settings).issues
-      const lintIssues = lintWorkflow({ nodes, edges }, settings, params)
+      const lintIssues = lintJob({ nodes, edges }, settings, params)
       const seen = new Set<string>()
       const issues = [...compileIssues, ...lintIssues].filter((issue) => {
         if (seen.has(issue.id)) return false
@@ -666,6 +691,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     setRun: (run) => set({ run }),
     setRunning: (running) => set({ running }),
+
+    setStepStatus: (nodeId, status) =>
+      set((state) => ({ stepStatus: { ...state.stepStatus, [nodeId]: status } })),
+    setStepStatuses: (stepStatus) => set({ stepStatus }),
+    clearStepStatus: () => set({ stepStatus: {} }),
+    transformNodeIdsInOrder: () => mainChainTransformNodeIds(get()),
 
     togglePanel: (panel, open) =>
       set((state) => {
@@ -679,6 +710,124 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setPanelWidth: (width) => set({ panelWidth: clampPanelWidth(width) }),
   }
 })
+
+/**
+ * Node ids behind the main `transformations` array, in the exact order the
+ * compiler emits them — the runner reports each step by its index into that
+ * array, so a mismatch would light up the wrong node.
+ *
+ * The selection mirrors `compileGraph()` (`lib/compiler/toJson.ts`) and reuses the
+ * same primitives: walk back from every destination, keep the prefix all of them
+ * share, and stop at the validations node, because the framework runs the main
+ * transformations, then validations, then each output's own transformations.
+ * Chains the compiler rejects are skipped here too — a graph that does not
+ * compile has no steps to report.
+ *
+ * Returns a fresh array, so read it through `getState()` or memoise it rather
+ * than passing it straight to `useEditorStore` as a selector.
+ */
+export function mainChainTransformNodeIds(state: StudioGraph): string[] {
+  const graph: StudioGraph = { nodes: state.nodes, edges: state.edges }
+  const middles: StudioNode[][] = []
+
+  for (const sink of graph.nodes.filter(isSinkNode)) {
+    if (isDisabled(sink)) continue
+    const walk = chainToSink(graph, sink.id)
+    if (walk.problem) continue
+    const chain = walk.nodes.filter(isCompilable)
+    const head = chain[0]
+    if (!head || !isSourceNode(head)) continue
+    if (chain.slice(1).some(isSourceNode)) continue
+    middles.push(chain.slice(1, chain.length - 1))
+  }
+
+  if (middles.length === 0) return []
+  const prefix = longestCommonPrefix(middles, (a, b) => a.id === b.id)
+  const validationsIndex = prefix.findIndex(isValidationsNode)
+  const mainPrefix = validationsIndex >= 0 ? prefix.slice(0, validationsIndex + 1) : prefix
+  return mainPrefix.filter(isTransformNode).map((node) => node.id)
+}
+
+/**
+ * The source node and the sink nodes a run touches, in the order the compiler
+ * emits them — the source feeds `input`, and the sinks line up index for index
+ * with the compiled `outputs` array, so the runner's `scope: 'input' | 'output'`
+ * step markers can be mapped back onto the canvas.
+ *
+ * Mirrors `mainChainTransformNodeIds`: same chain walk, same rejections.
+ */
+export function runtimeEndpointNodeIds(state: StudioGraph): {
+  sourceId: string | null
+  sinkIds: string[]
+} {
+  const graph: StudioGraph = { nodes: state.nodes, edges: state.edges }
+  const sinkIds: string[] = []
+  let sourceId: string | null = null
+
+  for (const sink of graph.nodes.filter(isSinkNode)) {
+    if (isDisabled(sink)) continue
+    const walk = chainToSink(graph, sink.id)
+    if (walk.problem) continue
+    const chain = walk.nodes.filter(isCompilable)
+    const head = chain[0]
+    if (!head || !isSourceNode(head)) continue
+    if (chain.slice(1).some(isSourceNode)) continue
+    sourceId ??= head.id
+    sinkIds.push(sink.id)
+  }
+
+  return { sourceId, sinkIds }
+}
+
+/**
+ * A 1-based number for every node a run touches, in execution order: the source,
+ * the shared transformations, the validations block, then each destination's own
+ * branch followed by the destination itself.
+ *
+ * It gives every box on the canvas a stable handle ("step 3") that matches the
+ * order the pipeline actually runs, so the logs and the canvas can be read side
+ * by side. Nodes outside any compilable chain (notes, orphans) get no number.
+ */
+export function nodeOrdinals(state: StudioGraph): Record<string, number> {
+  const graph: StudioGraph = { nodes: state.nodes, edges: state.edges }
+  const ordered: string[] = []
+  const seen = new Set<string>()
+  const push = (id: string) => {
+    if (seen.has(id)) return
+    seen.add(id)
+    ordered.push(id)
+  }
+
+  const chains: { sink: StudioNode; middle: StudioNode[]; head: StudioNode }[] = []
+  for (const sink of graph.nodes.filter(isSinkNode)) {
+    if (isDisabled(sink)) continue
+    const walk = chainToSink(graph, sink.id)
+    if (walk.problem) continue
+    const chain = walk.nodes.filter(isCompilable)
+    const head = chain[0]
+    if (!head || !isSourceNode(head)) continue
+    if (chain.slice(1).some(isSourceNode)) continue
+    chains.push({ sink, head, middle: chain.slice(1, chain.length - 1) })
+  }
+  if (chains.length === 0) return {}
+
+  const prefix = longestCommonPrefix(
+    chains.map((entry) => entry.middle),
+    (a, b) => a.id === b.id,
+  )
+  const validationsIndex = prefix.findIndex(isValidationsNode)
+  const mainPrefix = validationsIndex >= 0 ? prefix.slice(0, validationsIndex + 1) : prefix
+
+  const first = chains[0]
+  if (first) push(first.head.id)
+  for (const node of mainPrefix) push(node.id)
+  for (const entry of chains) {
+    for (const node of entry.middle.slice(mainPrefix.length)) push(node.id)
+    push(entry.sink.id)
+  }
+
+  return Object.fromEntries(ordered.map((id, index) => [id, index + 1]))
+}
 
 /** Would adding source→target close a loop? */
 function createsCycle(edges: StudioEdge[], source: string, target: string): boolean {

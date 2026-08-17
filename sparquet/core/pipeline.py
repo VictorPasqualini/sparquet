@@ -106,6 +106,12 @@ class Pipeline:
                 rows_read = 0
                 log.info("Input df injetado externamente", colunas=len(df.columns))
             else:
+                # Marcadores de etapa (scope="input") para o status do nó de origem.
+                log.info(
+                    "Input started",
+                    scope="input", index=0, total=1, step=True,
+                    format=self.config.input.format, path=self.config.input.path,
+                )
                 df = ReaderFactory.create(spark, self.config.input).read()
                 df = df.withColumn("ingestion_ts", F.current_timestamp())
                 rows_read = df.count()
@@ -113,6 +119,7 @@ class Pipeline:
                     "Leitura concluida",
                     linhas=rows_read,
                     formato=self.config.input.format,
+                    scope="input", index=0, total=1, step=True,
                 )
 
             for col_name, value in self._columns.items():
@@ -138,7 +145,9 @@ class Pipeline:
             # O engine é reusado entre execuções no Sparquet; zera o store
             # de runtime para não vazar variáveis coletadas de um run anterior.
             self._transform_engine.reset_runtime()
-            df = self._transform_engine.apply(df, self.config.transformations)
+            df = self._transform_engine.apply(
+                df, self.config.transformations, top_level=True
+            )
             log.info("Transformacoes aplicadas")
 
             validation_results = self._validation_engine.validate(
@@ -291,7 +300,15 @@ class Pipeline:
         self, spark: SparkSession, df: DataFrame, log
     ) -> List[OutputMetrics]:
         metrics: List[OutputMetrics] = []
-        for output in self.config.outputs:
+        total = len(self.config.outputs)
+        for index, output in enumerate(self.config.outputs):
+            # Marcador de etapa (scope="output") para o Studio pintar o status do
+            # nó de destino ao vivo. Ver TransformationEngine.apply(top_level=True).
+            log.info(
+                "Output started",
+                scope="output", index=index, total=total, step=True,
+                format=output.format, path=output.path,
+            )
             # Transformações próprias do destino (ex: explode, to_json, join),
             # aplicadas sobre o df principal sem afetar as demais saídas.
             output_df = df
@@ -313,6 +330,11 @@ class Pipeline:
                 linhas=rows_written,
             )
             WriterFactory.create(spark, output).write(output_df)
+            log.info(
+                "Output written",
+                scope="output", index=index, total=total, step=True,
+                format=output.format, path=output.path, linhas=rows_written,
+            )
             metrics.append(
                 OutputMetrics(
                     format=output.format,

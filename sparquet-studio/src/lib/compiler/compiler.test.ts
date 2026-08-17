@@ -12,13 +12,13 @@ import type {
   StudioGraph,
   TransformNode,
   ValidationsNode,
-  WorkflowSettings,
+  JobSettings,
 } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
 
 /* ---------------------------------------------------------------- helpers */
 
-const SETTINGS: WorkflowSettings = { pipelineName: 'test', description: '', spark: {} }
+const SETTINGS: JobSettings = { pipelineName: 'test', description: '', spark: {} }
 
 const sourceNode = (id: string, format = 'csv', path = '/in'): SourceNode => ({
   id,
@@ -444,11 +444,11 @@ describe('compileGraph', () => {
     expect(pipeline?.outputs?.[1].transformations).toHaveLength(1)
   })
 
-  it('reports a workflow without a destination', () => {
+  it('reports a job without a destination', () => {
     const graph: StudioGraph = { nodes: [sourceNode('src')], edges: [] }
     const { pipeline, issues } = compileGraph(graph, SETTINGS)
     expect(pipeline).toBeNull()
-    expect(errorsOf(issues)).toEqual(['The workflow has no destination.'])
+    expect(errorsOf(issues)).toEqual(['The job has no destination.'])
   })
 
   it('reports destinations reading from different sources', () => {

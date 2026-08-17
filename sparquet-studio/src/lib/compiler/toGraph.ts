@@ -24,7 +24,7 @@ import type {
   TransformNode,
   ValidationIssue,
   ValidationsNode,
-  WorkflowSettings,
+  JobSettings,
 } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
 import { makeEdge, newNodeId } from '@/lib/compiler/graph'
@@ -32,7 +32,7 @@ import { autoLayout } from '@/lib/compiler/layout'
 
 export interface DecompileResult {
   graph: StudioGraph
-  settings: WorkflowSettings
+  settings: JobSettings
   issues: ValidationIssue[]
 }
 
@@ -92,7 +92,7 @@ function createIssues() {
 
 type Issues = ReturnType<typeof createIssues>
 
-function emptySettings(): WorkflowSettings {
+function emptySettings(): JobSettings {
   return { pipelineName: '', description: '', spark: {} }
 }
 
@@ -335,7 +335,7 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
     return { graph: { nodes: [], edges: [] }, settings: emptySettings(), issues: issues.items }
   }
 
-  const settings: WorkflowSettings = {
+  const settings: JobSettings = {
     pipelineName: asText(pipeline.name),
     description: asText(pipeline.description),
     spark: readSpark(pipeline.spark),

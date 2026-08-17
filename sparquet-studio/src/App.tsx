@@ -12,8 +12,8 @@ import { applyTheme, useSettingsStore } from '@/store/settings'
 
 // Split per screen: the editor pulls React Flow and Monaco, which no other
 // route needs, and the overview must stay instant.
-const ProjectDetail = lazy(() =>
-  import('@/screens/ProjectDetail').then((m) => ({ default: m.ProjectDetail })),
+const WorkflowDetail = lazy(() =>
+  import('@/screens/WorkflowDetail').then((m) => ({ default: m.WorkflowDetail })),
 )
 const Templates = lazy(() =>
   import('@/screens/Templates').then((m) => ({ default: m.Templates })),
@@ -22,11 +22,12 @@ const Learn = lazy(() => import('@/screens/Learn').then((m) => ({ default: m.Lea
 const LessonDetail = lazy(() =>
   import('@/screens/LessonDetail').then((m) => ({ default: m.LessonDetail })),
 )
-const Settings = lazy(() =>
-  import('@/screens/Settings').then((m) => ({ default: m.Settings })),
+const Settings = lazy(() => import('@/screens/Settings').then((m) => ({ default: m.Settings })))
+const JobEditor = lazy(() =>
+  import('@/screens/JobEditor').then((m) => ({ default: m.JobEditor })),
 )
-const WorkflowEditor = lazy(() =>
-  import('@/screens/WorkflowEditor').then((m) => ({ default: m.WorkflowEditor })),
+const PipelineEditor = lazy(() =>
+  import('@/screens/PipelineEditor').then((m) => ({ default: m.PipelineEditor })),
 )
 
 function Loading() {
@@ -45,7 +46,7 @@ const router = createHashRouter([
     element: <AppShell />,
     children: [
       { path: '/', element: <Dashboard /> },
-      { path: '/projects/:projectId', element: lazyRoute(<ProjectDetail />) },
+      { path: '/workflows/:workflowId', element: lazyRoute(<WorkflowDetail />) },
       { path: '/templates', element: lazyRoute(<Templates />) },
       { path: '/learn', element: lazyRoute(<Learn />) },
       { path: '/learn/:lessonId', element: lazyRoute(<LessonDetail />) },
@@ -53,7 +54,9 @@ const router = createHashRouter([
       { path: '*', element: <NotFound /> },
     ],
   },
-  { path: '/workflows/:workflowId', element: lazyRoute(<WorkflowEditor />) },
+  // Both editors own the whole viewport, so they sit outside the AppShell chrome.
+  { path: '/jobs/:jobId', element: lazyRoute(<JobEditor />) },
+  { path: '/pipelines/:pipelineId', element: lazyRoute(<PipelineEditor />) },
 ])
 
 export default function App() {

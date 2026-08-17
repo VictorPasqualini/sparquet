@@ -12,7 +12,11 @@ export default defineConfig({
   },
   server: {
     port: 5273,
-    strictPort: false,
+    // Fail loudly instead of drifting to 5274: the local runner only trusts
+    // http://localhost:5273 (SPARQUET_STUDIO_ORIGINS), so a "helpful" fallback
+    // port silently breaks every run with a CORS refusal that looks like a
+    // runner bug. A port clash is almost always a dev server left running.
+    strictPort: true,
   },
   build: {
     outDir: 'dist',

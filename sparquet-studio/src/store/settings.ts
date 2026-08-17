@@ -43,7 +43,7 @@ export const DEFAULT_AI_SETTINGS: AiSettings = {
   apiKey: '',
   temperature: 0.2,
   maxTokens: 8000,
-  shareWorkflowContext: true,
+  shareJobContext: true,
 }
 
 const DEFAULT_CANVAS: CanvasPreferences = {

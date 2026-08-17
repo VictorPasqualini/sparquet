@@ -21,7 +21,7 @@ import type {
   TransformNode,
   ValidationIssue,
   ValidationsNode,
-  WorkflowSettings,
+  JobSettings,
 } from '@/types/studio'
 
 /* ------------------------------------------------------------------ helpers */
@@ -773,7 +773,7 @@ const checkValidationRules = (ctx: LintContext): void => {
 
 const checkPlaceholders = (
   ctx: LintContext,
-  settings: WorkflowSettings,
+  settings: JobSettings,
   params: ParamDefinition[],
 ): void => {
   const published = new Set<string>()
@@ -827,7 +827,7 @@ const checkPlaceholders = (
     ctx.issues.push({
       id: `param-undeclared:${name}`,
       severity: 'warning',
-      message: `Template param {${name}} is used but not declared in the workflow params.`,
+      message: `Template param {${name}} is used but not declared in the job params.`,
       nodeId: where.nodeId,
       field: where.field,
       hint: 'Declare it in the params panel or remove the placeholder — an unknown key is left literal in the JSON instead of being substituted.',
@@ -970,13 +970,13 @@ const checkOutputColumns = (ctx: LintContext): void => {
 /* ---------------------------------------------------------------- entry point */
 
 /**
- * Lints a workflow graph against the framework semantics the JSON schema cannot
+ * Lints a job graph against the framework semantics the JSON schema cannot
  * express. Issue ids are derived from rule + node so they stay stable across runs
  * and can be used as React keys.
  */
-export function lintWorkflow(
+export function lintJob(
   graph: StudioGraph,
-  settings: WorkflowSettings,
+  settings: JobSettings,
   params: ParamDefinition[],
 ): ValidationIssue[] {
   const ctx = buildContext(graph)

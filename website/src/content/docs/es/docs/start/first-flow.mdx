@@ -1,6 +1,6 @@
 ---
-title: Tu primer flujo en Studio
-description: Dibuja un pipeline en el lienzo de Sparquet Studio, míralo compilarse a JSON y ejecútalo localmente.
+title: Tu primer Job en Studio
+description: Dibuja un Job en el lienzo de Sparquet Studio, míralo compilarse a JSON y ejecútalo localmente.
 sidebar:
   order: 4
 ---
@@ -19,11 +19,11 @@ Studio es un editor para el archivo que escribiste en la [guía rápida](/es/doc
    npm run dev
    ```
 
-   Ve a [http://localhost:5273](http://localhost:5273). El primer inicio crea un proyecto **Getting Started** con pipelines funcionales — abre uno para explorar, o sigue la guía y construye el tuyo.
+   Ve a [http://localhost:5273](http://localhost:5273). El primer inicio crea un Workflow **Getting Started** con Jobs funcionales — abre uno para explorar, o sigue la guía y construye el tuyo.
 
-2. ### Crea un proyecto y un workflow
+2. ### Crea un Workflow y un Job
 
-   Los proyectos agrupan pipelines relacionados; uno por dominio mantiene los nombres cortos. Haz clic en **New project**, nómbralo `Sales`, luego **New workflow** dentro de él y llámalo `Orders curated`.
+   Un **Workflow** agrupa Jobs relacionados; uno por dominio mantiene los nombres cortos. Un **Job** es un JSON de pipeline — el archivo que ejecuta el framework. Haz clic en **New workflow**, nómbralo `Sales`, luego **New job** dentro de él y llámalo `Orders curated`.
 
    Aterrizas en un lienzo vacío con la paleta de nodos a la izquierda y el inspector a la derecha.
 
@@ -86,7 +86,7 @@ Studio es un editor para el archivo que escribiste en la [guía rápida](/es/doc
    uvicorn server.main:app --port 8787
    ```
 
-   El runner imprime un token — pégalo en el panel. Luego **Run pipeline** ejecuta el JSON compilado con el framework real y devuelve conteos de filas, resultados de validación por regla, una vista previa de 50 filas y los propios logs del framework.
+   El runner imprime un token — pégalo en el panel. Luego **Run** ejecuta el JSON compilado con el framework real y devuelve conteos de filas, resultados de validación por regla, una vista previa de 50 filas y los propios logs del framework.
 
 </Steps>
 
@@ -109,5 +109,6 @@ Studio es un editor para el archivo que escribiste en la [guía rápida](/es/doc
 ## Siguiente
 
 - [El lienzo](/es/docs/studio/canvas/) — conexiones, ramificación, control por teclado.
-- [Asistente de IA](/es/docs/studio/ai-assistant/) — describe un pipeline en lugar de dibujarlo.
+- [Asistente de IA](/es/docs/studio/ai-assistant/) — describe un Job en lugar de dibujarlo.
+- [Pipelines](/es/docs/studio/pipelines/) — encadena varios Jobs en una ejecución secuencial.
 - [Conceptos fundamentales](/es/docs/start/concepts/) — qué se ejecuta y cuándo, y por qué el grafo se corresponde como lo hace.

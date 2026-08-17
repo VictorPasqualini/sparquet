@@ -699,7 +699,7 @@ function ExamplesPopover({ examples }: { examples: CatalogExample[] }) {
           Examples
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="max-h-[24rem] w-[22rem] space-y-3 overflow-y-auto p-3">
+      <PopoverContent className="max-h-[24rem] w-[22rem] space-y-3 overpipeline-y-auto p-3">
         {examples.map((example) => (
           <div key={example.title} className="space-y-1">
             <div className="flex items-start justify-between gap-2">
@@ -717,7 +717,7 @@ function ExamplesPopover({ examples }: { examples: CatalogExample[] }) {
                 <Copy />
               </IconButton>
             </div>
-            <pre className="overflow-x-auto rounded-lg border border-line bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-content-muted">
+            <pre className="overpipeline-x-auto rounded-lg border border-line bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-content-muted">
               {example.json}
             </pre>
           </div>
@@ -1216,7 +1216,7 @@ function ValidationsBody({ id, data }: { id: string; data: ValidationsNodeData }
                 Add rule
               </Button>
             </MenuTrigger>
-            <MenuContent align="end" className="max-h-80 w-64 overflow-y-auto">
+            <MenuContent align="end" className="max-h-80 w-64 overpipeline-y-auto">
               <MenuLabel>Validators</MenuLabel>
               {VALIDATORS.map((validator) => {
                 const Icon = iconByName(validator.icon, ShieldCheck)

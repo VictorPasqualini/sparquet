@@ -1,6 +1,6 @@
 ---
 title: Sparquet Studio
-description: El editor visual de pipelines Sparquet — qué es, cómo guarda tu trabajo y cómo mapea un canvas al JSON que el framework ejecuta.
+description: El editor visual de Jobs Sparquet — qué es, cómo guarda tu trabajo y cómo mapea un canvas al JSON que el framework ejecuta.
 sidebar:
   order: 1
   label: Visión general
@@ -8,7 +8,7 @@ sidebar:
 
 import { Aside, Card, CardGrid } from '@astrojs/starlight/components'
 
-Studio es una aplicación de navegador que edita pipelines Sparquet en un canvas de nodos. No es un producto aparte con su propio formato: lee el JSON del pipeline y escribe el JSON del pipeline.
+Studio es una aplicación de navegador que edita **Jobs** Sparquet en un canvas de nodos — un Job siendo un JSON de pipeline. No es un producto aparte con su propio formato: lee el JSON del pipeline y escribe el JSON del pipeline.
 
 ```bash
 cd sparquet-studio
@@ -18,11 +18,11 @@ npm run dev          # http://localhost:5273
 
 <CardGrid>
   <Card title="Local first">
-    Los proyectos y workflows viven en el IndexedDB de tu navegador. Sin cuenta,
-    sin servidor, sin telemetría. Exporta todo el workspace como un JSON.
+    Los Workflows, Jobs y Pipelines viven en el IndexedDB de tu navegador. Sin
+    cuenta, sin servidor, sin telemetría. Exporta todo el workspace como un JSON.
   </Card>
   <Card title="Sin lock-in">
-    El canvas compila al archivo que corre la CLI. Borra Studio y cada pipeline
+    El canvas compila al archivo que corre la CLI. Borra Studio y cada Job
     sigue funcionando.
   </Card>
   <Card title="Documentado en su lugar">
@@ -30,8 +30,9 @@ npm run dev          # http://localhost:5273
     comportamientos que normalmente viven solo en el código fuente del framework.
   </Card>
   <Card title="Runner opcional">
-    Apúntalo a un pequeño servicio local y ejecuta pipelines desde el canvas, con
-    contadores, validaciones y un preview de los datos.
+    Apúntalo a un pequeño servicio local y ejecuta un Job — o un Pipeline
+    completo — desde el canvas, con contadores, validaciones y un preview de los
+    datos.
   </Card>
 </CardGrid>
 
@@ -40,24 +41,41 @@ npm run dev          # http://localhost:5273
 | Área | Qué hace |
 |---|---|
 | **Palette** (izquierda) | Toda fuente, transformación, validator y destino. Arrastra al canvas, o haz clic para añadir tras el último nodo. |
-| **Canvas** (centro) | El pipeline como nodos conectados. De izquierda a derecha es el orden de ejecución. |
+| **Canvas** (centro) | El Job como nodos conectados. De izquierda a derecha es el orden de ejecución. |
 | **Inspector** (derecha) | Los campos del nodo seleccionado, con ayuda, ejemplos y gotchas. |
-| **JSON panel** | El pipeline compilado, en vivo. También la superficie de import. |
+| **JSON panel** | El JSON del pipeline compilado, en vivo. También la superficie de import. |
 | **Issues panel** | Resultados de lint mientras escribes, cada uno enlazando el nodo y el campo. |
 | **Run panel** | Ejecución mediante el runner local. |
 | **Status bar** | Conteo de nodos, validez, estado de guardado. |
 
 Los paneles comparten una columna a la derecha, en pestañas y redimensionable — <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>E</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd> y <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd> alternan entre ellos.
 
-## Proyectos y workflows
+## Workflows, Jobs y Pipelines
 
-Un **workflow** es un pipeline. Un **proyecto** agrupa workflows relacionados — normalmente uno por dominio: `Sales`, `Billing`, `CRM`.
+Studio anida tres cosas:
 
-Ambos viven en tu navegador. **Settings → Data** exporta todo como un único bundle JSON y lo reimporta, que es como mueves un workspace entre máquinas o compartes un conjunto de pipelines con un colega.
+| Concepto | Qué es | Dónde vive |
+|---|---|---|
+| **Workflow** | El contenedor. Normalmente uno por dominio: `Sales`, `Billing`, `CRM`. | `/workflows/:id` |
+| **Job** | Un JSON de pipeline, dibujado en el canvas de nodos. | `/jobs/:id` |
+| **Pipeline** | Un conjunto ordenado de Jobs que se ejecutan en secuencia. | `/pipelines/:id` |
+
+<Aside type="note" title="Un Job es un JSON de pipeline">
+  El framework conserva su propio vocabulario: un JSON *es* un pipeline — el
+  archivo que ejecuta la clase `Pipeline` y que reporta como `PipelineResult`. En
+  Studio ese archivo es un **Job**, y el nombre **Pipeline** queda reservado para
+  una secuencia de varios de ellos. Un Pipeline de Studio con cuatro etapas son
+  cuatro ejecuciones del `Pipeline` del framework, en orden, compartiendo una
+  sesión Spark.
+</Aside>
+
+La pantalla de un Workflow tiene dos pestañas. **Jobs** lista los Jobs que contiene, junto con los Pipelines armados a partir de ellos. **Pipeline** dibuja cómo se conectan esos Jobs — inferido, de solo lectura, a partir de los paths y temp views que comparten — y es por donde empiezas un [Pipeline](/es/docs/studio/pipelines/) ejecutable.
+
+Todo eso vive en tu navegador. **Settings → Data** exporta todo como un único bundle JSON y lo reimporta, que es como mueves un workspace entre máquinas o compartes un conjunto de Jobs con un colega.
 
 <Aside type="caution">
   El almacenamiento del navegador es por navegador y por perfil. Borrar los datos
-  del sitio elimina tu workspace. Commitea los pipelines compilados a git — son el
+  del sitio elimina tu workspace. Commitea el JSON compilado a git — es el
   artefacto que importa, y Studio puede reimportar cualquiera de ellos.
 </Aside>
 
@@ -65,7 +83,7 @@ Ambos viven en tu navegador. **Settings → Data** exporta todo como un único b
 
 Dos reglas definen todo el mapeo:
 
-**La cadena compartida es el pipeline principal.** Lo que todo destino tiene en común se vuelve el `transformations` de nivel superior. Después de que el grafo se ramifica, cada rama se vuelve el `transformations` de ese destino.
+**La cadena compartida es la principal.** Lo que todo destino tiene en común se vuelve el `transformations` de nivel superior. Después de que el grafo se ramifica, cada rama se vuelve el `transformations` de ese destino.
 
 **Un join o union toma su segunda fuente de su segundo input.** La cadena que alimenta ese handle se vuelve `with` más `with_transformations`.
 
@@ -79,7 +97,7 @@ Todo lo demás es un campo de nodo. Las sticky notes nunca compilan; los nodos s
 
 ## Importar lo que ya tienes
 
-Abre el panel JSON, cambia a **Edit**, pega un pipeline y haz clic en **Apply to canvas**. Studio lo organiza automáticamente. Los tipos de transformación desconocidos — los personalizados que registraste — se preservan intactos en import y export.
+Abre el panel JSON, cambia a **Edit**, pega un JSON de pipeline y haz clic en **Apply to canvas**. Studio lo organiza automáticamente. Los tipos de transformación desconocidos — los personalizados que registraste — se preservan intactos en import y export.
 
 ## Verificar un cambio
 
@@ -98,6 +116,7 @@ El compiler está cubierto por tests de round-trip sobre los pipelines de ejempl
 
 - [El canvas](/es/docs/studio/canvas/) — conexiones, branching, control por teclado
 - [El inspector](/es/docs/studio/inspector/) — editar campos de nodos
-- [Asistente de IA](/es/docs/studio/ai-assistant/) — generar y modificar pipelines
-- [Ejecutar pipelines](/es/docs/studio/running/) — el runner local
+- [Asistente de IA](/es/docs/studio/ai-assistant/) — generar y modificar Jobs
+- [Ejecutar un Job](/es/docs/studio/running/) — el runner local
+- [Pipelines](/es/docs/studio/pipelines/) — varios Jobs en secuencia
 - [Plantillas y lecciones](/es/docs/studio/templates/) — la forma más rápida de aprender una función

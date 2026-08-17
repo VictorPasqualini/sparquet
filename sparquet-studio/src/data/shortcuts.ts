@@ -20,7 +20,7 @@ export interface Shortcut {
 
 export const SHORTCUTS: Shortcut[] = [
   { keys: ['Mod', 'K'], label: 'Open the command palette', scope: 'global' },
-  { keys: ['Mod', 'S'], label: 'Save the workflow', scope: 'global' },
+  { keys: ['Mod', 'S'], label: 'Save the job', scope: 'global' },
   { keys: ['Mod', 'Z'], label: 'Undo the last change', scope: 'global' },
   { keys: ['Mod', 'Shift', 'Z'], label: 'Redo the last undone change', scope: 'global' },
   { keys: ['Mod', 'Enter'], label: 'Run the pipeline', scope: 'global' },

@@ -109,7 +109,7 @@ const FALLBACK_NODE_WIDTH = 240
 
 /**
  * A free spot for a clicked node: just right of the rightmost node, aligned with it
- * so a chain keeps flowing left to right.
+ * so a chain keeps pipelineing left to right.
  */
 function nextPosition(nodes: StudioNode[]): XYPosition {
   if (nodes.length === 0) return FIRST_POSITION

@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { getTransformation } from '@/catalog'
 import type { FieldSpec } from '@/catalog/types'
 import { buildSystemPrompt } from '@/lib/ai/prompt'
-import { lintWorkflow } from '@/lib/validation/lint'
+import { lintJob } from '@/lib/validation/lint'
 import { HANDLE } from '@/types/studio'
-import type { StudioEdge, StudioNode, WorkflowSettings } from '@/types/studio'
+import type { StudioEdge, StudioNode, JobSettings } from '@/types/studio'
 
-const SETTINGS: WorkflowSettings = { pipelineName: 'test', description: '', spark: {} }
+const SETTINGS: JobSettings = { pipelineName: 'test', description: '', spark: {} }
 
 const link = (from: string, to: string): StudioEdge => ({
   id: `${from}->${to}`,
@@ -48,7 +48,7 @@ const lintOne = (type: string, params: Record<string, unknown>): string[] => {
     },
   ]
   const edges = [link('src', 'node'), link('node', 'out')]
-  return lintWorkflow({ nodes, edges }, SETTINGS, [])
+  return lintJob({ nodes, edges }, SETTINGS, [])
     .filter((issue) => issue.nodeId === 'node' && issue.severity === 'error')
     .map((issue) => issue.field ?? '')
 }

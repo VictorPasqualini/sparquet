@@ -89,7 +89,7 @@ const HARD_RULES = [
   'kafka is write-only — never use it as an input. It needs the brokers as either the bootstrap_servers option or the Spark-native kafka.bootstrap.servers option, plus a topic (the path doubles as the topic).',
   'mode "merge" only exists for delta and iceberg, and requires options.merge_keys; options.merge_condition is extra SQL using the T. (target) and S. (source) aliases.',
   '"skip_if_false" is a TOP-LEVEL key of any transformation, never nested inside its parameters. After substitution, an empty string skips the step and a boolean expression skips it when false.',
-  '{param} is substituted in the raw JSON before parsing (values come from the workflow parameters); {{runtime}} is resolved during execution from a value captured by a "collect" step. Never mix the two syntaxes.',
+  '{param} is substituted in the raw JSON before parsing (values come from the job parameters); {{runtime}} is resolved during execution from a value captured by a "collect" step. Never mix the two syntaxes.',
   'Use "checkpoint" before "collect" so the collected values do not recompute the whole lineage, and before fanning out to several outputs.',
   'Validations report on the data, they do not change it — filter rows with "filter", do not use a validator to drop them.',
   'Every value is a string, number, boolean, list or object of plain JSON: no comments, no trailing commas, no expressions outside strings.',
@@ -142,9 +142,9 @@ export function buildSystemPrompt(): string {
 /* ---------------------------------------------------------------- user prompt */
 
 export interface AiPromptContext {
-  /** Current pipeline JSON, when the user shares the workflow. */
+  /** Current pipeline JSON, when the user shares the job. */
   pipeline?: unknown
-  /** Lint issues currently reported for the workflow. */
+  /** Lint issues currently reported for the job. */
   issues?: ValidationIssue[]
   /** Node selected on the canvas, when the request is scoped to it. */
   selectedNode?: StudioNode | null

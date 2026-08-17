@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { TEMPLATES } from '@/data/templates'
 import { pipelineToGraph } from '@/lib/compiler'
 import { inferParams } from '@/lib/params'
-import { lintWorkflow } from '@/lib/validation/lint'
+import { lintJob } from '@/lib/validation/lint'
 import { HANDLE } from '@/types/studio'
 import type {
   ParamDefinition,
@@ -14,10 +14,10 @@ import type {
   TransformNodeData,
   ValidationIssue,
   ValidationsNodeData,
-  WorkflowSettings,
+  JobSettings,
 } from '@/types/studio'
 
-const SETTINGS: WorkflowSettings = { pipelineName: 'test', description: '', spark: {} }
+const SETTINGS: JobSettings = { pipelineName: 'test', description: '', spark: {} }
 
 const source = (id: string, patch: Partial<SourceNodeData> = {}): StudioNode => ({
   id,
@@ -73,7 +73,7 @@ const lint = (
   nodes: StudioNode[],
   edges: StudioEdge[],
   params: ParamDefinition[] = [],
-): ValidationIssue[] => lintWorkflow({ nodes, edges }, SETTINGS, params)
+): ValidationIssue[] => lintJob({ nodes, edges }, SETTINGS, params)
 
 const idsOf = (issues: ValidationIssue[]): string[] => issues.map((issue) => issue.id)
 
@@ -95,7 +95,7 @@ const cleanGraph = (): { nodes: StudioNode[]; edges: StudioEdge[] } => ({
   edges: [link('src', 'f'), link('f', 'v'), link('v', 'out')],
 })
 
-describe('lintWorkflow', () => {
+describe('lintJob', () => {
   it('reports nothing for a complete pipeline', () => {
     const { nodes, edges } = cleanGraph()
     expect(lint(nodes, edges)).toEqual([])
@@ -757,7 +757,7 @@ describe('lintWorkflow', () => {
     for (const template of TEMPLATES) {
       it(`lints "${template.id}" without a single error`, () => {
         const { graph, settings } = pipelineToGraph(template.pipeline)
-        const issues = lintWorkflow(graph, settings, inferParams(template.pipeline))
+        const issues = lintJob(graph, settings, inferParams(template.pipeline))
         expect(issues.filter((issue) => issue.severity === 'error')).toEqual([])
       })
     }

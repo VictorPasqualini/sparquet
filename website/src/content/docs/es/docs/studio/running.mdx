@@ -1,6 +1,6 @@
 ---
-title: Ejecutar pipelines
-description: Ejecuta un pipeline desde el canvas de Sparquet Studio mediante el runner local — setup, el token de seguridad y lectura de resultados.
+title: Ejecutar un Job
+description: Ejecuta un Job desde el canvas de Sparquet Studio mediante el runner local — setup, el token de seguridad y lectura de resultados.
 sidebar:
   order: 5
 ---
@@ -56,7 +56,7 @@ $env:SPARQUET_STUDIO_TOKEN = "my-local-token"; uvicorn server.main:app --port 87
 <Aside type="danger" title="Por qué hay un token">
   El runner ejecuta trabajo Spark arbitrario — SQL arbitrario, lecturas y escrituras
   arbitrarias en todo lo que esta máquina alcanza. Sin el token, cualquier página web
-  que visites podría postear un pipeline a `127.0.0.1:8787` y ejecutarlo; CORS no
+  que visites podría postear un JSON de pipeline a `127.0.0.1:8787` y ejecutarlo; CORS no
   detiene ese tipo de solicitud. `/run` y `/validate` exigen el token y verifican el
   `Origin` de la solicitud. Mantén el servicio en localhost y nunca lo expongas a la red.
 </Aside>
@@ -65,12 +65,14 @@ $env:SPARQUET_STUDIO_TOKEN = "my-local-token"; uvicorn server.main:app --port 87
 
 Abre el panel Run con <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>.
 
-- **Run pipeline** compila el canvas y lo ejecuta.
+- **Run** compila el canvas y ejecuta el Job.
 - **Validate only** parsea la configuración sin tocar Spark — la forma más rápida de comprobar que un config está bien formado.
 - Los errores de lint que bloquean deshabilitan el botón, con un tooltip que explica por qué.
 - Aparece una advertencia cuando un destino escribe con `overwrite`, porque la ejecución es real.
 
-Cuando el workflow declara placeholders `{param}`, el panel renderiza un input por parámetro y envía los valores con la ejecución.
+Cuando el Job declara placeholders `{param}`, el panel renderiza un input por parámetro y envía los valores con la ejecución.
+
+Para correr **varios Jobs uno tras otro**, arma un [Pipeline](/es/docs/studio/pipelines/) — mismo runner, mismo token, una etapa por Job.
 
 ## Leer el resultado
 
@@ -91,7 +93,8 @@ El servicio es un pequeño app FastAPI que puedes llamar directo:
 | Endpoint | Auth | Propósito |
 |---|---|---|
 | `GET /health` | abierto | versión, si Spark es importable, si el token se exige |
-| `POST /run` | token | corre un pipeline, devuelve contadores, validaciones, preview y logs |
+| `POST /run` | token | corre un JSON de pipeline, devuelve contadores, validaciones, preview y logs |
+| `POST /run/flow/stream` | token | corre varios JSONs en secuencia — lo que postea un [Pipeline](/es/docs/studio/pipelines/) |
 | `POST /validate` | token | solo parseo |
 | `GET /capabilities` | token | los registries **en vivo** — cada transformación, reader, writer y validator que el proceso en ejecución conoce |
 

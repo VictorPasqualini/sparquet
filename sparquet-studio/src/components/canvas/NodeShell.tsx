@@ -14,8 +14,10 @@ import type { LucideIcon } from 'lucide-react'
 import { IconButton, Tooltip } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import type { NodeAccent } from '@/catalog'
-import { useEditorStore } from '@/store/editor'
-import { HANDLE, type ValidationIssue } from '@/types/studio'
+import { nodeOrdinals, useEditorStore } from '@/store/editor'
+import { HANDLE, type StepStatus, type ValidationIssue } from '@/types/studio'
+
+import { stepLook } from './stepLook'
 
 /** Every node is the same width so chains read as a column, not a staircase. */
 const NODE_WIDTH = 'w-[264px]'
@@ -131,6 +133,10 @@ export function NodeShell({
   // Severity must survive a monochrome screen, so it picks the icon, not just the hue.
   const IssueIcon = errorCount > 0 ? CircleX : TriangleAlert
 
+  const ordinal = useNodeOrdinal(nodeId)
+  const step = stepLook(useNodeStepStatus(nodeId))
+  const StepIcon = step?.icon
+
   const connectSource = useConnectSource()
   const isConnectSource = connectSource === nodeId
   const canReceiveConnection = connectSource !== null && !isConnectSource && inputs !== 'none'
@@ -162,6 +168,10 @@ export function NodeShell({
         selected ? 'border-brand-500 ring-2 ring-brand-500/40' : 'border-line',
         !selected && errorCount > 0 && 'ring-2 ring-state-danger/45',
         !selected && errorCount === 0 && warningCount > 0 && 'ring-2 ring-state-warning/40',
+        // Ring precedence: selection and issues first — a broken node stays flagged
+        // even mid-run — so the run ring only paints a node nothing else claims.
+        // The status badge always shows, so no run state is ever lost.
+        !selected && flagged === 0 && step && step.ring,
         isConnectSource && 'ring-2 ring-brand-500',
         disabled && 'border-dashed opacity-55',
       )}
@@ -275,6 +285,14 @@ export function NodeShell({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-start gap-1.5">
+            {ordinal !== undefined && (
+              <span
+                className="mt-0.5 shrink-0 rounded bg-surface-sunken px-1 text-2xs font-medium tabular-nums text-content-subtle"
+                title={`Step ${ordinal} in the execution order`}
+              >
+                {ordinal}
+              </span>
+            )}
             <p
               className="min-w-0 flex-1 truncate text-sm font-medium leading-5 text-content"
               title={title}
@@ -288,6 +306,20 @@ export function NodeShell({
                   className="h-1.5 w-1.5 rounded-full bg-content-subtle"
                   title="Muted — left out of the compiled JSON"
                 />
+              )}
+              {step && StepIcon && (
+                <span
+                  role="img"
+                  aria-label={step.label}
+                  title={step.label}
+                  className={cn(
+                    'inline-flex h-4 w-4 items-center justify-center rounded-full',
+                    step.chip,
+                    step.spin,
+                  )}
+                >
+                  <StepIcon className="h-3 w-3" aria-hidden />
+                </span>
               )}
               {flagged > 0 && (
                 <Tooltip
@@ -373,6 +405,26 @@ export function NodeShell({
 export function useNodeIssues(nodeId: string): ValidationIssue[] {
   const issues = useEditorStore((state) => state.issues)
   return useMemo(() => issues.filter((issue) => issue.nodeId === nodeId), [issues, nodeId])
+}
+
+/**
+ * Run status of one node, or `undefined` outside a run. Subscribing to the single
+ * entry — not the whole map — keeps a streaming run from re-rendering every node
+ * on every step event.
+ */
+export function useNodeStepStatus(nodeId: string): StepStatus | undefined {
+  return useEditorStore((state) => state.stepStatus[nodeId])
+}
+
+/**
+ * This node's place in the execution order, 1-based. Recomputed from the graph
+ * rather than stored, so it follows edits immediately; `undefined` for nodes no
+ * chain reaches (notes, orphans), which have no step to number.
+ */
+export function useNodeOrdinal(nodeId: string): number | undefined {
+  const nodes = useEditorStore((state) => state.nodes)
+  const edges = useEditorStore((state) => state.edges)
+  return useMemo(() => nodeOrdinals({ nodes, edges })[nodeId], [nodes, edges, nodeId])
 }
 
 /** Keeps both ends of a path readable: `/data/bronze/…/clientes`. */

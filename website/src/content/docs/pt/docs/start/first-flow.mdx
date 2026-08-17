@@ -1,6 +1,6 @@
 ---
-title: Seu primeiro fluxo no Studio
-description: Desenhe um pipeline no canvas do Sparquet Studio, veja-o compilar para JSON e execute-o localmente.
+title: Seu primeiro Job no Studio
+description: Desenhe um Job no canvas do Sparquet Studio, veja-o compilar para JSON e execute-o localmente.
 sidebar:
   order: 4
 ---
@@ -19,11 +19,11 @@ O Studio é um editor para o arquivo que você escreveu no [quickstart](/pt/docs
    npm run dev
    ```
 
-   Vá para [http://localhost:5273](http://localhost:5273). O primeiro lançamento cria um projeto **Getting Started** com pipelines funcionais — abra um para dar uma olhada, ou siga junto e construa o seu.
+   Vá para [http://localhost:5273](http://localhost:5273). O primeiro lançamento cria um Workflow **Getting Started** com Jobs funcionais — abra um para dar uma olhada, ou siga junto e construa o seu.
 
-2. ### Crie um projeto e um workflow
+2. ### Crie um Workflow e um Job
 
-   Projetos agrupam pipelines relacionados; um por domínio mantém os nomes curtos. Clique em **New project**, nomeie-o `Sales`, depois **New workflow** dentro dele e chame-o de `Orders curated`.
+   Um **Workflow** agrupa Jobs relacionados; um por domínio mantém os nomes curtos. Um **Job** é um JSON de pipeline — o arquivo que o framework roda. Clique em **New workflow**, nomeie-o `Sales`, depois **New job** dentro dele e chame-o de `Orders curated`.
 
    Você chega a um canvas vazio, com a paleta de nodes à esquerda e o inspector à direita.
 
@@ -85,7 +85,7 @@ O Studio é um editor para o arquivo que você escreveu no [quickstart](/pt/docs
    uvicorn server.main:app --port 8787
    ```
 
-   O runner imprime um token — cole-o no painel. Então **Run pipeline** executa o JSON compilado com o framework real e traz de volta contagens de linhas, resultados de validação por regra, um preview de 50 linhas e os logs do próprio framework.
+   O runner imprime um token — cole-o no painel. Então **Run** executa o JSON compilado com o framework real e traz de volta contagens de linhas, resultados de validação por regra, um preview de 50 linhas e os logs do próprio framework.
 
 </Steps>
 
@@ -108,5 +108,6 @@ Já tem um JSON de pipeline? Abra o painel JSON, mude para **Edit**, cole o arqu
 ## Próximos
 
 - [O canvas](/pt/docs/studio/canvas/) — conexões, ramificação, controle por teclado.
-- [Assistente de IA](/pt/docs/studio/ai-assistant/) — descreva um pipeline em vez de desenhá-lo.
+- [Assistente de IA](/pt/docs/studio/ai-assistant/) — descreva um Job em vez de desenhá-lo.
+- [Pipelines](/pt/docs/studio/pipelines/) — encadeie vários Jobs numa execução sequencial.
 - [Conceitos centrais](/pt/docs/start/concepts/) — o que roda quando, e por que o grafo se mapeia do jeito que se mapeia.

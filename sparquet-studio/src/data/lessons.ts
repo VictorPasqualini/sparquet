@@ -6,7 +6,7 @@
  * `sort` accepting a list of booleans) the lessons describe the code.
  */
 
-import type { WorkflowTemplate } from '@/types/studio'
+import type { JobTemplate } from '@/types/studio'
 
 export interface LessonSection {
   heading: string
@@ -22,7 +22,7 @@ export interface Lesson {
   id: string
   title: string
   minutes: number
-  level: WorkflowTemplate['level']
+  level: JobTemplate['level']
   summary: string
   sections: LessonSection[]
   checklist: string[]
@@ -111,7 +111,7 @@ export const LESSONS: Lesson[] = [
       },
     ],
     checklist: [
-      'Create a workflow from the "CSV to Parquet" template',
+      'Create a job from the "CSV to Parquet" template',
       'Change the input path and the filter condition to match your own data',
       'Open the JSON panel and find the four transformations you see on the canvas',
       'Add a `with_column` step and watch the JSON update',

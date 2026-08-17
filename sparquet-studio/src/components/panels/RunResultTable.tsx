@@ -26,12 +26,12 @@ export function RunResultTable({ columns, rows, truncated }: RunResultTableProps
   const clipped = truncated || rows.length > visible.length
 
   return (
-    <div className="overflow-hidden rounded-xl border border-line bg-surface">
+    <div className="overpipeline-hidden rounded-xl border border-line bg-surface">
       <div
         role="region"
         aria-label="Result preview"
         tabIndex={0}
-        className="max-h-80 overflow-auto"
+        className="max-h-80 overpipeline-auto"
       >
         <table className="w-full border-collapse text-left text-2xs">
           <thead>

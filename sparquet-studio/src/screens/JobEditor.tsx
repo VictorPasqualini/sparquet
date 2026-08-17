@@ -27,7 +27,7 @@ import {
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { FlowCanvas } from '@/components/canvas/FlowCanvas'
+import { JobCanvas } from '@/components/canvas/JobCanvas'
 import { CommandPalette } from '@/components/layout/CommandPalette'
 import { AiPanel } from '@/components/panels/AiPanel'
 import { Inspector } from '@/components/panels/Inspector'
@@ -37,10 +37,10 @@ import { RunPanel } from '@/components/panels/RunPanel'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
 import { relativeTime } from '@/lib/utils/format'
 import { cn } from '@/lib/utils/cn'
-import { getWorkflow } from '@/lib/storage/db'
+import { getJob } from '@/lib/storage/db'
 import { useEditorStore, type PanelId } from '@/store/editor'
 import { useLibraryStore } from '@/store/library'
-import type { Workflow } from '@/types/studio'
+import type { Job } from '@/types/studio'
 
 /** Monaco is heavy and only the JSON tab needs it. */
 const JsonPanel = lazy(() =>
@@ -62,8 +62,8 @@ const SIDE_PANELS: {
   { id: 'issues', label: 'Issues', tab: 'Issues', icon: ListChecks, shortcut: '⌘E' },
 ]
 
-export function WorkflowEditor() {
-  const { workflowId } = useParams<{ workflowId: string }>()
+export function JobEditor() {
+  const { jobId } = useParams<{ jobId: string }>()
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -84,16 +84,16 @@ export function WorkflowEditor() {
     setMissing(false)
 
     void (async () => {
-      if (!workflowId) return
-      const fromStore = useLibraryStore.getState().workflows.find((w) => w.id === workflowId)
-      const workflow: Workflow | null | undefined = fromStore ?? (await getWorkflow(workflowId))
+      if (!jobId) return
+      const fromStore = useLibraryStore.getState().jobs.find((w) => w.id === jobId)
+      const job: Job | null | undefined = fromStore ?? (await getJob(jobId))
       if (cancelled) return
-      if (!workflow) {
+      if (!job) {
         setMissing(true)
         setLoading(false)
         return
       }
-      open(workflow)
+      open(job)
       setLoading(false)
       if (openAiOnLoad.current) togglePanel('ai', true)
     })()
@@ -102,7 +102,7 @@ export function WorkflowEditor() {
       cancelled = true
       close()
     }
-  }, [workflowId, open, close, togglePanel])
+  }, [jobId, open, close, togglePanel])
 
   if (loading) {
     return (
@@ -115,7 +115,7 @@ export function WorkflowEditor() {
   if (missing) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-canvas text-center">
-        <p className="text-sm text-content">This workflow no longer exists.</p>
+        <p className="text-sm text-content">This job no longer exists.</p>
         <Link to="/" className="text-xs text-brand-600 hover:underline dark:text-brand-400">
           Back to overview
         </Link>
@@ -132,7 +132,7 @@ export function WorkflowEditor() {
             <NodePalette />
           </aside>
           <main className="relative min-w-0 flex-1">
-            <FlowCanvas />
+            <JobCanvas />
           </main>
           <SidePanel />
         </div>
@@ -163,7 +163,7 @@ function EditorCommandPalette() {
 }
 
 function EditorTopBar({ onBack }: { onBack: () => void }) {
-  const workflow = useEditorStore((state) => state.workflow)
+  const job = useEditorStore((state) => state.job)
   const dirty = useEditorStore((state) => state.dirty)
   const saving = useEditorStore((state) => state.saving)
   const save = useEditorStore((state) => state.save)
@@ -174,19 +174,19 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
   const future = useEditorStore((state) => state.future.length)
   const activePanel = useEditorStore((state) => state.activePanel)
   const togglePanel = useEditorStore((state) => state.togglePanel)
-  const updateWorkflowMeta = useLibraryStore((state) => state.updateWorkflowMeta)
+  const updateJobMeta = useLibraryStore((state) => state.updateJobMeta)
 
-  const [name, setName] = useState(workflow?.name ?? '')
-  useEffect(() => setName(workflow?.name ?? ''), [workflow?.name])
+  const [name, setName] = useState(job?.name ?? '')
+  useEffect(() => setName(job?.name ?? ''), [job?.name])
 
   const commitName = () => {
     const trimmed = name.trim()
-    if (!workflow || !trimmed || trimmed === workflow.name) {
-      setName(workflow?.name ?? '')
+    if (!job || !trimmed || trimmed === job.name) {
+      setName(job?.name ?? '')
       return
     }
-    void updateWorkflowMeta(workflow.id, { name: trimmed })
-    useEditorStore.setState({ workflow: { ...workflow, name: trimmed } })
+    void updateJobMeta(job.id, { name: trimmed })
+    useEditorStore.setState({ job: { ...job, name: trimmed } })
   }
 
   return (
@@ -203,11 +203,11 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
           onKeyDown={(event) => {
             if (event.key === 'Enter') event.currentTarget.blur()
             if (event.key === 'Escape') {
-              setName(workflow?.name ?? '')
+              setName(job?.name ?? '')
               event.currentTarget.blur()
             }
           }}
-          aria-label="Workflow name"
+          aria-label="Job name"
           className="h-8 max-w-sm border-transparent bg-transparent px-2 text-sm font-medium hover:border-line focus:bg-surface-sunken"
         />
       </div>
@@ -468,7 +468,7 @@ function EditorShortcuts() {
       if (mod && event.key.toLowerCase() === 's') {
         event.preventDefault()
         void save()
-        toast.success('Workflow saved')
+        toast.success('Job saved')
         return
       }
       if (mod && event.key.toLowerCase() === 'z') {

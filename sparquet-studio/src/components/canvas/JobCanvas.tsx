@@ -28,7 +28,7 @@ import {
   Plus,
   Search,
   Sparkles,
-  Workflow,
+  Workflow as JobIcon,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -100,7 +100,7 @@ const ACCENT_COLOR: Record<NodeAccent, string> = {
   output: 'rgb(var(--node-output))',
 }
 
-export function FlowCanvas() {
+export function JobCanvas() {
   const nodes = useEditorStore((state) => state.nodes)
   const edges = useEditorStore((state) => state.edges)
   const onNodesChange = useEditorStore((state) => state.onNodesChange)
@@ -358,7 +358,7 @@ export function FlowCanvas() {
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
           <div className="pointer-events-auto w-full max-w-md rounded-2xl border border-line bg-surface/95 shadow-card animate-fade-in">
             <EmptyState
-              icon={<Workflow />}
+              icon={<JobIcon />}
               title="Nothing on the canvas yet"
               description="Every pipeline starts with one input. Drag a node in from the palette, or pick a starting point below."
               action={

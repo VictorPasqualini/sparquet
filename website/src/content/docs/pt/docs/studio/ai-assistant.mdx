@@ -1,13 +1,13 @@
 ---
 title: Assistente de IA
-description: Gere, modifique e explique pipelines Sparquet com o modelo de sua escolha — traga sua própria chave, revise cada proposta.
+description: Gere, modifique e explique Jobs Sparquet com o modelo de sua escolha — traga sua própria chave, revise cada proposta.
 sidebar:
   order: 4
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components'
 
-O assistente escreve pipelines na linguagem que o Studio já entende. O system prompt dele é gerado do mesmo catálogo que dirige os formulários e o linter, então ele não consegue sugerir uma transformação que o framework não tem.
+O assistente escreve Jobs na linguagem que o Studio já entende. O system prompt dele é gerado do mesmo catálogo que dirige os formulários e o linter, então ele não consegue sugerir uma transformação que o framework não tem.
 
 ## Configurando
 
@@ -41,9 +41,9 @@ Abra o painel com <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd>. Escolha uma intenção, desc
 
 | Intenção | O que faz |
 |---|---|
-| **Generate** | Um pipeline completo a partir de uma descrição |
-| **Modify** | Altera o pipeline que está no canvas |
-| **Explain** | Explicação em português do que o pipeline faz |
+| **Generate** | Um Job completo a partir de uma descrição |
+| **Modify** | Altera o Job que está no canvas |
+| **Explain** | Explicação em português do que o Job faz |
 | **Fix issues** | Pega os achados do linter e propõe correções |
 | **Optimize** | Sugere checkpoints, pushdown e leituras mais baratas |
 | **Document** | Escreve os campos `description` |
@@ -58,12 +58,12 @@ Bons prompts são específicos sobre fontes, chaves e destinos:
 
 ## Propostas
 
-Quando uma resposta contém um pipeline, ela chega como um **card**, não como mudança aplicada:
+Quando uma resposta contém um JSON de pipeline, ela chega como um **card**, não como mudança aplicada:
 
 - **Apply to canvas** substitui o grafo — e está a um <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> de ser desfeito.
 - **View JSON** mostra o documento cru primeiro.
 
-Uma explicação que apenas cita um fragmento não gera proposta — só um pipeline completo gera, o que evita que uma resposta de "o que isso faz?" apague seu trabalho.
+Uma explicação que apenas cita um fragmento não gera proposta — só um JSON de pipeline completo gera, o que evita que uma resposta de "o que isso faz?" apague seu trabalho.
 
 ## O que o modelo recebe
 
@@ -74,7 +74,7 @@ O system prompt é gerado do catálogo em build time e carrega:
 - validators e as políticas `on_failure`
 - as regras duras: `agg` é uma lista de strings SQL, entradas de `select` são expressões, `binary` é só leitura, `merge` precisa de `merge_keys`, `skip_if_false` é chave de topo, `{param}` e `{{variable}}` são mecanismos diferentes
 
-Contexto é adicionado por requisição: o pipeline compilado, as issues de lint atuais e o nó selecionado — **só** quando *Share workflow context* está ligado. Desligue e nada do seu pipeline sai do navegador.
+Contexto é adicionado por requisição: o JSON compilado, as issues de lint atuais e o nó selecionado — **só** quando *Share job context* está ligado. Desligue e nada do seu Job sai do navegador.
 
 ## Custo e limites
 

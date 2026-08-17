@@ -4,11 +4,12 @@ import {
   FolderPlus,
   GraduationCap,
   LayoutTemplate,
+  ListOrdered,
   Moon,
   Search,
   Settings,
   Sun,
-  Workflow as WorkflowIcon,
+  Workflow as JobIcon,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -25,17 +26,18 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { EmptyState, Input, Kbd, Modal } from '@/components/ui'
 import { LESSONS } from '@/data/lessons'
 import { cn } from '@/lib/utils/cn'
+import { plural } from '@/lib/utils/format'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
-import type { Workflow } from '@/types/studio'
+import type { Job } from '@/types/studio'
 
 /**
- * Asks the shell to open its "New project" modal.
+ * Asks the shell to open its "New workflow" modal.
  *
  * The palette owns the event name so the shell can import it without the two
  * modules importing each other.
  */
-export const NEW_PROJECT_EVENT = 'sparquet-studio:new-project'
+export const NEW_WORKFLOW_EVENT = 'sparquet-studio:new-workflow'
 
 export interface CommandPaletteProps {
   open: boolean
@@ -44,8 +46,8 @@ export interface CommandPaletteProps {
 
 const GROUPS = [
   { id: 'actions', label: 'Actions' },
+  { id: 'jobs', label: 'Jobs' },
   { id: 'workflows', label: 'Workflows' },
-  { id: 'projects', label: 'Projects' },
   { id: 'lessons', label: 'Learn' },
 ] as const
 
@@ -63,20 +65,21 @@ interface CommandItem {
 }
 
 /** How many rows a group may contribute, searching versus sitting idle. */
-const LIMITS: Record<GroupId, number> = { actions: 6, workflows: 8, projects: 8, lessons: 6 }
+const LIMITS: Record<GroupId, number> = { actions: 6, jobs: 8, workflows: 8, lessons: 6 }
 const IDLE_LIMITS: Record<GroupId, number> = {
   actions: 6,
+  jobs: 5,
   workflows: 5,
-  projects: 5,
   lessons: 3,
 }
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
   const location = useLocation()
-  const projects = useLibraryStore((state) => state.projects)
   const workflows = useLibraryStore((state) => state.workflows)
-  const createWorkflow = useLibraryStore((state) => state.createWorkflow)
+  const jobs = useLibraryStore((state) => state.jobs)
+  const pipelines = useLibraryStore((state) => state.pipelines)
+  const createJob = useLibraryStore((state) => state.createJob)
   const theme = useSettingsStore((state) => state.theme)
   const toggleTheme = useSettingsStore((state) => state.toggleTheme)
 
@@ -87,45 +90,45 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const baseId = useId()
   const listId = `${baseId}-list`
 
-  const activeProjectId = /^\/projects\/([^/]+)/.exec(location.pathname)?.[1]
+  const activeWorkflowId = /^\/workflows\/([^/]+)/.exec(location.pathname)?.[1]
 
   const items = useMemo<CommandItem[]>(() => {
-    const projectName = new Map(projects.map((project) => [project.id, project.name]))
-    const countByProject = new Map<string, number>()
-    for (const workflow of workflows) {
-      countByProject.set(workflow.projectId, (countByProject.get(workflow.projectId) ?? 0) + 1)
+    const workflowName = new Map(workflows.map((workflow) => [workflow.id, workflow.name]))
+    const countByWorkflow = new Map<string, number>()
+    for (const job of jobs) {
+      countByWorkflow.set(job.workflowId, (countByWorkflow.get(job.workflowId) ?? 0) + 1)
     }
 
-    const newWorkflow = () => {
-      const projectId = activeProjectId ?? projects[0]?.id
-      // Nothing to hang a workflow on yet — send the user through project creation.
-      if (!projectId) {
-        window.dispatchEvent(new Event(NEW_PROJECT_EVENT))
+    const newJob = () => {
+      const workflowId = activeWorkflowId ?? workflows[0]?.id
+      // Nothing to hang a job on yet — send the user through workflow creation.
+      if (!workflowId) {
+        window.dispatchEvent(new Event(NEW_WORKFLOW_EVENT))
         return
       }
-      void createWorkflow({ projectId, name: nextWorkflowName(workflows) }).then((workflow) =>
-        navigate(`/workflows/${workflow.id}`),
+      void createJob({ workflowId, name: nextJobName(jobs) }).then((job) =>
+        navigate(`/jobs/${job.id}`),
       )
     }
 
     const actions: CommandItem[] = [
       {
-        id: 'action:new-project',
-        group: 'actions',
-        label: 'New project',
-        hint: 'Group related workflows',
-        icon: FolderPlus,
-        keywords: 'create add folder workspace',
-        run: () => window.dispatchEvent(new Event(NEW_PROJECT_EVENT)),
-      },
-      {
         id: 'action:new-workflow',
         group: 'actions',
         label: 'New workflow',
+        hint: 'Group related jobs',
+        icon: FolderPlus,
+        keywords: 'create add folder workspace',
+        run: () => window.dispatchEvent(new Event(NEW_WORKFLOW_EVENT)),
+      },
+      {
+        id: 'action:new-job',
+        group: 'actions',
+        label: 'New job',
         hint: 'Start an empty pipeline',
-        icon: WorkflowIcon,
+        icon: JobIcon,
         keywords: 'create add pipeline canvas blank',
-        run: newWorkflow,
+        run: newJob,
       },
       {
         id: 'action:toggle-theme',
@@ -156,28 +159,42 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       },
     ]
 
-    const workflowItems: CommandItem[] = [...workflows]
+    const jobItems: CommandItem[] = [...jobs]
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((workflow) => ({
-        id: `workflow:${workflow.id}`,
-        group: 'workflows',
-        label: workflow.name,
-        hint: projectName.get(workflow.projectId) ?? 'No project',
-        icon: WorkflowIcon,
-        keywords: [workflow.description, ...workflow.tags, workflow.settings.pipelineName]
+      .map((job) => ({
+        id: `job:${job.id}`,
+        group: 'jobs',
+        label: job.name,
+        hint: workflowName.get(job.workflowId) ?? 'No workflow',
+        icon: JobIcon,
+        keywords: [job.description, ...job.tags, job.settings.pipelineName]
           .filter(Boolean)
           .join(' '),
-        run: () => navigate(`/workflows/${workflow.id}`),
+        run: () => navigate(`/jobs/${job.id}`),
       }))
 
-    const projectItems: CommandItem[] = projects.map((project) => ({
-      id: `project:${project.id}`,
-      group: 'projects',
-      label: project.name,
-      hint: workflowCountLabel(countByProject.get(project.id) ?? 0),
+    // Pipelines sit in the same group as the files they order: ⌘K is the
+    // fastest way back into either, and they are all "things you open and run".
+    const pipelineItems: CommandItem[] = [...pipelines]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((pipeline) => ({
+        id: `pipeline:${pipeline.id}`,
+        group: 'jobs',
+        label: pipeline.name,
+        hint: `${plural(pipeline.stages.length, 'stage')} · ${workflowName.get(pipeline.workflowId) ?? 'No workflow'}`,
+        icon: ListOrdered,
+        keywords: `${pipeline.description} pipeline sequence order run`,
+        run: () => navigate(`/pipelines/${pipeline.id}`),
+      }))
+
+    const workflowItems: CommandItem[] = workflows.map((workflow) => ({
+      id: `workflow:${workflow.id}`,
+      group: 'workflows',
+      label: workflow.name,
+      hint: jobCountLabel(countByWorkflow.get(workflow.id) ?? 0),
       icon: FolderOpen,
-      keywords: project.description,
-      run: () => navigate(`/projects/${project.id}`),
+      keywords: workflow.description,
+      run: () => navigate(`/workflows/${workflow.id}`),
     }))
 
     const lessonItems: CommandItem[] = LESSONS.map((lesson) => ({
@@ -190,8 +207,17 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       run: () => navigate(`/learn/${lesson.id}`),
     }))
 
-    return [...actions, ...workflowItems, ...projectItems, ...lessonItems]
-  }, [activeProjectId, createWorkflow, navigate, projects, theme, toggleTheme, workflows])
+    return [...actions, ...jobItems, ...pipelineItems, ...workflowItems, ...lessonItems]
+  }, [
+    activeWorkflowId,
+    createJob,
+    pipelines,
+    navigate,
+    workflows,
+    theme,
+    toggleTheme,
+    jobs,
+  ])
 
   const groups = useMemo(() => {
     const needle = query.replace(/\s+/g, '').toLowerCase()
@@ -280,7 +306,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       open={open}
       onOpenChange={onOpenChange}
       title="Command palette"
-      description="Jump to a workflow, a project or a lesson — or run an action."
+      description="Jump to a job, a workflow or a lesson — or run an action."
       size="lg"
       footer={
         <div className="flex w-full items-center justify-between gap-3 text-2xs text-content-subtle">
@@ -308,7 +334,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             setActive(0)
           }}
           onKeyDown={onKeyDown}
-          placeholder="Search workflows, projects, lessons…"
+          placeholder="Search jobs, workflows, lessons…"
           leading={<Search />}
           role="combobox"
           aria-expanded
@@ -443,14 +469,14 @@ function fuzzyScore(query: string, text: string): number {
   return Math.max(score, 0)
 }
 
-function workflowCountLabel(count: number): string {
-  if (count === 0) return 'No workflows'
-  return `${count} ${count === 1 ? 'workflow' : 'workflows'}`
+function jobCountLabel(count: number): string {
+  if (count === 0) return 'No jobs'
+  return `${count} ${count === 1 ? 'job' : 'jobs'}`
 }
 
-function nextWorkflowName(workflows: Workflow[]): string {
-  const base = 'Untitled workflow'
-  const taken = new Set(workflows.map((workflow) => workflow.name))
+function nextJobName(jobs: Job[]): string {
+  const base = 'Untitled job'
+  const taken = new Set(jobs.map((job) => job.name))
   if (!taken.has(base)) return base
   let suffix = 2
   while (taken.has(`${base} ${suffix}`)) suffix += 1

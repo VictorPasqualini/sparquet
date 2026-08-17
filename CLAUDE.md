@@ -650,12 +650,38 @@ Rules:
 
 Editor visual para os pipelines JSON, em `sparquet-studio/` (React 18 + TypeScript +
 Vite + Tailwind + React Flow). É o ponto de entrada de uso do framework: o usuário
-desenha o pipeline no canvas, o Studio compila para o mesmo JSON que o
+desenha o **Job** no canvas, o Studio compila para o mesmo JSON que o
 `Sparquet` executa.
 
 ```bash
 cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
 ```
+
+### Vocabulário do Studio (≠ vocabulário do framework)
+
+| Conceito do Studio | O que é | Rota |
+|--------------------|---------|------|
+| **Workflow** | O container. Geralmente um por domínio (`Sales`, `Billing`). | `/workflows/:id` |
+| **Job** | **Um JSON de pipeline**, desenhado no canvas de nós. | `/jobs/:id` |
+| **Pipeline** | Conjunto **ordenado** de Jobs, executados em sequência. | `/pipelines/:id` |
+
+A tela do Workflow tem duas abas: **Jobs** (lista os Jobs e os Pipelines montados
+com eles) e **Pipeline** (mapa somente leitura, inferido dos paths/temp views que
+os Jobs compartilham).
+
+> **Ponte entre os dois vocabulários** — decisão explícita do produto: no
+> **framework** um JSON continua sendo um *pipeline* (classe `Pipeline`,
+> `PipelineResult`, `PipelineConfig`, docs de `reference/`). No **Studio** esse
+> mesmo arquivo é um **Job**, e o nome **Pipeline** fica reservado para a sequência
+> de vários deles. Um Pipeline de 4 estágios = 4 execuções do `Pipeline` do
+> framework, em ordem, na mesma SparkSession. Não renomeie a API Python.
+
+Um Pipeline não guarda JSON próprio: cada estágio referencia um Job e o JSON é
+compilado do canvas na hora de rodar. A ordem vem dos links desenhados (nada é
+inferido de paths); ciclos são recusados; estágios sem link rodam por último com
+warning. Os estágios compartilham uma SparkSession e trocam dados pelo que
+gravam — um path que o próximo lê, ou uma temp view. Execução via
+`POST /run/flow/stream` (SSE), com status/logs por estágio e preview do último.
 
 | Camada | Caminho | Responsabilidade |
 |--------|---------|------------------|
@@ -663,8 +689,9 @@ cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
 | Compilador | `src/lib/compiler/` | `compileGraph()` (grafo → JSON) e `pipelineToGraph()` (JSON → grafo) são inversos, com testes de round-trip sobre os confs de `examples/`. |
 | Linter | `src/lib/validation/lint.ts` | Regras client-side (merge sem `merge_keys`, `{{var}}` sem `collect`, `{param}` não declarado, etc). |
 | IA | `src/lib/ai/` | Cliente streaming multi-provider (Anthropic/OpenAI/Google/compatível), prompt gerado do catálogo, parser de proposta. |
-| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o pipeline com o `Sparquet` real e devolve contadores, validações, preview e logs. |
-| Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (projetos/workflows), settings. |
+| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o Job (um JSON) com o `Sparquet` real e devolve contadores, validações, preview e logs; `/run/flow/stream` executa um Pipeline inteiro. |
+| Pipelines | `src/lib/flow/` | Ordem dos estágios, resolução/compilação por estágio e plano de execução; mais o mapa somente leitura inferido dos paths e views dos Jobs. |
+| Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (workflows/jobs/pipelines), settings. |
 
 **Regra de ouro ao evoluir o framework**: toda transformação, formato ou validator
 novo precisa de uma entrada correspondente no catálogo (`src/catalog/`), senão o

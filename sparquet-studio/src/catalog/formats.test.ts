@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import { getFormat } from '@/catalog'
-import { lintWorkflow } from '@/lib/validation/lint'
+import { lintJob } from '@/lib/validation/lint'
 import { HANDLE } from '@/types/studio'
-import type { SinkNodeData, StudioEdge, StudioNode, WorkflowSettings } from '@/types/studio'
+import type { SinkNodeData, StudioEdge, StudioNode, JobSettings } from '@/types/studio'
 
-const SETTINGS: WorkflowSettings = { pipelineName: 'test', description: '', spark: {} }
+const SETTINGS: JobSettings = { pipelineName: 'test', description: '', spark: {} }
 
 const source = (id: string): StudioNode => ({
   id,
@@ -42,7 +42,7 @@ const kafkaSink = (options: Record<string, unknown>): StudioNode =>
   sink('out', { format: 'kafka', path: 'registro-lastros', mode: 'append', options })
 
 const bootstrapIssues = (options: Record<string, unknown>): string[] =>
-  lintWorkflow(
+  lintJob(
     { nodes: [source('src'), kafkaSink(options)], edges: [link('src', 'out')] },
     SETTINGS,
     [],

@@ -46,6 +46,15 @@ Rodada de evolução — capacidades já no código, com testes e entrada no cat
 - **Temp view global vs sessão**: `view` ganhou `options.scope`
   (`session`/`global`); o `input_view` aceita `{"name": ..., "type": "session"|"global"}`.
 
+- **Marcadores de etapa nos logs** (framework, v0.3.1): `Pipeline`/`TransformationEngine`
+  emitem `step=True` com `scope` (`input`/`transformation`/`output`), `index` e `total`.
+  Puramente aditivo — `apply(..., top_level=False)` mantém o comportamento anterior.
+  É o que alimenta o status por etapa no canvas do Studio.
+- **Studio — vocabulário**: `Workflow` (container) › `Job` (um JSON) › `Pipeline`
+  (conjunto ordenado de Jobs, executado em sequência). O framework **não** mudou:
+  para ele um JSON continua sendo um *pipeline* (classe `Pipeline`).
+- **Studio — execução em sequência**: `POST /run/flow/stream` no runner executa vários
+  Jobs numa SparkSession compartilhada, com status/logs por estágio e `stop_on_error`.
 - **CI/CD de release** (resolve §5): GitHub Actions `ci.yml` (testes em push/PR,
   matriz Python) + `publish.yml` (testes → build + `twine check` → publish no PyPI em
   release; TestPyPI em execução manual), via Trusted Publishing OIDC.

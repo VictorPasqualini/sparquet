@@ -71,7 +71,7 @@ Open the Issues panel. Blocking errors: no destination, an orphan node, a requir
 The graph does not compile yet — the panel shows the blocking issues instead.
 
 **`Local runner not detected`**
-The service is not running, or the URL in **Settings → Local runner** does not match. See [Running pipelines](/docs/studio/running/).
+The service is not running, or the URL in **Settings → Local runner** does not match. See [Running a job](/docs/studio/running/).
 
 **A run returns 401**
 The runner requires its token. Copy the one printed in its terminal into Settings, or start it with `SPARQUET_STUDIO_TOKEN` to pin a stable value.
@@ -80,7 +80,7 @@ The runner requires its token. Copy the one printed in its terminal into Setting
 Another run is in progress. The service serializes runs to protect the shared Spark session.
 
 **My work disappeared**
-Studio stores projects in the browser's IndexedDB. Clearing site data deletes them, and a different browser or profile has its own copy. Export from **Settings → Data**, and commit the compiled pipelines to git.
+Studio stores your Workflows in the browser's IndexedDB. Clearing site data deletes them, and a different browser or profile has its own copy. Export from **Settings → Data**, and commit the compiled pipelines to git.
 
 ## Environment
 
