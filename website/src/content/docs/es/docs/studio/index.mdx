@@ -1,0 +1,122 @@
+---
+title: Sparquet Studio
+description: El editor visual de Jobs Sparquet — qué es, cómo guarda tu trabajo y cómo mapea un canvas al JSON que el framework ejecuta.
+sidebar:
+  order: 1
+  label: Visión general
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components'
+
+Studio es una aplicación de navegador que edita **Jobs** Sparquet en un canvas de nodos — un Job siendo un JSON de pipeline. No es un producto aparte con su propio formato: lee el JSON del pipeline y escribe el JSON del pipeline.
+
+```bash
+cd sparquet-studio
+npm install
+npm run dev          # http://localhost:5273
+```
+
+<CardGrid>
+  <Card title="Local first">
+    Los Workflows, Jobs y Pipelines viven en el IndexedDB de tu navegador. Sin
+    cuenta, sin servidor, sin telemetría. Exporta todo el workspace como un JSON.
+  </Card>
+  <Card title="Sin lock-in">
+    El canvas compila al archivo que corre la CLI. Borra Studio y cada Job
+    sigue funcionando.
+  </Card>
+  <Card title="Documentado en su lugar">
+    Cada campo lleva las mismas notas que esta referencia, incluidos los
+    comportamientos que normalmente viven solo en el código fuente del framework.
+  </Card>
+  <Card title="Runner opcional">
+    Apúntalo a un pequeño servicio local y ejecuta un Job — o un Pipeline
+    completo — desde el canvas, con contadores, validaciones y un preview de los
+    datos.
+  </Card>
+</CardGrid>
+
+## El layout
+
+| Área | Qué hace |
+|---|---|
+| **Palette** (izquierda) | Toda fuente, transformación, validator y destino. Arrastra al canvas, o haz clic para añadir tras el último nodo. |
+| **Canvas** (centro) | El Job como nodos conectados. De izquierda a derecha es el orden de ejecución. |
+| **Inspector** (derecha) | Los campos del nodo seleccionado, con ayuda, ejemplos y gotchas. |
+| **JSON panel** | El JSON del pipeline compilado, en vivo. También la superficie de import. |
+| **Issues panel** | Resultados de lint mientras escribes, cada uno enlazando el nodo y el campo. |
+| **Run panel** | Ejecución mediante el runner local. |
+| **Status bar** | Conteo de nodos, validez, estado de guardado. |
+
+Los paneles comparten una columna a la derecha, en pestañas y redimensionable — <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>E</kbd>, <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd> y <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd> alternan entre ellos.
+
+## Workflows, Jobs y Pipelines
+
+Studio anida tres cosas:
+
+| Concepto | Qué es | Dónde vive |
+|---|---|---|
+| **Workflow** | El contenedor. Normalmente uno por dominio: `Sales`, `Billing`, `CRM`. | `/workflows/:id` |
+| **Job** | Un JSON de pipeline, dibujado en el canvas de nodos. | `/jobs/:id` |
+| **Pipeline** | Un conjunto ordenado de Jobs que se ejecutan en secuencia. | `/pipelines/:id` |
+
+<Aside type="note" title="Un Job es un JSON de pipeline">
+  El framework conserva su propio vocabulario: un JSON *es* un pipeline — el
+  archivo que ejecuta la clase `Pipeline` y que reporta como `PipelineResult`. En
+  Studio ese archivo es un **Job**, y el nombre **Pipeline** queda reservado para
+  una secuencia de varios de ellos. Un Pipeline de Studio con cuatro etapas son
+  cuatro ejecuciones del `Pipeline` del framework, en orden, compartiendo una
+  sesión Spark.
+</Aside>
+
+La pantalla de un Workflow tiene dos pestañas. **Jobs** lista los Jobs que contiene, junto con los Pipelines armados a partir de ellos. **Pipeline** dibuja cómo se conectan esos Jobs — inferido, de solo lectura, a partir de los paths y temp views que comparten — y es por donde empiezas un [Pipeline](/es/docs/studio/pipelines/) ejecutable.
+
+Todo eso vive en tu navegador. **Settings → Data** exporta todo como un único bundle JSON y lo reimporta, que es como mueves un workspace entre máquinas o compartes un conjunto de Jobs con un colega.
+
+<Aside type="caution">
+  El almacenamiento del navegador es por navegador y por perfil. Borrar los datos
+  del sitio elimina tu workspace. Commitea el JSON compilado a git — es el
+  artefacto que importa, y Studio puede reimportar cualquiera de ellos.
+</Aside>
+
+## Cómo el canvas se vuelve el archivo
+
+Dos reglas definen todo el mapeo:
+
+**La cadena compartida es la principal.** Lo que todo destino tiene en común se vuelve el `transformations` de nivel superior. Después de que el grafo se ramifica, cada rama se vuelve el `transformations` de ese destino.
+
+**Un join o union toma su segunda fuente de su segundo input.** La cadena que alimenta ese handle se vuelve `with` más `with_transformations`.
+
+Todo lo demás es un campo de nodo. Las sticky notes nunca compilan; los nodos silenciados se saltan.
+
+<Aside type="tip">
+  Pulsa <kbd>Ctrl/⌘</kbd>+<kbd>J</kbd> en cualquier momento para ver exactamente
+  lo que produce tu dibujo. Si el JSON no es lo que esperabas, el grafo no es lo
+  que pensabas — el panel es la forma más rápida de aprender el mapeo.
+</Aside>
+
+## Importar lo que ya tienes
+
+Abre el panel JSON, cambia a **Edit**, pega un JSON de pipeline y haz clic en **Apply to canvas**. Studio lo organiza automáticamente. Los tipos de transformación desconocidos — los personalizados que registraste — se preservan intactos en import y export.
+
+## Verificar un cambio
+
+Studio trae sus propias comprobaciones:
+
+```bash
+npm run typecheck   # TypeScript, cero errores esperados
+npm run test        # tests unitarios, incluidos round-trips del compiler
+npm run lint        # eslint
+npm run smoke       # pasada end-to-end en un Chrome real
+```
+
+El compiler está cubierto por tests de round-trip sobre los pipelines de ejemplo del propio framework: importa cada uno, compila de vuelta y compara. Ese test es lo que garantiza que el canvas nunca cambie tu archivo en silencio.
+
+## Siguiente
+
+- [El canvas](/es/docs/studio/canvas/) — conexiones, branching, control por teclado
+- [El inspector](/es/docs/studio/inspector/) — editar campos de nodos
+- [Asistente de IA](/es/docs/studio/ai-assistant/) — generar y modificar Jobs
+- [Ejecutar un Job](/es/docs/studio/running/) — el runner local
+- [Pipelines](/es/docs/studio/pipelines/) — varios Jobs en secuencia
+- [Plantillas y lecciones](/es/docs/studio/templates/) — la forma más rápida de aprender una función

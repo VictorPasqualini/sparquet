@@ -1,0 +1,299 @@
+---
+title: Validaciones
+description: Reglas de calidad de datos en Sparquet — cada validador, las políticas de falla, y el reporte que se escribe por cada ejecución.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Las validaciones miden el DataFrame después de cada transformación y antes de cualquier escritura. **Nunca modifican los datos** — esa separación es lo que hace confiable al reporte.
+
+```json
+{
+  "validations": {
+    "on_failure": "warn",
+    "report": { "format": "csv", "path": "/dq/orders", "mode": "append" },
+    "rules": [
+      { "type": "not_null", "columns": ["id", "customer_id"] },
+      { "type": "unique", "columns": ["id"] },
+      { "type": "range", "column": "quantity", "min": 1, "max": 10000 },
+      { "type": "regex", "column": "email", "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$" },
+      { "type": "row_count", "min": 1, "max": 5000000 },
+      {
+        "type": "sql",
+        "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE revenue < 0",
+        "error_message": "Negative revenue found"
+      }
+    ]
+  }
+}
+```
+
+## Reglas
+
+### `not_null`
+
+Falla cuando cualquier columna listada contiene nulos. El conteo de fallas es el número de filas infractoras.
+
+```json
+{ "type": "not_null", "columns": ["id", "customer_id"] }
+```
+
+### `unique`
+
+Falla cuando las columnas listadas no forman una clave única. Con varias columnas la unicidad es sobre la **combinación**, no sobre cada columna por separado.
+
+```json
+{ "type": "unique", "columns": ["order_id", "line_number"] }
+```
+
+### `range`
+
+Acota una columna numérica o de fecha. Se requiere al menos uno de `min` / `max`; ambos son inclusivos.
+
+```json
+{ "type": "range", "column": "quantity", "min": 1, "max": 10000 }
+```
+
+Los nulos pasan esta regla — combínala con `not_null` cuando la columna sea obligatoria.
+
+### `regex`
+
+Verifica una columna string contra un patrón.
+
+```json
+{ "type": "regex", "column": "document", "pattern": "^[0-9]{11}$" }
+```
+
+<Aside type="note">
+  Aquí los nulos cuentan como fallas, a diferencia de `range`. Recuerda el escape
+  de JSON: una barra invertida en el patrón se escribe `\\`.
+</Aside>
+
+### `row_count`
+
+Acota el tamaño del DataFrame — la guarda más barata contra una carga silenciosamente vacía.
+
+```json
+{ "type": "row_count", "min": 1, "max": 5000000 }
+```
+
+`min` toma `0` por defecto; `max` es opcional.
+
+### `sql`
+
+Todo lo que las demás reglas no expresan. La query se ejecuta contra una vista temporal llamada `_validation_df` y debe devolver un **único booleano**: `true` significa que la regla pasó. La semántica es *pasa-cuando-es-verdadero* — escribe el invariante, no la violación.
+
+```json
+{
+  "type": "sql",
+  "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE revenue < 0",
+  "error_message": "Negative revenue found"
+}
+```
+
+Úsala para invariantes entre columnas (`ends_at > starts_at`), expectativas referenciales dentro del DataFrame, o reglas de negocio que solo tienen sentido en conjunto.
+
+**Dos modos.** Además de la `query` booleana, la regla `sql` acepta **`failed_rows`** — una query que devuelve las *filas infractoras* (estilo "failed rows" de SODA). El check falla si regresa alguna, `failed_count` es su número, y un `output` opcional por regla escribe exactamente esas filas en un destino:
+
+```json
+{
+  "type": "sql",
+  "failed_rows": "SELECT * FROM _validation_df WHERE revenue < 0",
+  "output": { "format": "delta", "path": "dq.negative_revenue", "mode": "overwrite" }
+}
+```
+
+Usa `query` cuando solo necesitas pasa/falla; usa `failed_rows` cuando quieres *ver y conservar* las filas malas para depuración o una cuarentena dirigida.
+
+<Aside type="note">
+  Esta regla se llamaba `custom_sql` en versiones anteriores. Ahora es `sql`, con
+  comportamiento idéntico. Todo el motor de validación es la librería autónoma
+  [`sparquet_cola`](/es/docs/guides/sparquet-cola/) — mismos `type`s de reglas.
+</Aside>
+
+### `check`
+
+Una única **métrica** medida sobre el DataFrame (o una columna) y comparada contra un **umbral**, al estilo SODA-Core. Lleva niveles de severidad `warn` y `fail`, así que un check puede pasar y aun así levantar una advertencia.
+
+```json
+{ "type": "check", "metric": "row_count", "must_be": "> 0" }
+
+{ "type": "check", "name": "cpf rarely missing",
+  "metric": "missing_percent", "column": "cpf", "must_be": "< 1%", "warn": "= 0" }
+
+{ "type": "check", "metric": "duplicate_count", "columns": ["id"], "must_be": "= 0" }
+
+{ "type": "check", "metric": "invalid_percent", "column": "email",
+  "valid_format": "email", "must_be": "< 5%" }
+
+{ "type": "check", "metric": "avg", "column": "amount", "must_be": "between 10 and 100" }
+
+{ "type": "check", "metric": "freshness", "column": "updated_at", "must_be": "< 1d" }
+```
+
+**Métricas.** `row_count`, `distinct_count`, `missing_count` / `missing_percent`, `duplicate_count` / `duplicate_percent`, `invalid_count` / `invalid_percent`, `min`, `max`, `avg` (`mean`), `sum`, `stddev`, y `freshness` (segundos desde el valor más reciente en `column`). Las métricas de conteo por columna toman `column` (o `columns`; las métricas de distinct/duplicate usan el conjunto completo).
+
+**DSL de umbral** (en `must_be`, la condición de aprobación, y el `warn` opcional):
+
+| Forma | Ejemplo |
+|---|---|
+| comparación | `> 0`, `< 5`, `>= 100`, `<= 10`, `= 0`, `!= 0` |
+| rango | `between 10 and 20`, `not between 1 and 2` |
+| sufijo de porcentaje | `< 5%` (el `%` es cosmético — el número es `5`) |
+| sufijo de duración | `< 1d`, `<= 2h`, `> 30m` (convertido a segundos, para `freshness`) |
+
+Las unidades de duración son `s` `m` `h` `d` `w`. Un número solo significa igualdad (`must_be: "0"` ≡ `= 0`).
+
+**Validez de columna** (para las métricas `invalid_*` — un valor cuenta como inválido cuando no está ausente y falla todas las reglas configuradas): `valid_values`, `invalid_values`, `valid_format` (regexes con nombre: `email`, `uuid`, `cpf`, `cnpj`, `date`, `timestamp`, `phone`, `url`, `ip`, `integer`, `decimal`, `boolean`, `alphanumeric`, `credit_card`, …), `valid_regex`, `valid_min` / `valid_max`, `valid_min_length` / `valid_max_length` / `valid_length`. Para las métricas `missing_*`, `missing_values` trata strings centinela extra (p. ej. `["", "N/A"]`) como ausentes además de `null`.
+
+### `schema`
+
+Asevera la forma del DataFrame — qué columnas deben existir, cuáles no, y sus tipos.
+
+```json
+{
+  "type": "schema",
+  "required_columns": ["id", "amount"],
+  "forbidden_columns": ["_debug"],
+  "column_types": { "id": "bigint", "amount": "double" }
+}
+```
+
+`column_types` acepta alias de tipo: `long` → `bigint`, `integer` → `int`, y una expectativa `decimal(p,s)` coincide con el tipo base `decimal` sin importar la precisión/escala.
+
+## `on_failure`
+
+Lo que hace el motor cuando al menos una regla falla.
+
+| Modo | Pipeline | Reporte | Úsalo cuando |
+|---|---|---|---|
+| `fail` (por defecto) | aborta antes de cualquier escritura | no se escribe | los datos malos nunca deben llegar al destino |
+| `warn` | continúa y escribe | se escribe | quieres visibilidad sin detener la carga |
+| `skip` | continúa y escribe | se escribe | las reglas son informativas por ahora |
+
+<Aside type="caution">
+  En modo `fail` una violación aborta la ejecución *antes* de que se escriba el
+  reporte, así que un dashboard alimentado solo por el reporte no verá las fallas
+  duras. Si necesitas que se registre cada resultado, usa `warn` y deja que tu
+  orquestador decida en base a `result.validation_results`.
+</Aside>
+
+El modo se compara distinguiendo mayúsculas — escríbelo en minúsculas.
+
+## Severidad
+
+Las reglas `check` agregan un nivel entre pasar y fallar. Un check que supera `must_be` pero cruza su umbral opcional `warn` tiene **severidad `warn`**: se registra y reporta, pero cuenta como aprobado — un `warn` nunca aborta la ejecución, ni siquiera bajo `on_failure: "fail"`. Solo una falla real (`must_be` violado, o cualquier otra regla que falle) lo hace.
+
+Cada resultado lleva la severidad junto a los campos clásicos:
+
+| Campo | Significado |
+|---|---|
+| `severity` | `pass`, `warn` o `fail` — derivado de `passed` cuando una regla no lo define |
+| `metric_value` | la métrica numérica que midió un `check` (`None` para reglas que no producen métrica) |
+| `check_name` | el `name` opcional del check, para reportes legibles |
+
+Como un `warn` mantiene `passed = True`, un orquestador que filtra por `not check.passed` ve solo las fallas duras; inspecciona `check.severity == "warn"` para también sacar a la luz las advertencias.
+
+## El reporte
+
+`report` acepta una configuración de salida completa — cualquier formato, cualquier modo, incluso sus propias transformaciones. Una fila por regla:
+
+| Columna | Significado |
+|---|---|
+| `pipeline` | el `name` del pipeline |
+| `rule_type` | tipo de validador |
+| `check_name` | el `name` del check, cuando está definido (vacío en caso contrario) |
+| `severity` | `pass`, `warn` o `fail` |
+| `passed` | booleano (`true` para `pass` y `warn`) |
+| `failed_count` | filas infractoras (0 cuando pasó) |
+| `metric_value` | la métrica medida para las reglas `check` (null en caso contrario) |
+| `message` | detalle legible de la falla |
+| `validated_at` | timestamp del check |
+
+```json
+{
+  "report": {
+    "format": "delta",
+    "path": "quality.pipeline_report",
+    "mode": "append",
+    "partition_by": ["pipeline"]
+  }
+}
+```
+
+Anexar cada ejecución a una sola tabla te da un historial de calidad que puedes graficar: tasa de fallas por regla, por pipeline, a lo largo del tiempo.
+
+## Cuarentena a nivel de fila (`validations.outputs`)
+
+Donde `report` persiste *métricas*, `validations.outputs` enruta las *filas mismas* — aparte del/de los `output(s)` principal(es). Claves `valid` e `invalid`, cada una un destino de salida completo:
+
+```json
+"validations": {
+  "on_failure": "warn",
+  "rules": [
+    { "type": "not_null", "columns": ["id"] },
+    { "type": "check", "metric": "invalid_count", "column": "email", "valid_format": "email", "must_be": "= 0" }
+  ],
+  "outputs": {
+    "valid":   { "format": "delta", "path": "silver.orders_ok",         "mode": "overwrite" },
+    "invalid": { "format": "delta", "path": "silver.orders_quarantine", "mode": "overwrite" }
+  }
+}
+```
+
+Una fila es **inválida** cuando viola cualquier regla *a nivel de fila* — `not_null`, `range`, `regex`, `unique`, y la regla `check` con una métrica `missing_*` / `invalid_*`. Las reglas agregadas (`row_count`, `avg`, `freshness`, `duplicate_count`, `schema`, `sql` booleano) describen la tabla, no filas individuales, así que no contribuyen a la división.
+
+<Aside type="tip">
+  `validations.outputs` es la división "bronze → silver válido + silver inválido"
+  cuando *inválido significa "falló las reglas de DQ"*. Si la división es lógica de
+  negocio ajena a la calidad, hazla en su lugar con dos entradas en los `outputs`
+  del pipeline y un `filter` por destino. Consulta la guía de calidad de datos para
+  el trade-off.
+</Aside>
+
+## Leer el resultado en Python
+
+```python
+result = fw.run("orders.json")
+
+for check in result.validation_results:
+    status = "ok" if check.passed else f"{check.failed_count} rows"
+    print(f"{check.rule_type:12} {status:>12}  {check.message}")
+
+if any(not check.passed for check in result.validation_results):
+    notify_data_owner(result.pipeline_name)
+```
+
+## Elegir entre una regla y un filtro
+
+| Intención | Herramienta correcta |
+|---|---|
+| La fila no debe llegar al destino | `filter` en `transformations` |
+| Necesito saber cuántas filas malas llegaron | una regla de validación |
+| Los datos malos significan que la carga está mal | una regla con `on_failure: "fail"` |
+| Los datos malos se esperan pero deben rastrearse | una regla con `warn` más un `report` |
+
+## Validadores personalizados
+
+```python
+from sparquet.validation.base import BaseValidator, ValidationResult
+import pyspark.sql.functions as F
+
+class NoFutureDateValidator(BaseValidator):
+    def validate(self, df):
+        column = self.rule.params["column"]
+        failed = df.filter(F.col(column) > F.current_date()).count()
+        if failed:
+            return ValidationResult("no_future_date", False, f"{failed} future dates", failed)
+        return ValidationResult("no_future_date", True)
+
+fw.register_validator("no_future_date", NoFutureDateValidator)
+```
+
+```json
+{ "type": "no_future_date", "column": "ordered_at" }
+```
+
+Consulta [Extender](/es/docs/reference/extending/).

@@ -38,9 +38,9 @@ El documento es el contrato. El framework nunca necesita al Studio para ejecutar
 ```
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework()
+fw = Sparquet()
 print(fw.run("pedidos_curados.json").summary())
 fw.stop()
 ```
@@ -82,7 +82,7 @@ Esa es toda la superficie: un archivo y una llamada. Todo lo demás en esta docu
 
 2. **[Tu primer pipeline](/es/docs/start/quickstart/)** — un trabajo funcionando en cinco minutos, desde la terminal.
 
-3. **Tu primer flujo en el Studio** — el mismo pipeline, dibujado en el lienzo.
+3. **Tu primer Job en el Studio** — el mismo pipeline, dibujado en el lienzo.
 
 4. **Conceptos** — orden de ejecución y cómo el grafo se convierte en el archivo.
 

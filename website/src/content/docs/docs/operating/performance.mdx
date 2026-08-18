@@ -23,6 +23,29 @@ The cheapest row is the one that never leaves the source.
 
 Order matters: a `select` after the join still carries every column through the shuffle.
 
+**Make it a habit: start every chain with `filter` then `select`, before any join, struct, `group_by` or window.** Spark's optimizer pushes some of this down on its own, but doing it explicitly shrinks the data for every step that follows, helps the planner, and makes the pipeline read as "narrow early, work later."
+
+## Reuse the input without re-reading
+
+When you need to **self-join** the input — or run SQL against it — without reading the source twice, register it once as a cached temp view with `input_view`:
+
+```python
+fw.run("orders.json", input_view="orders")            # session temp view, cached
+fw.run("orders.json", input_view={"name": "orders", "type": "global"})  # global_temp.orders
+```
+
+```json
+// a later step joins the input to itself through the view — no second read
+{ "type": "join",
+  "with": { "format": "view", "path": "orders" },
+  "with_transformations": [
+    { "type": "group_by", "by": ["customer_id"], "agg": ["max(amount) as top"] }
+  ],
+  "on": "customer_id", "how": "left" }
+```
+
+The input DataFrame is `cache()`d and registered before the transformations run, so the self-join reuses the cached rows instead of recomputing the source lineage. Set it in the `Sparquet(...)` constructor to apply to every run, or per `run(...)` call.
+
 ## Checkpoint the plan
 
 ```json

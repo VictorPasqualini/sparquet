@@ -22,7 +22,7 @@ import {
 } from 'react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 
-import { CommandPalette, NEW_PROJECT_EVENT } from '@/components/layout/CommandPalette'
+import { CommandPalette, NEW_WORKFLOW_EVENT } from '@/components/layout/CommandPalette'
 import {
   Button,
   Field,
@@ -37,7 +37,7 @@ import {
 import { cn } from '@/lib/utils/cn'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
-import { PROJECT_ACCENTS, type Project, type ProjectAccent } from '@/types/studio'
+import { WORKFLOW_ACCENTS, type Workflow, type WorkflowAccent } from '@/types/studio'
 
 const SIDEBAR_KEY = 'sparquet-studio:sidebar'
 const GITHUB_URL = 'https://github.com/sparquet/sparquet-studio'
@@ -63,8 +63,8 @@ const NAV: NavEntry[] = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 
-/** Project accents mapped onto the semantic token set — no raw palette colors. */
-const ACCENT_DOT: Record<ProjectAccent, string> = {
+/** Workflow accents mapped onto the semantic token set — no raw palette colors. */
+const ACCENT_DOT: Record<WorkflowAccent, string> = {
   amber: 'bg-brand-500',
   sky: 'bg-node-input',
   violet: 'bg-node-combine',
@@ -73,8 +73,8 @@ const ACCENT_DOT: Record<ProjectAccent, string> = {
   slate: 'bg-node-inspect',
 }
 
-/** Same accents, tinted — carries project identity into the collapsed rail. */
-const ACCENT_SOFT: Record<ProjectAccent, string> = {
+/** Same accents, tinted — carries workflow identity into the collapsed rail. */
+const ACCENT_SOFT: Record<WorkflowAccent, string> = {
   amber: 'bg-brand-500/15',
   sky: 'bg-node-input/15',
   violet: 'bg-node-combine/15',
@@ -86,7 +86,7 @@ const ACCENT_SOFT: Record<ProjectAccent, string> = {
 export function AppShell() {
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const [paletteOpen, setPaletteOpen] = useState(false)
-  const [newProjectOpen, setNewProjectOpen] = useState(false)
+  const [newWorkflowOpen, setNewWorkflowOpen] = useState(false)
 
   useEffect(() => {
     try {
@@ -112,9 +112,9 @@ export function AppShell() {
   }, [])
 
   useEffect(() => {
-    const onRequest = () => setNewProjectOpen(true)
-    window.addEventListener(NEW_PROJECT_EVENT, onRequest)
-    return () => window.removeEventListener(NEW_PROJECT_EVENT, onRequest)
+    const onRequest = () => setNewWorkflowOpen(true)
+    window.addEventListener(NEW_WORKFLOW_EVENT, onRequest)
+    return () => window.removeEventListener(NEW_WORKFLOW_EVENT, onRequest)
   }, [])
 
   return (
@@ -123,7 +123,7 @@ export function AppShell() {
         collapsed={collapsed}
         onToggleCollapsed={() => setCollapsed((value) => !value)}
         onOpenPalette={() => setPaletteOpen(true)}
-        onNewProject={() => setNewProjectOpen(true)}
+        onNewWorkflow={() => setNewWorkflowOpen(true)}
       />
 
       <main className="scroll-area min-h-0 min-w-0 flex-1">
@@ -131,7 +131,7 @@ export function AppShell() {
       </main>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-      <NewProjectModal open={newProjectOpen} onOpenChange={setNewProjectOpen} />
+      <NewWorkflowModal open={newWorkflowOpen} onOpenChange={setNewWorkflowOpen} />
     </div>
   )
 }
@@ -142,20 +142,20 @@ interface SidebarProps {
   collapsed: boolean
   onToggleCollapsed: () => void
   onOpenPalette: () => void
-  onNewProject: () => void
+  onNewWorkflow: () => void
 }
 
-function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewProject }: SidebarProps) {
-  const projects = useLibraryStore((state) => state.projects)
+function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }: SidebarProps) {
   const workflows = useLibraryStore((state) => state.workflows)
+  const jobs = useLibraryStore((state) => state.jobs)
 
   const counts = useMemo(() => {
     const map = new Map<string, number>()
-    for (const workflow of workflows) {
-      map.set(workflow.projectId, (map.get(workflow.projectId) ?? 0) + 1)
+    for (const job of jobs) {
+      map.set(job.workflowId, (map.get(job.workflowId) ?? 0) + 1)
     }
     return map
-  }, [workflows])
+  }, [jobs])
 
   return (
     <aside
@@ -237,16 +237,16 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewProject }: 
       <div className={cn('scroll-area min-h-0 flex-1 px-2 pb-2', collapsed && 'px-0')}>
         {collapsed ? (
           <div className="flex flex-col items-center gap-0.5 border-t border-line pt-2">
-            {projects.map((project) => (
-              <ProjectLink
-                key={project.id}
-                project={project}
-                count={counts.get(project.id) ?? 0}
+            {workflows.map((workflow) => (
+              <WorkflowLink
+                key={workflow.id}
+                workflow={workflow}
+                count={counts.get(workflow.id) ?? 0}
                 collapsed
               />
             ))}
-            <Tooltip content="New project" side="right">
-              <IconButton label="New project" size="sm" onClick={onNewProject}>
+            <Tooltip content="New workflow" side="right">
+              <IconButton label="New workflow" size="sm" onClick={onNewWorkflow}>
                 <Plus />
               </IconButton>
             </Tooltip>
@@ -256,26 +256,26 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewProject }: 
             <SectionTitle
               className="px-1 pb-1.5 pt-2"
               action={
-                <IconButton label="New project" size="xs" onClick={onNewProject}>
+                <IconButton label="New workflow" size="xs" onClick={onNewWorkflow}>
                   <Plus />
                 </IconButton>
               }
             >
-              Projects
+              Workflows
             </SectionTitle>
             <div className="space-y-0.5">
-              {projects.map((project) => (
-                <ProjectLink
-                  key={project.id}
-                  project={project}
-                  count={counts.get(project.id) ?? 0}
+              {workflows.map((workflow) => (
+                <WorkflowLink
+                  key={workflow.id}
+                  workflow={workflow}
+                  count={counts.get(workflow.id) ?? 0}
                   collapsed={false}
                 />
               ))}
             </div>
-            {projects.length === 0 && (
+            {workflows.length === 0 && (
               <p className="px-1 py-1.5 text-2xs leading-relaxed text-content-subtle">
-                No projects yet. Create one to hold your workflows.
+                No workflows yet. Create one to hold your jobs.
               </p>
             )}
           </>
@@ -319,19 +319,19 @@ function SidebarLink({ to, label, icon: Icon, collapsed, end }: SidebarLinkProps
   )
 }
 
-interface ProjectLinkProps {
-  project: Project
+interface WorkflowLinkProps {
+  workflow: Workflow
   count: number
   collapsed: boolean
 }
 
-function ProjectLink({ project, count, collapsed }: ProjectLinkProps) {
-  const label = `${project.name} — ${countLabel(count)}`
+function WorkflowLink({ workflow, count, collapsed }: WorkflowLinkProps) {
+  const label = `${workflow.name} — ${countLabel(count)}`
 
   return (
     <Tooltip content={label} side="right" disabled={!collapsed}>
       <NavLink
-        to={`/projects/${project.id}`}
+        to={`/workflows/${workflow.id}`}
         aria-label={collapsed ? label : undefined}
         className={({ isActive }) =>
           cn(
@@ -347,18 +347,18 @@ function ProjectLink({ project, count, collapsed }: ProjectLinkProps) {
           <span
             className={cn(
               'flex h-6 w-6 items-center justify-center rounded-md text-2xs font-semibold uppercase text-content',
-              ACCENT_SOFT[project.accent],
+              ACCENT_SOFT[workflow.accent],
             )}
           >
-            {project.name.slice(0, 2)}
+            {workflow.name.slice(0, 2)}
           </span>
         ) : (
           <>
             <span
-              className={cn('h-2 w-2 shrink-0 rounded-full', ACCENT_DOT[project.accent])}
+              className={cn('h-2 w-2 shrink-0 rounded-full', ACCENT_DOT[workflow.accent])}
               aria-hidden
             />
-            <span className="min-w-0 flex-1 truncate">{project.name}</span>
+            <span className="min-w-0 flex-1 truncate">{workflow.name}</span>
             <span className="shrink-0 text-2xs tabular-nums text-content-subtle">{count}</span>
           </>
         )}
@@ -423,21 +423,21 @@ function SidebarFooter({
   )
 }
 
-/* ----------------------------------------------------------- new project */
+/* ----------------------------------------------------------- new workflow */
 
-interface NewProjectModalProps {
+interface NewWorkflowModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-function NewProjectModal({ open, onOpenChange }: NewProjectModalProps) {
-  const createProject = useLibraryStore((state) => state.createProject)
+function NewWorkflowModal({ open, onOpenChange }: NewWorkflowModalProps) {
+  const createWorkflow = useLibraryStore((state) => state.createWorkflow)
   const navigate = useNavigate()
   const formId = useId()
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [accent, setAccent] = useState<ProjectAccent>('amber')
+  const [accent, setAccent] = useState<WorkflowAccent>('amber')
   const [busy, setBusy] = useState(false)
   const accentGroupRef = useRef<HTMLDivElement>(null)
 
@@ -451,8 +451,8 @@ function NewProjectModal({ open, onOpenChange }: NewProjectModalProps) {
           : 0
     if (delta === 0) return
     event.preventDefault()
-    const next = (index + delta + PROJECT_ACCENTS.length) % PROJECT_ACCENTS.length
-    setAccent(PROJECT_ACCENTS[next])
+    const next = (index + delta + WORKFLOW_ACCENTS.length) % WORKFLOW_ACCENTS.length
+    setAccent(WORKFLOW_ACCENTS[next])
     accentGroupRef.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus()
   }
 
@@ -468,21 +468,21 @@ function NewProjectModal({ open, onOpenChange }: NewProjectModalProps) {
     const trimmed = name.trim()
     if (!trimmed || busy) return
     setBusy(true)
-    const project = await createProject({
+    const workflow = await createWorkflow({
       name: trimmed,
       description: description.trim(),
       accent,
     })
     onOpenChange(false)
-    navigate(`/projects/${project.id}`)
+    navigate(`/workflows/${workflow.id}`)
   }
 
   return (
     <Modal
       open={open}
       onOpenChange={onOpenChange}
-      title="New project"
-      description="A project groups the workflows that belong to the same data domain."
+      title="New workflow"
+      description="A workflow groups the jobs that belong to the same data domain."
       size="md"
       footer={
         <>
@@ -496,7 +496,7 @@ function NewProjectModal({ open, onOpenChange }: NewProjectModalProps) {
             loading={busy}
             disabled={!name.trim()}
           >
-            Create project
+            Create workflow
           </Button>
         </>
       }
@@ -533,14 +533,14 @@ function NewProjectModal({ open, onOpenChange }: NewProjectModalProps) {
           />
         </Field>
 
-        <Field label="Accent" help="Tells projects apart across the sidebar and the lists.">
+        <Field label="Accent" help="Tells workflows apart across the sidebar and the lists.">
           <div
             ref={accentGroupRef}
             role="radiogroup"
-            aria-label="Project accent"
+            aria-label="Workflow accent"
             className="flex items-center gap-2"
           >
-            {PROJECT_ACCENTS.map((option, index) => (
+            {WORKFLOW_ACCENTS.map((option, index) => (
               <button
                 key={option}
                 type="button"
@@ -578,6 +578,6 @@ function readCollapsed(): boolean {
 }
 
 function countLabel(count: number): string {
-  if (count === 0) return 'no workflows'
-  return `${count} ${count === 1 ? 'workflow' : 'workflows'}`
+  if (count === 0) return 'no jobs'
+  return `${count} ${count === 1 ? 'job' : 'jobs'}`
 }

@@ -1,27 +1,13 @@
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+"""Compat: os tipos base de validação agora vivem em `sparquet_cola`.
 
-from pyspark.sql import DataFrame
+O bloco JSON continua sendo `validations`; internamente o motor de qualidade de
+dados é o **sparquet_cola** (biblioteca separável). Estes aliases preservam os nomes
+históricos do framework (`BaseValidator`, `ValidationResult`) usados por validators
+customizados via `register_validator`.
+"""
+from sparquet_cola.checks import BaseCheck, CheckResult
 
-from sparquet.core.config import ValidationRule
+BaseValidator = BaseCheck
+ValidationResult = CheckResult
 
-
-@dataclass
-class ValidationResult:
-    rule_type: str
-    passed: bool
-    message: str = ""
-    failed_count: int = 0
-
-    def __str__(self) -> str:
-        status = "PASS" if self.passed else "FAIL"
-        return f"[{status}] {self.rule_type}: {self.message or 'OK'}"
-
-
-class BaseValidator(ABC):
-    def __init__(self, rule: ValidationRule) -> None:
-        self.rule = rule
-
-    @abstractmethod
-    def validate(self, df: DataFrame) -> ValidationResult:
-        ...
+__all__ = ["BaseValidator", "ValidationResult", "BaseCheck", "CheckResult"]

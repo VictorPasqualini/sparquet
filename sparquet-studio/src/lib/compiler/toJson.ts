@@ -27,9 +27,11 @@ import type {
   StudioNode,
   TransformNode,
   ValidationIssue,
-  ValidationsNode,
-  WorkflowSettings,
+  ValidationNode,
+  ValidationPolicy,
+  JobSettings,
 } from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY } from '@/types/studio'
 import {
   chainToSink,
   isCompilable,
@@ -38,13 +40,13 @@ import {
   isSinkNode,
   isSourceNode,
   isTransformNode,
-  isValidationsNode,
+  isValidationNode,
   longestCommonPrefix,
   sideParent,
 } from '@/lib/compiler/graph'
 
 export interface CompileResult {
-  /** `null` when a structural error makes the workflow impossible to express. */
+  /** `null` when a structural error makes the job impossible to express. */
   pipeline: PipelineSpec | null
   issues: ValidationIssue[]
 }
@@ -77,7 +79,7 @@ const OUTPUT_KEY_ORDER = [
   'options',
   'transformations',
 ]
-const VALIDATIONS_KEY_ORDER = ['on_failure', 'report', 'rules']
+const VALIDATIONS_KEY_ORDER = ['on_failure', 'report', 'outputs', 'rules']
 /** `with` / `with_transformations` lead because they describe the second input. */
 const TRANSFORM_KEY_ORDER = ['type', 'skip_if_false', 'with', 'with_transformations']
 
@@ -139,6 +141,14 @@ function orderKeys(record: JsonRecord, preferred: readonly string[]): JsonRecord
     if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = record[key]
   }
   return out
+}
+
+/** `Array.prototype.findLastIndex` is ES2023; the build targets ES2022. */
+function lastIndexOf<T>(items: readonly T[], match: (item: T) => boolean): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (match(items[index])) return index
+  }
+  return -1
 }
 
 interface IssueOptions {
@@ -221,30 +231,52 @@ function buildReport(report: OutputSpec): OutputSpec | null {
   return orderKeys(pruned, OUTPUT_KEY_ORDER) as unknown as OutputSpec
 }
 
-function buildValidations(node: ValidationsNode, issues: Issues): ValidationsSpec | null {
-  const rules: ValidationRuleSpec[] = []
-  for (const rule of node.data.rules ?? []) {
-    if (!isRecord(rule) || typeof rule.type !== 'string' || rule.type.trim() === '') {
-      issues.warning('A validation rule without a type was left out.', { nodeId: node.id })
-      continue
-    }
-    const cloned = jsonClone(rule) as JsonRecord
-    const pruned: JsonRecord = {}
-    for (const [key, value] of Object.entries(cloned)) {
-      if (value === undefined || value === null) continue
-      pruned[key] = value
-    }
-    rules.push(orderKeys(pruned, ['type']) as unknown as ValidationRuleSpec)
-  }
-
-  if (rules.length === 0) {
-    issues.warning('This validations node has no rules and was left out.', { nodeId: node.id })
+/** One rule node → one entry of `validations.rules`. */
+function buildRule(node: ValidationNode, issues: Issues): ValidationRuleSpec | null {
+  const type = node.data.validator
+  if (typeof type !== 'string' || type.trim() === '') {
+    issues.warning('This validation node has no rule type and was left out.', {
+      nodeId: node.id,
+    })
     return null
   }
 
-  const spec: ValidationsSpec = { on_failure: node.data.onFailure ?? 'fail' }
-  const report = node.data.report ? buildReport(node.data.report) : null
+  const spec: JsonRecord = { type }
+  for (const [key, value] of Object.entries(node.data.params ?? {})) {
+    if (key === 'type') continue
+    // Only null/undefined go: an empty list (`columns: []`) is still a value the
+    // engine reads, so it has to survive the round trip.
+    if (value === undefined || value === null) continue
+    spec[key] = jsonClone(value)
+  }
+  return orderKeys(spec, ['type']) as unknown as ValidationRuleSpec
+}
+
+/**
+ * The rule nodes on the shared chain plus the job-level policy → the single
+ * `validations` object. No rules means no `validations` key at all.
+ */
+function buildValidations(
+  nodes: readonly ValidationNode[],
+  policy: ValidationPolicy | undefined,
+  issues: Issues,
+): ValidationsSpec | null {
+  const rules: ValidationRuleSpec[] = []
+  for (const node of nodes) {
+    const rule = buildRule(node, issues)
+    if (rule) rules.push(rule)
+  }
+  if (rules.length === 0) return null
+
+  const spec: ValidationsSpec = {
+    on_failure: policy?.onFailure ?? DEFAULT_VALIDATION_POLICY.onFailure,
+  }
+  const report = policy?.report ? buildReport(policy.report) : null
   if (report) spec.report = report
+  const outputs = policy?.outputs
+  if (isRecord(outputs) && Object.keys(outputs).length > 0) {
+    spec.outputs = jsonClone(outputs) as Record<string, OutputSpec>
+  }
   spec.rules = rules
   return spec
 }
@@ -305,7 +337,7 @@ function compileSideInput(
     })
     return empty
   }
-  if (rest.some(isValidationsNode)) {
+  if (rest.some(isValidationNode)) {
     ctx.issues.error('Validations cannot run inside the right side of a join.', {
       nodeId: node.id,
     })
@@ -396,14 +428,14 @@ function reportChainProblem(
 
 export function compileGraph(
   graph: StudioGraph,
-  settings: WorkflowSettings,
+  settings: JobSettings,
   params?: readonly ParamDefinition[],
 ): CompileResult {
   const issues = createIssues()
   const sinks = graph.nodes.filter(isSinkNode).filter((node) => !isDisabled(node))
 
   if (sinks.length === 0) {
-    issues.error('The workflow has no destination.', {
+    issues.error('The job has no destination.', {
       hint: 'Add a destination node and connect the end of the chain to it.',
     })
     return { pipeline: null, issues: issues.items }
@@ -462,35 +494,41 @@ export function compileGraph(
   )
   const prefixIds = new Set(prefix.map((node) => node.id))
 
-  const validationNodes: ValidationsNode[] = []
-  const seenValidations = new Set<string>()
+  // Rules only exist as a block, and the block runs once for the whole job: a rule
+  // node sitting past the fan-out would belong to one destination only.
+  const strayValidations = new Set<string>()
   for (const entry of chains) {
     for (const node of entry.middle) {
-      if (!isValidationsNode(node) || seenValidations.has(node.id)) continue
-      seenValidations.add(node.id)
-      validationNodes.push(node)
+      if (!isValidationNode(node) || prefixIds.has(node.id) || strayValidations.has(node.id)) {
+        continue
+      }
+      strayValidations.add(node.id)
+      issues.error('Validations must run before the chain splits into several destinations.', {
+        nodeId: node.id,
+        hint: 'Move it upstream of the branch, where every destination passes through it.',
+      })
     }
   }
 
-  if (validationNodes.length > 1) {
-    issues.error('A pipeline can only have one validations block.', {
-      nodeId: validationNodes[1].id,
-      hint: 'Merge the rules into a single validations node on the shared part of the chain.',
-    })
-  }
-  const validationsNode = validationNodes[0]
-  if (validationsNode && !prefixIds.has(validationsNode.id)) {
-    issues.error('Validations must run before the chain splits into several destinations.', {
-      nodeId: validationsNode.id,
-      hint: 'Move it upstream of the branch, where every destination passes through it.',
+  const validationNodes = prefix.filter(isValidationNode)
+  const firstValidation = prefix.findIndex(isValidationNode)
+  const lastValidation = lastIndexOf(prefix, isValidationNode)
+
+  // The framework runs main `transformations`, then ONE validations block, then each
+  // output's own `transformations`. A node wedged between two rules would therefore
+  // change place in that order without the canvas showing it, so it is refused.
+  for (let index = firstValidation + 1; index < lastValidation; index += 1) {
+    const node = prefix[index]
+    if (isValidationNode(node)) continue
+    issues.error('This node runs between two validation rules.', {
+      nodeId: node.id,
+      hint: 'Rules compile into a single validations block — keep them next to each other and move this node before or after the whole run.',
     })
   }
 
-  // The framework runs main `transformations`, then validations, then each
-  // output's own `transformations` — so the shared prefix stops at the
-  // validations node and everything past it belongs to the destinations.
-  const validationsIndex = prefix.findIndex(isValidationsNode)
-  const mainPrefix = validationsIndex >= 0 ? prefix.slice(0, validationsIndex + 1) : prefix
+  // The shared prefix stops at the last rule; everything past it belongs to the
+  // destinations.
+  const mainPrefix = lastValidation >= 0 ? prefix.slice(0, lastValidation + 1) : prefix
 
   const input = buildInput(source, issues)
   const transformations = mainPrefix
@@ -505,8 +543,7 @@ export function compileGraph(
     return buildOutput(entry.sink, suffixTransforms, issues)
   })
 
-  const validations = validationsNode ? buildValidations(validationsNode, issues) : null
-  if (validationsNode) ctx.used.add(validationsNode.id)
+  const validations = buildValidations(validationNodes, settings.validations, issues)
 
   for (const node of graph.nodes) {
     if (isNoteNode(node) || isDisabled(node) || ctx.used.has(node.id)) continue
@@ -555,7 +592,7 @@ function reportUnknownParams(
     if (defined.has(key) || reported.has(key)) continue
     reported.add(key)
     issues.warning(`The pipeline uses {${key}}, but no parameter with that name is defined.`, {
-      hint: 'Add it to the workflow parameters, or the placeholder stays literal at run time.',
+      hint: 'Add it to the job parameters, or the placeholder stays literal at run time.',
     })
   }
 }

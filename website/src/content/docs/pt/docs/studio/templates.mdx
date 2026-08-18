@@ -1,0 +1,52 @@
+---
+title: Templates e lições
+description: Dez Jobs funcionais e seis lições guiadas que vêm com o Sparquet Studio.
+sidebar:
+  order: 7
+---
+
+O Studio vem com Jobs que realmente rodam. Abrir um e ler o JSON dele costuma ser mais rápido que ler uma página de referência.
+
+## Templates
+
+**Templates** na sidebar. Cada card traz o que o template demonstra; **Preview** mostra o JSON antes de você se comprometer com qualquer coisa, **Use template** o copia para um Workflow como um novo Job.
+
+| Template | Nível | O que ensina |
+|---|---|---|
+| CSV to Parquet | starter | As quatro transformações do dia a dia, e por que a ordem importa |
+| Ingestion with data quality | starter | Validações, `on_failure: warn` e um report persistido |
+| Join and runtime pushdown | intermediate | `checkpoint` → `collect` → `{{variable}}` dentro de `with_transformations` |
+| Nested payload and multi-output | intermediate | dot-paths de `struct`, dois destinos a partir de um DataFrame |
+| Delta merge (upsert) | intermediate | `mode: merge`, `merge_keys` e a regra de unicidade que o protege |
+| Aggregation with group_by and pivot | intermediate | Expressões de agregação SQL completas, valores de pivot listados |
+| Union and dedupe | intermediate | Union por posição vs por nome, deduplicação |
+| Staging view handoff | intermediate | Vários Jobs compondo por uma temp view — o formato que um [Pipeline](/pt/docs/studio/pipelines/) automatiza |
+| Kafka publication | advanced | `struct` → `to_json` → tópico, como transformação por destino |
+| Parameterized pipeline | advanced | `{param}` e branching com `skip_if_false` |
+
+Todo template é JSON Sparquet real, importado pelo mesmo compilador de qualquer outro arquivo — e coberto por um teste que faz o lint de todos sem um único erro.
+
+## Lições
+
+**Learn** na sidebar tem seis lições que se apoiam umas nas outras. Cada uma tem seções, snippets executáveis e um checklist que lembra o que você marcou.
+
+1. **Seu primeiro Job em cinco minutos** — o formato do documento e a execução
+2. **Pensando em nós** — como o grafo mapeia no arquivo, incluindo forks e joins
+3. **Transformações que importam** — `select` vs `with_column` vs `struct`, e onde cada uma vence
+4. **Juntar e enriquecer** — semântica de join, e pushdown com `collect` + `{{variable}}`
+5. **Qualidade de dados** — validators, políticas `on_failure` e leitura do report
+6. **Indo para produção** — parâmetros, includes, checkpoints, escrita merge e rodar num cluster
+
+As lições linkam para o template que as demonstra, então ler e fazer ficam a um clique de distância.
+
+## Começando de um template na prática
+
+O caminho mais rápido para um novo Job raramente é um canvas em branco:
+
+1. Ache o template mais próximo do seu caso.
+2. **Use template** no Workflow certo.
+3. Mude os paths de origem e destino.
+4. Leia o painel Issues — ele aponta o que a troca invalidou.
+5. Rode com o runner local contra uma fatia pequena de dados.
+
+Para algo genuinamente novo, descreva ao [assistente de IA](/pt/docs/studio/ai-assistant/) e edite o que ele rascunhar.

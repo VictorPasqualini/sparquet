@@ -8,7 +8,6 @@ from pyspark.sql import DataFrame
 from sparquet.core.config import TransformationConfig
 from sparquet.transform.base import BaseTransformation
 from sparquet.transform.builtin import (
-    AddColumnTransformation,
     CastTransformation,
     CheckpointTransformation,
     CollectTransformation,
@@ -38,7 +37,6 @@ _BUILTIN_TRANSFORMATIONS: Dict[str, Type[BaseTransformation]] = {
     "rename": RenameTransformation,
     "cast": CastTransformation,
     "with_column": WithColumnTransformation,
-    "add_column": AddColumnTransformation,   # alias backward-compat
     "struct": StructTransformation,
     "drop_duplicates": DropDuplicatesTransformation,
     "distinct": DistinctTransformation,
@@ -110,13 +108,23 @@ class TransformationEngine:
         self,
         df: DataFrame,
         configs: List[TransformationConfig],
+        top_level: bool = False,
     ) -> DataFrame:
-        for config in configs:
+        """Aplica as transformações em sequência.
+
+        `top_level=True` (a cadeia principal do pipeline, chamada por `Pipeline.run`)
+        emite eventos de etapa (`step=True`, com `index`/`total`) para o runner do
+        Studio pintar o status por nó ao vivo. Cadeias aninhadas (join/union/debug)
+        rodam com `top_level=False` e não emitem esses marcadores.
+        """
+        total = len(configs)
+        for index, config in enumerate(configs):
             if self._should_skip(config.skip_if_false, df):
                 logger.info(
                     "Transformacao pulada",
                     type=config.type,
                     skip_if_false=config.skip_if_false,
+                    **({"index": index, "total": total, "step": True} if top_level else {}),
                 )
                 continue
             config = self._resolve_runtime(config)
@@ -126,10 +134,24 @@ class TransformationEngine:
                     f"Unknown transformation '{config.type}'. "
                     f"Available: {sorted(self._registry)}"
                 )
-            logger.info("Applying transformation", type=config.type)
+            if top_level:
+                # Etapa iniciada — o Spark é lazy, então na maioria das transformações
+                # isto apenas monta o plano (instantâneo); join/union/debug disparam
+                # ações e demoram de verdade.
+                logger.info(
+                    "Transformation started",
+                    type=config.type, index=index, total=total, step=True,
+                )
+            else:
+                logger.info("Applying transformation", type=config.type)
             transformation = cls(config)
             transformation.runtime = self.runtime
             df = transformation.apply(df)
+            if top_level:
+                logger.info(
+                    "Transformation applied",
+                    type=config.type, index=index, total=total, step=True,
+                )
         return df
 
     def _should_skip(self, skip_if_false: str | None, df: DataFrame) -> bool:

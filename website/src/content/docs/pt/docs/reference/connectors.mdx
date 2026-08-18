@@ -1,0 +1,354 @@
+---
+title: Conectores
+description: Todas as origens e destinos que o Sparquet suporta — arquivos, tabelas lakehouse, temp views, Kafka, bancos relacionais, data warehouses e stores NoSQL.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Um conector é escolhido pelo campo `format` de um `input`, de um `output` ou de uma origem de join/union. O mesmo registry serve aos três, e é extensível — veja [Adicionando o seu](#adding-your-own).
+
+| Formato | Leitura | Escrita | Notas |
+|---|:---:|:---:|---|
+| `parquet` | ✓ | ✓ | Nativo do Spark |
+| `delta` | ✓ | ✓ | Upserts com MERGE, time travel |
+| `iceberg` | ✓ | ✓ | MERGE INTO |
+| `csv` | ✓ | ✓ | `header` e `inferSchema` com default true |
+| `txt` | ✓ | ✓ | texto plano, coluna única `value` |
+| `view` | ✓ | ✓ | Spark temp views, auto-cache |
+| `kafka` | ✓ | ✓ | leitura e publicação batch; Amazon MSK |
+| `postgresql` | ✓ | ✓ | JDBC |
+| `mysql` | ✓ | ✓ | JDBC |
+| `mariadb` | ✓ | ✓ | JDBC |
+| `sqlserver` | ✓ | ✓ | JDBC |
+| `oracle` | ✓ | ✓ | JDBC (service name) |
+| `bigquery` | ✓ | ✓ | Google BigQuery |
+| `snowflake` | ✓ | ✓ | Snowflake |
+| `redshift` | ✓ | ✓ | Amazon Redshift, staging em S3 |
+| `mongodb` | ✓ | ✓ | MongoDB |
+| `documentdb` | ✓ | ✓ | Amazon DocumentDB (protocolo Mongo) |
+| `dynamodb` | ✓ | ✓ | Amazon DynamoDB, escrita é upsert |
+| `cassandra` | ✓ | ✓ | Cassandra / ScyllaDB, escrita é upsert |
+| `elasticsearch` | ✓ | ✓ | Elasticsearch / OpenSearch |
+
+<Aside type="caution" title="Todo conector externo precisa do JAR do seu driver">
+  O framework apenas monta a chamada Spark `.format(...).options(...)` — ele
+  nunca empacota drivers. Cada banco JDBC, data warehouse, store NoSQL e o Kafka
+  exige o JAR do seu conector/driver no classpath do Spark, declarado por pipeline
+  através de `spark.jars.packages` (veja o [exemplo abaixo](#driver-jars-on-the-classpath)).
+</Aside>
+
+## Arquivos e lakehouse
+
+### Parquet
+
+```json
+{ "format": "parquet", "path": "/data/curated/orders", "mode": "overwrite", "partition_by": ["country"] }
+```
+
+Qualquer opção Parquet do Spark passa por `options`. `path` é um diretório de arquivos part, não um único arquivo.
+
+### CSV
+
+```json
+{ "format": "csv", "path": "/data/landing/orders", "options": { "sep": ";", "encoding": "UTF-8" } }
+```
+
+Defaults aplicados pelo framework: `header: true` e `inferSchema: true` na leitura, `header: true` na escrita, `encoding: UTF-8` em ambas. `inferSchema` custa uma passada extra sobre os dados — defina um `cast` explícito e desligue-o para feeds grandes e estáveis.
+
+### Delta Lake
+
+```json
+// lê uma tabela, ou um path, ou uma versão passada
+{ "format": "delta", "path": "catalog.schema.orders" }
+{ "format": "delta", "path": "/mnt/raw/orders", "options": { "versionAsOf": "5" } }
+{ "format": "delta", "path": "catalog.schema.orders", "options": { "timestampAsOf": "2026-01-01T00:00:00Z" } }
+
+// upsert
+{ "format": "delta", "path": "catalog.schema.orders", "mode": "merge",
+  "options": { "merge_keys": ["order_id"], "merge_condition": "T.deleted = false" } }
+```
+
+`path` é tratado como nome de tabela quando contém um ponto e não começa com `/` ou um storage scheme; caso contrário, como um path. Em `merge_condition`, `T` é a tabela alvo e `S` o DataFrame de entrada.
+
+Fora do Databricks, instale o pacote OSS: `pip install "sparquet[delta]"`.
+
+### Iceberg
+
+```json
+{ "format": "iceberg", "path": "catalog.db.orders", "mode": "merge", "options": { "merge_keys": ["id"] } }
+```
+
+<Aside type="caution">
+  O writer do Iceberg compara o modo contra `"merge"` de forma case-sensitive.
+  `"MERGE"` pula o branch de merge e chega em `df.write.mode("MERGE")`, que o
+  Spark rejeita com *Unknown save mode* — nada é escrito. Sempre em minúsculas.
+</Aside>
+
+### Texto
+
+```json
+{ "format": "txt", "path": "/data/exports/lines", "mode": "overwrite" }
+```
+
+Lê para uma única coluna `value`, e escreve um DataFrame que precisa ter exatamente uma coluna string — projete-a antes com `select`.
+
+### Temp views
+
+```json
+{ "format": "view", "path": "orders_staging", "mode": "overwrite" }
+```
+
+Registra uma Spark temp view, cacheada por padrão, para que um pipeline posterior na mesma sessão possa lê-la como `{"format": "view", "path": "orders_staging"}`. Este é o mecanismo de staging por trás dos jobs multi-pipeline — um escreve a view, o próximo a consome.
+
+`options.scope` escolhe o tempo de vida: `session` (default) é uma temp view normal, visível apenas à sessão atual; `global` usa `createOrReplaceGlobalTempView`, visível a **todas as sessões da mesma aplicação Spark** (leia-a como `global_temp.<name>`, ou com `scope: "global"` no reader).
+
+### Kafka
+
+Leitura batch e publicação batch. `path` é o tópico. Requer `spark-sql-kafka-0-10` no classpath.
+
+```json
+// lê o tópico inteiro
+{
+  "format": "kafka",
+  "path": "orders-events",
+  "options": { "bootstrap_servers": "broker1:9092,broker2:9092", "startingOffsets": "earliest" }
+}
+
+// publica
+{
+  "format": "kafka",
+  "path": "orders-events",
+  "mode": "append",
+  "transformations": [
+    { "type": "with_column", "column": "value", "expression": "to_json(payload)" }
+  ],
+  "options": {
+    "bootstrap_servers": "broker1:9092,broker2:9092",
+    "value_column": "value",
+    "key_column": "order_id"
+  }
+}
+```
+
+Na **leitura**, o DataFrame volta com o schema nativo do Kafka (binário `key`/`value`, `topic`, `partition`, `offset`, `timestamp`, `timestampType`) — geralmente seguido de um `CAST(value AS STRING)`. Os defaults de batch são `startingOffsets: earliest` e `endingOffsets: latest`, então uma execução lê o tópico inteiro; sobrescreva-os, ou passe `assign` / `subscribePattern` no lugar do default `subscribe`.
+
+Na **escrita**, a `value_column` configurada (default `payload`) e a `key_column` (default `header`, `null` para omitir) são renomeadas para `value` e `key`, e toda coluna fora de `{key, value, topic, partition, timestamp, headers}` é descartada antes da escrita.
+
+`bootstrap_servers` é um alias amigável para `kafka.bootstrap.servers`. Para o **Amazon MSK com auth IAM**, passe `kafka.security.protocol=SASL_SSL` e `kafka.sasl.mechanism=AWS_MSK_IAM` em `options` (além do JAR `aws-msk-iam-auth` no classpath).
+
+### JSON
+
+Nativo, sem JAR extra. `path` é um diretório; o default é um objeto por linha (JSON Lines). Defina `multiLine: "true"` para ler um documento por arquivo.
+
+```json
+{ "format": "json", "path": "/data/landing/events", "options": { "multiLine": "true" } }
+```
+
+### ORC
+
+Formato colunar nativo (como o Parquet), sem JAR extra. As opções incluem `compression` (default `zlib`) e `mergeSchema`.
+
+```json
+{ "format": "orc", "path": "/data/curated/orders", "mode": "overwrite", "partition_by": ["dt_ref"] }
+```
+
+### Avro
+
+Orientado a linhas; requer o pacote `org.apache.spark:spark-avro` no classpath. Opções: `avroSchema`, `compression` (snappy/deflate/bzip2/xz), `recordName`.
+
+```json
+{ "format": "avro", "path": "/data/raw/events" }
+```
+
+### XML
+
+Requer o pacote `com.databricks:spark-xml` (registra o formato `xml`). `rowTag` é **obrigatório** na leitura e escrita; `rootTag` (default `rows`) nomeia a raiz da escrita.
+
+```json
+{ "format": "xml", "path": "/data/raw/catalog", "options": { "rowTag": "book" } }
+```
+
+### Arquivos binários
+
+**Somente leitura** (`binaryFile`). Carrega arquivos inteiros nas colunas `path`, `modificationTime`, `length`, `content` (binário) — imagens, PDFs, blobs. Não há writer binário; persista `content` via parquet/delta.
+
+```json
+{ "format": "binary", "path": "/data/raw/docs", "options": { "pathGlobFilter": "*.pdf" } }
+```
+
+### Apache Hudi
+
+Formato de tabela lakehouse com upserts. Requer o JAR `hudi-spark-bundle` e as session extensions do Hudi. `path` é o base path da tabela; particionamento e upsert são dirigidos por opções `hoodie.*` (o `partition_by` do framework não é usado).
+
+```json
+{
+  "format": "hudi",
+  "path": "s3a://lake/hudi/orders",
+  "mode": "append",
+  "options": {
+    "hoodie.table.name": "orders",
+    "hoodie.datasource.write.recordkey.field": "order_id",
+    "hoodie.datasource.write.precombine.field": "updated_at",
+    "hoodie.datasource.write.operation": "upsert"
+  }
+}
+```
+
+## Bancos relacionais (JDBC)
+
+`postgresql`, `mysql`, `mariadb`, `sqlserver` e `oracle` compartilham uma base JDBC única com dialetos por banco que preenchem a classe do driver, a porta default e o formato da URL. `path` é o nome da tabela (`dbtable`).
+
+```json
+// lê uma tabela
+{
+  "format": "postgresql",
+  "path": "public.orders",
+  "options": {
+    "host": "db.internal", "port": 5432, "database": "sales",
+    "user": "reader", "password": "…"
+  }
+}
+
+// ou informe a URL completa e uma query com pushdown
+{
+  "format": "sqlserver",
+  "path": "dbo.orders",
+  "options": {
+    "url": "jdbc:sqlserver://db:1433;databaseName=sales",
+    "query": "SELECT id, total FROM dbo.orders WHERE total > 0",
+    "user": "reader", "password": "…"
+  }
+}
+```
+
+Opções de conexão: `url` (URL JDBC completa, tem precedência) ou `host` + `database` (+ `port` opcional, com default por banco) para montá-la; `driver` (com default por banco); `user` / `password`. As leituras também aceitam `query` (um SELECT usado no lugar de `dbtable`), `dbtable` (sobrescreve `path`), `partitionColumn` / `lowerBound` / `upperBound` / `numPartitions` para leituras paralelas, e `fetchsize`. As escritas suportam `append` e `overwrite` (`truncate: "true"` faz um TRUNCATE em vez de DROP/CREATE), além de `batchsize`, `isolationLevel`, `createTableColumnTypes` / `createTableOptions`. JDBC não tem `merge` — use append/overwrite.
+
+Para o Oracle, `database` é o service name (`jdbc:oracle:thin:@//host:port/service`).
+
+## Data warehouses
+
+### BigQuery
+
+`path` é `project.dataset.table` (ou `dataset.table` com um projeto default). Usa o `spark-bigquery-connector`.
+
+```json
+{ "format": "bigquery", "path": "my-proj.sales.orders",
+  "options": { "parentProject": "billing-proj", "credentialsFile": "/secrets/sa.json" } }
+```
+
+Opções de leitura: `query` (requer `viewsEnabled: "true"`), `parentProject` (billing), `credentialsFile` / `credentials`, `filter`, `maxParallelism`. Escrita (`overwrite` / `append`): `temporaryGcsBucket` (staging indireto, default), `writeMethod` (`indirect` ou `direct`), `partitionField` / `partitionType` / `clusteredFields`.
+
+### Snowflake
+
+`path` é a tabela (`dbtable`). Usa `spark-snowflake` + `snowflake-jdbc`.
+
+```json
+{ "format": "snowflake", "path": "ANALYTICS.PUBLIC.ORDERS",
+  "options": {
+    "sfUrl": "myorg-acct.snowflakecomputing.com",
+    "sfUser": "loader", "sfPassword": "…",
+    "sfDatabase": "ANALYTICS", "sfSchema": "PUBLIC", "sfWarehouse": "LOAD_WH"
+  } }
+```
+
+A conexão é a família `sfXxx` (`sfUrl`, `sfUser` / `sfPassword` ou `pem_private_key`, `sfDatabase`, `sfSchema`, `sfWarehouse`, `sfRole`). As leituras aceitam `query`; as escritas suportam `overwrite` / `append`.
+
+### Redshift
+
+`path` é a tabela (`dbtable`). Usa o conector community `spark-redshift`, que faz staging via S3.
+
+```json
+{ "format": "redshift", "path": "public.orders",
+  "options": {
+    "url": "jdbc:redshift://cluster:5439/sales",
+    "tempdir": "s3://my-bucket/redshift-staging/",
+    "aws_iam_role": "arn:aws:iam::…:role/redshift-copy"
+  } }
+```
+
+`url` e `tempdir` (um prefixo S3) são **obrigatórios**. A auth é `user` / `password` ou `aws_iam_role`; `forward_spark_s3_credentials: "true"` reutiliza as credenciais S3 da sessão. As escritas suportam `overwrite` / `append` e `diststyle` / `distkey` / `sortkeyspec` / `tempformat`.
+
+## NoSQL e busca
+
+### MongoDB e DocumentDB
+
+`path` é a coleção. O mesmo Mongo Spark Connector serve o Amazon DocumentDB — aponte `connection.uri` para o cluster DocumentDB com `?tls=true&retryWrites=false`.
+
+```json
+{ "format": "mongodb", "path": "orders",
+  "options": { "connection.uri": "mongodb://user:pass@host:27017/", "database": "sales" } }
+```
+
+Opções: `connection.uri` (obrigatório), `database`, `collection` (sobrescreve `path`), `aggregation.pipeline` (pushdown de leitura). As escritas suportam `overwrite` / `append`, além de `operationType` (`insert` / `replace` / `update`), `idFieldList`, `ordered`.
+
+### DynamoDB
+
+`path` é a tabela (`tableName`). Usa `spark-dynamodb`.
+
+```json
+{ "format": "dynamodb", "path": "orders", "options": { "region": "us-east-1" } }
+```
+
+Opções: `region`, `roleArn`, `endpoint` (ex.: DynamoDB local), `throughput` / `targetCapacity`, `readPartitions` / `stronglyConsistentReads`. As escritas são sempre um PutItem por linha — um **upsert por chave primária** (`append`); o DynamoDB não tem overwrite de tabela.
+
+### Cassandra e ScyllaDB
+
+`path` é `keyspace.table` (ou apenas a tabela, com `keyspace` em options). Usa o `spark-cassandra-connector`.
+
+```json
+{ "format": "cassandra", "path": "sales.orders",
+  "options": { "spark.cassandra.connection.host": "node1,node2" } }
+```
+
+Opções: `keyspace` / `table` (sobrescrevem `path`), `spark.cassandra.connection.host` / `.port`, `spark.cassandra.auth.username` / `.password`. As escritas são `append` (INSERT/upsert por chave); a tabela já deve existir.
+
+### Elasticsearch
+
+`path` é o índice (`resource`). Usa o conector `elasticsearch-hadoop` — prefixo de opção `es.*`.
+
+```json
+{ "format": "elasticsearch", "path": "orders",
+  "options": { "es.nodes": "es.internal", "es.port": "9200" } }
+```
+
+Opções: `es.nodes` / `es.port`, `es.net.http.auth.user` / `.pass`, `es.nodes.wan.only` (cloud/proxy), `es.query` (DSL de leitura), `es.mapping.id` (usa uma coluna como `_id`), `es.write.operation` (`index` / `create` / `update` / `upsert`). As escritas suportam `append` / `overwrite`.
+
+### OpenSearch
+
+Um formato **separado** com seu próprio conector (`opensearch-hadoop`) — prefixo de opção `opensearch.*`, não `es.*`. No mais, mesmo formato do Elasticsearch.
+
+```json
+{ "format": "opensearch", "path": "orders",
+  "options": { "opensearch.nodes": "os.internal", "opensearch.port": "9200" } }
+```
+
+As opções espelham as do ES com o prefixo `opensearch.`: `opensearch.nodes` / `opensearch.port`, `opensearch.net.http.auth.user` / `.pass`, `opensearch.nodes.wan.only`, `opensearch.query`, `opensearch.mapping.id`, `opensearch.write.operation`.
+
+## JARs de driver no classpath
+
+Cada conector acima é distribuído como um pacote Spark que precisa estar no classpath. Declare-o por pipeline para que o job carregue sua própria dependência:
+
+```json
+{
+  "spark": {
+    "configs": {
+      "spark.jars.packages": "org.postgresql:postgresql:42.7.3,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
+    }
+  }
+}
+```
+
+Numa plataforma gerenciada você também pode adicionar o pacote às bibliotecas do cluster. O framework nunca empacota esses drivers — um JAR ausente aparece como um `ClassNotFoundException` / *Failed to find data source* no momento da leitura ou escrita.
+
+## Adicionando o seu
+
+Registre um reader ou writer uma vez e todo pipeline no processo pode usá-lo:
+
+```python
+fw.register_reader("my_format", MyReader)   # class MyReader(BaseReader)
+fw.register_writer("my_format", MyWriter)   # class MyWriter(BaseWriter)
+```
+
+Veja [Estendendo](/pt/docs/reference/extending/). O Studio preserva formatos desconhecidos ao longo da importação e exportação, então um conector customizado não quebra o canvas.

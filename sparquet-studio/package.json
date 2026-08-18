@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Visual, AI-assisted editor for Sparquet JSON data pipelines — the n8n of data engineering.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18"
   },

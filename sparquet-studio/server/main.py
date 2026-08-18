@@ -33,12 +33,13 @@ import json
 import logging
 import math
 import os
+import queue
 import re
 import secrets
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import date, datetime, timezone
 from datetime import time as clock_time
 from decimal import Decimal
@@ -47,6 +48,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 SERVICE_VERSION = "0.2.0"
@@ -87,6 +89,28 @@ class RunRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
     limit: int = Field(default=DEFAULT_PREVIEW_LIMIT, ge=1, le=MAX_PREVIEW_LIMIT)
     dry_run: bool = False
+
+
+class FlowStageRequest(BaseModel):
+    """One JSON of a composed flow — a pipeline that is a stage of a larger job."""
+
+    id: str
+    name: Optional[str] = None
+    pipeline: Dict[str, Any]
+    params: Optional[Dict[str, Any]] = None
+
+
+class RunFlowRequest(BaseModel):
+    """Several pipelines, already in execution order, run one after another.
+
+    The stages share one SparkSession, so a stage can hand data to the next either
+    through storage (it writes, the next one reads the path) or through a temp view
+    registered by a `view` output — both work without extra wiring here.
+    """
+
+    stages: List[FlowStageRequest]
+    limit: int = Field(default=DEFAULT_PREVIEW_LIMIT, ge=1, le=MAX_PREVIEW_LIMIT)
+    stop_on_error: bool = True
 
 
 class ValidateRequest(BaseModel):
@@ -250,6 +274,130 @@ def _capture_logs() -> Iterator[_LogCollector]:
     finally:
         log.removeHandler(collector)
         log.setLevel(previous_level)
+
+
+# ------------------------------------------------------ live streaming
+
+
+class _StreamCollector(_LogCollector):
+    """A `_LogCollector` that also pushes each record onto a live queue, so the
+    SSE endpoint can forward pipeline logs as they are emitted (not only at the
+    end). The `step=True` records (with `index`/`total`) drive the per-node status
+    in Studio; everything else is a normal log line."""
+
+    def __init__(self, events: "queue.Queue[Optional[Dict[str, Any]]]") -> None:
+        super().__init__()
+        self._events = events
+
+    def append(
+        self, timestamp: str, level: str, message: str, context: Dict[str, Any]
+    ) -> None:
+        super().append(timestamp, level, message, context)
+        self._events.put(
+            {
+                "source": "pipeline",
+                "timestamp": timestamp,
+                "level": level,
+                "message": message,
+                "context": context,
+            }
+        )
+
+
+def _spark_line_level(line: str) -> str:
+    upper = line.upper()
+    if " ERROR " in upper or "EXCEPTION" in upper or "ERROR:" in upper:
+        return "ERROR"
+    if " WARN " in upper or "WARNING" in upper:
+        return "WARNING"
+    return "INFO"
+
+
+class _QueueWriter:
+    """File-like sink that splits writes into lines and pushes each as a log event
+    onto the stream queue. Used to capture stdout (the `debug` transformation's
+    `print`/`df.show` output)."""
+
+    def __init__(self, events: Any, source: str, level: str = "INFO") -> None:
+        self._events = events
+        self._source = source
+        self._level = level
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._emit(self._buffer)
+            self._buffer = ""
+
+    def _emit(self, line: str) -> None:
+        level = _spark_line_level(line) if self._source == "spark" else self._level
+        self._events.put(
+            {
+                "source": self._source,
+                "timestamp": _now_iso(),
+                "level": level,
+                "message": line,
+                "context": {},
+            }
+        )
+
+
+@contextmanager
+def _capture_streams(events: Any) -> Iterator[None]:
+    """For the duration of a run, mirrors Python stdout (debug prints, `df.show`)
+    and the JVM's own stderr (log4j lines — the *real* Spark/winutils error) onto
+    the stream queue, then restores both. fd-level capture of file descriptor 2 is
+    what surfaces the errors the JVM writes straight past Python's logging."""
+    stdout_writer = _QueueWriter(events, "stdout", "DEBUG")
+
+    r_fd, w_fd = os.pipe()
+    saved_fd = os.dup(2)
+
+    def _reader() -> None:
+        try:
+            with os.fdopen(r_fd, "r", errors="replace") as handle:
+                for line in handle:
+                    events.put(
+                        {
+                            "source": "spark",
+                            "timestamp": _now_iso(),
+                            "level": _spark_line_level(line),
+                            "message": line.rstrip("\n"),
+                            "context": {},
+                        }
+                    )
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    os.dup2(w_fd, 2)
+    try:
+        with redirect_stdout(stdout_writer):
+            yield
+    finally:
+        stdout_writer.flush()
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os.dup2(saved_fd, 2)
+        os.close(w_fd)
+        os.close(saved_fd)
+        reader.join(timeout=2)
+
+
+def _sse(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 # -------------------------------------------------------------- framework
@@ -536,43 +684,260 @@ def run(body: RunRequest) -> RunResponse:
 
     try:
         with _capture_logs() as collector:
-            framework = _get_framework()
-            try:
-                result = framework.run_from_dict(body.pipeline, params=body.params or None)
-            except Exception as exc:
-                # Config loading (missing keys, bad $include) raises outside the
-                # pipeline's own try block and never reaches PipelineResult.
-                return RunResponse(
-                    success=False,
-                    pipeline_name=name,
-                    duration_ms=_elapsed_ms(started),
-                    error=_describe(exc),
-                    logs=[LogOut(**entry) for entry in collector.records],
-                )
-
-            output_df = getattr(result, "output_df", None)
-            preview = (
-                _build_preview(output_df, body.limit, collector)
-                if output_df is not None
-                else None
-            )
-            logs = [LogOut(**entry) for entry in collector.records]
-
-        return RunResponse(
-            success=bool(result.success),
-            skipped=bool(getattr(result, "skipped", False)),
-            pipeline_name=str(getattr(result, "pipeline_name", None) or name or ""),
-            rows_read=int(getattr(result, "rows_read", 0) or 0),
-            rows_written=int(getattr(result, "rows_written", 0) or 0),
-            duration_ms=_elapsed_ms(started),
-            error=getattr(result, "error", None),
-            validations=_map_validations(getattr(result, "validation_results", [])),
-            output_metrics=_map_output_metrics(getattr(result, "output_metrics", [])),
-            preview=preview,
-            logs=logs,
-        )
+            return _execute_run(body, name, started, collector)
     finally:
         _RUN_LOCK.release()
+
+
+def _execute_run(
+    body: RunRequest, name: Optional[str], started: float, collector: _LogCollector
+) -> RunResponse:
+    """The body shared by `/run` and `/run/stream`: execute the pipeline and shape
+    the response. The caller owns the run lock and the log capture."""
+    framework = _get_framework()
+    try:
+        result = framework.run_from_dict(body.pipeline, params=body.params or None)
+    except Exception as exc:
+        # Config loading (missing keys, bad $include) raises outside the
+        # pipeline's own try block and never reaches PipelineResult.
+        return RunResponse(
+            success=False,
+            pipeline_name=name,
+            duration_ms=_elapsed_ms(started),
+            error=_describe(exc),
+            logs=[LogOut(**entry) for entry in collector.records],
+        )
+
+    output_df = getattr(result, "output_df", None)
+    preview = (
+        _build_preview(output_df, body.limit, collector)
+        if output_df is not None
+        else None
+    )
+
+    return RunResponse(
+        success=bool(result.success),
+        skipped=bool(getattr(result, "skipped", False)),
+        pipeline_name=str(getattr(result, "pipeline_name", None) or name or ""),
+        rows_read=int(getattr(result, "rows_read", 0) or 0),
+        rows_written=int(getattr(result, "rows_written", 0) or 0),
+        duration_ms=_elapsed_ms(started),
+        error=getattr(result, "error", None),
+        validations=_map_validations(getattr(result, "validation_results", [])),
+        output_metrics=_map_output_metrics(getattr(result, "output_metrics", [])),
+        preview=preview,
+        logs=[LogOut(**entry) for entry in collector.records],
+    )
+
+
+@app.post("/run/stream", dependencies=[Depends(require_token)])
+def run_stream(body: RunRequest) -> StreamingResponse:
+    """Same execution as `/run`, but as Server-Sent Events, so Studio can paint
+    per-step status and stream logs while Spark works.
+
+    Events: `log` (one per pipeline/stdout/JVM line, carrying `source` and, for
+    step markers, `context.index`/`context.step`), then a final `result` with the
+    same payload `/run` returns, or `error`.
+
+    Note on laziness: Spark builds a plan, so most transformations report applied
+    almost instantly; the wall-clock time shows up on the read, the validations and
+    the write — the actions that really touch data.
+    """
+    started = time.perf_counter()
+    pipeline_name = body.pipeline.get("name")
+    name = str(pipeline_name) if isinstance(pipeline_name, str) else None
+
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline run is already in progress on this runner.",
+        )
+
+    events: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
+    box: Dict[str, Any] = {}
+
+    def _work() -> None:
+        collector = _StreamCollector(events)
+        log = logging.getLogger(FRAMEWORK_LOGGER)
+        previous_level = log.level
+        if log.getEffectiveLevel() > logging.INFO:
+            log.setLevel(logging.INFO)
+        log.addHandler(collector)
+        try:
+            with _capture_streams(events):
+                box["response"] = _execute_run(body, name, started, collector)
+        except Exception as exc:  # pragma: no cover - defensive
+            box["error"] = _describe(exc)
+        finally:
+            log.removeHandler(collector)
+            log.setLevel(previous_level)
+            events.put(None)  # sentinel: work finished
+
+    def _stream() -> Iterator[str]:
+        worker = threading.Thread(target=_work, daemon=True)
+        worker.start()
+        try:
+            yield _sse("start", {"pipeline_name": name, "timestamp": _now_iso()})
+            while True:
+                entry = events.get()
+                if entry is None:
+                    break
+                yield _sse("log", entry)
+            worker.join(timeout=5)
+            if "response" in box:
+                yield _sse("result", box["response"].model_dump())
+            else:
+                yield _sse(
+                    "error",
+                    {"error": box.get("error", "Run finished without a result")},
+                )
+        finally:
+            _RUN_LOCK.release()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/run/flow/stream", dependencies=[Depends(require_token)])
+def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
+    """Runs several pipelines in sequence — a composed flow, where each JSON is one
+    stage — streaming per-stage progress as Server-Sent Events.
+
+    The stages arrive already ordered and share one SparkSession, so a stage hands
+    data to the next through whatever it wrote: a path the next one reads, or a
+    `view` output registered as a temp view.
+
+    Events: `start`, then per stage `stage_start` → `log`* → `stage_result`, and a
+    final `result` (or `error`). Every `log` carries `stage_id`, so a line can
+    always be traced back to the JSON that produced it.
+
+    Stage markers travel through the same queue as the logs, so a stage's lines can
+    never be attributed to its neighbour: the queue is FIFO.
+    """
+    started = time.perf_counter()
+
+    if not body.stages:
+        raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
+
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A pipeline run is already in progress on this runner.",
+        )
+
+    events: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
+    box: Dict[str, Any] = {"stages": [], "error": None, "preview": None}
+
+    def _work() -> None:
+        log = logging.getLogger(FRAMEWORK_LOGGER)
+        previous_level = log.level
+        if log.getEffectiveLevel() > logging.INFO:
+            log.setLevel(logging.INFO)
+        try:
+            for index, stage in enumerate(body.stages):
+                events.put({"__stage__": {"index": index, "id": stage.id,
+                                          "name": stage.name}})
+                # A fresh collector per stage keeps each stage's `logs` its own.
+                collector = _StreamCollector(events)
+                log.addHandler(collector)
+                stage_started = time.perf_counter()
+                # Only the last stage's preview is kept: it is the flow's output.
+                is_last = index == len(body.stages) - 1
+                request = RunRequest(
+                    pipeline=stage.pipeline,
+                    params=stage.params,
+                    limit=body.limit,
+                )
+                try:
+                    with _capture_streams(events):
+                        response = _execute_run(
+                            request, stage.name, stage_started, collector
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    response = RunResponse(
+                        success=False,
+                        pipeline_name=stage.name,
+                        duration_ms=_elapsed_ms(stage_started),
+                        error=_describe(exc),
+                    )
+                finally:
+                    log.removeHandler(collector)
+
+                payload = {
+                    "index": index,
+                    "id": stage.id,
+                    "name": stage.name,
+                    "success": response.success,
+                    "skipped": response.skipped,
+                    "rows_read": response.rows_read,
+                    "rows_written": response.rows_written,
+                    "duration_ms": response.duration_ms,
+                    "error": response.error,
+                    "validations": [v.model_dump() for v in response.validations],
+                    "output_metrics": [m.model_dump() for m in response.output_metrics],
+                }
+                box["stages"].append(payload)
+                if is_last and response.preview is not None:
+                    box["preview"] = response.preview.model_dump()
+                events.put({"__stage_result__": payload})
+
+                if not response.success and body.stop_on_error:
+                    box["error"] = (
+                        f"Stage {index + 1} ({stage.name or stage.id}) failed: "
+                        f"{response.error or 'unknown error'}"
+                    )
+                    break
+        except Exception as exc:  # pragma: no cover - defensive
+            box["error"] = _describe(exc)
+        finally:
+            log.setLevel(previous_level)
+            events.put(None)  # sentinel: work finished
+
+    def _stream() -> Iterator[str]:
+        worker = threading.Thread(target=_work, daemon=True)
+        worker.start()
+        current: Optional[str] = None
+        try:
+            yield _sse("start", {"flow": True, "total": len(body.stages),
+                                 "timestamp": _now_iso()})
+            while True:
+                entry = events.get()
+                if entry is None:
+                    break
+                marker = entry.get("__stage__")
+                if marker is not None:
+                    current = marker["id"]
+                    yield _sse("stage_start", marker)
+                    continue
+                result = entry.get("__stage_result__")
+                if result is not None:
+                    yield _sse("stage_result", result)
+                    continue
+                yield _sse("log", {**entry, "stage_id": current})
+            worker.join(timeout=5)
+            stages = box["stages"]
+            yield _sse(
+                "result",
+                {
+                    "success": bool(stages) and all(s["success"] for s in stages)
+                    and len(stages) == len(body.stages),
+                    "duration_ms": _elapsed_ms(started),
+                    "stages": stages,
+                    "preview": box["preview"],
+                    "error": box["error"],
+                },
+            )
+        finally:
+            _RUN_LOCK.release()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _elapsed_ms(started: float) -> int:

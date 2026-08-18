@@ -1,6 +1,6 @@
 ---
 title: The canvas
-description: Building pipelines on the Sparquet Studio canvas — adding nodes, connecting them, branching, and controlling it from the keyboard.
+description: Building a Job on the Sparquet Studio canvas — adding nodes, connecting them, branching, and controlling it from the keyboard.
 sidebar:
   order: 2
 ---
@@ -27,7 +27,7 @@ Press <kbd>/</kbd> anywhere to focus the palette search.
 | Destination | an entry of `outputs` | one |
 | Note | nothing | none |
 
-A node shows its most meaningful parameter under the title — the condition of a filter, the expression of a computed column, the join type and key — so a pipeline is readable without opening anything.
+A node shows its most meaningful parameter under the title — the condition of a filter, the expression of a computed column, the join type and key — so a Job is readable without opening anything.
 
 ## Connecting
 
@@ -77,7 +77,7 @@ Delete removes the node and its connections in a single undo step.
 
 ## Layout
 
-<kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>L</kbd> re-runs the automatic layout: left to right, side chains stacked under the node they feed. Positions are saved with the workflow, so a tidied graph stays tidy.
+<kbd>Shift</kbd>+<kbd>Ctrl/⌘</kbd>+<kbd>L</kbd> re-runs the automatic layout: left to right, side chains stacked under the node they feed. Positions are saved with the Job, so a tidied graph stays tidy.
 
 ## Keyboard
 
@@ -102,14 +102,14 @@ Linting runs while you type. It reports what is statically decidable and stays q
 
 | Severity | Examples |
 |---|---|
-| **Error** | no destination; an orphan node; a required field empty; `merge` without `merge_keys`; a `kafka` source; two main inputs into one node |
+| **Error** | no destination; an orphan node; a required field empty; `merge` without `merge_keys`; a `binary` destination (read-only format); two main inputs into one node |
 | **Warning** | a `collect` with no upstream `checkpoint`; a `{{variable}}` nothing publishes; a `{param}` never declared; two destinations writing the same path; a positional `union` |
-| **Info** | a `debug` node left in the pipeline; no validations block |
+| **Info** | a `debug` node left in the Job; no validations block |
 
 Click any issue to select the node and jump to the offending field.
 
 ## Saving
 
-Edits autosave a moment after you stop typing; the status bar shows *Saved* or *Unsaved*. <kbd>Ctrl/⌘</kbd>+<kbd>S</kbd> forces it. Closing a workflow flushes anything pending, so navigating away never loses the last keystrokes.
+Edits autosave a moment after you stop typing; the status bar shows *Saved* or *Unsaved*. <kbd>Ctrl/⌘</kbd>+<kbd>S</kbd> forces it. Closing a Job flushes anything pending, so navigating away never loses the last keystrokes.
 
 Undo history covers structural changes and field edits, coalescing rapid typing into one step so a single undo steps back over a word rather than a character.

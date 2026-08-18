@@ -1,0 +1,122 @@
+---
+title: Ejecutar un Job
+description: Ejecuta un Job desde el canvas de Sparquet Studio mediante el runner local — setup, el token de seguridad y lectura de resultados.
+sidebar:
+  order: 5
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+Diseñar solo necesita el navegador. Ejecutar necesita Spark, así que Studio habla con un pequeño servicio que corres tú mismo.
+
+## Inicia el runner
+
+<Steps>
+
+1. Instala sus dependencias:
+
+   ```bash
+   cd sparquet-studio
+   pip install -r server/requirements.txt
+   ```
+
+2. Inícialo desde ese directorio — el módulo inserta la raíz del repositorio en `sys.path`, así que `sparquet` resuelve sin instalar nada:
+
+   ```bash
+   uvicorn server.main:app --port 8787
+   ```
+
+3. Copia el token que imprime:
+
+   ```
+   ========================================================================
+   Sparquet Studio runner token (this session only):
+       S3yhI-6191J6wu2xz7bCX9YpafB0GOLo
+   ========================================================================
+   ```
+
+4. Pégalo en **Settings → Local runner → Runner token**, o en la tarjeta que el panel Run muestra cuando una ejecución es rechazada.
+
+</Steps>
+
+`pyspark` y un `JAVA_HOME` funcional son necesarios para ejecuciones reales. En Windows también necesitas `winutils.exe` y `HADOOP_HOME` — sin ellos Spark se cuelga la primera vez que toca el filesystem.
+
+### Un token estable
+
+El token generado cambia en cada reinicio. Fíjalo con una variable de entorno:
+
+```bash
+SPARQUET_STUDIO_TOKEN=my-local-token uvicorn server.main:app --port 8787
+```
+
+```powershell
+$env:SPARQUET_STUDIO_TOKEN = "my-local-token"; uvicorn server.main:app --port 8787
+```
+
+<Aside type="danger" title="Por qué hay un token">
+  El runner ejecuta trabajo Spark arbitrario — SQL arbitrario, lecturas y escrituras
+  arbitrarias en todo lo que esta máquina alcanza. Sin el token, cualquier página web
+  que visites podría postear un JSON de pipeline a `127.0.0.1:8787` y ejecutarlo; CORS no
+  detiene ese tipo de solicitud. `/run` y `/validate` exigen el token y verifican el
+  `Origin` de la solicitud. Mantén el servicio en localhost y nunca lo expongas a la red.
+</Aside>
+
+## Ejecuta
+
+Abre el panel Run con <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>.
+
+- **Run** compila el canvas y ejecuta el Job.
+- **Validate only** parsea la configuración sin tocar Spark — la forma más rápida de comprobar que un config está bien formado.
+- Los errores de lint que bloquean deshabilitan el botón, con un tooltip que explica por qué.
+- Aparece una advertencia cuando un destino escribe con `overwrite`, porque la ejecución es real.
+
+Cuando el Job declara placeholders `{param}`, el panel renderiza un input por parámetro y envía los valores con la ejecución.
+
+Para correr **varios Jobs uno tras otro**, arma un [Pipeline](/es/docs/studio/pipelines/) — mismo runner, mismo token, una etapa por Job.
+
+## Leer el resultado
+
+| Sección | Qué te dice |
+|---|---|
+| Status | success, skipped (disparó un `stop_if_empty`) o error, con el mensaje |
+| Metrics | filas leídas, filas escritas, duración |
+| Validations | una fila por regla: pasó, conteo de fallos, mensaje |
+| Preview | hasta 50 filas del DataFrame de salida |
+| Logs | los registros estructurados del framework para esta ejecución |
+
+Una ejecución skipped no es un fallo: `stop_if_empty` la terminó porque no había nada que procesar.
+
+## Endpoints
+
+El servicio es un pequeño app FastAPI que puedes llamar directo:
+
+| Endpoint | Auth | Propósito |
+|---|---|---|
+| `GET /health` | abierto | versión, si Spark es importable, si el token se exige |
+| `POST /run` | token | corre un JSON de pipeline, devuelve contadores, validaciones, preview y logs |
+| `POST /run/flow/stream` | token | corre varios JSONs en secuencia — lo que postea un [Pipeline](/es/docs/studio/pipelines/) |
+| `POST /validate` | token | solo parseo |
+| `GET /capabilities` | token | los registries **en vivo** — cada transformación, reader, writer y validator que el proceso en ejecución conoce |
+
+`/capabilities` es la respuesta autoritativa a "¿este runtime tiene mi transformación personalizada?", ya que los registries son dinámicos.
+
+## Resolución de problemas
+
+| Síntoma | Causa |
+|---|---|
+| *Local runner not detected* | El servicio no está corriendo, o la URL en Settings no coincide |
+| **401** con explicación | Token ausente o incorrecto — pega el que imprimió la terminal |
+| **403** | El `Origin` de la solicitud no está permitido; amplíalo con `SPARQUET_STUDIO_ORIGINS` |
+| **409** | Una ejecución ya está en curso — el servicio serializa ejecuciones para proteger la sesión compartida |
+| **503** mencionando pyspark | `pyspark` no es importable en ese entorno |
+| Una ejecución que nunca termina en Windows | Falta `winutils.exe` / `HADOOP_HOME` |
+
+## Más allá del runner local
+
+El runner es una conveniencia de desarrollo, no un scheduler. En producción, corre el JSON compilado de la forma habitual:
+
+```bash
+python -m sparquet.cli pipeline.json
+```
+
+o desde tu orquestador vía [API Python](/es/docs/reference/python-api/). El archivo que Studio produjo es el mismo archivo de cualquier forma.

@@ -5,12 +5,7 @@
  * every read is guarded: malformed values become issues, never exceptions.
  */
 
-import type {
-  OnFailureMode,
-  OutputSpec,
-  SparkSettings,
-  ValidationRuleSpec,
-} from '@/types/pipeline'
+import type { OnFailureMode, OutputSpec, SparkSettings } from '@/types/pipeline'
 import { ON_FAILURE_MODES } from '@/types/pipeline'
 import type {
   IssueSeverity,
@@ -23,16 +18,17 @@ import type {
   StudioNode,
   TransformNode,
   ValidationIssue,
-  ValidationsNode,
-  WorkflowSettings,
+  ValidationNode,
+  ValidationPolicy,
+  JobSettings,
 } from '@/types/studio'
-import { HANDLE } from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
 import { makeEdge, newNodeId } from '@/lib/compiler/graph'
 import { autoLayout } from '@/lib/compiler/layout'
 
 export interface DecompileResult {
   graph: StudioGraph
-  settings: WorkflowSettings
+  settings: JobSettings
   issues: ValidationIssue[]
 }
 
@@ -92,7 +88,7 @@ function createIssues() {
 
 type Issues = ReturnType<typeof createIssues>
 
-function emptySettings(): WorkflowSettings {
+function emptySettings(): JobSettings {
   return { pipelineName: '', description: '', spark: {} }
 }
 
@@ -136,16 +132,17 @@ function makeTransformNode(
   }
 }
 
-function makeValidationsNode(
-  onFailure: OnFailureMode,
-  rules: ValidationRuleSpec[],
-  report: OutputSpec | null,
-): ValidationsNode {
+function makeValidationNode(rule: JsonRecord): ValidationNode {
+  const params: JsonRecord = {}
+  for (const [key, value] of Object.entries(rule)) {
+    if (key === 'type') continue
+    params[key] = jsonClone(value)
+  }
   return {
-    id: newNodeId('validations'),
-    type: 'validations',
+    id: newNodeId('validation'),
+    type: 'validation',
     position: at(),
-    data: { kind: 'validations', onFailure, rules, report },
+    data: { kind: 'validation', validator: asText(rule.type), params },
   }
 }
 
@@ -286,40 +283,51 @@ function importTransformation(
   return node
 }
 
-function importValidations(value: unknown, issues: Issues): ValidationsNode | null {
+/**
+ * Splits the `validations` block in two: its rules become one node each (the
+ * inverse of `buildValidations`), while `on_failure` / `report` / `outputs` are
+ * job-wide policy and land in the job settings.
+ */
+function importValidations(
+  value: unknown,
+  issues: Issues,
+): { policy: ValidationPolicy | null; rules: JsonRecord[] } {
   if (!isRecord(value)) {
     issues.warning('The "validations" block is not an object and was skipped.')
-    return null
+    return { policy: null, rules: [] }
   }
 
-  const rules: ValidationRuleSpec[] = []
+  const rules: JsonRecord[] = []
   const rawRules = Array.isArray(value.rules) ? value.rules : []
   rawRules.forEach((rule, index) => {
     if (!isRecord(rule) || !asText(rule.type)) {
       issues.warning(`Validation rule #${index + 1} has no "type" and was skipped.`)
       return
     }
-    rules.push(jsonClone(rule) as unknown as ValidationRuleSpec)
+    rules.push(rule)
   })
 
   if (rules.length === 0) {
     issues.warning('The "validations" block has no usable rules and was skipped.')
-    return null
   }
 
   const rawMode = asText(value.on_failure)
   const onFailure: OnFailureMode = ON_FAILURE_MODES.includes(rawMode as OnFailureMode)
     ? (rawMode as OnFailureMode)
-    : 'fail'
+    : DEFAULT_VALIDATION_POLICY.onFailure
   if (rawMode && onFailure !== rawMode) {
     issues.warning(`Unknown "on_failure" mode "${rawMode}"; using "fail".`)
   }
 
-  const report = isRecord(value.report)
-    ? (jsonClone(value.report) as unknown as OutputSpec)
-    : null
+  const policy: ValidationPolicy = { onFailure }
+  if (isRecord(value.report)) {
+    policy.report = jsonClone(value.report) as unknown as OutputSpec
+  }
+  if (isRecord(value.outputs)) {
+    policy.outputs = jsonClone(value.outputs) as unknown as Record<string, OutputSpec>
+  }
 
-  return makeValidationsNode(onFailure, rules, report)
+  return { policy, rules }
 }
 
 export function pipelineToGraph(pipeline: unknown): DecompileResult {
@@ -330,7 +338,7 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
     return { graph: { nodes: [], edges: [] }, settings: emptySettings(), issues: issues.items }
   }
 
-  const settings: WorkflowSettings = {
+  const settings: JobSettings = {
     pipelineName: asText(pipeline.name),
     description: asText(pipeline.description),
     spark: readSpark(pipeline.spark),
@@ -357,11 +365,13 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
   })
 
   if (pipeline.validations !== undefined) {
-    const validations = importValidations(pipeline.validations, issues)
-    if (validations) {
-      ctx.nodes.push(validations)
-      ctx.edges.push(makeEdge(tail.id, validations.id))
-      tail = validations
+    const { policy, rules } = importValidations(pipeline.validations, issues)
+    if (policy) settings.validations = policy
+    for (const rule of rules) {
+      const node = makeValidationNode(rule)
+      ctx.nodes.push(node)
+      ctx.edges.push(makeEdge(tail.id, node.id))
+      tail = node
     }
   }
 

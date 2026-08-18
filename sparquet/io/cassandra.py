@@ -4,7 +4,11 @@ from pyspark.sql import DataFrame
 
 from sparquet.io.base import BaseReader, BaseWriter
 
-# spark-cassandra-connector (com.datastax.spark). Atende Cassandra e ScyllaDB.
+# spark-cassandra-connector (com.datastax.spark).
+#
+# A MESMA classe atende Cassandra E ScyllaDB — não há reader/writer separado.
+# ScyllaDB é compatível com o protocolo CQL/Cassandra; basta apontar
+# `spark.cassandra.connection.host` para o cluster Scylla.
 _FMT = "org.apache.spark.sql.cassandra"
 
 

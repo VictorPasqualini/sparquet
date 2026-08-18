@@ -85,7 +85,7 @@ const SECTIONS: SectionMeta[] = [
     id: 'appearance',
     label: 'Appearance',
     title: 'Appearance',
-    description: 'Theme and the canvas defaults applied to every workflow you open.',
+    description: 'Theme and the canvas defaults applied to every job you open.',
     icon: Palette,
   },
   {
@@ -106,7 +106,7 @@ const SECTIONS: SectionMeta[] = [
     id: 'data',
     label: 'Data',
     title: 'Data',
-    description: 'Your projects and workflows, stored in this browser only.',
+    description: 'Your workflows and jobs, stored in this browser only.',
     icon: Database,
   },
   {
@@ -146,7 +146,7 @@ const CANVAS_PREFERENCES: {
   {
     key: 'liveLint',
     label: 'Live linting',
-    description: 'Re-checks the workflow while you edit, not only when you run it.',
+    description: 'Re-checks the job while you edit, not only when you run it.',
   },
 ]
 
@@ -762,15 +762,15 @@ type ImportMode = 'merge' | 'replace'
 interface ImportCandidate {
   name: string
   bundle: unknown
-  projects: number
   workflows: number
+  jobs: number
 }
 
 function DataSection() {
-  const projectCount = useLibraryStore((state) => state.projects.length)
   const workflowCount = useLibraryStore((state) => state.workflows.length)
+  const jobCount = useLibraryStore((state) => state.jobs.length)
   const nodeCount = useLibraryStore((state) =>
-    state.workflows.reduce((total, workflow) => total + workflow.graph.nodes.length, 0),
+    state.jobs.reduce((total, job) => total + job.graph.nodes.length, 0),
   )
   const reload = useLibraryStore((state) => state.load)
 
@@ -807,8 +807,8 @@ function DataSection() {
       setCandidate({
         name: file.name,
         bundle,
-        projects: countIn(bundle, 'projects'),
         workflows: countIn(bundle, 'workflows'),
+        jobs: countIn(bundle, 'jobs'),
       })
     } catch {
       toast.error(`${file.name} is not valid JSON.`)
@@ -823,8 +823,8 @@ function DataSection() {
       await reload()
       setCandidate(null)
       toast.success(
-        `Imported ${summary.projects} ${plural(summary.projects, 'project')} and ` +
-          `${summary.workflows} ${plural(summary.workflows, 'workflow')}` +
+        `Imported ${summary.workflows} ${plural(summary.workflows, 'workflow')} and ` +
+          `${summary.jobs} ${plural(summary.jobs, 'job')}` +
           (summary.skipped > 0 ? ` — ${summary.skipped} unreadable records skipped.` : '.'),
       )
     } catch (error) {
@@ -848,14 +848,14 @@ function DataSection() {
   return (
     <Section meta={SECTIONS[3]}>
       <dl className="grid grid-cols-3 gap-3">
-        <Stat label="Projects" value={projectCount} />
         <Stat label="Workflows" value={workflowCount} />
+        <Stat label="Jobs" value={jobCount} />
         <Stat label="Nodes" value={nodeCount} />
       </dl>
 
       <ActionRow
         title="Export everything"
-        description="One JSON bundle with every project and workflow. Keys and preferences stay out of it."
+        description="One JSON bundle with every workflow and job. Keys and preferences stay out of it."
         action={
           <Button
             size="sm"
@@ -897,7 +897,7 @@ function DataSection() {
 
       <ActionRow
         title="Reset workspace"
-        description="Deletes every project and workflow in this browser. Export first — this cannot be undone."
+        description="Deletes every workflow and job in this browser. Export first — this cannot be undone."
         action={
           <Button
             size="sm"
@@ -953,7 +953,7 @@ function ImportModal({
       title="Import workspace"
       description={
         candidate
-          ? `${candidate.name} — ${candidate.projects} ${plural(candidate.projects, 'project')}, ${candidate.workflows} ${plural(candidate.workflows, 'workflow')}.`
+          ? `${candidate.name} — ${candidate.workflows} ${plural(candidate.workflows, 'workflow')}, ${candidate.jobs} ${plural(candidate.jobs, 'job')}.`
           : undefined
       }
       footer={
@@ -983,7 +983,7 @@ function ImportModal({
         <p className="text-xs leading-relaxed text-content-muted">
           {mode === 'merge'
             ? 'Records are added, and anything with a matching id is overwritten by the bundle. Everything else in this browser is kept.'
-            : 'Every project and workflow in this browser is deleted first, then the bundle is written. A copy of the current library is kept in a backup key.'}
+            : 'Every workflow and job in this browser is deleted first, then the bundle is written. A copy of the current library is kept in a backup key.'}
         </p>
       </div>
     </Modal>
@@ -1015,7 +1015,7 @@ function ResetModal({
         if (!next) close()
       }}
       title="Reset workspace"
-      description="Every project and workflow in this browser is deleted. Settings and the AI key are untouched."
+      description="Every workflow and job in this browser is deleted. Settings and the AI key are untouched."
       size="sm"
       footer={
         <>
@@ -1066,7 +1066,7 @@ function AboutSection() {
       <div className="space-y-2">
         <p className="text-xs font-medium text-content-muted">How Studio works</p>
         <p className="text-xs leading-relaxed text-content-muted">
-          Studio is a static front end with no accounts and no backend. Projects, workflows and
+          Studio is a static front end with no accounts and no backend. Workflows, jobs and
           preferences live in this browser — IndexedDB, falling back to local storage — and the
           canvas compiles to the same pipeline JSON the framework runs. Clearing site data or
           moving to another browser loses your work, so export a bundle before you do either.
@@ -1264,7 +1264,7 @@ function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`
 }
 
-function countIn(bundle: unknown, key: 'projects' | 'workflows'): number {
+function countIn(bundle: unknown, key: 'workflows' | 'jobs'): number {
   if (typeof bundle !== 'object' || bundle === null) return 0
   const value = (bundle as Record<string, unknown>)[key]
   return Array.isArray(value) ? value.length : 0

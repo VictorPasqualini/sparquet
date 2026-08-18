@@ -1,0 +1,146 @@
+---
+title: Estendendo
+description: Adicione seus próprios conectores, transformações e validators ao Sparquet — e mantenha o Studio funcionando com eles.
+sidebar:
+  order: 8
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Tudo o que já vem embutido é registrado pelas mesmas interfaces que você pode usar. Quando a linguagem não cobre um caso, estenda-a em vez de contorná-la.
+
+## Uma transformação
+
+```python
+import pyspark.sql.functions as F
+from sparquet.transform.base import BaseTransformation
+
+class NormalizeText(BaseTransformation):
+    """Trims and lowercases a column."""
+
+    def apply(self, df):
+        column = self.config.params["column"]
+        return df.withColumn(column, F.trim(F.lower(F.col(column))))
+```
+
+```python
+fw.register_transformation("normalize_text", NormalizeText)
+```
+
+```json
+{ "type": "normalize_text", "column": "email" }
+```
+
+`self.config.params` guarda todas as chaves do JSON exceto `type` e `skip_if_false` — o que significa que `skip_if_false` funciona na sua transformação de graça.
+
+## Um validator
+
+```python
+import pyspark.sql.functions as F
+from sparquet.validation.base import BaseValidator, ValidationResult
+
+class NoFutureDateValidator(BaseValidator):
+    def validate(self, df):
+        column = self.rule.params["column"]
+        failed = df.filter(F.col(column) > F.current_date()).count()
+        if failed:
+            return ValidationResult("no_future_date", False, f"{failed} future dates", failed)
+        return ValidationResult("no_future_date", True)
+```
+
+```python
+fw.register_validator("no_future_date", NoFutureDateValidator)
+```
+
+```json
+{ "type": "no_future_date", "column": "ordered_at" }
+```
+
+Retornar um `ValidationResult` — em vez de lançar uma exceção — é o que permite ao `on_failure` decidir a política e ao relatório registrar o resultado.
+
+## Um conector
+
+```python
+from sparquet.io.base import BaseReader, BaseWriter
+
+class ElasticReader(BaseReader):
+    def read(self):
+        options = {**self.config.options, "es.resource": self.config.path}
+        return self.spark.read.format("org.elasticsearch.spark.sql").options(**options).load()
+
+class ElasticWriter(BaseWriter):
+    def write(self, df):
+        writer = df.write.format("org.elasticsearch.spark.sql").mode(self.config.mode)
+        writer.options(**self.config.options).save(self.config.path)
+```
+
+```python
+fw.register_reader("elasticsearch", ElasticReader)
+fw.register_writer("elasticsearch", ElasticWriter)
+```
+
+```json
+{ "format": "elasticsearch", "path": "orders/_doc", "options": { "es.nodes": "es.internal" } }
+```
+
+<Aside type="note">
+  Os registries de reader e writer são a nível de classe, compartilhados por todo
+  `Sparquet` no processo. Os registries de transformação e validator são
+  por instância, então dois frameworks podem carregar transformações customizadas diferentes.
+</Aside>
+
+## Mantendo o Studio em sincronia
+
+O Studio monta sua paleta, seus formulários, seu linter e o prompt do assistente a partir de um único catálogo em `sparquet-studio/src/catalog/`. Um tipo customizado ainda funciona sem tocá-lo — nós desconhecidos são importados, preservados e exportados intactos — mas ele não ganha formulário dedicado e o assistente não vai sugeri-lo.
+
+Para torná-lo de primeira classe, adicione uma entrada:
+
+```ts title="src/catalog/transformations.core.ts"
+{
+  type: 'normalize_text',
+  label: 'Normalize text',
+  family: 'compute',
+  accent: 'transform',
+  icon: 'Type',
+  summary: 'Trims and lowercases a column.',
+  description: 'Applies trim + lower to one column, in place.',
+  fields: [
+    {
+      key: 'column',
+      label: 'Column',
+      type: 'text',
+      required: true,
+      placeholder: 'email',
+      help: 'Column rewritten in place.',
+    },
+  ],
+  keywords: ['trim', 'lower', 'clean'],
+  gotchas: ['Rewrites the column in place — cast it first if the type matters.'],
+  examples: [{ title: 'Normalize an email column', json: '{ "type": "normalize_text", "column": "email" }' }],
+}
+```
+
+Essa única entrada te dá o item da paleta, o formulário do inspector, a regra de lint de campo obrigatório e uma linha no system prompt do assistente.
+
+## Descobrindo o que um runtime realmente tem
+
+Os registries são dinâmicos, então a lista autoritativa vive no processo em execução. O runner local do Studio a expõe:
+
+```bash
+curl -s localhost:8787/capabilities | jq
+```
+
+```json
+{
+  "transformations": ["filter", "select", "…", "normalize_text"],
+  "readers": ["parquet", "delta", "…", "elasticsearch"],
+  "writers": ["parquet", "delta", "…", "elasticsearch"],
+  "validators": ["not_null", "unique", "…", "no_future_date"]
+}
+```
+
+Comparar isso com o catálogo é a maneira mais rápida de identificar um tipo customizado que o editor ainda não conhece.
+
+## Contribuindo de volta
+
+Se a extensão for geral — um conector para um banco de dados comum, uma transformação que todo pipeline acaba reescrevendo — envie um pull request. Duas coisas o tornam mergeável: um pipeline de exemplo em `examples/` que o exercite, e uma entrada no catálogo para que o Studio também o entregue.

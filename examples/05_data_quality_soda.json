@@ -1,0 +1,61 @@
+{
+  "name": "05_data_quality_soda",
+  "description": "Qualidade de dados no estilo SODA Core + broadcast join. Enriquece pedidos com uma dimensão pequena (broadcast, map-side, sem shuffle) e valida a saída com checks baseados em métrica/threshold (warn/fail), configs de validade (valid_format), freshness e verificação de schema. O relatório de validações registra severity + metric_value.",
+
+  "input": {
+    "format": "delta",
+    "path": "vendas.pedidos"
+  },
+
+  "transformations": [
+    {
+      "type": "join",
+      "with": { "format": "delta", "path": "ref.dim_cliente" },
+      "with_transformations": [
+        { "type": "select", "columns": ["id_cliente", "segmento", "email"] },
+        { "type": "distinct" }
+      ],
+      "on": "id_cliente",
+      "how": "left",
+      "broadcast": true
+    },
+    { "type": "checkpoint" }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "report": { "format": "delta", "path": "dq.validation_report", "mode": "append" },
+    "rules": [
+      { "type": "check", "metric": "row_count", "must_be": "> 0" },
+
+      { "type": "check", "name": "cliente sempre presente",
+        "metric": "missing_count", "column": "id_cliente", "must_be": "= 0" },
+
+      { "type": "check", "name": "email completo",
+        "metric": "missing_percent", "column": "email", "must_be": "< 5%", "warn": "= 0" },
+
+      { "type": "check", "name": "email válido",
+        "metric": "invalid_percent", "column": "email",
+        "valid_format": "email", "must_be": "< 5%" },
+
+      { "type": "check", "name": "sem pedido duplicado",
+        "metric": "duplicate_count", "columns": ["id_pedido"], "must_be": "= 0" },
+
+      { "type": "check", "name": "ticket médio plausível",
+        "metric": "avg", "column": "valor", "must_be": "between 1 and 100000" },
+
+      { "type": "check", "name": "dados frescos",
+        "metric": "freshness", "column": "dt_atualizacao", "must_be": "< 2d", "warn": "< 6h" },
+
+      { "type": "schema",
+        "required_columns": ["id_pedido", "id_cliente", "valor", "dt_atualizacao"],
+        "column_types": { "id_pedido": "bigint", "valor": "double" } }
+    ]
+  },
+
+  "output": {
+    "format": "delta",
+    "path": "vendas.pedidos_enriquecidos",
+    "mode": "overwrite"
+  }
+}

@@ -208,9 +208,9 @@ export function AiPanel() {
     abortRef.current = controller
 
     const editor = useEditorStore.getState()
-    // Context off means nothing about the workflow leaves the browser: lint messages
+    // Context off means nothing about the job leaves the browser: lint messages
     // and node params quote table paths, column names and raw SQL just as the JSON does.
-    const share = ai.shareWorkflowContext
+    const share = ai.shareJobContext
     const context: AiPromptContext = {
       pipeline: share ? editor.compile().pipeline : null,
       issues: share ? editor.issues.slice(0, MAX_CONTEXT_ISSUES) : [],
@@ -512,19 +512,19 @@ export function AiPanel() {
         <div className="flex items-center justify-between gap-2">
           <button
             type="button"
-            aria-pressed={ai.shareWorkflowContext}
-            title="Toggle workflow context"
-            onClick={() => setAi({ shareWorkflowContext: !ai.shareWorkflowContext })}
+            aria-pressed={ai.shareJobContext}
+            title="Toggle job context"
+            onClick={() => setAi({ shareJobContext: !ai.shareJobContext })}
             className={cn(
               'inline-flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 text-2xs transition-colors',
-              ai.shareWorkflowContext
+              ai.shareJobContext
                 ? 'text-content-muted hover:text-content'
                 : 'text-content-subtle hover:text-content-muted',
             )}
           >
             <Paperclip className="h-3 w-3 shrink-0" aria-hidden />
             <span className="truncate">
-              {ai.shareWorkflowContext ? contextParts.join(' · ') : 'Context off'}
+              {ai.shareJobContext ? contextParts.join(' · ') : 'Context off'}
             </span>
           </button>
           <p className="shrink-0 text-2xs text-content-subtle">

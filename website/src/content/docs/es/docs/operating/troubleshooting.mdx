@@ -1,0 +1,120 @@
+---
+title: Resolución de problemas
+description: Los errores que los usuarios de Sparquet realmente encuentran, qué los causa y cómo resolver cada uno.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+## El pipeline no arranca
+
+**`The pipeline JSON needs 'output' (object) or 'outputs' (list).`**
+Ninguna de las claves está presente. Una de ellas es obligatoria.
+
+**`KeyError: 'format'` o `KeyError: 'path'`**
+A un `input`, un `output` o un `with` de join/union le falta un campo obligatorio. El `input` debe estar completo aun cuando inyectes un DataFrame con `input_df` — el bloque igual tiene que parsear.
+
+**`Read format 'x' not supported`**
+El formato no está en el registry de lectura. Revisa la ortografía; `binary` es de solo lectura (sin writer), mientras que `kafka` lee y escribe. Los formatos personalizados deben registrarse antes de la ejecución.
+
+## No se escribió nada
+
+**`result.skipped` es `True`**
+Un `stop_if_empty` disparó: no había datos que procesar. `success` sigue `True` — es un no-op, no un fallo.
+
+**Una transformación se saltó en silencio**
+Su `skip_if_false` evaluó a vacío o falso. Recuerda que `False`, `[]` y un parámetro ausente se vuelven todos una cadena vacía. Imprime el documento sustituido si tienes dudas.
+
+## Datos incorrectos o faltantes
+
+**Desaparecieron columnas**
+`select` es destructivo: todo lo no listado se va. `group_by` descarta toda columna que no esté en `by` o producida por `agg`.
+
+**Una union produjo basura**
+`allow_missing_columns` es `false` por defecto, y entonces Spark empareja columnas **por posición**. Ponlo en `true` para emparejar por nombre.
+
+**Un join multiplicó filas**
+El lado derecho no es único en la clave del join. Añade `distinct` en `with_transformations`, y una validación `unique` para atraparlo de forma permanente.
+
+**Un cast produjo nulos**
+Spark devuelve null en vez de lanzar cuando un valor no se puede convertir. Valida con una regla `not_null` después del cast.
+
+**Una columna `ingestion_ts` inesperada**
+El framework la añade tras la lectura. Elimínala si el esquema de destino es fijo.
+
+**`{param}` aparece literal en los datos**
+La clave no estaba en `params`. Los placeholders sin correspondencia quedan literales por diseño.
+
+## Fallos de merge
+
+**`multiple source rows matched`** (Delta)
+El DataFrame entrante tiene más de una fila por clave de merge. Deduplica antes de escribir, y añade una validación `unique` en esas columnas.
+
+**`Unknown save mode: MERGE`**
+El writer de Iceberg compara el modo distinguiendo mayúsculas. Escribe `merge` en minúsculas.
+
+## Conectores
+
+**`ClassNotFoundException` / `No suitable driver`**
+El paquete del conector no está en el classpath. Añade `spark.jars.packages` al `spark.configs` del pipeline, o instálalo como biblioteca de cluster.
+
+**`Read format 'x' not supported`**
+El formato no está registrado. Los conectores personalizados deben registrarse antes de la ejecución — ver [Extensión](/es/docs/reference/extending/).
+
+## Studio
+
+**El canvas no compila**
+Abre el panel Issues. Errores que bloquean: sin destino, un nodo huérfano, un campo obligatorio vacío, dos entradas principales a un mismo nodo, un nodo de validations en una rama divergente, transformaciones en el segundo input de una `union`.
+
+**El panel JSON está vacío**
+El grafo aún no compila — el panel muestra los problemas que bloquean.
+
+**`Local runner not detected`**
+El servicio no está corriendo, o la URL en **Settings → Local runner** no coincide. Ver [Ejecutar un Job](/es/docs/studio/running/).
+
+**Una ejecución devuelve 401**
+El runner exige su token. Copia el que se imprime en su terminal a Settings, o inícialo con `SPARQUET_STUDIO_TOKEN` para fijar un valor estable.
+
+**Una ejecución devuelve 409**
+Otra ejecución está en curso. El servicio serializa las ejecuciones para proteger la SparkSession compartida.
+
+**Mi trabajo desapareció**
+Studio guarda tus Workflows en el IndexedDB del navegador. Borrar los datos del sitio los elimina, y un navegador o perfil distinto tiene su propia copia. Exporta en **Settings → Data**, y commitea los pipelines compilados a git.
+
+## Entorno
+
+**Una ejecución local se cuelga en Windows**
+Spark necesita los shims nativos de Hadoop. Instala `winutils.exe` y `hadoop.dll` en `C:\hadoop\bin` y define `HADOOP_HOME`. WSL2 o Docker lo evitan por completo.
+
+**`JAVA_HOME is not set`**
+Spark necesita un JDK — 11 o 17 para Spark 3.5, 17+ para Spark 4.
+
+**Las opciones del bloque `spark` no tuvieron efecto**
+En Databricks se reutiliza la sesión activa y el bloque se ignora. La sesión también es un singleton por proceso: gana el primer pipeline que la crea.
+
+## Técnica de depuración
+
+Añade un nodo `debug` donde perdiste el hilo:
+
+```json
+{
+  "type": "debug",
+  "label": "after join",
+  "actions": ["count", "print_schema", "show"],
+  "transformations": [{ "type": "filter", "condition": "id = 'SUSPECT'" }],
+  "show_rows": 20
+}
+```
+
+Sus `transformations` anidadas se aplican a una copia desechable, así que puedes enfocar la inspección en un registro sin cambiar el pipeline.
+
+<Aside type="tip">
+  Reproduce con una porción pequeña primero: apunta el input a una muestra,
+  añade `stop_if_empty`, y córrelo desde Studio, donde tienes contadores,
+  validaciones y un preview en un solo lugar.
+</Aside>
+
+## Sigues atascado
+
+Abre un issue con el JSON del pipeline (sin secretos), el mensaje de error y el entorno — [github.com/VictorPasqualini/sparquet/issues](https://github.com/VictorPasqualini/sparquet/issues).

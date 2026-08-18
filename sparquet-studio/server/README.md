@@ -1,15 +1,21 @@
 # Sparquet Studio — local runner
 
-Optional HTTP bridge that executes a pipeline built in Studio against the real
+Optional HTTP bridge that executes a Job built in Studio against the real
 `Sparquet`, and returns counters, validation results, a data preview and
 the framework's structured logs.
 
 Studio works entirely offline without it; the runner only powers the **Run**
 button.
 
+> **Vocabulary.** A Studio **Job** is one pipeline JSON — exactly what the
+> `pipeline` field of a request carries, and what the framework's `Pipeline` class
+> executes. A Studio **Pipeline** is an ordered set of Jobs: it posts to
+> `/run/flow/stream`, one `stages[]` entry per Job. The request and response
+> fields below keep the framework's names.
+
 ## Security
 
-**This service executes arbitrary Spark jobs.** Every request carries a pipeline
+**This service executes arbitrary Spark work.** Every request carries a pipeline
 definition with arbitrary SQL, arbitrary input paths and arbitrary output paths,
 which are run with your user's permissions on your machine and on every data
 store your machine can reach.
@@ -185,6 +191,52 @@ Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
 - `dry_run: true` parses the configuration and returns without touching Spark.
 - `rows_written` is the main DataFrame count taken before the writes, so it does
   not necessarily match any single destination.
+
+### `POST /run/flow/stream`
+
+Runs several pipeline JSONs **in sequence** — a Studio **Pipeline**, where each Job
+is one stage. Requires the token, same as `/run`. Server-Sent Events.
+
+```json
+{
+  "stages": [
+    { "id": "s1", "name": "bronze", "pipeline": { "...": "..." }, "params": {} },
+    { "id": "s2", "name": "silver", "pipeline": { "...": "..." } }
+  ],
+  "limit": 50,
+  "stop_on_error": true
+}
+```
+
+Stages arrive already ordered and share one SparkSession, so a stage hands data to
+the next through whatever it wrote — a path the next one reads, or a `view` output
+registered as a temp view. No extra wiring is needed here.
+
+Events: `start` (`{flow, total}`), then per stage `stage_start` → `log`* →
+`stage_result`, and a final `result`:
+
+```json
+{
+  "success": true,
+  "duration_ms": 36743,
+  "stages": [
+    { "index": 0, "id": "s1", "name": "bronze", "success": true,
+      "rows_read": 12, "rows_written": 8, "duration_ms": 34197, "error": null,
+      "validations": [], "output_metrics": [] }
+  ],
+  "preview": { "columns": ["country", "total"], "rows": [["BR", 655.99]] },
+  "error": null
+}
+```
+
+- Every `log` carries `stage_id`, so a line always traces back to the JSON that
+  produced it (including `stdout` and JVM lines).
+- `preview` is the **last** stage's output — the Pipeline's result.
+- `stop_on_error: true` (default) stops at the first failing stage: later stages
+  never start, and `error` names the stage that broke. `false` runs them all.
+- `success` is true only when every stage ran and succeeded.
+- The whole sequence takes the same single run lock as `/run`, so a second
+  Pipeline (or a single run) while one is in progress gets `409`.
 
 ### `POST /validate`
 

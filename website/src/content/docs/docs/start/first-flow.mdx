@@ -1,6 +1,6 @@
 ---
-title: Your first flow in Studio
-description: Draw a pipeline on the Sparquet Studio canvas, watch it compile to JSON, and run it locally.
+title: Your first job in Studio
+description: Draw a Job on the Sparquet Studio canvas, watch it compile to JSON, and run it locally.
 sidebar:
   order: 4
 ---
@@ -19,11 +19,11 @@ Studio is an editor for the file you wrote in the [quickstart](/docs/start/quick
    npm run dev
    ```
 
-   Go to [http://localhost:5273](http://localhost:5273). The first launch creates a **Getting Started** project with working pipelines — open one to look around, or follow along and build your own.
+   Go to [http://localhost:5273](http://localhost:5273). The first launch creates a **Getting Started** Workflow with working Jobs — open one to look around, or follow along and build your own.
 
-2. ### Create a project and a workflow
+2. ### Create a Workflow and a Job
 
-   Projects group related pipelines; one per domain keeps names short. Click **New project**, name it `Sales`, then **New workflow** inside it and call it `Orders curated`.
+   A **Workflow** groups related Jobs; one per domain keeps names short. A **Job** is one pipeline JSON — the file the framework runs. Click **New workflow**, name it `Sales`, then **New job** inside it and call it `Orders curated`.
 
    You land on an empty canvas with the node palette on the left and the inspector on the right.
 
@@ -85,7 +85,7 @@ Studio is an editor for the file you wrote in the [quickstart](/docs/start/quick
    uvicorn server.main:app --port 8787
    ```
 
-   The runner prints a token — paste it into the panel. Then **Run pipeline** executes the compiled JSON with the real framework and brings back row counts, per-rule validation results, a 50-row preview and the framework's own logs.
+   The runner prints a token — paste it into the panel. Then **Run** executes the compiled JSON with the real framework and brings back row counts, per-rule validation results, a 50-row preview and the framework's own logs.
 
 </Steps>
 
@@ -108,5 +108,6 @@ Have a pipeline JSON already? Open the JSON panel, switch to **Edit**, paste the
 ## Next
 
 - [The canvas](/docs/studio/canvas/) — connections, branching, keyboard control.
-- [AI assistant](/docs/studio/ai-assistant/) — describe a pipeline instead of drawing it.
+- [AI assistant](/docs/studio/ai-assistant/) — describe a Job instead of drawing it.
+- [Pipelines](/docs/studio/pipelines/) — chain several Jobs into one sequential run.
 - [Core concepts](/docs/start/concepts/) — what runs when, and why the graph maps the way it does.

@@ -40,14 +40,15 @@ import {
   checkRunnerHealth,
   DEFAULT_RUNNER_URL,
   isRunnerError,
-  runPipeline,
+  runJobStream,
   RUNNER_INSTALL_COMMAND,
   RUNNER_START_COMMAND,
-  validatePipeline,
+  validateJob,
   type RunnerHealth,
 } from '@/lib/runner/client'
 import { cn } from '@/lib/utils/cn'
-import { useEditorStore } from '@/store/editor'
+import { formatClockTime, formatCount, formatDuration } from '@/lib/utils/format'
+import { runtimeEndpointNodeIds, useEditorStore } from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
 import type { ParamDefinition, RunLogLine, RunResult, RunStatus } from '@/types/studio'
 
@@ -79,6 +80,8 @@ export function RunPanel() {
   const running = useEditorStore((state) => state.running)
   const setRun = useEditorStore((state) => state.setRun)
   const setRunning = useEditorStore((state) => state.setRunning)
+  const setStepStatus = useEditorStore((state) => state.setStepStatus)
+  const setStepStatuses = useEditorStore((state) => state.setStepStatuses)
 
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const setRunnerUrl = useSettingsStore((state) => state.setRunnerUrl)
@@ -185,16 +188,82 @@ export function RunPanel() {
 
     try {
       if (next === 'run') {
-        const result = await runPipeline(
+        // Streamed run: logs land as Spark produces them, so a long write shows
+        // progress instead of a frozen panel. The final `result` event carries the
+        // same payload the blocking endpoint returns.
+        const streamed: RunLogLine[] = []
+        let settled: RunResult | null = null
+        let lastStarted: string | null = null
+
+        // The runner reports steps by index into the main `transformations`
+        // array; this is the same order the compiler emits, so index → node id.
+        const state = useEditorStore.getState()
+        const transformNodeIds = state.transformNodeIdsInOrder()
+        const { sourceId, sinkIds } = runtimeEndpointNodeIds(state)
+        setStepStatuses(
+          Object.fromEntries(
+            [...(sourceId ? [sourceId] : []), ...transformNodeIds, ...sinkIds].map((id) => [
+              id,
+              'pending' as const,
+            ]),
+          ),
+        )
+
+        // Each scope counts in its own lane, so an index means different things.
+        const nodeForStep = (index: number, scope?: string): string | undefined =>
+          scope === 'input'
+            ? (sourceId ?? undefined)
+            : scope === 'output'
+              ? sinkIds[index]
+              : transformNodeIds[index]
+
+        await runJobStream(
           runnerUrl,
           { pipeline, params: paramValues, limit: PREVIEW_ROWS },
+          {
+            onLog: (line) => {
+              streamed.push(line)
+              setRun({
+                status: 'running',
+                pipelineName: pipeline.name,
+                logs: [...streamed],
+              })
+            },
+            onStep: (index, status, type, scope) => {
+              const nodeId = nodeForStep(index, scope)
+              if (nodeId) {
+                setStepStatus(nodeId, status, type)
+                lastStarted = status === 'running' ? nodeId : null
+              }
+            },
+            onResult: (result) => {
+              settled = result
+              // A failed run stops mid-chain: the step that was running never
+              // reports 'applied', so mark it as the failure point.
+              if (result.status === 'error' && lastStarted) {
+                setStepStatus(lastStarted, 'error')
+              }
+            },
+          },
           controller.signal,
           runnerToken,
         )
+
         const elapsed = Math.round(performance.now() - startedAt)
-        setRun(result.durationMs ? result : { ...result, durationMs: elapsed })
+        const result: RunResult = settled ?? {
+          status: 'error',
+          pipelineName: pipeline.name,
+          error: 'The runner closed the stream without a result.',
+          logs: streamed,
+        }
+        // Keep the streamed lines: the JVM/stdout windows only exist on the stream.
+        const merged: RunResult = {
+          ...result,
+          logs: streamed.length >= (result.logs?.length ?? 0) ? streamed : result.logs,
+        }
+        setRun(merged.durationMs ? merged : { ...merged, durationMs: elapsed })
       } else {
-        const outcome = await validatePipeline(
+        const outcome = await validateJob(
           runnerUrl,
           pipeline,
           controller.signal,
@@ -850,19 +919,11 @@ function RunReport({ run, mode }: { run: RunResult; mode: RunMode }) {
       )}
 
       {run.preview && (
-        <section className="space-y-2">
-          <SectionTitle>
-            <span className="inline-flex items-center gap-1.5">
-              <Table2 className="h-3.5 w-3.5" aria-hidden />
-              Preview
-            </span>
-          </SectionTitle>
-          <RunResultTable
-            columns={run.preview.columns}
-            rows={run.preview.rows}
-            truncated={run.preview.truncated}
-          />
-        </section>
+        <PreviewSection
+          columns={run.preview.columns}
+          rows={run.preview.rows}
+          truncated={run.preview.truncated}
+        />
       )}
 
       {run.logs.length > 0 && <LogStream logs={run.logs} />}
@@ -984,6 +1045,52 @@ function Metric({
   )
 }
 
+/**
+ * The output preview, collapsible so a wide result table does not push the logs
+ * and metrics off screen. Starts collapsed so the run summary, validations and
+ * logs stay on one screen; the header keeps the shape (rows × columns) visible,
+ * so opening it is a deliberate act rather than the default cost of every run.
+ */
+function PreviewSection({
+  columns,
+  rows,
+  truncated,
+}: {
+  columns: string[]
+  rows: unknown[][]
+  truncated: boolean
+}) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <section className="space-y-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs text-content transition-colors hover:bg-surface-sunken"
+      >
+        <ChevronRight
+          className={cn(
+            'h-3.5 w-3.5 text-content-subtle transition-transform',
+            open && 'rotate-90',
+          )}
+          aria-hidden
+        />
+        <Table2 className="h-3.5 w-3.5 text-content-subtle" aria-hidden />
+        <span className="font-medium">Preview</span>
+        <span className="text-content-subtle">
+          {rows.length}
+          {truncated ? '+' : ''} row{rows.length === 1 && !truncated ? '' : 's'} ×{' '}
+          {columns.length} col{columns.length === 1 ? '' : 's'}
+        </span>
+      </button>
+
+      {open && <RunResultTable columns={columns} rows={rows} truncated={truncated} />}
+    </section>
+  )
+}
+
 const LOG_LEVEL_CLASS: Record<RunLogLine['level'], string> = {
   debug: 'text-content-subtle',
   info: 'text-state-info',
@@ -991,9 +1098,69 @@ const LOG_LEVEL_CLASS: Record<RunLogLine['level'], string> = {
   error: 'text-state-danger',
 }
 
+/**
+ * The three log windows a run produces, behind one collapsible section.
+ *
+ * They are genuinely different streams, not a filter over one: `pipeline` is the
+ * framework's own structured log, `output` is whatever the pipeline printed
+ * (the `debug` transformation's `count`/`show` tables), and `spark` is the JVM's
+ * stderr — where the real Spark stack trace or a Windows winutils failure shows
+ * up, which never reaches the Python logger. A run that "worked" but wrote
+ * nothing is usually explained in the Spark window, so it is worth its own tab.
+ */
+const LOG_TABS = [
+  { id: 'pipeline', label: 'Pipeline', hint: 'The framework log' },
+  { id: 'output', label: 'Output', hint: 'debug / show output' },
+  { id: 'spark', label: 'Spark', hint: 'JVM stderr (log4j)' },
+] as const
+
+type LogTabId = (typeof LOG_TABS)[number]['id']
+
+function tabFor(line: RunLogLine): LogTabId {
+  if (line.source === 'spark') return 'spark'
+  if (line.source === 'stdout') return 'output'
+  return 'pipeline'
+}
+
+/**
+ * "Transformation started" says nothing on its own. The runner ships the step's
+ * `type`, `index` and `total` in the log context, so spell them out: which
+ * transformation, and where it sits in the pipeline.
+ */
+function describeLog(line: RunLogLine): { label: string | null; message: string } {
+  const context = line.context
+  if (!context || context.step !== true) return { label: null, message: line.message }
+
+  const type = typeof context.type === 'string' ? context.type : null
+  const index = typeof context.index === 'number' ? context.index : null
+  const total = typeof context.total === 'number' ? context.total : null
+  if (!type) return { label: null, message: line.message }
+
+  const step = index !== null && total !== null ? `${index + 1}/${total}` : null
+  const verb = line.message.includes('applied')
+    ? 'applied'
+    : line.message.includes('pulada')
+      ? 'skipped'
+      : 'running'
+
+  return {
+    label: step ? `step ${step}` : null,
+    message: `${type} — ${verb}`,
+  }
+}
+
 function LogStream({ logs }: { logs: RunLogLine[] }) {
   const [open, setOpen] = useState(false)
+  const [tab, setTab] = useState<LogTabId>('pipeline')
   const failures = logs.filter((line) => line.level === 'error').length
+
+  const byTab = useMemo(() => {
+    const groups: Record<LogTabId, RunLogLine[]> = { pipeline: [], output: [], spark: [] }
+    for (const line of logs) groups[tabFor(line)].push(line)
+    return groups
+  }, [logs])
+
+  const visible = byTab[tab]
 
   return (
     <section className="space-y-2">
@@ -1021,18 +1188,67 @@ function LogStream({ logs }: { logs: RunLogLine[] }) {
       </button>
 
       {open && (
-        <div className="max-h-64 overflow-auto rounded-xl border border-line bg-surface-sunken p-2 font-mono text-2xs">
-          {logs.map((line, index) => (
-            <div key={`${line.ts}-${index}`} className="flex gap-2 py-0.5">
-              <span className="shrink-0 text-content-subtle">{formatTime(line.ts)}</span>
-              <span className={cn('w-16 shrink-0 uppercase', LOG_LEVEL_CLASS[line.level])}>
-                {line.level}
-              </span>
-              <span className="min-w-0 whitespace-pre-wrap break-words text-content-muted">
-                {line.message}
-              </span>
-            </div>
-          ))}
+        <div className="space-y-2">
+          <div role="tablist" aria-label="Log windows" className="flex gap-1">
+            {LOG_TABS.map((entry) => {
+              const count = byTab[entry.id].length
+              const errors = byTab[entry.id].filter((l) => l.level === 'error').length
+              const selected = entry.id === tab
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  title={entry.hint}
+                  onClick={() => setTab(entry.id)}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-2xs transition-colors',
+                    selected
+                      ? 'border-brand-500/40 bg-brand-500/10 text-content'
+                      : 'border-line bg-surface text-content-muted hover:bg-surface-sunken',
+                  )}
+                >
+                  {entry.label}
+                  <span className={cn(errors > 0 ? 'text-state-danger' : 'text-content-subtle')}>
+                    {count}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="max-h-64 overflow-auto rounded-xl border border-line bg-surface-sunken p-2 font-mono text-2xs">
+            {visible.length === 0 ? (
+              <p className="px-1 py-2 text-content-subtle">
+                Nothing on this stream for this run.
+              </p>
+            ) : (
+              visible.map((line, index) => {
+                const { label, message } = describeLog(line)
+                return (
+                  <div key={`${line.ts}-${index}`} className="flex gap-2 py-0.5">
+                    <span className="shrink-0 text-content-subtle">
+                      {formatClockTime(line.ts)}
+                    </span>
+                    <span
+                      className={cn('w-16 shrink-0 uppercase', LOG_LEVEL_CLASS[line.level])}
+                    >
+                      {line.level}
+                    </span>
+                    {label && (
+                      <span className="shrink-0 text-brand-500" aria-label="pipeline step">
+                        {label}
+                      </span>
+                    )}
+                    <span className="min-w-0 whitespace-pre-wrap break-words text-content-muted">
+                      {message}
+                    </span>
+                  </div>
+                )
+              })
+            )}
+          </div>
         </div>
       )}
     </section>
@@ -1074,19 +1290,3 @@ function toNumberValue(raw: string): ParamValue {
   return Number.isNaN(parsed) ? raw : parsed
 }
 
-function formatCount(value: number | undefined): string {
-  return value === undefined ? '—' : new Intl.NumberFormat().format(value)
-}
-
-function formatDuration(ms: number | undefined): string {
-  if (ms === undefined) return '—'
-  if (ms < 1000) return `${Math.round(ms)} ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
-  const minutes = Math.floor(ms / 60_000)
-  const seconds = Math.round((ms % 60_000) / 1000)
-  return `${minutes}m ${seconds}s`
-}
-
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString(undefined, { hour12: false })
-}

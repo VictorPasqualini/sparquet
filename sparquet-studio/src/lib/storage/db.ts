@@ -1,5 +1,5 @@
 /**
- * Local persistence for projects and workflows.
+ * Local persistence for workflows, jobs and pipelines.
  *
  * IndexedDB (through idb-keyval) is the primary backend; when it is unavailable —
  * Safari/Firefox private windows, blocked storage, SSR — the same API runs on
@@ -8,6 +8,16 @@
  * Every record lives under its own key, so a save touches exactly one entry and a
  * crash mid-write can never corrupt unrelated records. The AI API key is NOT stored
  * here: it belongs to the settings store (`sparquet-studio:settings`).
+ *
+ * The physical KEY NAMES predate the current vocabulary and are deliberately left
+ * alone — renaming them would strand every workspace already on disk:
+ *
+ *   `…:db:project:<id>`   holds a Workflow (the container)
+ *   `…:db:workflow:<id>`  holds a Job (one pipeline JSON)
+ *   `…:db:flow:<id>`      holds a Pipeline (an ordered set of Jobs)
+ *
+ * The record FIELDS did move to the new names in storage v3; `upgradeRecord`
+ * reads the legacy shape and `migrateStep` rewrites it in place.
  */
 
 import {
@@ -20,7 +30,8 @@ import {
 } from 'idb-keyval'
 import { nanoid } from 'nanoid'
 
-import type { Project, StudioGraph, Workflow } from '@/types/studio'
+import { upgradeJob } from '@/lib/storage/migrations'
+import type { Pipeline, Workflow, StudioGraph, Job } from '@/types/studio'
 
 /* ------------------------------------------------------------------- keys */
 
@@ -31,6 +42,7 @@ const NS = `${STORAGE_PREFIX}db:`
 const META_PREFIX = `${NS}meta:`
 const PROJECT_PREFIX = `${NS}project:`
 const WORKFLOW_PREFIX = `${NS}workflow:`
+const FLOW_PREFIX = `${NS}flow:`
 
 const KEY = {
   version: `${META_PREFIX}version`,
@@ -39,6 +51,7 @@ const KEY = {
   backup: `${NS}backup`,
   project: (id: string) => `${PROJECT_PREFIX}${id}`,
   workflow: (id: string) => `${WORKFLOW_PREFIX}${id}`,
+  flow: (id: string) => `${FLOW_PREFIX}${id}`,
 } as const
 
 const IDB_NAME = 'sparquet-studio'
@@ -47,7 +60,7 @@ const IDB_STORE = 'records'
 export const APP_ID = 'sparquet-studio'
 
 /** Bumped whenever the persisted record shape changes; drives `migrate()`. */
-export const STORAGE_VERSION = 1
+export const STORAGE_VERSION = 3
 
 /* --------------------------------------------------------------- backends */
 
@@ -168,13 +181,16 @@ export interface StudioBundle {
   app: string
   version: number
   exportedAt: number
-  projects: Project[]
   workflows: Workflow[]
+  jobs: Job[]
+  /** Pipelines. Absent in bundles exported before storage v2. */
+  pipelines: Pipeline[]
 }
 
 export interface ImportSummary {
-  projects: number
   workflows: number
+  jobs: number
+  pipelines: number
   /** Records dropped because they did not match the expected shape. */
   skipped: number
   merged: boolean
@@ -245,6 +261,20 @@ async function migrateStep(store: StorageBackend, version: number): Promise<numb
     case 0:
       // Records written before versioning already match the v1 shape.
       return 1
+    case 1:
+      // v2 only ADDS pipeline records; workflows and jobs are untouched.
+      return 2
+    case 2: {
+      // v3 turns the single `validations` node into one node per rule and moves the
+      // block-level policy (on_failure, report, quarantine outputs) into the job
+      // settings. Jobs that never had a validations node are left byte-identical.
+      const jobs = await readJobs(store)
+      for (const job of jobs) {
+        const upgraded = upgradeJob(job)
+        if (upgraded !== job) await store.set(KEY.workflow(job.id), upgraded)
+      }
+      return 3
+    }
     default:
       throw new Error(
         `No migration path from storage version ${version} (${store.kind} backend).`,
@@ -252,76 +282,79 @@ async function migrateStep(store: StorageBackend, version: number): Promise<numb
   }
 }
 
-/* --------------------------------------------------------------- projects */
+/* --------------------------------------------------------------- workflows */
 
-export async function listProjects(): Promise<Project[]> {
+export async function listWorkflows(): Promise<Workflow[]> {
   const store = await open()
-  return readProjects(store)
-}
-
-export async function getProject(id: string): Promise<Project | null> {
-  const store = await open()
-  const value = await store.get(KEY.project(id))
-  return isProject(value) ? value : null
-}
-
-export async function saveProject(project: Project): Promise<Project> {
-  const store = await open()
-  const record: Project = { ...project }
-  await store.set(KEY.project(record.id), record)
-  return record
-}
-
-/** Deletes the project and every workflow that belongs to it. */
-export async function deleteProject(id: string): Promise<void> {
-  const store = await open()
-  const owned = await readWorkflows(store, id)
-  await Promise.all(owned.map((workflow) => store.del(KEY.workflow(workflow.id))))
-  await store.del(KEY.project(id))
-}
-
-/* -------------------------------------------------------------- workflows */
-
-export async function listWorkflows(projectId?: string): Promise<Workflow[]> {
-  const store = await open()
-  return readWorkflows(store, projectId)
+  return readWorkflows(store)
 }
 
 export async function getWorkflow(id: string): Promise<Workflow | null> {
   const store = await open()
-  const value = await store.get(KEY.workflow(id))
+  const value = await store.get(KEY.project(id))
   return isWorkflow(value) ? value : null
 }
 
 export async function saveWorkflow(workflow: Workflow): Promise<Workflow> {
   const store = await open()
   const record: Workflow = { ...workflow }
+  await store.set(KEY.project(record.id), record)
+  return record
+}
+
+/** Deletes the workflow and every job and pipeline that belongs to it. */
+export async function deleteWorkflow(id: string): Promise<void> {
+  const store = await open()
+  const [jobs, pipelines] = await Promise.all([readJobs(store, id), readPipelines(store, id)])
+  await Promise.all([
+    ...jobs.map((job) => store.del(KEY.workflow(job.id))),
+    ...pipelines.map((pipeline) => store.del(KEY.flow(pipeline.id))),
+  ])
+  await store.del(KEY.project(id))
+}
+
+/* -------------------------------------------------------------- jobs */
+
+export async function listJobs(workflowId?: string): Promise<Job[]> {
+  const store = await open()
+  return readJobs(store, workflowId)
+}
+
+export async function getJob(id: string): Promise<Job | null> {
+  const store = await open()
+  const value = await store.get(KEY.workflow(id))
+  return isJob(value) ? value : null
+}
+
+export async function saveJob(job: Job): Promise<Job> {
+  const store = await open()
+  const record: Job = { ...job }
   await store.set(KEY.workflow(record.id), record)
   return record
 }
 
-export async function deleteWorkflow(id: string): Promise<void> {
+export async function deleteJob(id: string): Promise<void> {
   const store = await open()
   await store.del(KEY.workflow(id))
 }
 
 /**
- * Copies a workflow into the same project. `name` is a request: when it is already
+ * Copies a job into the same workflow. `name` is a request: when it is already
  * taken the copy becomes `name (2)`, `name (3)`, and so on.
  */
-export async function duplicateWorkflow(id: string, name?: string): Promise<Workflow | null> {
+export async function duplicateJob(id: string, name?: string): Promise<Job | null> {
   const store = await open()
   const source = await store.get(KEY.workflow(id))
-  if (!isWorkflow(source)) return null
+  if (!isJob(source)) return null
 
-  const siblings = await readWorkflows(store, source.projectId)
+  const siblings = await readJobs(store, source.workflowId)
   const now = Date.now()
-  const copy: Workflow = {
+  const copy: Job = {
     ...cloneRecord(source),
     id: nanoid(10),
     name: uniqueName(
       name ?? `Copy of ${source.name}`,
-      siblings.map((workflow) => workflow.name),
+      siblings.map((job) => job.name),
     ),
     createdAt: now,
     updatedAt: now,
@@ -330,6 +363,31 @@ export async function duplicateWorkflow(id: string, name?: string): Promise<Work
 
   await store.set(KEY.workflow(copy.id), copy)
   return copy
+}
+
+/* ----------------------------------------------------------------- pipelines */
+
+export async function listPipelines(workflowId?: string): Promise<Pipeline[]> {
+  const store = await open()
+  return readPipelines(store, workflowId)
+}
+
+export async function getPipeline(id: string): Promise<Pipeline | null> {
+  const store = await open()
+  const value = await store.get(KEY.flow(id))
+  return isPipeline(value) ? value : null
+}
+
+export async function savePipeline(pipeline: Pipeline): Promise<Pipeline> {
+  const store = await open()
+  const record: Pipeline = { ...pipeline }
+  await store.set(KEY.flow(record.id), record)
+  return record
+}
+
+export async function deletePipeline(id: string): Promise<void> {
+  const store = await open()
+  await store.del(KEY.flow(id))
 }
 
 /* ---------------------------------------------------------- export/import */
@@ -343,7 +401,7 @@ export async function exportAll(): Promise<StudioBundle> {
  * Restores a bundle. `merge: true` (default) upserts by id and keeps everything
  * else; `merge: false` replaces the whole library, after copying the current
  * contents to the backup key. Either way the import is all-or-nothing: a failure
- * puts the previous projects and workflows back before it rethrows.
+ * puts the previous workflows and jobs back before it rethrows.
  */
 export async function importAll(
   bundle: unknown,
@@ -369,19 +427,20 @@ export async function importAll(
   } catch (error) {
     await writeBundle(store, backup, false)
     throw new Error(
-      `Import failed; your previous projects and workflows were restored. ${messageOf(error)}`,
+      `Import failed; your previous workflows and jobs were restored. ${messageOf(error)}`,
     )
   }
 
   return {
-    projects: parsed.bundle.projects.length,
     workflows: parsed.bundle.workflows.length,
+    jobs: parsed.bundle.jobs.length,
+    pipelines: parsed.bundle.pipelines.length,
     skipped: parsed.skipped,
     merged: merge,
   }
 }
 
-/** Removes every project, workflow and backup. Meta keys survive by design. */
+/** Removes every workflow, job and backup. Meta keys survive by design. */
 export async function clearAll(): Promise<void> {
   const store = await open()
   const keys = await store.keys(NS)
@@ -406,23 +465,37 @@ export async function markSeeded(): Promise<void> {
 
 async function hasRecords(store: StorageBackend): Promise<boolean> {
   const keys = await store.keys(NS)
-  return keys.some((key) => key.startsWith(PROJECT_PREFIX) || key.startsWith(WORKFLOW_PREFIX))
+  return keys.some(
+    (key) =>
+      key.startsWith(PROJECT_PREFIX) ||
+      key.startsWith(WORKFLOW_PREFIX) ||
+      key.startsWith(FLOW_PREFIX),
+  )
 }
 
-async function readProjects(store: StorageBackend): Promise<Project[]> {
+async function readWorkflows(store: StorageBackend): Promise<Workflow[]> {
   const keys = await store.keys(PROJECT_PREFIX)
-  const values = await Promise.all(keys.map((key) => store.get(key)))
-  const projects = values.filter(isProject)
-  warnUnreadable(values.length - projects.length, 'project')
-  return projects.sort(byRecency)
-}
-
-async function readWorkflows(store: StorageBackend, projectId?: string): Promise<Workflow[]> {
-  const keys = await store.keys(WORKFLOW_PREFIX)
   const values = await Promise.all(keys.map((key) => store.get(key)))
   const workflows = values.filter(isWorkflow)
   warnUnreadable(values.length - workflows.length, 'workflow')
-  const scoped = projectId ? workflows.filter((w) => w.projectId === projectId) : workflows
+  return workflows.sort(byRecency)
+}
+
+async function readJobs(store: StorageBackend, workflowId?: string): Promise<Job[]> {
+  const keys = await store.keys(WORKFLOW_PREFIX)
+  const values = await Promise.all(keys.map((key) => store.get(key)))
+  const jobs = values.filter(isJob)
+  warnUnreadable(values.length - jobs.length, 'job')
+  const scoped = workflowId ? jobs.filter((w) => w.workflowId === workflowId) : jobs
+  return scoped.sort(byRecency)
+}
+
+async function readPipelines(store: StorageBackend, workflowId?: string): Promise<Pipeline[]> {
+  const keys = await store.keys(FLOW_PREFIX)
+  const values = await Promise.all(keys.map((key) => store.get(key)))
+  const pipelines = values.filter(isPipeline)
+  warnUnreadable(values.length - pipelines.length, 'pipeline')
+  const scoped = workflowId ? pipelines.filter((pipeline) => pipeline.workflowId === workflowId) : pipelines
   return scoped.sort(byRecency)
 }
 
@@ -434,8 +507,12 @@ function warnUnreadable(count: number, label: string): void {
 }
 
 async function readBundle(store: StorageBackend, version: number): Promise<StudioBundle> {
-  const [projects, workflows] = await Promise.all([readProjects(store), readWorkflows(store)])
-  return { app: APP_ID, version, exportedAt: Date.now(), projects, workflows }
+  const [workflows, jobs, pipelines] = await Promise.all([
+    readWorkflows(store),
+    readJobs(store),
+    readPipelines(store),
+  ])
+  return { app: APP_ID, version, exportedAt: Date.now(), workflows, jobs, pipelines }
 }
 
 async function writeBundle(
@@ -447,13 +524,19 @@ async function writeBundle(
     const keys = await store.keys(NS)
     await Promise.all(
       keys
-        .filter((key) => key.startsWith(PROJECT_PREFIX) || key.startsWith(WORKFLOW_PREFIX))
+        .filter(
+          (key) =>
+            key.startsWith(PROJECT_PREFIX) ||
+            key.startsWith(WORKFLOW_PREFIX) ||
+            key.startsWith(FLOW_PREFIX),
+        )
         .map((key) => store.del(key)),
     )
   }
   await Promise.all([
-    ...bundle.projects.map((project) => store.set(KEY.project(project.id), project)),
-    ...bundle.workflows.map((workflow) => store.set(KEY.workflow(workflow.id), workflow)),
+    ...bundle.workflows.map((workflow) => store.set(KEY.project(workflow.id), workflow)),
+    ...bundle.jobs.map((job) => store.set(KEY.workflow(job.id), job)),
+    ...bundle.pipelines.map((pipeline) => store.set(KEY.flow(pipeline.id), pipeline)),
   ])
 }
 
@@ -470,24 +553,36 @@ function parseBundle(value: unknown): { bundle: StudioBundle; skipped: number } 
     )
   }
 
-  if (!Array.isArray(value.projects) && !Array.isArray(value.workflows)) {
-    throw new Error('Invalid bundle: expected a `projects` or `workflows` array.')
+  if (
+    !Array.isArray(value.workflows) &&
+    !Array.isArray(value.jobs) &&
+    !Array.isArray(value.pipelines)
+  ) {
+    throw new Error('Invalid bundle: expected a `workflows` or `jobs` array.')
   }
 
-  const rawProjects = Array.isArray(value.projects) ? value.projects : []
   const rawWorkflows = Array.isArray(value.workflows) ? value.workflows : []
-  const projects = rawProjects.filter(isProject)
+  const rawJobs = Array.isArray(value.jobs) ? value.jobs : []
+  // `pipelines` only exists from v2 on: an older bundle simply carries none.
+  const rawPipelines = Array.isArray(value.pipelines) ? value.pipelines : []
   const workflows = rawWorkflows.filter(isWorkflow)
+  const jobs = rawJobs.filter(isJob)
+  const pipelines = rawPipelines.filter(isPipeline)
 
   return {
     bundle: {
       app: typeof value.app === 'string' ? value.app : APP_ID,
       version,
       exportedAt: typeof value.exportedAt === 'number' ? value.exportedAt : Date.now(),
-      projects,
       workflows,
+      jobs,
+      pipelines,
     },
-    skipped: rawProjects.length - projects.length + (rawWorkflows.length - workflows.length),
+    skipped:
+      rawWorkflows.length -
+      workflows.length +
+      (rawJobs.length - jobs.length) +
+      (rawPipelines.length - pipelines.length),
   }
 }
 
@@ -510,7 +605,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isProject(value: unknown): value is Project {
+function isWorkflow(value: unknown): value is Workflow {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
@@ -524,11 +619,11 @@ function isProject(value: unknown): value is Project {
  * Every field checked here is dereferenced unguarded by the screens, so a record
  * that fails is dropped rather than allowed to crash the app on the next render.
  */
-function isWorkflow(value: unknown): value is Workflow {
+function isJob(value: unknown): value is Job {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
-    typeof value.projectId === 'string' &&
+    typeof value.workflowId === 'string' &&
     typeof value.name === 'string' &&
     typeof value.description === 'string' &&
     Array.isArray(value.tags) &&
@@ -537,6 +632,40 @@ function isWorkflow(value: unknown): value is Workflow {
     isGraph(value.graph) &&
     typeof value.createdAt === 'number' &&
     typeof value.updatedAt === 'number'
+  )
+}
+
+/**
+ * A pipeline is only stages plus links, so every field the canvas walks is
+ * checked here. `revision` is required: the editor derives the next one from it,
+ * and a record without it would save `NaN` back over a good row.
+ */
+function isPipeline(value: unknown): value is Pipeline {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.workflowId === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.description === 'string' &&
+    Array.isArray(value.stages) &&
+    value.stages.every(isPipelineStage) &&
+    Array.isArray(value.links) &&
+    // A link is `{id, source, target}`, exactly a graph edge's shape.
+    value.links.every(isGraphEdge) &&
+    typeof value.createdAt === 'number' &&
+    typeof value.updatedAt === 'number' &&
+    typeof value.revision === 'number'
+  )
+}
+
+function isPipelineStage(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.jobId === 'string' &&
+    isRecord(value.position) &&
+    typeof value.position.x === 'number' &&
+    typeof value.position.y === 'number'
   )
 }
 

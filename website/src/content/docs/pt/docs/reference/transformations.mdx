@@ -1,0 +1,372 @@
+---
+title: Transformações
+description: Todas as transformações nativas do Sparquet, com suas chaves exatas, defaults e comportamento.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Transformações são as entradas do array `transformations`. Elas executam **na ordem em que você as escreve**, cada uma recebendo o DataFrame que a anterior retornou.
+
+Todas aceitam a meta-chave [`skip_if_false`](/pt/docs/reference/parameters/#skip_if_false), que liga ou desliga a etapa por execução.
+
+## Filtragem e modelagem
+
+### `filter`
+
+Mantém as linhas que casam com uma expressão booleana SQL.
+
+```json
+{ "type": "filter", "condition": "status = 'CONFIRMED' AND amount > 0" }
+```
+
+| Chave | Tipo | Obrigatório |
+|---|---|---|
+| `condition` | expressão SQL | sim |
+
+Portador comum de placeholders `{{runtime}}`: `"id IN ({{ids}})"`.
+
+### `select`
+
+Projeta uma lista de colunas — ou expressões SQL completas com aliases.
+
+```json
+{ "type": "select", "columns": ["id", "customer", "to_json(payload) AS value"] }
+```
+
+<Aside type="caution">
+  Cada entrada passa por `F.expr`, não por `F.col`. Uma coluna cujo nome tem espaços,
+  pontos ou palavras reservadas precisa de crase: `` "`my column`" ``. Um nome com ponto
+  como `a.b` é lido como um campo de struct, não como uma coluna chamada literalmente `a.b`.
+</Aside>
+
+### `drop`
+
+Remove colunas. Nomes que não existem são ignorados silenciosamente pelo Spark.
+
+```json
+{ "type": "drop", "columns": ["tmp_flag", "debug_note"] }
+```
+
+### `rename`
+
+Renomeia colunas através de um mapa ordenado, aplicado um por vez.
+
+```json
+{ "type": "rename", "mappings": { "created_at": "creation_date", "nm": "name" } }
+```
+
+Por ser sequencial, renomeações encadeadas funcionam (`a→b` depois `b→c` termina como `c`) e reordenar as chaves muda o resultado.
+
+### `cast`
+
+Converte colunas para tipos Spark.
+
+```json
+{ "type": "cast", "columns": { "amount": "decimal(18,2)", "ordered_at": "date" } }
+```
+
+Usa `F.col`, então a coluna precisa existir. Valores que não podem ser convertidos viram `null` — o Spark não lança erro.
+
+### `sort`
+
+Ordena o DataFrame.
+
+```json
+{ "type": "sort", "columns": ["ordered_at", "id"], "ascending": true }
+```
+
+`ascending` aceita um booleano ou uma lista de booleanos, um por coluna.
+
+### `drop_duplicates`
+
+Remove linhas duplicadas, opcionalmente restrito a um subconjunto.
+
+```json
+{ "type": "drop_duplicates", "columns": ["id"] }
+```
+
+`columns` é opcional: omiti-lo (ou passar uma lista vazia) deduplica sobre **todas** as colunas, exatamente como `distinct`. Qual linha sobrevive não é determinístico — faça `sort` antes se isso importar.
+
+### `distinct`
+
+Remove linhas duplicadas usando todas as colunas. Sem parâmetros.
+
+```json
+{ "type": "distinct" }
+```
+
+### `fill_na`
+
+Substitui nulos.
+
+```json
+{ "type": "fill_na", "value": 0, "columns": ["quantity"] }
+{ "type": "fill_na", "value": { "quantity": 0, "segment": "UNKNOWN" } }
+```
+
+A forma escalar aceita um subconjunto opcional `columns`. O Spark ignora preenchimentos cujo tipo não casa com o tipo da coluna — um no-op silencioso, não um erro.
+
+## Computando colunas
+
+### `with_column`
+
+Adiciona ou substitui colunas computadas a partir de expressões SQL. Duas formas mutuamente exclusivas.
+
+```json
+// coluna única
+{ "type": "with_column", "column": "revenue", "expression": "quantity * unit_price" }
+
+// várias, em ordem — expressões posteriores podem usar as anteriores
+{ "type": "with_column", "columns": {
+    "revenue": "quantity * unit_price",
+    "revenue_brl": "revenue * fx_rate"
+  } }
+```
+
+<Aside type="caution" title="Precedência">
+  Sempre que a chave `columns` estiver **presente**, ela vence e `column` / `expression`
+  são ignorados. Nunca emita ambos. A ordem das chaves é load-bearing: as colunas são criadas
+  na ordem do mapa, e é por isso que `revenue_brl` acima pode referenciar `revenue`.
+</Aside>
+
+`name` é aceito como um alias legado de `column`, parseado para compatibilidade retroativa; escreva `column` em pipelines novos.
+
+### `struct`
+
+Constrói uma coluna struct aninhada a partir de um mapa de campos. Mais legível que um `named_struct` escrito à mão.
+
+```json
+{
+  "type": "struct",
+  "column": "payload",
+  "fields": {
+    "external_id": "contract_id",
+    "issuer.name": "issuer_name",
+    "issuer.document": "lpad(cast(document as string), 14, '0')",
+    "amounts": { "principal": "principal_amount", "interest": "interest_amount" }
+  }
+}
+```
+
+- Valores string são expressões SQL; valores objeto aninham mais.
+- **Dot-paths auto-aninham**: `issuer.name` e `issuer.document` viram um único struct `issuer`, então o payload se lê como uma tabela plana no arquivo e chega aninhado nos dados.
+- A ordem dos campos segue a ordem das chaves, o que mantém os diffs estáveis.
+- Um nome de campo contendo um ponto literal é impossível — todo ponto significa aninhamento.
+
+Dois conflitos são levantados em tempo de aplicação: usar um segmento de path que já é uma folha (`a` usado como valor e prefixo ao mesmo tempo), e duplicar uma chave folha.
+
+### `sql`
+
+Executa Spark SQL arbitrário sobre o DataFrame atual.
+
+```json
+{
+  "type": "sql",
+  "view_name": "_df",
+  "query": "SELECT customer, SUM(revenue) AS total FROM _df GROUP BY customer"
+}
+```
+
+O DataFrame é registrado como uma temp view chamada `view_name` (default `_df`) e o resultado da query se torna o novo DataFrame. A válvula de escape para tudo o que as outras transformações não expressam.
+
+## Agregando
+
+### `group_by`
+
+Agrupa e agrega, com pivot opcional.
+
+```json
+{
+  "type": "group_by",
+  "by": ["customer_id", "country"],
+  "agg": [
+    "sum(revenue) as revenue_total",
+    "count(*) as orders",
+    "max(ordered_at) as last_order"
+  ],
+  "pivot": { "column": "month", "values": ["jan", "feb", "mar"] }
+}
+```
+
+| Chave | Tipo | Obrigatório |
+|---|---|---|
+| `by` | lista de colunas | sim |
+| `agg` | lista de **expressões de agregação SQL completas**, com aliases | sim |
+| `pivot` | nome de coluna, ou `{ column, values }` | não |
+
+<Aside type="caution">
+  `agg` é uma lista de strings, nunca um mapa. Listar `values` num pivot poupa
+  do Spark uma varredura extra para descobri-los; uma lista vazia se comporta como se a chave
+  estivesse ausente. Toda coluna não nomeada em `by` ou produzida por `agg` desaparece.
+</Aside>
+
+## Combinando origens
+
+### `join`
+
+Junta uma segunda origem lida inline.
+
+```json
+{
+  "type": "join",
+  "with": { "format": "delta", "path": "sales.customers" },
+  "with_transformations": [
+    { "type": "filter", "condition": "active = true" },
+    { "type": "select", "columns": ["customer_id", "segment"] }
+  ],
+  "on": "customer_id",
+  "how": "left"
+}
+```
+
+| Chave | Tipo | Notas |
+|---|---|---|
+| `with` | config de origem | qualquer formato legível |
+| `on` | string, lista, ou expressão SQL | `"id"`, `["a","b"]`, ou `"l.id = r.id AND l.dt = r.dt"` |
+| `how` | tipo de join | `inner` (default), `left`, `right`, `full`, `cross`, `leftsemi`, `leftanti`, … |
+| `broadcast` | `true` / `"right"` / `"left"` / `false` | hint de join map-side (broadcast) |
+| `with_transformations` | lista | aplicadas ao lado direito **antes** do join |
+
+O DataFrame da esquerda recebe o alias `l` e o da direita `r`, então uma expressão em `on` pode desambiguar colunas. Dentro de `with_transformations` os aliases ainda não existem — use nomes de coluna simples ali.
+
+#### Broadcast join
+
+Defina `broadcast` quando um lado for pequeno o bastante para caber na memória de cada executor (uma dimensão, um lookup). O Spark envia esse lado a cada executor e faz o join map-side, pulando por completo o shuffle do lado grande.
+
+```json
+{
+  "type": "join",
+  "with": { "format": "delta", "path": "ref.dim_product" },
+  "on": "product_id",
+  "how": "left",
+  "broadcast": true
+}
+```
+
+| Valor | Faz broadcast de |
+|---|---|
+| `true` ou `"right"` | a segunda origem (o lado `with` — a pequena dimensão/lookup) |
+| `"left"` | o DataFrame principal |
+| `false` ou ausente | sem hint — o Spark decide por tamanho |
+
+Fazer broadcast de um lado que não é realmente pequeno pode esgotar a memória do executor; deixe ausente na dúvida.
+
+No Studio, `with` e `with_transformations` vêm da **segunda entrada** do node, não de um campo de formulário.
+
+### `union`
+
+Anexa as linhas de outra origem.
+
+```json
+{
+  "type": "union",
+  "with": { "format": "parquet", "path": "/data/orders_archive" },
+  "allow_missing_columns": false
+}
+```
+
+<Aside type="danger" title="Posicional por padrão">
+  Com `allow_missing_columns: false` (o default) o Spark casa colunas **por
+  posição**, não por nome — uma fonte clássica de corrupção silenciosa quando os dois
+  schemas divergiram. Defina-o como `true` para casar por nome e preencher colunas ausentes
+  com null.
+</Aside>
+
+`union` não tem `with_transformations`: o lado direito é lido como está.
+
+## Controle e inspeção
+
+### `checkpoint`
+
+Materializa o DataFrame e trunca seu plano lógico.
+
+```json
+{ "type": "checkpoint", "method": "localCheckpoint", "eager": true }
+```
+
+| Chave | Valores | Default |
+|---|---|---|
+| `method` | `localCheckpoint`, `checkpoint` | `localCheckpoint` |
+| `eager` | booleano | `true` |
+
+Use-o após joins pesados, antes de um `collect`, e antes de fanning out para vários destinos — ele impede o Spark de recomputar a mesma linhagem repetidamente. Um `method` inválido é ignorado, com um warning emitido ao fim da execução.
+
+### `collect`
+
+Coleta os valores distintos de uma coluna numa variável de runtime.
+
+```json
+{ "type": "collect", "column": "customer_id", "as": "active_customers" }
+```
+
+O DataFrame passa inalterado, mas os valores caem em `{{active_customers}}` para etapas posteriores. Ele dispara uma action no driver, então execute-o **após um `checkpoint`**. Veja [variáveis de runtime](/pt/docs/reference/parameters/#runtime-variables).
+
+### `stop_if_empty`
+
+Encerra a execução graciosamente quando não há nada a processar.
+
+```json
+{ "type": "stop_if_empty", "message": "No approved orders in the window" }
+```
+
+As transformações restantes e toda escrita são puladas. O resultado volta com `skipped: true`, `success: true` e `rows_written: 0` — um no-op, não uma falha. Posicione-o logo após o filtro que define o conjunto de trabalho, antes de joins custosos.
+
+<Aside type="caution">
+  Evite-o dentro de uma cadeia por destino: a execução é reportada como skipped mesmo
+  que destinos anteriores já tenham sido escritos.
+</Aside>
+
+### `debug`
+
+Inspeciona o DataFrame sem alterá-lo.
+
+```json
+{
+  "type": "debug",
+  "label": "after enrichment",
+  "actions": ["count", "print_schema", "show"],
+  "transformations": [{ "type": "filter", "condition": "id = 'X1'" }],
+  "show_rows": 20,
+  "truncate": true,
+  "vertical": false,
+  "extended": false
+}
+```
+
+`actions` aceita `count`, `print_schema`, `show`, `explain`, `columns`, `dtypes`. Suas `transformations` aninhadas aplicam-se a uma cópia descartável usada apenas para a inspeção — o DataFrame do pipeline sempre passa intocado.
+
+### `$include`
+
+Não é uma transformação, mas uma diretiva: ela inclui inline um fragmento JSON.
+
+```json
+{ "$include": "shared/standard_filters.json" }
+```
+
+O path é relativo ao arquivo do pipeline. O fragmento pode ser um único objeto ou uma lista. Includes aninhados não são expandidos, e a diretiva funciona apenas no array `transformations` de nível superior.
+
+## Índice rápido
+
+| Tipo | Propósito |
+|---|---|
+| `filter` | manter linhas que casam |
+| `select` | projetar colunas ou expressões |
+| `drop` | remover colunas |
+| `rename` | renomear colunas |
+| `cast` | mudar tipos de coluna |
+| `with_column` | computar colunas |
+| `struct` | construir uma coluna aninhada |
+| `drop_duplicates` | deduplicar, opcionalmente por subconjunto |
+| `distinct` | deduplicar sobre todas as colunas |
+| `sort` | ordenar linhas |
+| `fill_na` | substituir nulos |
+| `sql` | Spark SQL arbitrário |
+| `group_by` | agregar, com pivot opcional |
+| `join` | juntar uma segunda origem |
+| `union` | anexar outra origem |
+| `checkpoint` | materializar e truncar o plano |
+| `collect` | publicar uma variável de runtime |
+| `stop_if_empty` | encerrar a execução quando não há dados |
+| `debug` | inspecionar sem alterar |

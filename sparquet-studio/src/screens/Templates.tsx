@@ -23,9 +23,9 @@ import { cn } from '@/lib/utils/cn'
 import { copyText } from '@/lib/utils/download'
 import { useLibraryStore } from '@/store/library'
 import type { PipelineSpec } from '@/types/pipeline'
-import type { WorkflowTemplate } from '@/types/studio'
+import type { JobTemplate } from '@/types/studio'
 
-type Level = WorkflowTemplate['level']
+type Level = JobTemplate['level']
 type LevelFilter = 'all' | Level
 
 const LEVEL_TONE: Record<Level, BadgeTone> = {
@@ -41,16 +41,16 @@ const LEVELS: { value: LevelFilter; label: string }[] = [
   { value: 'advanced', label: 'Advanced' },
 ]
 
-/** Target of the create dialog. `template: null` is the blank AI workflow. */
+/** Target of the create dialog. `template: null` is the blank AI job. */
 interface CreateTarget {
-  template: WorkflowTemplate | null
+  template: JobTemplate | null
 }
 
 export function Templates() {
   const location = useLocation()
   const [level, setLevel] = useState<LevelFilter>('all')
   const [query, setQuery] = useState('')
-  const [preview, setPreview] = useState<WorkflowTemplate | null>(null)
+  const [preview, setPreview] = useState<JobTemplate | null>(null)
   const [target, setTarget] = useState<CreateTarget | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
@@ -197,7 +197,7 @@ export function Templates() {
       )}
 
       {target && (
-        <CreateWorkflowDialog
+        <CreateJobDialog
           key={target.template?.id ?? 'blank'}
           template={target.template}
           onClose={() => setTarget(null)}
@@ -210,7 +210,7 @@ export function Templates() {
 /* -------------------------------------------------------------------- cards */
 
 interface TemplateCardProps {
-  template: WorkflowTemplate
+  template: JobTemplate
   onPreview: () => void
   onUse: () => void
 }
@@ -289,7 +289,7 @@ function AiCard({ onStart }: { onStart: () => void }) {
 /* ------------------------------------------------------------------ preview */
 
 interface PreviewDialogProps {
-  template: WorkflowTemplate
+  template: JobTemplate
   onClose: () => void
   onUse: () => void
 }
@@ -360,39 +360,39 @@ function PreviewDialog({ template, onClose, onUse }: PreviewDialogProps) {
 
 /* ------------------------------------------------------------------- create */
 
-const NEW_PROJECT = '__new__'
+const NEW_WORKFLOW = '__new__'
 
-interface CreateWorkflowDialogProps {
-  /** `null` creates a blank workflow and opens the AI panel. */
-  template: WorkflowTemplate | null
+interface CreateJobDialogProps {
+  /** `null` creates a blank job and opens the AI panel. */
+  template: JobTemplate | null
   onClose: () => void
 }
 
-function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) {
+function CreateJobDialog({ template, onClose }: CreateJobDialogProps) {
   const navigate = useNavigate()
-  const projects = useLibraryStore((state) => state.projects)
-  const createProject = useLibraryStore((state) => state.createProject)
+  const workflows = useLibraryStore((state) => state.workflows)
   const createWorkflow = useLibraryStore((state) => state.createWorkflow)
+  const createJob = useLibraryStore((state) => state.createJob)
 
   const formId = useId()
-  const projectFieldId = `${formId}-project`
-  const projectNameFieldId = `${formId}-project-name`
+  const workflowFieldId = `${formId}-workflow`
+  const workflowNameFieldId = `${formId}-workflow-name`
   const nameFieldId = `${formId}-name`
 
-  const [projectId, setProjectId] = useState(() => projects[0]?.id ?? NEW_PROJECT)
-  const [projectName, setProjectName] = useState('My pipelines')
+  const [workflowId, setWorkflowId] = useState(() => workflows[0]?.id ?? NEW_WORKFLOW)
+  const [workflowName, setWorkflowName] = useState('My pipelines')
   const [name, setName] = useState(template?.name ?? 'Untitled pipeline')
   const [busy, setBusy] = useState(false)
 
-  const creatingProject = projectId === NEW_PROJECT
-  const valid = name.trim().length > 0 && (!creatingProject || projectName.trim().length > 0)
+  const creatingWorkflow = workflowId === NEW_WORKFLOW
+  const valid = name.trim().length > 0 && (!creatingWorkflow || workflowName.trim().length > 0)
 
-  const projectOptions = useMemo(
+  const workflowOptions = useMemo(
     () => [
-      ...projects.map((project) => ({ value: project.id, label: project.name })),
-      { value: NEW_PROJECT, label: 'New project…' },
+      ...workflows.map((workflow) => ({ value: workflow.id, label: workflow.name })),
+      { value: NEW_WORKFLOW, label: 'New workflow…' },
     ],
-    [projects],
+    [workflows],
   )
 
   const submit = useCallback(() => {
@@ -400,21 +400,21 @@ function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) 
     setBusy(true)
     void (async () => {
       try {
-        const owner = creatingProject
-          ? (await createProject({ name: projectName.trim() })).id
-          : projectId
-        const workflow = await createWorkflow({
-          projectId: owner,
+        const owner = creatingWorkflow
+          ? (await createWorkflow({ name: workflowName.trim() })).id
+          : workflowId
+        const job = await createJob({
+          workflowId: owner,
           name: name.trim(),
           description: template?.summary,
           pipeline: template?.pipeline,
         })
-        navigate(`/workflows/${workflow.id}`, {
+        navigate(`/jobs/${job.id}`, {
           state: template ? undefined : { openAi: true },
         })
       } catch (error) {
         setBusy(false)
-        toast.error('Could not create the workflow', {
+        toast.error('Could not create the job', {
           description: error instanceof Error ? error.message : String(error),
         })
       }
@@ -422,11 +422,11 @@ function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) 
   }, [
     valid,
     busy,
-    creatingProject,
-    createProject,
-    projectName,
-    projectId,
+    creatingWorkflow,
     createWorkflow,
+    workflowName,
+    workflowId,
+    createJob,
     name,
     template,
     navigate,
@@ -438,7 +438,7 @@ function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) 
       onOpenChange={(open) => {
         if (!open) onClose()
       }}
-      title={template ? 'Use this template' : 'New workflow with AI'}
+      title={template ? 'Use this template' : 'New job with AI'}
       description={
         template
           ? 'A copy of the template is created — editing it never touches the original.'
@@ -457,7 +457,7 @@ function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) 
             loading={busy}
             disabled={!valid}
           >
-            {template ? 'Create workflow' : 'Open canvas'}
+            {template ? 'Create job' : 'Open canvas'}
           </Button>
         </>
       }
@@ -470,32 +470,32 @@ function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) 
           submit()
         }}
       >
-        <Field label="Project" htmlFor={projectFieldId}>
+        <Field label="Workflow" htmlFor={workflowFieldId}>
           <Select
-            id={projectFieldId}
-            value={projectId}
-            onValueChange={setProjectId}
-            options={projectOptions}
-            ariaLabel="Project"
+            id={workflowFieldId}
+            value={workflowId}
+            onValueChange={setWorkflowId}
+            options={workflowOptions}
+            ariaLabel="Workflow"
           />
         </Field>
 
-        {creatingProject && (
+        {creatingWorkflow && (
           <Field
-            label="New project name"
-            htmlFor={projectNameFieldId}
-            help="Projects group related workflows — one per domain works well."
+            label="New workflow name"
+            htmlFor={workflowNameFieldId}
+            help="Workflows group related jobs — one per domain works well."
           >
             <Input
-              id={projectNameFieldId}
-              value={projectName}
-              onChange={(event) => setProjectName(event.target.value)}
+              id={workflowNameFieldId}
+              value={workflowName}
+              onChange={(event) => setWorkflowName(event.target.value)}
               placeholder="My pipelines"
             />
           </Field>
         )}
 
-        <Field label="Workflow name" htmlFor={nameFieldId} required>
+        <Field label="Job name" htmlFor={nameFieldId} required>
           <Input
             id={nameFieldId}
             autoFocus
@@ -512,12 +512,12 @@ function CreateWorkflowDialog({ template, onClose }: CreateWorkflowDialogProps) 
 /* ------------------------------------------------------------------ helpers */
 
 /** Templates carry real pipeline JSON; the compiler's serializer keeps key order readable. */
-function templateJson(template: WorkflowTemplate): string {
+function templateJson(template: JobTemplate): string {
   return serializePipeline(template.pipeline as PipelineSpec)
 }
 
 /** Every whitespace-separated term must appear in the name, summary or tags. */
-function matches(template: WorkflowTemplate, query: string): boolean {
+function matches(template: JobTemplate, query: string): boolean {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
   if (terms.length === 0) return true
   const haystack = [template.name, template.summary, ...template.tags].join(' ').toLowerCase()

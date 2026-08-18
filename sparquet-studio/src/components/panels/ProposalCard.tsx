@@ -143,7 +143,8 @@ function readStats(pipeline: unknown): ProposalStats {
       (formats.length ? ` · ${unique(formats).join(', ')}` : ''),
   )
 
-  const nodes = (input ? 1 : 0) + transformations + (validations ? 1 : 0) + outputs.length
+  // Every rule is its own canvas node, so the block contributes as many as it holds.
+  const nodes = (input ? 1 : 0) + transformations + (rules ?? 0) + outputs.length
 
   return { name, lines, nodes }
 }

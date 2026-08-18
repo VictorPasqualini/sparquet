@@ -33,8 +33,8 @@ export interface AiSettings {
   apiKey: string
   temperature: number
   maxTokens: number
-  /** Send the current workflow JSON with each request. */
-  shareWorkflowContext: boolean
+  /** Send the current job JSON with each request. */
+  shareJobContext: boolean
 }
 
 export type AiIntent =

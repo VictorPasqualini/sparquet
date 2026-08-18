@@ -2,59 +2,95 @@ import { nanoid } from 'nanoid'
 import { create } from 'zustand'
 
 import { autoLayout, pipelineToGraph } from '@/lib/compiler'
+import { newPipeline, newLink, newStage, stageRowPosition } from '@/lib/pipeline'
 import { inferParams } from '@/lib/params'
 import * as db from '@/lib/storage/db'
-import type { ParamDefinition, Project, ProjectAccent, Workflow } from '@/types/studio'
+import type {
+  Pipeline,
+  ParamDefinition,
+  Workflow,
+  WorkflowAccent,
+  Job,
+} from '@/types/studio'
 
 interface LibraryState {
-  projects: Project[]
   workflows: Workflow[]
+  jobs: Job[]
+  /** Pipelines: ordered sequences of jobs, one record per pipeline. */
+  pipelines: Pipeline[]
   loading: boolean
   error: string | null
 
   load: () => Promise<void>
-  createProject: (input: { name: string; description?: string; accent?: ProjectAccent }) => Promise<Project>
-  updateProject: (id: string, patch: Partial<Omit<Project, 'id' | 'createdAt'>>) => Promise<void>
-  deleteProject: (id: string) => Promise<void>
-
   createWorkflow: (input: {
-    projectId: string
+    name: string
+    description?: string
+    accent?: WorkflowAccent
+  }) => Promise<Workflow>
+  updateWorkflow: (
+    id: string,
+    patch: Partial<Omit<Workflow, 'id' | 'createdAt'>>,
+  ) => Promise<void>
+  deleteWorkflow: (id: string) => Promise<void>
+
+  createJob: (input: {
+    workflowId: string
     name: string
     description?: string
     /** Seed the graph from an existing pipeline JSON (template, import, AI). */
     pipeline?: unknown
-  }) => Promise<Workflow>
-  updateWorkflowMeta: (
+  }) => Promise<Job>
+  updateJobMeta: (
     id: string,
-    patch: Partial<Pick<Workflow, 'name' | 'description' | 'tags' | 'projectId'>>,
+    patch: Partial<Pick<Job, 'name' | 'description' | 'tags' | 'workflowId'>>,
   ) => Promise<void>
-  deleteWorkflow: (id: string) => Promise<void>
-  duplicateWorkflow: (id: string) => Promise<Workflow | null>
+  deleteJob: (id: string) => Promise<void>
+  duplicateJob: (id: string) => Promise<Job | null>
   /** Called by the editor after a save so lists stay fresh without a reload. */
-  upsertWorkflow: (workflow: Workflow) => void
+  upsertJob: (job: Job) => void
+
+  createPipeline: (input: {
+    workflowId: string
+    name: string
+    description?: string
+    /** Stage every job in this order, already linked head to tail. */
+    jobIds?: string[]
+  }) => Promise<Pipeline>
+  updatePipelineMeta: (
+    id: string,
+    patch: Partial<Pick<Pipeline, 'name' | 'description' | 'workflowId'>>,
+  ) => Promise<void>
+  deletePipeline: (id: string) => Promise<void>
+  /** Called by the pipeline editor after a save, mirroring `upsertJob`. */
+  upsertPipeline: (pipeline: Pipeline) => void
 }
 
 const emptyGraph = { nodes: [], edges: [] }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
-  projects: [],
   workflows: [],
+  jobs: [],
+  pipelines: [],
   loading: false,
   error: null,
 
   load: async () => {
     set({ loading: true, error: null })
     try {
-      const [projects, workflows] = await Promise.all([db.listProjects(), db.listWorkflows()])
-      set({ projects, workflows, loading: false })
+      const [workflows, jobs, pipelines] = await Promise.all([
+        db.listWorkflows(),
+        db.listJobs(),
+        db.listPipelines(),
+      ])
+      set({ workflows, jobs, pipelines, loading: false })
     } catch (error) {
       set({ loading: false, error: error instanceof Error ? error.message : String(error) })
     }
   },
 
-  createProject: async ({ name, description = '', accent = 'amber' }) => {
+  createWorkflow: async ({ name, description = '', accent = 'amber' }) => {
     const now = Date.now()
-    const project: Project = {
+    const workflow: Workflow = {
       id: nanoid(10),
       name,
       description,
@@ -62,31 +98,32 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       createdAt: now,
       updatedAt: now,
     }
-    await db.saveProject(project)
-    set((state) => ({ projects: [...state.projects, project] }))
-    return project
+    await db.saveWorkflow(workflow)
+    set((state) => ({ workflows: [...state.workflows, workflow] }))
+    return workflow
   },
 
-  updateProject: async (id, patch) => {
-    const current = get().projects.find((p) => p.id === id)
+  updateWorkflow: async (id, patch) => {
+    const current = get().workflows.find((p) => p.id === id)
     if (!current) return
-    const next: Project = { ...current, ...patch, updatedAt: Date.now() }
-    await db.saveProject(next)
-    set((state) => ({ projects: state.projects.map((p) => (p.id === id ? next : p)) }))
+    const next: Workflow = { ...current, ...patch, updatedAt: Date.now() }
+    await db.saveWorkflow(next)
+    set((state) => ({ workflows: state.workflows.map((p) => (p.id === id ? next : p)) }))
   },
 
-  deleteProject: async (id) => {
-    await db.deleteProject(id)
+  deleteWorkflow: async (id) => {
+    await db.deleteWorkflow(id)
     set((state) => ({
-      projects: state.projects.filter((p) => p.id !== id),
-      workflows: state.workflows.filter((w) => w.projectId !== id),
+      workflows: state.workflows.filter((p) => p.id !== id),
+      jobs: state.jobs.filter((w) => w.workflowId !== id),
+      pipelines: state.pipelines.filter((f) => f.workflowId !== id),
     }))
   },
 
-  createWorkflow: async ({ projectId, name, description = '', pipeline }) => {
+  createJob: async ({ workflowId, name, description = '', pipeline }) => {
     const now = Date.now()
-    let graph = emptyGraph as Workflow['graph']
-    let settings: Workflow['settings'] = {
+    let graph = emptyGraph as Job['graph']
+    let settings: Job['settings'] = {
       pipelineName: slugify(name),
       description,
       spark: {},
@@ -103,9 +140,9 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       params = inferParams(pipeline)
     }
 
-    const workflow: Workflow = {
+    const job: Job = {
       id: nanoid(10),
-      projectId,
+      workflowId,
       name,
       description,
       tags: [],
@@ -116,42 +153,84 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       updatedAt: now,
       revision: 1,
     }
-    await db.saveWorkflow(workflow)
-    set((state) => ({ workflows: [...state.workflows, workflow] }))
-    return workflow
+    await db.saveJob(job)
+    set((state) => ({ jobs: [...state.jobs, job] }))
+    return job
   },
 
-  updateWorkflowMeta: async (id, patch) => {
-    const current = get().workflows.find((w) => w.id === id)
+  updateJobMeta: async (id, patch) => {
+    const current = get().jobs.find((w) => w.id === id)
     if (!current) return
-    const next: Workflow = {
+    const next: Job = {
       ...current,
       ...patch,
       updatedAt: Date.now(),
       revision: current.revision + 1,
     }
-    await db.saveWorkflow(next)
-    set((state) => ({ workflows: state.workflows.map((w) => (w.id === id ? next : w)) }))
+    await db.saveJob(next)
+    set((state) => ({ jobs: state.jobs.map((w) => (w.id === id ? next : w)) }))
   },
 
-  deleteWorkflow: async (id) => {
-    await db.deleteWorkflow(id)
-    set((state) => ({ workflows: state.workflows.filter((w) => w.id !== id) }))
+  deleteJob: async (id) => {
+    await db.deleteJob(id)
+    // Pipelines keep their reference on purpose: a stage pointing at a
+    // deleted job is drawn as broken, which is information. Rewriting other
+    // records here would hide the mistake instead of surfacing it.
+    set((state) => ({ jobs: state.jobs.filter((w) => w.id !== id) }))
   },
 
-  duplicateWorkflow: async (id) => {
-    const current = get().workflows.find((w) => w.id === id)
+  duplicateJob: async (id) => {
+    const current = get().jobs.find((w) => w.id === id)
     if (!current) return null
-    const copy = await db.duplicateWorkflow(id, `Copy of ${current.name}`)
-    if (copy) set((state) => ({ workflows: [...state.workflows, copy] }))
+    const copy = await db.duplicateJob(id, `Copy of ${current.name}`)
+    if (copy) set((state) => ({ jobs: [...state.jobs, copy] }))
     return copy
   },
 
-  upsertWorkflow: (workflow) =>
+  upsertJob: (job) =>
     set((state) => ({
-      workflows: state.workflows.some((w) => w.id === workflow.id)
-        ? state.workflows.map((w) => (w.id === workflow.id ? workflow : w))
-        : [...state.workflows, workflow],
+      jobs: state.jobs.some((w) => w.id === job.id)
+        ? state.jobs.map((w) => (w.id === job.id ? job : w))
+        : [...state.jobs, job],
+    })),
+
+  createPipeline: async ({ workflowId, name, description = '', jobIds = [] }) => {
+    const stages = jobIds.map((jobId, index) =>
+      newStage(jobId, stageRowPosition(index)),
+    )
+    // Seeded stages are chained head to tail: the order the user picked them in
+    // is the order they meant, and an unlinked pile would say nothing.
+    const links = stages.slice(1).map((stage, index) => newLink(stages[index].id, stage.id))
+
+    const pipeline = newPipeline({ workflowId, name, description, stages, links })
+    await db.savePipeline(pipeline)
+    set((state) => ({ pipelines: [...state.pipelines, pipeline] }))
+    return pipeline
+  },
+
+  updatePipelineMeta: async (id, patch) => {
+    const current = get().pipelines.find((f) => f.id === id)
+    if (!current) return
+    const next: Pipeline = {
+      ...current,
+      ...patch,
+      updatedAt: Date.now(),
+      revision: current.revision + 1,
+    }
+    await db.savePipeline(next)
+    set((state) => ({ pipelines: state.pipelines.map((f) => (f.id === id ? next : f)) }))
+  },
+
+  deletePipeline: async (id) => {
+    await db.deletePipeline(id)
+    set((state) => ({ pipelines: state.pipelines.filter((f) => f.id !== id) }))
+  },
+
+  upsertPipeline: (pipeline) =>
+    set((state) => ({
+      pipelines: state.pipelines.some((f) => f.id === pipeline.id)
+        ? state.pipelines.map((f) => (f.id === pipeline.id ? pipeline : f))
+        : [...state.pipelines, pipeline],
     })),
 }))
 

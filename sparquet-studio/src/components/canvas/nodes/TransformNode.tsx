@@ -30,13 +30,6 @@ export const TransformNode = memo(function TransformNodeRenderer({
       </Badge>,
     )
   }
-  if (def?.deprecatedAlias) {
-    chips.push(
-      <Badge key="legacy" tone="neutral">
-        Legacy alias
-      </Badge>,
-    )
-  }
   if (runtimeVar) {
     chips.push(<Badge key="runtime" tone="brand">{`{{${runtimeVar}}}`}</Badge>)
   }
@@ -120,8 +113,7 @@ export function describeParams(data: TransformNodeData): ParamPreview | null {
       return line(`${pairs.length} casts`)
     }
 
-    case 'with_column':
-    case 'add_column': {
+    case 'with_column': {
       // A non-empty map makes column/expression dead config in the engine.
       const pairs = pairsOf(params.columns)
       if (pairs.length === 1) return line(`${pairs[0][0]} = ${pairs[0][1]}`, true)

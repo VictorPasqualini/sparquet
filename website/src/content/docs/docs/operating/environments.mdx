@@ -15,15 +15,15 @@ Sparquet is a library. Wherever PySpark runs, it runs — and the session manage
 | EMR / Dataproc / Synapse | built with your `configs` | `configs` applied, `master` ignored |
 | Local | built with your `configs` | fully applied, including `master` |
 
-The session is a **process-wide singleton**: the first `SparkFramework` creates it and every later pipeline shares it. That is what makes running many pipelines in one job cheap, and what lets them hand data to each other through temp views.
+The session is a **process-wide singleton**: the first `Sparquet` creates it and every later pipeline shares it. That is what makes running many pipelines in one job cheap, and what lets them hand data to each other through temp views.
 
 <Tabs>
   <TabItem label="Local">
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework(spark={"app_name": "dev", "master": "local[*]"})
+fw = Sparquet(spark={"app_name": "dev", "master": "local[*]"})
 print(fw.run("pipelines/orders.json").summary())
 fw.stop()
 ```
@@ -34,14 +34,14 @@ Good for development and tests. On Windows, Spark needs `winutils.exe` and `HADO
   <TabItem label="Databricks">
 
 ```python
-%pip install spark-framework
+%pip install sparquet
 dbutils.library.restartPython()
 ```
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework()                     # reuses the notebook/job session
+fw = Sparquet()                     # reuses the notebook/job session
 result = fw.run("/Workspace/Repos/team/pipelines/orders.json",
                 params={"since": dbutils.widgets.get("since")})
                                           # do NOT call fw.stop() here
@@ -60,14 +60,14 @@ spark-submit \
 
 ```python title="run_job.py"
 import argparse
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True)
 parser.add_argument("--since", required=True)
 args = parser.parse_args()
 
-fw = SparkFramework(spark={"app_name": "orders"})
+fw = Sparquet(spark={"app_name": "orders"})
 result = fw.run(args.config, params={"since": args.since})
 fw.stop()
 
@@ -82,10 +82,10 @@ Exiting non-zero on failure is what lets the cluster's step and your scheduler n
 ```dockerfile
 FROM apache/spark-py:v3.5.0
 USER root
-RUN pip install --no-cache-dir spark-framework
+RUN pip install --no-cache-dir sparquet
 COPY pipelines/ /opt/pipelines/
 USER spark
-ENTRYPOINT ["python", "-m", "spark_framework.cli"]
+ENTRYPOINT ["python", "-m", "sparquet.cli"]
 ```
 
 ```bash
@@ -116,7 +116,7 @@ Because a pipeline is data, it is testable without a cluster: parse every file i
 
 ```python
 import json, pathlib
-from spark_framework.core.config import PipelineConfig
+from sparquet.core.config import PipelineConfig
 
 def test_every_pipeline_parses():
     for path in pathlib.Path("pipelines").glob("*.json"):
@@ -128,7 +128,7 @@ def test_every_pipeline_parses():
 Sparquet runs a pipeline; it does not decide when. Any scheduler works, because the entry point is a normal Python process:
 
 ```bash
-python -m spark_framework.cli pipelines/orders.json
+python -m sparquet.cli pipelines/orders.json
 ```
 
 ```python

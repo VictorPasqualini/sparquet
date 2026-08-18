@@ -1,3 +1,9 @@
+"""Motor de validação do framework — fino adaptador sobre o `sparquet_cola`.
+
+O bloco `validations` do JSON não muda. Internamente delega ao `Cola` (a biblioteca
+de qualidade de dados separável). Mantém `_registry` (dict) para introspecção do
+Studio e o contrato `validate(df, config)` usado pelo `Pipeline`.
+"""
 from __future__ import annotations
 
 from typing import Dict, List, Type
@@ -5,64 +11,57 @@ from typing import Dict, List, Type
 from pyspark.sql import DataFrame
 
 from sparquet.core.config import ValidationConfig
-from sparquet.validation.base import BaseValidator, ValidationResult
-from sparquet.validation.builtin import (
-    CustomSqlValidator,
-    NotNullValidator,
-    RangeValidator,
-    RegexValidator,
-    RowCountValidator,
-    UniqueValidator,
-)
 from sparquet.utils.logger import logger
+from sparquet_cola.checks import BaseCheck, CheckResult
+from sparquet_cola.engine import Cola, ColaSplit
 
-_BUILTIN_VALIDATORS: Dict[str, Type[BaseValidator]] = {
-    "not_null": NotNullValidator,
-    "unique": UniqueValidator,
-    "range": RangeValidator,
-    "regex": RegexValidator,
-    "row_count": RowCountValidator,
-    "custom_sql": CustomSqlValidator,
-}
+# Aliases históricos
+BaseValidator = BaseCheck
+ValidationResult = CheckResult
 
 
 class ValidationEngine:
-    """Runs all validation rules against a DataFrame and handles failures.
+    """Roda as regras de `validations` e trata falhas conforme `on_failure`.
 
-    Supports registering custom validators at runtime via `register()`.
+    Suporta registrar validators/checks customizados via `register()`. A severidade
+    `warn` (checks estilo SODA) é registrada mas **não** aborta o pipeline.
     """
 
     def __init__(self) -> None:
-        self._registry: Dict[str, Type[BaseValidator]] = dict(_BUILTIN_VALIDATORS)
+        self._cola = Cola()
+        # O Studio introspecta este dict (server/main.py: getattr(engine, "_registry")).
+        self._registry: Dict[str, Type[BaseCheck]] = self._cola._registry
 
-    def register(self, name: str, cls: Type[BaseValidator]) -> None:
-        self._registry[name] = cls
+    def register(self, name: str, cls: Type[BaseCheck]) -> None:
+        self._cola.register(name, cls)
+
+    @property
+    def available(self) -> List[str]:
+        return self._cola.available
 
     def validate(
         self, df: DataFrame, config: ValidationConfig
     ) -> List[ValidationResult]:
-        results: List[ValidationResult] = []
+        results = self._cola.run(df, config.rules)
         failures: List[ValidationResult] = []
 
-        for rule in config.rules:
-            cls = self._registry.get(rule.type)
-            if cls is None:
-                raise ValueError(
-                    f"Unknown validator '{rule.type}'. "
-                    f"Available: {sorted(self._registry)}"
+        for result in results:
+            if result.severity == "warn":
+                logger.warning(
+                    "Validation warning",
+                    rule=result.rule_type,
+                    validation_message=result.message,
+                    metric_value=result.metric_value,
                 )
-
-            result = cls(rule).validate(df)
-            results.append(result)
-
-            if result.passed:
-                logger.info("Validation passed", rule=rule.type)
+            elif result.passed:
+                logger.info("Validation passed", rule=result.rule_type)
             else:
                 logger.warning(
                     "Validation failed",
-                    rule=rule.type,
+                    rule=result.rule_type,
                     validation_message=result.message,
                     failed_count=result.failed_count,
+                    metric_value=result.metric_value,
                 )
                 failures.append(result)
 
@@ -72,6 +71,6 @@ class ValidationEngine:
 
         return results
 
-    @property
-    def available(self) -> list[str]:
-        return sorted(self._registry)
+    def split(self, df: DataFrame, config: ValidationConfig) -> ColaSplit:
+        """Divide o df em válidas/inválidas a partir das regras (ver Cola.split)."""
+        return self._cola.split(df, config.rules)

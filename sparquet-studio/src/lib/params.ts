@@ -47,13 +47,24 @@ export function seedParamValue(type: ParamType): ParamDefinition['value'] {
 }
 
 /**
+ * The `{key: value}` map the framework expects, built from the declared params.
+ * Unnamed params are skipped: a blank key would substitute `{}` everywhere.
+ */
+export function paramValues(
+  params: readonly ParamDefinition[],
+): Record<string, ParamDefinition['value']> {
+  const values: Record<string, ParamDefinition['value']> = {}
+  for (const param of params) {
+    if (param.key) values[param.key] = param.value
+  }
+  return values
+}
+
+/**
  * Keeps a param list in step with a pipeline: newly referenced keys are added
  * with a seed value, and values the user already typed are preserved.
  */
-export function mergeParams(
-  existing: ParamDefinition[],
-  pipeline: unknown,
-): ParamDefinition[] {
+export function mergeParams(existing: ParamDefinition[], pipeline: unknown): ParamDefinition[] {
   const discovered = inferParams(pipeline)
   const byKey = new Map(existing.map((param) => [param.key, param]))
   const merged = discovered.map((param) => byKey.get(param.key) ?? param)

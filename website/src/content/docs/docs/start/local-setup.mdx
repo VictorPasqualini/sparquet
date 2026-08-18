@@ -1,0 +1,284 @@
+---
+title: Run locally, end to end
+description: A complete walkthrough from a bare machine to a pipeline running on the Sparquet Studio canvas — Java, Python, the Windows Hadoop shims, the Studio dev server and the optional local runner.
+sidebar:
+  order: 6
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
+
+This page takes a machine with nothing installed and ends with a pipeline you built on the canvas, executed against real Spark, showing its result. It ties together the [install](/docs/start/install/) and [running a job](/docs/studio/running/) pages into one ordered path — follow it top to bottom the first time.
+
+The pieces you install:
+
+1. **Java (JDK 17)** — Spark runs on the JVM.
+2. **Python + Sparquet + PySpark** — the framework and its engine.
+3. **The Hadoop shims** — only on Windows, and the single most common reason a first run hangs.
+4. **Sparquet Studio** — the browser app where you design.
+5. **The local runner** — the small service that lets Studio execute against your Spark.
+
+## 1. Java (JDK 17)
+
+Spark needs a JDK and `JAVA_HOME` pointing at it. **JDK 17** works for both Spark 3.5 and Spark 4 (Java 11 also works for Spark 3.x).
+
+<Tabs>
+  <TabItem label="macOS">
+
+```bash
+brew install openjdk@17
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+```
+
+  </TabItem>
+  <TabItem label="Linux">
+
+```bash
+sudo apt-get install -y openjdk-17-jdk        # Debian/Ubuntu
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+```
+
+  </TabItem>
+  <TabItem label="Windows">
+
+Install **Temurin 17** (Adoptium) or another OpenJDK 17, then set `JAVA_HOME`:
+
+```powershell
+setx JAVA_HOME "C:\Program Files\Eclipse Adoptium\jdk-17"
+```
+
+Open a new terminal so the variable takes effect.
+
+  </TabItem>
+</Tabs>
+
+Verify — the version must be 17 and `JAVA_HOME` must be set:
+
+```bash
+java -version
+echo $JAVA_HOME        # PowerShell: echo $env:JAVA_HOME
+```
+
+<Aside type="caution">
+  A missing or wrong `JAVA_HOME` is the most common first-run error off a managed
+  platform. Spark fails at startup with a JVM or gateway error rather than a clear
+  message about Java.
+</Aside>
+
+## 2. Python, Sparquet and PySpark
+
+Sparquet needs Python 3.9+; PySpark comes along as a dependency. Use a virtual environment so the install stays isolated.
+
+<Tabs>
+  <TabItem label="macOS / Linux">
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install sparquet pyspark
+```
+
+  </TabItem>
+  <TabItem label="Windows">
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install sparquet pyspark
+```
+
+  </TabItem>
+  <TabItem label="From source">
+
+```bash
+git clone https://github.com/VictorPasqualini/sparquet.git
+cd sparquet
+pip install -e . pyspark
+```
+
+  </TabItem>
+</Tabs>
+
+For Delta Lake tables outside Databricks, add the extra: `pip install "sparquet[delta]"`.
+
+Verify the import resolves:
+
+```python
+from sparquet import Sparquet
+print(Sparquet)
+```
+
+## 3. Windows only — the Hadoop shims
+
+<Aside type="danger" title="Do not skip this on Windows">
+  Spark needs Hadoop's native shims to touch the local filesystem on Windows.
+  Without them a local run **hangs the first time it writes a file**, or fails
+  with `NativeIO$Windows` — and nothing about the error points at the real cause.
+</Aside>
+
+<Steps>
+
+1. Download `winutils.exe` and `hadoop.dll` matching your Hadoop version (the one PySpark bundled).
+2. Put both in `C:\hadoop\bin`.
+3. Set `HADOOP_HOME` and add its `bin` to `PATH`:
+
+   ```powershell
+   setx HADOOP_HOME "C:\hadoop"
+   setx PATH "$env:PATH;C:\hadoop\bin"
+   ```
+
+4. Open a new terminal so the variables apply.
+
+</Steps>
+
+WSL2 or Docker sidesteps this entirely — inside a Linux environment there is nothing extra to install.
+
+## 4. Confirm Spark works
+
+Before wiring up Studio, prove the runtime end to end. Create a one-line CSV to read:
+
+```bash
+printf 'id,amount\n1,10\n2,20\n' > orders.csv
+```
+
+Save this pipeline as `hello.json`:
+
+```json
+{
+  "name": "hello_local",
+  "input": { "format": "csv", "path": "orders.csv" },
+  "transformations": [
+    { "type": "filter", "condition": "amount > 0" }
+  ],
+  "output": { "format": "csv", "path": "./out/hello", "mode": "overwrite" }
+}
+```
+
+Run it through the CLI:
+
+```bash
+python -m sparquet.cli hello.json
+```
+
+If it prints a structured result ending in a written row count and leaves part
+files under `./out/hello`, your Java + PySpark + (on Windows) Hadoop setup is
+correct and Studio's runner will work too.
+
+<Aside type="tip">
+  On Windows, a run that hangs here — never printing the final result — is almost
+  always the missing Hadoop shims from step 3, not a problem with the pipeline.
+</Aside>
+
+## 5. Sparquet Studio
+
+Studio is a static browser app; designing needs no server.
+
+<Steps>
+
+1. Clone and install:
+
+   ```bash
+   git clone https://github.com/VictorPasqualini/sparquet.git
+   cd sparquet/sparquet-studio
+   npm install
+   ```
+
+2. Start the dev server:
+
+   ```bash
+   npm run dev
+   ```
+
+3. Open [http://localhost:5273](http://localhost:5273). The first launch seeds a **Getting Started** Workflow with working Jobs.
+
+</Steps>
+
+Node.js 18.18+ is required for this step only.
+
+## 6. The local runner
+
+Designing works offline. **Executing** from the canvas needs Spark, so Studio talks to a small FastAPI service you run yourself against the same Python environment from step 2.
+
+<Steps>
+
+1. Install its dependencies:
+
+   ```bash
+   cd sparquet-studio
+   pip install -r server/requirements.txt
+   ```
+
+2. Start it **from the `sparquet-studio` directory** — the module inserts the repository root into `sys.path`, so `sparquet` resolves even without installing the package:
+
+   ```bash
+   uvicorn server.main:app --port 8787
+   ```
+
+   It binds `127.0.0.1` by default. Keep it there — never expose it to a network.
+
+3. Copy the token it prints on startup:
+
+   ```
+   ========================================================================
+   Sparquet Studio runner token (this session only):
+       S3yhI-6191J6wu2xz7bCX9YpafB0GOLo
+   ========================================================================
+   ```
+
+4. Paste it into **Settings → Local runner → Runner token** in Studio (or into the card the Run panel shows the first time a run is refused).
+
+</Steps>
+
+The token changes on every restart. To pin it, set `SPARQUET_STUDIO_TOKEN` before starting:
+
+```bash
+SPARQUET_STUDIO_TOKEN=my-local-token uvicorn server.main:app --port 8787
+```
+
+```powershell
+$env:SPARQUET_STUDIO_TOKEN = "my-local-token"; uvicorn server.main:app --port 8787
+```
+
+<Aside type="danger" title="Why the token exists">
+  The runner executes arbitrary Spark work with your permissions. Without the
+  token, any web page you visit could POST a pipeline to `127.0.0.1:8787` and run
+  it. `/run` and `/validate` require the token and check the request `Origin`.
+</Aside>
+
+The same Windows rule applies to the runner: without `winutils.exe` and `HADOOP_HOME` (step 3), a `/run` never finishes. `GET /health` reports `spark_available` from the import alone, so it can read `ok` on a machine where a real run still cannot write files.
+
+## 7. Build and run a pipeline
+
+<Steps>
+
+1. In Studio, drag an **input** node onto the canvas and point it at a source you can read locally — a CSV or Parquet path, for instance.
+2. Add a transformation or two (a `filter`, a `with_column`), then an **output** node writing somewhere local.
+3. Open the Run panel with <kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>.
+4. Press **Run pipeline**. Studio compiles the canvas to the same JSON the framework runs, and posts it to the runner.
+
+</Steps>
+
+<Aside type="note">
+  Blocking lint errors disable the Run button with a tooltip explaining why, and
+  a warning appears when a destination writes with `overwrite` — the run is real.
+  **Validate only** parses the config without touching Spark.
+</Aside>
+
+## 8. Read the result
+
+The Run panel reports everything the run produced:
+
+| Section | What it tells you |
+|---|---|
+| Status | success, skipped (a `stop_if_empty` fired) or error, with the message |
+| Metrics | rows read, rows written, duration |
+| Validations | one row per rule: passed, failed count, message |
+| Preview | up to 50 rows of the output DataFrame |
+| Logs | the framework's own structured records for this run |
+
+A skipped run is not a failure — `stop_if_empty` ended it because there was nothing to process.
+
+## Next
+
+- The full run flow, endpoints and troubleshooting: [Running a job](/docs/studio/running/).
+- Write a pipeline by hand instead: [Your first pipeline](/docs/start/quickstart/).
+- What every node compiles to: the [pipeline reference](/docs/reference/pipeline-json/).

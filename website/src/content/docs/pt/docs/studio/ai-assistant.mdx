@@ -1,0 +1,85 @@
+---
+title: Assistente de IA
+description: Gere, modifique e explique Jobs Sparquet com o modelo de sua escolha — traga sua própria chave, revise cada proposta.
+sidebar:
+  order: 4
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+O assistente escreve Jobs na linguagem que o Studio já entende. O system prompt dele é gerado do mesmo catálogo que dirige os formulários e o linter, então ele não consegue sugerir uma transformação que o framework não tem.
+
+## Configurando
+
+<Steps>
+
+1. Abra **Settings → AI assistant**.
+
+2. Escolha um provedor e cole uma chave:
+
+   | Provedor | Obter chave | Modelo padrão |
+   |---|---|---|
+   | Anthropic | [console.anthropic.com](https://console.anthropic.com/settings/keys) | `claude-sonnet-4-5` |
+   | OpenAI | [platform.openai.com](https://platform.openai.com/api-keys) | `gpt-4.1` |
+   | Google | [aistudio.google.com](https://aistudio.google.com/apikey) | `gemini-2.5-pro` |
+   | Compatível com OpenAI | seu próprio gateway, Ollama, vLLM | texto livre |
+
+3. Opcionalmente clique em **Test connection** — envia um ping de um token e reporta o resultado inline.
+
+</Steps>
+
+<Aside type="caution" title="Onde a chave fica">
+  As requisições vão **direto do seu navegador para o seu provedor** — não há
+  servidor Sparquet no meio. Por padrão a chave fica em memória só na sessão.
+  "Remember key in this browser" a guarda no `localStorage`, o que é conveniente
+  numa máquina pessoal e má ideia numa compartilhada.
+</Aside>
+
+## Usando
+
+Abra o painel com <kbd>Ctrl/⌘</kbd>+<kbd>/</kbd>. Escolha uma intenção, descreva o que quer, envie.
+
+| Intenção | O que faz |
+|---|---|
+| **Generate** | Um Job completo a partir de uma descrição |
+| **Modify** | Altera o Job que está no canvas |
+| **Explain** | Explicação em português do que o Job faz |
+| **Fix issues** | Pega os achados do linter e propõe correções |
+| **Optimize** | Sugere checkpoints, pushdown e leituras mais baratas |
+| **Document** | Escreve os campos `description` |
+
+Bons prompts são específicos sobre fontes, chaves e destinos:
+
+> Leia orders da tabela Delta `sales.orders`, mantenha os confirmados, agregue receita por cliente e faça upsert do resultado em `analytics.customer_revenue` por `customer_id`.
+
+> Adicione um bloco de qualidade que falha a execução quando `id` tiver nulos ou duplicados, e grave o report em `quality.report` como Delta.
+
+> O join está lento. Empurre a lista de ids de cliente para o lado direito em vez de ler a tabela de eventos inteira.
+
+## Propostas
+
+Quando uma resposta contém um JSON de pipeline, ela chega como um **card**, não como mudança aplicada:
+
+- **Apply to canvas** substitui o grafo — e está a um <kbd>Ctrl/⌘</kbd>+<kbd>Z</kbd> de ser desfeito.
+- **View JSON** mostra o documento cru primeiro.
+
+Uma explicação que apenas cita um fragmento não gera proposta — só um JSON de pipeline completo gera, o que evita que uma resposta de "o que isso faz?" apague seu trabalho.
+
+## O que o modelo recebe
+
+O system prompt é gerado do catálogo em build time e carrega:
+
+- todo tipo de transformação com suas chaves obrigatórias e opcionais
+- formatos legíveis e graváveis, com seus modos de escrita válidos
+- validators e as políticas `on_failure`
+- as regras duras: `agg` é uma lista de strings SQL, entradas de `select` são expressões, `binary` é só leitura, `merge` precisa de `merge_keys`, `skip_if_false` é chave de topo, `{param}` e `{{variable}}` são mecanismos diferentes
+
+Contexto é adicionado por requisição: o JSON compilado, as issues de lint atuais e o nó selecionado — **só** quando *Share job context* está ligado. Desligue e nada do seu Job sai do navegador.
+
+## Custo e limites
+
+Você paga seu provedor direto, nas tarifas dele. Uma geração costuma ser alguns milhares de tokens de entrada e menos de mil de saída. Conversas longas cortam turnos antigos em vez de crescer sem limite.
+
+## Quando ele erra
+
+O linter é a rede de segurança: aplique a proposta, leia o painel Issues e corrija à mão ou mande as issues de volta com **Fix issues**. O assistente é uma ferramenta de rascunho — o arquivo que ele produz é checado pelas mesmas regras de qualquer um que você escreva.

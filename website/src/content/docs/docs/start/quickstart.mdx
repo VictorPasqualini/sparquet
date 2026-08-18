@@ -68,9 +68,9 @@ Five minutes, one file, a real dataset on disk. No Studio, no cluster, no databa
 3. ### Run it
 
    ```python title="run.py"
-   from spark_framework import SparkFramework
+   from sparquet import Sparquet
 
-   fw = SparkFramework(spark={"app_name": "demo", "master": "local[*]"})
+   fw = Sparquet(spark={"app_name": "demo", "master": "local[*]"})
    result = fw.run("orders.json")
 
    print(result.summary())
@@ -87,7 +87,7 @@ Five minutes, one file, a real dataset on disk. No Studio, no cluster, no databa
    Or straight from the terminal, with no Python file at all:
 
    ```bash
-   python -m spark_framework.cli orders.json
+   python -m sparquet.cli orders.json
    ```
 
 4. ### Read the result
@@ -159,6 +159,6 @@ fw.run("orders.json", params={"country": "BR"})
 
 ## Next
 
-- [Your first flow in Studio](/docs/start/first-flow/) — the same pipeline, drawn on a canvas.
+- [Your first job in Studio](/docs/start/first-flow/) — the same pipeline, drawn on a canvas.
 - [Core concepts](/docs/start/concepts/) — the execution model behind what you just ran.
 - [Transformations](/docs/reference/transformations/) — all twenty, field by field.

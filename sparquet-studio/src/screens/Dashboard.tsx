@@ -10,7 +10,7 @@ import {
   Plus,
   Sparkles,
   Trash2,
-  Workflow as WorkflowIcon,
+  Workflow as JobIcon,
 } from 'lucide-react'
 import { useId, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
@@ -33,21 +33,21 @@ import {
   useConfirm,
 } from '@/components/ui'
 import { TEMPLATES } from '@/data/templates'
-import { SEED_PROJECT_NAME } from '@/lib/storage/seed'
+import { SEED_WORKFLOW_NAME } from '@/lib/storage/seed'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
 import { useLibraryStore } from '@/store/library'
 import {
-  PROJECT_ACCENTS,
-  type Project,
-  type ProjectAccent,
+  WORKFLOW_ACCENTS,
   type Workflow,
+  type WorkflowAccent,
+  type Job,
 } from '@/types/studio'
 
 const RECENT_LIMIT = 8
 
-/** Project accents mapped onto the semantic palette — no raw colors anywhere. */
-const ACCENT: Record<ProjectAccent, { dot: string; tile: string; surface: string }> = {
+/** Workflow accents mapped onto the semantic palette — no raw colors anywhere. */
+const ACCENT: Record<WorkflowAccent, { dot: string; tile: string; surface: string }> = {
   amber: {
     dot: 'bg-brand-500',
     tile: 'bg-brand-500/15 text-brand-600 dark:text-brand-400',
@@ -82,49 +82,49 @@ const ACCENT: Record<ProjectAccent, { dot: string; tile: string; surface: string
 
 export function Dashboard() {
   const navigate = useNavigate()
-  const projects = useLibraryStore((state) => state.projects)
   const workflows = useLibraryStore((state) => state.workflows)
-  const duplicateWorkflow = useLibraryStore((state) => state.duplicateWorkflow)
-  const deleteWorkflow = useLibraryStore((state) => state.deleteWorkflow)
+  const jobs = useLibraryStore((state) => state.jobs)
+  const duplicateJob = useLibraryStore((state) => state.duplicateJob)
+  const deleteJob = useLibraryStore((state) => state.deleteJob)
 
   const [confirm, confirmDialog] = useConfirm()
+  const [creatingJob, setCreatingJob] = useState(false)
   const [creatingWorkflow, setCreatingWorkflow] = useState(false)
-  const [creatingProject, setCreatingProject] = useState(false)
-  const [renaming, setRenaming] = useState<Workflow | null>(null)
+  const [renaming, setRenaming] = useState<Job | null>(null)
 
-  const projectsById = useMemo(
-    () => new Map(projects.map((project) => [project.id, project])),
-    [projects],
+  const workflowsById = useMemo(
+    () => new Map(workflows.map((workflow) => [workflow.id, workflow])),
+    [workflows],
   )
   const recent = useMemo(
-    () => [...workflows].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, RECENT_LIMIT),
-    [workflows],
+    () => [...jobs].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, RECENT_LIMIT),
+    [jobs],
   )
   const totalNodes = useMemo(
-    () => workflows.reduce((total, workflow) => total + countNodes(workflow), 0),
-    [workflows],
+    () => jobs.reduce((total, job) => total + countNodes(job), 0),
+    [jobs],
   )
-  const firstRun = useMemo(() => !hasOwnWork(projects, workflows), [projects, workflows])
+  const firstRun = useMemo(() => !hasOwnWork(workflows, jobs), [workflows, jobs])
 
-  const handleDuplicate = async (workflow: Workflow) => {
-    const copy = await duplicateWorkflow(workflow.id)
+  const handleDuplicate = async (job: Job) => {
+    const copy = await duplicateJob(job.id)
     if (copy) toast.success(`Duplicated as "${copy.name}"`)
   }
 
-  const handleDelete = async (workflow: Workflow) => {
+  const handleDelete = async (job: Job) => {
     const confirmed = await confirm({
-      title: 'Delete workflow',
+      title: 'Delete job',
       message: (
         <>
-          <span className="font-medium text-content">{workflow.name}</span> and its canvas will
+          <span className="font-medium text-content">{job.name}</span> and its canvas will
           be removed. This cannot be undone.
         </>
       ),
       confirmLabel: 'Delete',
     })
     if (!confirmed) return
-    await deleteWorkflow(workflow.id)
-    toast.success('Workflow deleted')
+    await deleteJob(job.id)
+    toast.success('Job deleted')
   }
 
   return (
@@ -149,68 +149,68 @@ export function Dashboard() {
             size="sm"
             variant="primary"
             icon={<Plus className="h-4 w-4" />}
-            onClick={() => setCreatingWorkflow(true)}
+            onClick={() => setCreatingJob(true)}
           >
-            New workflow
+            New job
           </Button>
         </div>
       </header>
 
-      {firstRun && <GettingStarted onCreateProject={() => setCreatingProject(true)} />}
+      {firstRun && <GettingStarted onCreateWorkflow={() => setCreatingWorkflow(true)} />}
 
       <section className="grid gap-3 sm:grid-cols-3">
-        <StatTile icon={<FolderKanban />} label="Projects" value={projects.length} />
-        <StatTile icon={<WorkflowIcon />} label="Workflows" value={workflows.length} />
+        <StatTile icon={<FolderKanban />} label="Workflows" value={workflows.length} />
+        <StatTile icon={<JobIcon />} label="Jobs" value={jobs.length} />
         <StatTile
           icon={<Boxes />}
           label="Nodes"
           value={totalNodes}
-          hint="across all workflows"
+          hint="across all jobs"
         />
       </section>
 
       <section className="space-y-3">
         <SectionTitle
           action={
-            workflows.length > RECENT_LIMIT ? (
+            jobs.length > RECENT_LIMIT ? (
               <span className="text-2xs text-content-subtle">
-                Showing {RECENT_LIMIT} of {workflows.length}
+                Showing {RECENT_LIMIT} of {jobs.length}
               </span>
             ) : undefined
           }
         >
-          Recent workflows
+          Recent jobs
         </SectionTitle>
 
         {recent.length === 0 ? (
           <div className="card">
             <EmptyState
-              icon={<WorkflowIcon />}
-              title="No workflows yet"
-              description="A workflow is one pipeline: a source, the transformations it needs and where the result lands."
+              icon={<JobIcon />}
+              title="No jobs yet"
+              description="A job is one pipeline: a source, the transformations it needs and where the result lands."
               action={
                 <Button
                   size="sm"
                   variant="primary"
                   icon={<Plus className="h-4 w-4" />}
-                  onClick={() => setCreatingWorkflow(true)}
+                  onClick={() => setCreatingJob(true)}
                 >
-                  New workflow
+                  New job
                 </Button>
               }
             />
           </div>
         ) : (
           <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {recent.map((workflow) => (
-              <WorkflowCard
-                key={workflow.id}
-                workflow={workflow}
-                project={projectsById.get(workflow.projectId)}
-                onOpen={() => navigate(`/workflows/${workflow.id}`)}
-                onDuplicate={() => void handleDuplicate(workflow)}
-                onRename={() => setRenaming(workflow)}
-                onDelete={() => void handleDelete(workflow)}
+            {recent.map((job) => (
+              <JobCard
+                key={job.id}
+                job={job}
+                workflow={workflowsById.get(job.workflowId)}
+                onOpen={() => navigate(`/jobs/${job.id}`)}
+                onDuplicate={() => void handleDuplicate(job)}
+                onRename={() => setRenaming(job)}
+                onDelete={() => void handleDelete(job)}
               />
             ))}
           </ul>
@@ -224,31 +224,31 @@ export function Dashboard() {
               size="xs"
               variant="ghost"
               icon={<Plus className="h-3.5 w-3.5" />}
-              onClick={() => setCreatingProject(true)}
+              onClick={() => setCreatingWorkflow(true)}
             >
-              New project
+              New workflow
             </Button>
           }
         >
-          Projects
+          Workflows
         </SectionTitle>
 
-        {projects.length === 0 ? (
+        {workflows.length === 0 ? (
           <div className="card">
             <EmptyState
               icon={<FolderKanban />}
-              title="No projects yet"
-              description="Projects group the pipelines of one domain — ingestion, ledger, reporting."
+              title="No workflows yet"
+              description="Workflows group the pipelines of one domain — ingestion, ledger, reporting."
             />
           </div>
         ) : (
           <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {projects.map((project) => (
-              <ProjectCard
-                key={project.id}
-                project={project}
-                workflowCount={
-                  workflows.filter((workflow) => workflow.projectId === project.id).length
+            {workflows.map((workflow) => (
+              <WorkflowCard
+                key={workflow.id}
+                workflow={workflow}
+                jobCount={
+                  jobs.filter((job) => job.workflowId === workflow.id).length
                 }
               />
             ))}
@@ -256,10 +256,10 @@ export function Dashboard() {
         )}
       </section>
 
+      {creatingJob && <NewJobModal onClose={() => setCreatingJob(false)} />}
       {creatingWorkflow && <NewWorkflowModal onClose={() => setCreatingWorkflow(false)} />}
-      {creatingProject && <NewProjectModal onClose={() => setCreatingProject(false)} />}
       {renaming && (
-        <RenameWorkflowModal workflow={renaming} onClose={() => setRenaming(null)} />
+        <RenameJobModal job={renaming} onClose={() => setRenaming(null)} />
       )}
       {confirmDialog}
     </div>
@@ -268,11 +268,11 @@ export function Dashboard() {
 
 /* ------------------------------------------------------------------ pieces */
 
-function GettingStarted({ onCreateProject }: { onCreateProject: () => void }) {
+function GettingStarted({ onCreateWorkflow }: { onCreateWorkflow: () => void }) {
   const steps = [
     {
-      title: 'Create a project',
-      body: 'Projects group related pipelines. One per domain keeps names short and search useful.',
+      title: 'Create a workflow',
+      body: 'Workflows group related pipelines. One per domain keeps names short and search useful.',
     },
     {
       title: 'Drop in nodes or ask the AI',
@@ -308,8 +308,8 @@ function GettingStarted({ onCreateProject }: { onCreateProject: () => void }) {
             <GraduationCap className="h-3.5 w-3.5" />
             Learn the basics
           </Link>
-          <Button size="sm" variant="primary" onClick={onCreateProject}>
-            Create a project
+          <Button size="sm" variant="primary" onClick={onCreateWorkflow}>
+            Create a workflow
           </Button>
         </div>
       </div>
@@ -358,30 +358,30 @@ function StatTile({
   )
 }
 
-interface WorkflowCardProps {
-  workflow: Workflow
-  project?: Project
+interface JobCardProps {
+  job: Job
+  workflow?: Workflow
   onOpen: () => void
   onDuplicate: () => void
   onRename: () => void
   onDelete: () => void
 }
 
-function WorkflowCard({
+function JobCard({
+  job,
   workflow,
-  project,
   onOpen,
   onDuplicate,
   onRename,
   onDelete,
-}: WorkflowCardProps) {
-  const accent = ACCENT[project?.accent ?? 'slate']
-  const tags = workflow.tags.slice(0, 3)
+}: JobCardProps) {
+  const accent = ACCENT[workflow?.accent ?? 'slate']
+  const tags = job.tags.slice(0, 3)
 
   return (
     <li className="relative">
       <Link
-        to={`/workflows/${workflow.id}`}
+        to={`/jobs/${job.id}`}
         className={cn(
           'flex h-full flex-col gap-2 rounded-xl border border-line bg-surface p-3 pr-10 shadow-card',
           'transition-colors hover:border-line-strong hover:bg-surface-raised',
@@ -391,12 +391,12 @@ function WorkflowCard({
         <span className="flex items-center gap-1.5">
           <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', accent.dot)} aria-hidden />
           <span className="truncate text-2xs text-content-subtle">
-            {project?.name ?? 'No project'}
+            {workflow?.name ?? 'No workflow'}
           </span>
         </span>
 
-        <span className="truncate text-sm font-medium text-content" title={workflow.name}>
-          {workflow.name}
+        <span className="truncate text-sm font-medium text-content" title={job.name}>
+          {job.name}
         </span>
 
         {tags.length > 0 && (
@@ -410,16 +410,16 @@ function WorkflowCard({
         )}
 
         <span className="mt-auto flex items-center gap-1.5 pt-1 text-2xs text-content-subtle">
-          <span>{plural(countNodes(workflow), 'node')}</span>
+          <span>{plural(countNodes(job), 'node')}</span>
           <span aria-hidden>·</span>
-          <span>{relativeTime(workflow.updatedAt)}</span>
+          <span>{relativeTime(job.updatedAt)}</span>
         </span>
       </Link>
 
       <div className="absolute right-2 top-2">
         <Menu>
           <MenuTrigger asChild>
-            <IconButton label={`Actions for ${workflow.name}`} size="sm">
+            <IconButton label={`Actions for ${job.name}`} size="sm">
               <MoreHorizontal />
             </IconButton>
           </MenuTrigger>
@@ -444,13 +444,13 @@ function WorkflowCard({
   )
 }
 
-function ProjectCard({ project, workflowCount }: { project: Project; workflowCount: number }) {
-  const accent = ACCENT[project.accent]
+function WorkflowCard({ workflow, jobCount }: { workflow: Workflow; jobCount: number }) {
+  const accent = ACCENT[workflow.accent]
 
   return (
     <li>
       <Link
-        to={`/projects/${project.id}`}
+        to={`/workflows/${workflow.id}`}
         className={cn(
           'flex h-full flex-col gap-2 rounded-xl border p-3 transition-colors',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50',
@@ -464,19 +464,19 @@ function ProjectCard({ project, workflowCount }: { project: Project; workflowCou
           >
             <FolderKanban className="h-3.5 w-3.5" />
           </span>
-          <span className="truncate text-sm font-medium text-content">{project.name}</span>
+          <span className="truncate text-sm font-medium text-content">{workflow.name}</span>
         </span>
 
-        {project.description && (
+        {workflow.description && (
           <span className="line-clamp-2 text-2xs leading-relaxed text-content-muted">
-            {project.description}
+            {workflow.description}
           </span>
         )}
 
         <span className="mt-auto flex items-center gap-1.5 pt-1 text-2xs text-content-subtle">
-          <span>{plural(workflowCount, 'workflow')}</span>
+          <span>{plural(jobCount, 'job')}</span>
           <span aria-hidden>·</span>
-          <span>{relativeTime(project.updatedAt)}</span>
+          <span>{relativeTime(workflow.updatedAt)}</span>
         </span>
       </Link>
     </li>
@@ -485,39 +485,39 @@ function ProjectCard({ project, workflowCount }: { project: Project; workflowCou
 
 /* ------------------------------------------------------------------ modals */
 
-const NEW_PROJECT = '__new-project'
+const NEW_WORKFLOW = '__new-workflow'
 
-function NewWorkflowModal({ onClose }: { onClose: () => void }) {
+function NewJobModal({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate()
-  const projects = useLibraryStore((state) => state.projects)
-  const createProject = useLibraryStore((state) => state.createProject)
+  const workflows = useLibraryStore((state) => state.workflows)
   const createWorkflow = useLibraryStore((state) => state.createWorkflow)
+  const createJob = useLibraryStore((state) => state.createJob)
 
   const nameId = useId()
-  const projectId = useId()
-  const newProjectId = useId()
+  const workflowId = useId()
+  const newWorkflowId = useId()
 
   const [name, setName] = useState('')
-  const [target, setTarget] = useState(projects[0]?.id ?? NEW_PROJECT)
-  const [projectName, setProjectName] = useState('')
+  const [target, setTarget] = useState(workflows[0]?.id ?? NEW_WORKFLOW)
+  const [workflowName, setWorkflowName] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const needsProjectName = target === NEW_PROJECT
-  const valid = name.trim().length > 0 && (!needsProjectName || projectName.trim().length > 0)
+  const needsWorkflowName = target === NEW_WORKFLOW
+  const valid = name.trim().length > 0 && (!needsWorkflowName || workflowName.trim().length > 0)
 
   const submit = async () => {
     if (!valid || busy) return
     setBusy(true)
     try {
-      const owner = needsProjectName
-        ? (await createProject({ name: projectName.trim() })).id
+      const owner = needsWorkflowName
+        ? (await createWorkflow({ name: workflowName.trim() })).id
         : target
-      const workflow = await createWorkflow({ projectId: owner, name: name.trim() })
+      const job = await createJob({ workflowId: owner, name: name.trim() })
       onClose()
-      navigate(`/workflows/${workflow.id}`)
+      navigate(`/jobs/${job.id}`)
     } catch (error) {
       setBusy(false)
-      toast.error('Could not create the workflow', {
+      toast.error('Could not create the job', {
         description: error instanceof Error ? error.message : String(error),
       })
     }
@@ -529,7 +529,7 @@ function NewWorkflowModal({ onClose }: { onClose: () => void }) {
       onOpenChange={(open) => {
         if (!open) onClose()
       }}
-      title="New workflow"
+      title="New job"
       description="Starts on an empty canvas. To begin from a worked example, use Start from template."
       size="md"
       footer={
@@ -543,7 +543,7 @@ function NewWorkflowModal({ onClose }: { onClose: () => void }) {
             disabled={!valid}
             onClick={() => void submit()}
           >
-            Create workflow
+            Create job
           </Button>
         </>
       }
@@ -562,26 +562,26 @@ function NewWorkflowModal({ onClose }: { onClose: () => void }) {
           />
         </Field>
 
-        <Field label="Project" htmlFor={projectId}>
+        <Field label="Workflow" htmlFor={workflowId}>
           <Select
-            id={projectId}
+            id={workflowId}
             value={target}
             onValueChange={setTarget}
-            ariaLabel="Project"
+            ariaLabel="Workflow"
             options={[
-              ...projects.map((project) => ({ value: project.id, label: project.name })),
-              { value: NEW_PROJECT, label: 'New project…' },
+              ...workflows.map((workflow) => ({ value: workflow.id, label: workflow.name })),
+              { value: NEW_WORKFLOW, label: 'New workflow…' },
             ]}
           />
         </Field>
 
-        {needsProjectName && (
-          <Field label="Project name" htmlFor={newProjectId} required>
+        {needsWorkflowName && (
+          <Field label="Workflow name" htmlFor={newWorkflowId} required>
             <Input
-              id={newProjectId}
-              value={projectName}
+              id={newWorkflowId}
+              value={workflowName}
               placeholder="Ingestion"
-              onChange={(event) => setProjectName(event.target.value)}
+              onChange={(event) => setWorkflowName(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') void submit()
               }}
@@ -593,21 +593,21 @@ function NewWorkflowModal({ onClose }: { onClose: () => void }) {
   )
 }
 
-function NewProjectModal({ onClose }: { onClose: () => void }) {
+function NewWorkflowModal({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate()
-  const createProject = useLibraryStore((state) => state.createProject)
+  const createWorkflow = useLibraryStore((state) => state.createWorkflow)
 
   const nameId = useId()
   const [name, setName] = useState('')
-  const [accent, setAccent] = useState<ProjectAccent>('amber')
+  const [accent, setAccent] = useState<WorkflowAccent>('amber')
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
     if (!name.trim() || busy) return
     setBusy(true)
-    const project = await createProject({ name: name.trim(), accent })
+    const workflow = await createWorkflow({ name: name.trim(), accent })
     onClose()
-    navigate(`/projects/${project.id}`)
+    navigate(`/workflows/${workflow.id}`)
   }
 
   return (
@@ -616,8 +616,8 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
       onOpenChange={(open) => {
         if (!open) onClose()
       }}
-      title="New project"
-      description="A project groups the pipelines that belong together."
+      title="New workflow"
+      description="A workflow groups the pipelines that belong together."
       size="sm"
       footer={
         <>
@@ -630,7 +630,7 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
             disabled={!name.trim()}
             onClick={() => void submit()}
           >
-            Create project
+            Create workflow
           </Button>
         </>
       }
@@ -656,24 +656,24 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
   )
 }
 
-function RenameWorkflowModal({
-  workflow,
+function RenameJobModal({
+  job,
   onClose,
 }: {
-  workflow: Workflow
+  job: Job
   onClose: () => void
 }) {
-  const updateWorkflowMeta = useLibraryStore((state) => state.updateWorkflowMeta)
+  const updateJobMeta = useLibraryStore((state) => state.updateJobMeta)
   const nameId = useId()
-  const [name, setName] = useState(workflow.name)
+  const [name, setName] = useState(job.name)
 
   const submit = async () => {
     const trimmed = name.trim()
-    if (!trimmed || trimmed === workflow.name) {
+    if (!trimmed || trimmed === job.name) {
       onClose()
       return
     }
-    await updateWorkflowMeta(workflow.id, { name: trimmed })
+    await updateJobMeta(job.id, { name: trimmed })
     onClose()
   }
 
@@ -683,7 +683,7 @@ function RenameWorkflowModal({
       onOpenChange={(open) => {
         if (!open) onClose()
       }}
-      title="Rename workflow"
+      title="Rename job"
       size="sm"
       footer={
         <>
@@ -715,12 +715,12 @@ function AccentPicker({
   value,
   onChange,
 }: {
-  value: ProjectAccent
-  onChange: (accent: ProjectAccent) => void
+  value: WorkflowAccent
+  onChange: (accent: WorkflowAccent) => void
 }) {
   return (
     <div className="flex items-center gap-1.5">
-      {PROJECT_ACCENTS.map((accent) => (
+      {WORKFLOW_ACCENTS.map((accent) => (
         <button
           key={accent}
           type="button"
@@ -743,24 +743,24 @@ function AccentPicker({
 /* ------------------------------------------------------------------- utils */
 
 /** Sticky notes are canvas annotations, never part of the compiled pipeline. */
-function countNodes(workflow: Workflow): number {
-  return workflow.graph.nodes.filter((node) => node.data.kind !== 'note').length
+function countNodes(job: Job): number {
+  return job.graph.nodes.filter((node) => node.data.kind !== 'note').length
 }
 
 /**
- * The seeded "Getting Started" project ships template copies. Until the user
+ * The seeded "Getting Started" workflow ships template copies. Until the user
  * adds something of their own, the dashboard stays in first-run mode.
  */
-function hasOwnWork(projects: Project[], workflows: Workflow[]): boolean {
-  const seededProjects = new Set(
-    projects
-      .filter((project) => project.name === SEED_PROJECT_NAME)
-      .map((project) => project.id),
+function hasOwnWork(workflows: Workflow[], jobs: Job[]): boolean {
+  const seededWorkflows = new Set(
+    workflows
+      .filter((workflow) => workflow.name === SEED_WORKFLOW_NAME)
+      .map((workflow) => workflow.id),
   )
   const templateNames = new Set(TEMPLATES.map((template) => template.name))
 
-  return workflows.some(
-    (workflow) => !seededProjects.has(workflow.projectId) || !templateNames.has(workflow.name),
+  return jobs.some(
+    (job) => !seededWorkflows.has(job.workflowId) || !templateNames.has(job.name),
   )
 }
 

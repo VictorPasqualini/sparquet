@@ -10,7 +10,7 @@ import { FORMATS } from './formats'
 import { ADVANCED_TRANSFORMATIONS } from './transformations.advanced'
 import { CORE_TRANSFORMATIONS } from './transformations.core'
 import type { FormatDef, TransformationDef, ValidatorDef } from './types'
-import { VALIDATORS } from './validators'
+import { ON_FAILURE_OPTIONS, VALIDATORS } from './validators'
 
 export * from './types'
 
@@ -19,7 +19,7 @@ export const TRANSFORMATIONS: TransformationDef[] = [
   ...ADVANCED_TRANSFORMATIONS,
 ]
 
-export { FORMATS, VALIDATORS }
+export { FORMATS, ON_FAILURE_OPTIONS, VALIDATORS }
 
 const transformationByType = new Map(TRANSFORMATIONS.map((t) => [t.type, t]))
 const formatById = new Map(FORMATS.map((f) => [f.id, f]))
@@ -37,10 +37,8 @@ export function getValidator(type: string): ValidatorDef | undefined {
   return validatorByType.get(type)
 }
 
-/** Transformations offered in the palette (aliases such as `add_column` hidden). */
-export const PALETTE_TRANSFORMATIONS: TransformationDef[] = TRANSFORMATIONS.filter(
-  (t) => !t.deprecatedAlias,
-)
+/** Transformations offered in the palette. */
+export const PALETTE_TRANSFORMATIONS: TransformationDef[] = TRANSFORMATIONS
 
 export const READABLE_FORMATS: FormatDef[] = FORMATS.filter((f) => f.canRead)
 export const WRITABLE_FORMATS: FormatDef[] = FORMATS.filter((f) => f.canWrite)

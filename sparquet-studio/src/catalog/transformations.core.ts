@@ -105,10 +105,7 @@ const parseJsonField = (value: unknown): Record<string, unknown> | string => {
   return 'Expected a JSON object.'
 }
 
-/**
- * `with_column` and its `add_column` alias are the same Python class, so they must
- * expose byte-identical forms.
- */
+/** Fields shared by the single-column and multi-column forms of `with_column`. */
 const buildWithColumnFields = (): FieldSpec[] => [
   {
     key: 'column',
@@ -573,48 +570,6 @@ export const CORE_TRANSFORMATIONS: TransformationDef[] = [
   "type": "with_column",
   "column": "documento",
   "expression": "lpad(regexp_replace(documento, '[^0-9]', ''), 14, '0')"
-}`,
-      },
-    ],
-  },
-
-  {
-    type: 'add_column',
-    label: 'Add column (legacy)',
-    family: 'compute',
-    accent: 'transform',
-    icon: 'CirclePlus',
-    deprecatedAlias: 'with_column',
-    summary: 'Backward-compatible alias of with_column — same class, same fields.',
-    description: [
-      '`add_column` is registered in the engine as a pure alias of `with_column`',
-      '(`AddColumnTransformation = WithColumnTransformation`), so it behaves identically: same',
-      'single-column form (`column` / legacy `name` + `expression`), same multi-column `columns`',
-      'map with the same precedence and key ordering. It is kept **only so older pipeline JSON',
-      'keeps parsing** — Studio never emits it for new nodes. Convert existing nodes to',
-      '`with_column`; the JSON is otherwise byte-identical.',
-    ].join(' '),
-    fields: buildWithColumnFields(),
-    keywords: [...WITH_COLUMN_KEYWORDS, 'alias', 'legacy', 'deprecated', 'with_column'],
-    gotchas: [
-      'Legacy alias — use with_column for new nodes; the runtime behavior is identical.',
-      ...WITH_COLUMN_GOTCHAS,
-    ],
-    examples: [
-      {
-        title: 'Legacy single-column node',
-        json: `{
-  "type": "add_column",
-  "column": "total",
-  "expression": "quantidade * preco_unitario"
-}`,
-      },
-      {
-        title: 'The same node, written the current way',
-        json: `{
-  "type": "with_column",
-  "column": "total",
-  "expression": "quantidade * preco_unitario"
 }`,
       },
     ],

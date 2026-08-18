@@ -103,8 +103,9 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `ReaderFactory/WriterFactory` | `io/factory.py` | Registry de formatos; extensível |
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
-| `ValidationEngine` | `validation/engine.py` | Roda validators; respeita `on_failure` |
-| Validators nativos | `validation/builtin.py` | Ver lista abaixo |
+| `ValidationEngine` | `validation/engine.py` | Adaptador fino sobre o `sparquet_cola`; respeita `on_failure` e severidade (warn não aborta); `split(df, config)` → valid/invalid |
+| **`sparquet_cola`** (lib de DQ) | **pacote/repo separado** (`../sparquet-cola`, publicado no PyPI; dependência `sparquet-cola>=0.1.0`) | Motor de qualidade de dados (só depende de pyspark). `Cola` (run/split/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/`check`/`schema`), `thresholds`. O bloco JSON continua `validations`; o branding Cola é interno. Import `sparquet_cola` (não vive mais dentro do repo do sparquet). |
+| `sparquet.validation.*` | `validation/{base,builtin,checks,thresholds}.py` | Shims de compat que reexportam do `sparquet_cola` com os nomes históricos (`BaseValidator`, `ValidationResult`, `*Validator`) |
 | `apply_template` | `utils/template.py` | Substitui `{chave}` no JSON bruto antes do parse; formata listas/booleanos para SQL |
 | `resolve_includes` | `utils/includes.py` | Expande diretivas `$include` em transformations |
 
@@ -262,7 +263,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     { "type": "rename", "mappings": {"old": "new"} },
     { "type": "cast", "columns": {"col": "type"} },
     // with_column: aceita "column" (ou "name", compat) + "expression", OU "columns"
-    // (mapa nome→expr) para criar várias colunas num bloco, em ordem. add_column = alias.
+    // (mapa nome→expr) para criar várias colunas num bloco, em ordem.
     { "type": "with_column", "column": "col", "expression": "SQL expr" },
     { "type": "with_column", "columns": { "c1": "expr1", "c2": "expr2 usando c1" } },
     // struct: monta coluna struct aninhada a partir de um mapa campo→expressão
@@ -324,6 +325,9 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       "with": { "format": "parquet", "path": "/ref/table", "options": {} },
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
       "how": "inner|left|right|full|cross|leftsemi|leftanti|...",
+      "broadcast": true,                // opcional: true/"right" faz broadcast do lado
+                                        // direito (dimensão/lookup pequeno) — map-side
+                                        // join sem shuffle; "left" faz broadcast do principal
       "skip_if_false": "{meu_param}",   // opcional: pula o join se o valor pós-substituição for ""
       // with_transformations: aplica transformações no df da direita antes do join
       // df esquerdo (principal) é alias 'l'; df direito é alias 'r'.
@@ -353,12 +357,43 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       { "type": "range", "column": "age", "min": 0, "max": 150 },
       { "type": "regex", "column": "email", "pattern": ".*@.*" },
       { "type": "row_count", "min": 1, "max": 1000000 },
-      {
-        "type": "custom_sql",
-        "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ...",
-        "error_message": "msg"
-      }
-    ]
+      // sql: dois modos. "query" = invariante pass-when-true (retorna booleano).
+      { "type": "sql", "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ...",
+        "error_message": "msg" },
+      // "failed_rows" = retorna as LINHAS ruins (estilo SODA "failed rows"); falha se
+      // vier alguma. "output" (opcional) grava essas linhas num destino.
+      { "type": "sql", "failed_rows": "SELECT * FROM _validation_df WHERE valor < 0",
+        "output": { "format": "delta", "path": "dq.linhas_ruins", "mode": "overwrite" } },
+
+      // check: estilo SODA Core — uma MÉTRICA comparada a um THRESHOLD, com níveis
+      // warn/fail. must_be é a condição de aprovação; warn (opcional) rebaixa para
+      // aviso (não aborta em on_failure="fail"). Métricas: row_count, distinct_count,
+      // missing_count/percent, duplicate_count/percent, invalid_count/percent,
+      // min, max, avg, sum, stddev, freshness. Threshold: > < >= <= = != , between X and Y,
+      // com sufixo % (percentual) ou duração (1d/2h/30m, para freshness).
+      { "type": "check", "metric": "row_count", "must_be": "> 0" },
+      { "type": "check", "name": "cpf completo", "metric": "missing_percent",
+        "column": "cpf", "must_be": "< 1%", "warn": "= 0" },
+      { "type": "check", "metric": "duplicate_count", "columns": ["id"], "must_be": "= 0" },
+      // invalid_* usa as configs de validade: valid_values / valid_format (email, uuid,
+      // cpf, cnpj, date, …) / valid_regex / valid_min / valid_max / valid_length
+      { "type": "check", "metric": "invalid_percent", "column": "email",
+        "valid_format": "email", "must_be": "< 5%" },
+      { "type": "check", "metric": "freshness", "column": "atualizado_em", "must_be": "< 1d" },
+
+      // schema: colunas obrigatórias/proibidas e tipos (aliases: long→bigint, integer→int)
+      { "type": "schema", "required_columns": ["id", "valor"],
+        "column_types": { "id": "bigint", "valor": "double" } }
+    ],
+    // report ganha as colunas check_name, severity (pass|warn|fail) e metric_value.
+
+    // outputs (quarentena): roteia LINHAS apartado da(s) saída(s) principal(is). Uma
+    // linha é "invalid" quando viola qualquer check row-level (not_null, range, regex,
+    // unique, e o `check` de missing/invalid). Ex: bronze → silver_ok + silver_quarentena.
+    "outputs": {
+      "valid":   { "format": "delta", "path": "silver.ok",         "mode": "overwrite" },
+      "invalid": { "format": "delta", "path": "silver.quarentena", "mode": "overwrite" }
+    }
   },
 
   // Saída única (shorthand):
@@ -416,7 +451,13 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | `delta` | sim | sim | Unity Catalog ou path; time travel; MERGE |
 | `iceberg` | sim | sim | MERGE INTO nativo |
 | `txt` | sim | sim | Texto plano; coluna `value` |
-| `view` | sim | sim | Spark temp views; auto-cache |
+| `view` | sim | sim | Spark temp views; auto-cache; `scope` session/global |
+| `json` | sim | sim | JSON nativo (JSON Lines; `multiLine` p/ 1 doc por arquivo) |
+| `orc` | sim | sim | ORC colunar nativo |
+| `avro` | sim | sim | Requer `spark-avro` no classpath |
+| `xml` | sim | sim | Requer `spark-xml`; `rowTag` obrigatório |
+| `binary` | sim | **não** | `binaryFile` (só leitura): path/modificationTime/length/content |
+| `hudi` | sim | sim | Requer bundle Hudi; upsert/partição via opções `hoodie.*` |
 | `kafka` | sim | sim | Batch read/write; MSK via SASL/IAM; requer conector Kafka no classpath |
 | `postgresql` | sim | sim | JDBC; `path`=tabela; `url` ou `host`+`database` em options |
 | `mysql` | sim | sim | JDBC |
@@ -429,15 +470,16 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | `mongodb` | sim | sim | `path`=coleção; `connection.uri`+`database` em options |
 | `documentdb` | sim | sim | Amazon DocumentDB (mesmo conector Mongo; URI com TLS) |
 | `dynamodb` | sim | sim | `path`=tabela; write é upsert por chave (append) |
-| `cassandra` | sim | sim | `path`=`keyspace.tabela`; append (upsert) |
-| `elasticsearch` | sim | sim | `path`=índice; Elasticsearch/OpenSearch |
+| `cassandra` | sim | sim | `path`=`keyspace.tabela`; append (upsert); **mesma classe atende Cassandra e ScyllaDB** |
+| `elasticsearch` | sim | sim | `path`=índice; **mesma classe atende Elasticsearch e OpenSearch** |
 
-> Todos os conectores externos (JDBC, BigQuery, Snowflake, Redshift, Mongo,
-> DynamoDB, Cassandra, Elasticsearch, Kafka) exigem o **JAR do driver/conector no
-> classpath** do Spark (`spark.jars` / `spark.jars.packages`). O framework só monta a
-> chamada `.format(...).options(...)`; não empacota drivers. Cada `io/<fmt>.py`
-> documenta as opções de conexão; o catálogo do Studio (`formats.databases.ts`) as
-> descreve para a UI e a IA.
+> Conectores externos exigem o **JAR do driver/conector no classpath** do Spark
+> (`spark.jars` / `spark.jars.packages`): JDBC, BigQuery, Snowflake, Redshift, Mongo,
+> DynamoDB, Cassandra, Elasticsearch, Kafka, **Avro (`spark-avro`), XML (`spark-xml`)
+> e Hudi (`hudi-spark-bundle`)**. `parquet`/`csv`/`delta`/`iceberg`/`txt`/`view`/`json`/
+> `orc`/`binary` são nativos. O framework só monta `.format(...).options(...)`; não
+> empacota drivers. Cada `io/<fmt>.py` documenta as opções; o catálogo do Studio
+> (`formats.databases.ts`, `formats.files.ts`) as descreve para a UI e a IA.
 
 ---
 
@@ -564,6 +606,10 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 - `PipelineResult` nunca lança exceção — erros ficam em `result.error`.
 - Logger sempre JSON estruturado (`utils/logger.py`).
 - `SparkContextManager` detecta o ambiente automaticamente (Databricks reusa sessão ativa; outros criam via builder).
+- **`filter`/`select` primeiro**: comece a cadeia de `transformations` reduzindo linhas (`filter`) e colunas (`select`) antes de joins/structs/group_by pesados — menos dados por todo o resto do pipeline (o Spark empurra parte, mas colocar explícito ajuda o planner e a legibilidade).
+- **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`).
+- **temp view (`view`) global vs sessão**: `options.scope` = `session` (default) ou `global` (`global_temp.<nome>`, visível a toda a aplicação Spark).
+- **sparquet_cola** é um pacote/repo separado (`../sparquet-cola`), publicado no PyPI e declarado em `dependencies` do sparquet como `sparquet-cola>=0.1.0` (sem cap — a lib é mantida sempre retrocompatível). Nome PyPI com hífen (`sparquet-cola`); o import é sempre `sparquet_cola` (underscore — convenção Python). Alterações no motor de DQ são feitas no repo `sparquet-cola` (publique uma nova versão lá antes de o sparquet a consumir).
 
 ---
 
@@ -604,12 +650,38 @@ Rules:
 
 Editor visual para os pipelines JSON, em `sparquet-studio/` (React 18 + TypeScript +
 Vite + Tailwind + React Flow). É o ponto de entrada de uso do framework: o usuário
-desenha o pipeline no canvas, o Studio compila para o mesmo JSON que o
+desenha o **Job** no canvas, o Studio compila para o mesmo JSON que o
 `Sparquet` executa.
 
 ```bash
 cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
 ```
+
+### Vocabulário do Studio (≠ vocabulário do framework)
+
+| Conceito do Studio | O que é | Rota |
+|--------------------|---------|------|
+| **Workflow** | O container. Geralmente um por domínio (`Sales`, `Billing`). | `/workflows/:id` |
+| **Job** | **Um JSON de pipeline**, desenhado no canvas de nós. | `/jobs/:id` |
+| **Pipeline** | Conjunto **ordenado** de Jobs, executados em sequência. | `/pipelines/:id` |
+
+A tela do Workflow tem duas abas: **Jobs** (lista os Jobs e os Pipelines montados
+com eles) e **Pipeline** (mapa somente leitura, inferido dos paths/temp views que
+os Jobs compartilham).
+
+> **Ponte entre os dois vocabulários** — decisão explícita do produto: no
+> **framework** um JSON continua sendo um *pipeline* (classe `Pipeline`,
+> `PipelineResult`, `PipelineConfig`, docs de `reference/`). No **Studio** esse
+> mesmo arquivo é um **Job**, e o nome **Pipeline** fica reservado para a sequência
+> de vários deles. Um Pipeline de 4 estágios = 4 execuções do `Pipeline` do
+> framework, em ordem, na mesma SparkSession. Não renomeie a API Python.
+
+Um Pipeline não guarda JSON próprio: cada estágio referencia um Job e o JSON é
+compilado do canvas na hora de rodar. A ordem vem dos links desenhados (nada é
+inferido de paths); ciclos são recusados; estágios sem link rodam por último com
+warning. Os estágios compartilham uma SparkSession e trocam dados pelo que
+gravam — um path que o próximo lê, ou uma temp view. Execução via
+`POST /run/flow/stream` (SSE), com status/logs por estágio e preview do último.
 
 | Camada | Caminho | Responsabilidade |
 |--------|---------|------------------|
@@ -617,8 +689,9 @@ cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
 | Compilador | `src/lib/compiler/` | `compileGraph()` (grafo → JSON) e `pipelineToGraph()` (JSON → grafo) são inversos, com testes de round-trip sobre os confs de `examples/`. |
 | Linter | `src/lib/validation/lint.ts` | Regras client-side (merge sem `merge_keys`, `{{var}}` sem `collect`, `{param}` não declarado, etc). |
 | IA | `src/lib/ai/` | Cliente streaming multi-provider (Anthropic/OpenAI/Google/compatível), prompt gerado do catálogo, parser de proposta. |
-| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o pipeline com o `Sparquet` real e devolve contadores, validações, preview e logs. |
-| Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (projetos/workflows), settings. |
+| Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o Job (um JSON) com o `Sparquet` real e devolve contadores, validações, preview e logs; `/run/flow/stream` executa um Pipeline inteiro. |
+| Pipelines | `src/lib/flow/` | Ordem dos estágios, resolução/compilação por estágio e plano de execução; mais o mapa somente leitura inferido dos paths e views dos Jobs. |
+| Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (workflows/jobs/pipelines), settings. |
 
 **Regra de ouro ao evoluir o framework**: toda transformação, formato ou validator
 novo precisa de uma entrada correspondente no catálogo (`src/catalog/`), senão o

@@ -121,7 +121,7 @@ export function PlaceholderHints({ value }: { value: unknown }) {
       {found.params.map((name) => (
         <Tooltip
           key={`param-${name}`}
-          content="Template parameter — replaced from the workflow params before the JSON is parsed."
+          content="Template parameter — replaced from the job params before the JSON is parsed."
         >
           <span className={CHIP_CLASS}>
             <Braces className="h-3 w-3" aria-hidden />

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { HANDLE, type StudioEdge, type StudioNode } from '@/types/studio'
 
-import { freeTargetHandle } from './FlowCanvas'
+import { freeTargetHandle } from './JobCanvas'
 
 const transform = (id: string, type: string): StudioNode => ({
   id,

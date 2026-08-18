@@ -59,6 +59,26 @@ export function truncateMiddle(text: string, max = 40): string {
   return `${text.slice(0, head)}…${tail > 0 ? text.slice(text.length - tail) : ''}`
 }
 
+/** Row counts, grouped for the current locale. `—` when the runner sent none. */
+export function formatCount(value: number | undefined): string {
+  return value === undefined ? '—' : new Intl.NumberFormat().format(value)
+}
+
+/** Run durations at a readable precision: `840 ms`, `4.2 s`, `2m 05s`. */
+export function formatDuration(ms: number | undefined): string {
+  if (ms === undefined) return '—'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
+  const minutes = Math.floor(ms / 60_000)
+  const seconds = Math.round((ms % 60_000) / 1000)
+  return `${minutes}m ${seconds}s`
+}
+
+/** Wall-clock time of a log line, 24h so the column width never jumps. */
+export function formatClockTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString(undefined, { hour12: false })
+}
+
 /** Whole days between two instants, compared as calendar days (DST-safe). */
 function calendarDaysApart(from: number, to: number): number {
   return Math.round((startOfDay(to) - startOfDay(from)) / DAY)

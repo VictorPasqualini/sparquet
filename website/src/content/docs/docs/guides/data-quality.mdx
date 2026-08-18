@@ -68,7 +68,7 @@ if failed:
 }
 ```
 
-Every run appends one row per rule: `pipeline`, `rule_type`, `passed`, `failed_count`, `message`, `validated_at`. Pointing every pipeline at the same table gives you a quality history for free, and three charts worth having:
+Every run appends one row per rule: `pipeline`, `rule_type`, `check_name`, `severity`, `passed`, `failed_count`, `metric_value`, `message`, `validated_at`. Pointing every pipeline at the same table gives you a quality history for free, and three charts worth having:
 
 - failure rate per rule over time — which check actually earns its keep
 - `failed_count` trend per pipeline — degradation before it becomes an incident
@@ -76,11 +76,11 @@ Every run appends one row per rule: `pipeline`, `rule_type`, `passed`, `failed_c
 
 ## Rules for the things that actually break
 
-Once the basics are in place, the valuable rules are domain rules. `custom_sql` covers them: the query runs against `_validation_df` and must return a single boolean.
+Once the basics are in place, the valuable rules are domain rules. `sql` covers them: the query runs against `_validation_df` and must return a single boolean.
 
 ```json
 {
-  "type": "custom_sql",
+  "type": "sql",
   "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE ends_at < starts_at",
   "error_message": "Contracts ending before they start"
 }
@@ -88,7 +88,7 @@ Once the basics are in place, the valuable rules are domain rules. `custom_sql` 
 
 ```json
 {
-  "type": "custom_sql",
+  "type": "sql",
   "query": "SELECT ABS(SUM(debit) - SUM(credit)) < 0.01 FROM _validation_df",
   "error_message": "Ledger does not balance"
 }
@@ -96,13 +96,40 @@ Once the basics are in place, the valuable rules are domain rules. `custom_sql` 
 
 ```json
 {
-  "type": "custom_sql",
+  "type": "sql",
   "query": "SELECT COUNT(DISTINCT currency) = 1 FROM _validation_df",
   "error_message": "Mixed currencies in a single settlement batch"
 }
 ```
 
 Those three are worth more than a dozen null checks, because they encode what the business considers impossible.
+
+## Metric checks with a warning band
+
+The `check` rule measures one metric and compares it to a threshold, SODA-Core style — and it can *warn* before it *fails*. That two-level band is what lets a pipeline degrade visibly without stopping:
+
+```json
+{ "type": "check", "name": "missing cpf", "metric": "missing_percent",
+  "column": "cpf", "warn": "= 0", "must_be": "< 1%" }
+```
+
+Zero missing values is the target (`warn`), anything up to 1% is tolerated (`must_be`), and past 1% the check fails. A `warn` is logged and lands in the report but never aborts the run, even under `on_failure: "fail"` — so you get an early signal without a false alarm.
+
+The same shape covers most metric guards:
+
+```json
+{ "type": "check", "metric": "freshness", "column": "updated_at", "must_be": "< 1d" }
+{ "type": "check", "metric": "invalid_percent", "column": "email", "valid_format": "email", "must_be": "< 5%" }
+{ "type": "check", "metric": "avg", "column": "amount", "must_be": "between 10 and 100" }
+```
+
+For structural expectations — the columns and types a downstream consumer depends on — the `schema` rule fails fast when a source silently drops a column or changes a type:
+
+```json
+{ "type": "schema", "required_columns": ["id", "amount"], "column_types": { "id": "bigint", "amount": "double" } }
+```
+
+See the [validations reference](/docs/reference/validations/#check) for every metric and the full threshold DSL.
 
 ## Validate, do not clean
 
@@ -143,12 +170,36 @@ Delta and Iceberg raise *multiple source rows matched* when the incoming DataFra
 
 The same guard belongs on any incremental write keyed by a business id.
 
+## Two silvers: quarantine or pipeline outputs?
+
+A recurring need: from one bronze table, produce a **valid** silver and an **invalid** silver. There are two honest ways to do it, and the right one depends on what "invalid" means.
+
+- **`validations.outputs`** (quarantine) — the split is *derived from the rules*: a row is invalid when it fails a row-level check (`not_null`, `range`, `regex`, `unique`, or a `check` on a `missing_*`/`invalid_*` metric). One declarative definition of "invalid", written next to the metrics, running apart from the main output — you don't even need a main `output`. Best when **invalid literally means "failed the data-quality rules"**.
+- **Two pipeline `outputs`**, each with its own `filter` transformation — the split is *business logic* you write by hand. Best when "invalid" is a domain rule unrelated to quality, or when the two branches need different shapes (columns, joins, payloads).
+
+Rule of thumb: if you would otherwise write the same condition twice — once as a validation and once as a filter — use `validations.outputs` and let the checks be the single source of truth. If the branches diverge in meaning or shape, use pipeline outputs.
+
+```json
+"validations": {
+  "rules": [
+    { "type": "not_null", "columns": ["id"] },
+    { "type": "check", "metric": "invalid_count", "column": "email", "valid_format": "email", "must_be": "= 0" }
+  ],
+  "outputs": {
+    "valid":   { "format": "delta", "path": "silver.orders_ok",         "mode": "overwrite" },
+    "invalid": { "format": "delta", "path": "silver.orders_quarantine", "mode": "overwrite" }
+  }
+}
+```
+
+For a targeted quarantine of a single rule's offending rows, a `sql` rule with `failed_rows` plus its own `output` writes exactly those rows. The whole engine is the standalone [`sparquet_cola`](/docs/guides/sparquet-cola/) library — usable on its own in any Spark job.
+
 ## A checklist
 
 - `row_count` with a `min` on every pipeline
 - `not_null` and `unique` on the business key
 - `range` on money, quantities and dates
 - `regex` on identifiers with a fixed shape (documents, codes)
-- one `custom_sql` for the invariant your domain would consider impossible
+- one `sql` for the invariant your domain would consider impossible
 - `warn` plus a persisted report, unless the destination truly cannot tolerate bad rows
 - a `unique` rule wherever a merge writes

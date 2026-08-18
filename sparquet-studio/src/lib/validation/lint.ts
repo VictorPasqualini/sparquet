@@ -9,7 +9,8 @@
 
 import { getFormat, getTransformation, getValidator } from '@/catalog'
 import type { FieldSpec } from '@/catalog/types'
-import { HANDLE } from '@/types/studio'
+import type { OutputSpec } from '@/types/pipeline'
+import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
 import type {
   IssueSeverity,
   ParamDefinition,
@@ -20,8 +21,9 @@ import type {
   StudioNode,
   TransformNode,
   ValidationIssue,
-  ValidationsNode,
-  WorkflowSettings,
+  ValidationNode,
+  ValidationPolicy,
+  JobSettings,
 } from '@/types/studio'
 
 /* ------------------------------------------------------------------ helpers */
@@ -30,8 +32,8 @@ const isSourceNode = (node: StudioNode): node is SourceNode => node.data.kind ==
 const isTransformNode = (node: StudioNode): node is TransformNode =>
   node.data.kind === 'transform'
 const isSinkNode = (node: StudioNode): node is SinkNode => node.data.kind === 'sink'
-const isValidationsNode = (node: StudioNode): node is ValidationsNode =>
-  node.data.kind === 'validations'
+const isValidationNode = (node: StudioNode): node is ValidationNode =>
+  node.data.kind === 'validation'
 
 const isPrimaryEdge = (edge: StudioEdge): boolean =>
   (edge.targetHandle ?? HANDLE.in) === HANDLE.in
@@ -64,8 +66,8 @@ const labelOf = (node: StudioNode): string => {
       return data.label ?? `${data.format || 'source'} input`
     case 'sink':
       return data.label ?? (data.path || `${data.format || 'output'} output`)
-    case 'validations':
-      return data.label ?? 'Validations'
+    case 'validation':
+      return data.label ?? getValidator(data.validator)?.label ?? data.validator
     default:
       return data.label ?? node.id
   }
@@ -110,8 +112,8 @@ const scannableOf = (node: StudioNode): Record<string, unknown> => {
         partition_by: data.partitionBy,
         options: data.options,
       }
-    case 'validations':
-      return { rules: data.rules, report: data.report }
+    case 'validation':
+      return { ...data.params }
     default:
       return {}
   }
@@ -145,7 +147,8 @@ interface LintContext {
   sources: SourceNode[]
   transforms: TransformNode[]
   sinks: SinkNode[]
-  validations: ValidationsNode[]
+  /** One node per `validations.rules` entry, in no particular order. */
+  validations: ValidationNode[]
   /** Main chain: the input source plus the prefix every destination shares. */
   trunk: Set<string>
   /** Nodes feeding the right-hand handle of a join / union. */
@@ -210,7 +213,7 @@ const buildContext = (graph: StudioGraph): LintContext => {
   const transforms = nodes.filter(isTransformNode)
   const sources = nodes.filter(isSourceNode)
   const sinks = nodes.filter(isSinkNode)
-  const validations = nodes.filter(isValidationsNode)
+  const validations = nodes.filter(isValidationNode)
 
   const rightChain = new Set<string>()
   for (const node of transforms) {
@@ -342,7 +345,8 @@ const checkStructure = (ctx: LintContext): void => {
     })
   }
 
-  for (const node of ctx.transforms) {
+  // Transformations and rules both need a DataFrame to work on.
+  for (const node of [...ctx.transforms, ...ctx.validations]) {
     if (node.data.disabled) continue
     if (hasPrimaryInput(ctx, node.id)) continue
     ctx.issues.push({
@@ -369,18 +373,8 @@ const checkStructure = (ctx: LintContext): void => {
     ctx.issues.push({
       id: 'no-validations',
       severity: 'info',
-      message: 'The pipeline has no validations block.',
-      hint: 'Add a validations node to report on data quality — rules never modify the DataFrame, they only measure it.',
-    })
-  }
-
-  for (const node of ctx.validations.slice(1)) {
-    ctx.issues.push({
-      id: `duplicate-validations:${node.id}`,
-      severity: 'error',
-      message: 'Only one validations block is compiled per pipeline.',
-      nodeId: node.id,
-      hint: 'Keep a single validations node and move every rule into it.',
+      message: 'The pipeline has no validation rules.',
+      hint: 'Drag a rule from the Quality section to report on data quality — rules never modify the DataFrame, they only measure it.',
     })
   }
 
@@ -389,11 +383,48 @@ const checkStructure = (ctx: LintContext): void => {
     ctx.issues.push({
       id: `validations-branch:${node.id}`,
       severity: 'error',
-      message: 'The validations node is not on the main chain.',
+      message: `"${labelOf(node)}" is not on the main chain.`,
       nodeId: node.id,
-      hint: 'Validations run once, after every transformation and before any write — place the node on the trunk, never inside a per-output or right-side branch.',
+      hint: 'Validations run once, after every transformation and before any write — place every rule on the trunk, never inside a per-output or right-side branch.',
     })
   }
+
+  // Rules compile into ONE block, so a transformation standing between two of them
+  // would silently move ahead of the checks it looks like it runs after.
+  for (const node of ctx.transforms) {
+    if (node.data.disabled || !ctx.trunk.has(node.id)) continue
+    if (!hasValidationBothWays(ctx, node.id)) continue
+    ctx.issues.push({
+      id: `validations-split:${node.id}`,
+      severity: 'error',
+      message: `"${labelOf(node)}" runs between two validation rules.`,
+      nodeId: node.id,
+      hint: 'The rules around it compile into a single validations block, which always runs after every main transformation. Group the rules together and move this node before or after the whole run.',
+    })
+  }
+}
+
+/** Is this trunk node sandwiched between validation rules, upstream and downstream? */
+const hasValidationBothWays = (ctx: LintContext, nodeId: string): boolean => {
+  const upstream = chainTo(ctx, nodeId)
+    .slice(0, -1)
+    .some((node) => isValidationNode(node) && ctx.trunk.has(node.id))
+  if (!upstream) return false
+
+  const seen = new Set<string>([nodeId])
+  const pending = [nodeId]
+  while (pending.length) {
+    const current = pending.pop()
+    if (current === undefined) continue
+    for (const edge of ctx.outgoing.get(current) ?? []) {
+      if (!isPrimaryEdge(edge) || seen.has(edge.target)) continue
+      seen.add(edge.target)
+      const node = ctx.nodeById.get(edge.target)
+      if (node && isValidationNode(node) && ctx.trunk.has(node.id)) return true
+      pending.push(edge.target)
+    }
+  }
+  return false
 }
 
 const checkFieldSpecs = (
@@ -721,59 +752,93 @@ const checkTransforms = (ctx: LintContext): void => {
 
 const checkValidationRules = (ctx: LintContext): void => {
   for (const node of ctx.validations) {
-    node.data.rules.forEach((rule, index) => {
-      const def = getValidator(String(rule.type))
-      if (!def) return
-      checkFieldSpecs(
-        ctx,
-        node.id,
-        `${def.label} rule`,
-        def.fields,
-        rule,
-        `field:${node.id}:rule${index}`,
-        `rules[${index}].`,
-      )
-    })
+    if (node.data.disabled) continue
+    const def = getValidator(node.data.validator)
+    if (!def) continue
+    checkFieldSpecs(
+      ctx,
+      node.id,
+      `${def.label} rule`,
+      def.fields,
+      node.data.params,
+      `field:${node.id}`,
+      '',
+    )
+  }
+}
 
-    const report = node.data.report
-    if (!report) continue
-    const def = getFormat(report.format ?? '')
-    if (text(report.format) === '') {
+/**
+ * The block-level policy lives in the job settings, so its problems are job-scoped:
+ * they carry no `nodeId` and their `field` paths are rooted at `validations.`.
+ */
+const checkValidationPolicy = (ctx: LintContext, settings: JobSettings): void => {
+  const policy: ValidationPolicy | undefined = settings.validations
+  if (!policy) return
+
+  const destinations: [string, OutputSpec | null | undefined][] = [
+    ['report', policy.report],
+    ...Object.entries(policy.outputs ?? {}).map(
+      ([key, value]): [string, OutputSpec] => [`outputs.${key}`, value],
+    ),
+  ]
+
+  const configured = destinations.filter(([, value]) => Boolean(value))
+
+  for (const [scope, destination] of configured) {
+    if (!destination) continue
+    const label = scope === 'report' ? 'Validation report' : `Validation ${scope}`
+    const def = getFormat(destination.format ?? '')
+    if (text(destination.format) === '') {
       ctx.issues.push({
-        id: `field:${node.id}:report-format`,
+        id: `settings:${scope}-format`,
         severity: 'error',
-        message: 'Validation report: a format is required.',
-        nodeId: node.id,
-        field: 'report.format',
-        hint: 'A report without a format is dropped from the compiled JSON, so the run writes no quality report at all.',
+        message: `${label}: a format is required.`,
+        field: `validations.${scope}.format`,
+        hint: 'A destination without a format is dropped from the compiled JSON, so nothing is ever written to it.',
+      })
+    } else if (def && !def.canWrite) {
+      ctx.issues.push({
+        id: `settings:${scope}-format-write`,
+        severity: 'error',
+        message: `${label}: ${def.label} cannot be written.`,
+        field: `validations.${scope}.format`,
+        hint: 'The writer registry has no entry for this format — pick a writable destination in the job settings.',
       })
     }
-    if (text(report.path) === '') {
+    if (text(destination.path) === '') {
       ctx.issues.push({
-        id: `field:${node.id}:report-path`,
+        id: `settings:${scope}-path`,
         severity: 'error',
-        message: 'Validation report: a path is required.',
-        nodeId: node.id,
-        field: 'report.path',
-        hint: 'The report is a full output config — it needs a format and a path like any other destination.',
+        message: `${label}: a path is required.`,
+        field: `validations.${scope}.path`,
+        hint: 'It is a full output config — it needs a format and a path like any other destination.',
       })
     }
-    if (def && !def.canWrite) {
-      ctx.issues.push({
-        id: `format-write:${node.id}:report`,
-        severity: 'error',
-        message: `Validation report: ${def.label} cannot be written.`,
-        nodeId: node.id,
-        field: 'report.format',
-        hint: 'Pick a writable format for the data-quality report.',
-      })
-    }
+  }
+
+  const active = ctx.validations.filter((node) => !node.data.disabled)
+  if (configured.length > 0 && active.length === 0) {
+    ctx.issues.push({
+      id: 'settings:validations-unused',
+      severity: 'warning',
+      message: 'The job configures validation destinations but has no rule.',
+      hint: 'Without a rule node no `validations` block is compiled, so neither the quality report nor the quarantine outputs are written. Add a rule, or switch the destinations off in the job settings.',
+    })
+  }
+
+  if (policy.onFailure !== DEFAULT_VALIDATION_POLICY.onFailure && active.length === 0) {
+    ctx.issues.push({
+      id: 'settings:on-failure-unused',
+      severity: 'info',
+      message: `"On failure: ${policy.onFailure}" applies to no rule.`,
+      hint: 'The policy only reaches the JSON alongside at least one validation rule.',
+    })
   }
 }
 
 const checkPlaceholders = (
   ctx: LintContext,
-  settings: WorkflowSettings,
+  settings: JobSettings,
   params: ParamDefinition[],
 ): void => {
   const published = new Set<string>()
@@ -816,7 +881,14 @@ const checkPlaceholders = (
 
   const settingsHits: StringHit[] = []
   collectStrings(
-    { name: settings.pipelineName, description: settings.description, spark: settings.spark },
+    {
+      name: settings.pipelineName,
+      description: settings.description,
+      spark: settings.spark,
+      // The quality report and the quarantine paths are as templated as any other
+      // destination, so they are scanned like one.
+      validations: settings.validations,
+    },
     '',
     settingsHits,
   )
@@ -827,7 +899,7 @@ const checkPlaceholders = (
     ctx.issues.push({
       id: `param-undeclared:${name}`,
       severity: 'warning',
-      message: `Template param {${name}} is used but not declared in the workflow params.`,
+      message: `Template param {${name}} is used but not declared in the job params.`,
       nodeId: where.nodeId,
       field: where.field,
       hint: 'Declare it in the params panel or remove the placeholder — an unknown key is left literal in the JSON instead of being substituted.',
@@ -881,8 +953,7 @@ const trackColumns = (columns: Set<string> | null, node: TransformNode): Set<str
       }
       return new Set(names)
     }
-    case 'with_column':
-    case 'add_column': {
+    case 'with_column': {
       if (!columns) return null
       const next = new Set(columns)
       const map = params.columns
@@ -971,13 +1042,13 @@ const checkOutputColumns = (ctx: LintContext): void => {
 /* ---------------------------------------------------------------- entry point */
 
 /**
- * Lints a workflow graph against the framework semantics the JSON schema cannot
+ * Lints a job graph against the framework semantics the JSON schema cannot
  * express. Issue ids are derived from rule + node so they stay stable across runs
  * and can be used as React keys.
  */
-export function lintWorkflow(
+export function lintJob(
   graph: StudioGraph,
-  settings: WorkflowSettings,
+  settings: JobSettings,
   params: ParamDefinition[],
 ): ValidationIssue[] {
   const ctx = buildContext(graph)
@@ -987,6 +1058,7 @@ export function lintWorkflow(
   checkSinks(ctx)
   checkTransforms(ctx)
   checkValidationRules(ctx)
+  checkValidationPolicy(ctx, settings)
   checkPlaceholders(ctx, settings, params)
   checkOutputColumns(ctx)
 

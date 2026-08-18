@@ -192,14 +192,6 @@ Converte tipos de colunas.
 }
 ```
 
-### add_column
-
-Adiciona coluna calculada via expressão SQL.
-
-```json
-{ "type": "add_column", "name": "total", "expression": "quantity * unit_price" }
-```
-
 ### drop_duplicates
 
 Remove linhas duplicadas. Se `columns` omitido, considera todas as colunas.
@@ -291,17 +283,22 @@ Adiciona coluna com timestamp de ingestão.
 { "type": "row_count", "min": 1, "max": 10000000 }
 ```
 
-### custom_sql
+### sql
 
-O DataFrame é exposto como `_validation_df`. A query deve retornar um único valor booleano.
+O DataFrame é exposto como `_validation_df`. A query deve retornar um único valor
+booleano — semântica **pass-when-true** (expresse o invariante, não a violação).
 
 ```json
 {
-  "type": "custom_sql",
+  "type": "sql",
   "query": "SELECT COUNT(*) = 0 FROM _validation_df WHERE total_amount < 0",
   "error_message": "Detectados valores negativos em total_amount"
 }
 ```
+
+> Também disponíveis: `check` (métrica + threshold warn/fail, estilo SODA Core) e
+> `schema` (colunas/tipos). Ver a referência completa no website (`/docs`) ou no
+> [CLAUDE.md](../CLAUDE.md).
 
 ---
 

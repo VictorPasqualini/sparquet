@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useMemo } from 'react'
 
-import { getFormat, getTransformation } from '@/catalog'
+import { getFormat, getTransformation, getValidator } from '@/catalog'
 import { Badge, Button, EmptyState, SectionTitle, type BadgeTone } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { useEditorStore } from '@/store/editor'
@@ -222,8 +222,8 @@ function nodeTitle(node: StudioNode): string {
       return `${getFormat(data.format)?.label ?? data.format} source`
     case 'transform':
       return getTransformation(data.transform)?.label ?? data.transform
-    case 'validations':
-      return 'Validations'
+    case 'validation':
+      return getValidator(data.validator)?.label ?? data.validator
     case 'sink':
       return `${getFormat(data.format)?.label ?? data.format} output`
     case 'note':

@@ -1,20 +1,20 @@
 ---
 title: Python API and CLI
-description: Every way to run a Sparquet pipeline — the SparkFramework class, the Pipeline class, the CLI, and the result object they return.
+description: Every way to run a Sparquet pipeline — the Sparquet class, the Pipeline class, the CLI, and the result object they return.
 sidebar:
   order: 7
 ---
 
 import { Aside } from '@astrojs/starlight/components'
 
-## `SparkFramework`
+## `Sparquet`
 
 The entry point. It owns the Spark session and shares the transformation and validation engines across every run.
 
 ```python
-from spark_framework import SparkFramework
+from sparquet import Sparquet
 
-fw = SparkFramework(spark={"app_name": "daily_load", "master": "local[*]"})
+fw = Sparquet(spark={"app_name": "daily_load", "master": "local[*]"})
 
 fw.run("pipelines/orders.json")
 fw.run("pipelines/customers.json")
@@ -72,7 +72,7 @@ See [Extending](/docs/reference/extending/).
 
 <Aside type="note">
   Reader and writer registries are class-level: registering a format affects
-  every `SparkFramework` in the process. Transformation and validator registries
+  every `Sparquet` in the process. Transformation and validator registries
   are per-instance.
 </Aside>
 
@@ -86,7 +86,7 @@ platform's, leave it running.
 One pipeline, without the framework wrapper — useful in tests and when you manage the session yourself.
 
 ```python
-from spark_framework import Pipeline
+from sparquet import Pipeline
 
 result = Pipeline.from_file("orders.json").run()
 result = Pipeline.from_dict({...}).run()
@@ -106,6 +106,7 @@ class PipelineResult:
     rows_read: int = 0
     rows_written: int = 0
     validation_results: list[ValidationResult] = []
+    output_metrics: list[OutputMetrics] = []
     error: str | None = None
     output_df: DataFrame | None = None
     skipped: bool = False
@@ -118,10 +119,32 @@ class PipelineResult:
 | `success` | `False` when the run failed; check `error` for why |
 | `skipped` | `True` when `stop_if_empty` ended the run — `success` stays `True` |
 | `rows_read` | rows read from the input (`0` when a DataFrame was injected) |
-| `rows_written` | rows in the main DataFrame at write time |
-| `validation_results` | one entry per rule: `rule_type`, `passed`, `message`, `failed_count` |
+| `rows_written` | total rows written — the **sum** of the per-destination counts |
+| `validation_results` | one entry per rule: `rule_type`, `passed`, `message`, `failed_count`, `severity`, `metric_value`, `check_name` |
+| `output_metrics` | one `OutputMetrics` per destination (see below) |
 | `output_df` | the transformed DataFrame, available when `input_df` was injected |
 | `error` | the failure message |
+
+### `output_metrics`
+
+One entry per destination the pipeline wrote, in order:
+
+```python
+@dataclass
+class OutputMetrics:
+    format: str
+    path: str
+    mode: str
+    rows_written: int
+```
+
+Each `rows_written` is counted on that destination's **final DataFrame** — after its own `transformations` and column projection, right before the write — so it is exact even when a per-destination chain explodes or aggregates rows. `PipelineResult.rows_written` is the sum of these counts.
+
+```python
+result = fw.run("orders.json")
+for m in result.output_metrics:
+    print(f"{m.format:8} {m.mode:9} {m.rows_written:>10}  {m.path}")
+```
 
 ```python
 result = fw.run("orders.json")
@@ -140,7 +163,7 @@ else:
 ## Chaining pipelines in one job
 
 ```python
-fw = SparkFramework(spark={"app_name": "registration"})
+fw = Sparquet(spark={"app_name": "registration"})
 
 for conf in ["conf_a.json", "conf_b.json", "conf_c.json"]:
     result = fw.run(conf, params={"dt_ref": dt_ref})
@@ -157,13 +180,13 @@ Each pipeline writes a staging temp view, and the last one validates and publish
 ## CLI
 
 ```bash
-python -m spark_framework.cli pipeline.json
+python -m sparquet.cli pipeline.json
 ```
 
 Or, when installed as a package, through the console script:
 
 ```bash
-spark-framework pipeline.json
+sparquet pipeline.json
 ```
 
 The CLI parses the file, runs it and prints the structured result. It is the right entry point for a scheduler or a container: no wrapper script to maintain.

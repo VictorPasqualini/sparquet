@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { StudioEdge, StudioNode, Workflow } from '@/types/studio'
+import type { StudioEdge, StudioNode, Job } from '@/types/studio'
 
-import { useEditorStore } from './editor'
+import { nodeOrdinals, useEditorStore } from './editor'
 import { useSettingsStore } from './settings'
 
 const dbState = vi.hoisted(() => ({
@@ -12,18 +12,18 @@ const dbState = vi.hoisted(() => ({
 }))
 
 vi.mock('@/lib/storage/db', () => ({
-  getWorkflow: async (id: string) => dbState.records.get(id) ?? null,
-  saveWorkflow: async (workflow: Workflow) => {
+  getJob: async (id: string) => dbState.records.get(id) ?? null,
+  saveJob: async (job: Job) => {
     if (dbState.gate) await dbState.gate
-    dbState.records.set(workflow.id, JSON.parse(JSON.stringify(workflow)) as Workflow)
-    return workflow
+    dbState.records.set(job.id, JSON.parse(JSON.stringify(job)) as Job)
+    return job
   },
 }))
 
-function stored(id: string): Workflow {
+function stored(id: string): Job {
   const record = dbState.records.get(id)
   if (!record) throw new Error(`no stored record for ${id}`)
-  return record as Workflow
+  return record as Job
 }
 
 function sourceNode(id: string, path: string): StudioNode {
@@ -57,12 +57,12 @@ const edge: StudioEdge = { id: 'e1', source: 'a', target: 'b', type: 'pipeline' 
 let seq = 0
 
 /** Each test uses its own id: the store keeps module-level state between tests. */
-function makeWorkflow(patch: Partial<Workflow> = {}): Workflow {
+function makeJob(patch: Partial<Job> = {}): Job {
   seq += 1
-  const workflow: Workflow = {
+  const job: Job = {
     id: `wf-${seq}`,
-    projectId: 'p1',
-    name: `Workflow ${seq}`,
+    workflowId: 'p1',
+    name: `Job ${seq}`,
     description: '',
     tags: [],
     settings: { pipelineName: 'pipeline', description: '', spark: {} },
@@ -73,8 +73,8 @@ function makeWorkflow(patch: Partial<Workflow> = {}): Workflow {
     revision: 3,
     ...patch,
   }
-  dbState.records.set(workflow.id, JSON.parse(JSON.stringify(workflow)) as Workflow)
-  return workflow
+  dbState.records.set(job.id, JSON.parse(JSON.stringify(job)) as Job)
+  return job
 }
 
 /** Lets queued microtasks run, which is what separates two user gestures. */
@@ -94,9 +94,9 @@ afterEach(async () => {
 
 describe('autosave', () => {
   it('flushes the pending write when the editor closes', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     editor.updateNodeData('a', { path: '/edited' })
     expect(useEditorStore.getState().dirty).toBe(true)
@@ -105,17 +105,17 @@ describe('autosave', () => {
     editor.close()
     await editor.save()
 
-    const nodes = stored(workflow.id).graph.nodes as StudioNode[]
+    const nodes = stored(job.id).graph.nodes as StudioNode[]
     expect(nodes[0].data).toMatchObject({ path: '/edited' })
-    expect(stored(workflow.id).revision).toBe(4)
+    expect(stored(job.id).revision).toBe(4)
     // The completed write must not resurrect the closed editor.
-    expect(useEditorStore.getState().workflow).toBeNull()
+    expect(useEditorStore.getState().job).toBeNull()
     expect(useEditorStore.getState().dirty).toBe(false)
   })
 
-  it('flushes the pending write when another workflow is opened', async () => {
-    const first = makeWorkflow()
-    const second = makeWorkflow()
+  it('flushes the pending write when another job is opened', async () => {
+    const first = makeJob()
+    const second = makeJob()
     const editor = useEditorStore.getState()
 
     editor.open(first)
@@ -125,13 +125,13 @@ describe('autosave', () => {
 
     const nodes = stored(first.id).graph.nodes as StudioNode[]
     expect(nodes[0].data).toMatchObject({ path: '/first' })
-    expect(useEditorStore.getState().workflow?.id).toBe(second.id)
+    expect(useEditorStore.getState().job?.id).toBe(second.id)
   })
 
   it('keeps dirty for edits that land while the write is in flight', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     let release!: () => void
     dbState.gate = new Promise<void>((resolve) => {
@@ -150,22 +150,22 @@ describe('autosave', () => {
     await saving
 
     expect(useEditorStore.getState().dirty).toBe(true)
-    const afterFirst = stored(workflow.id).graph.nodes as StudioNode[]
+    const afterFirst = stored(job.id).graph.nodes as StudioNode[]
     expect(afterFirst[0].data).toMatchObject({ path: '/one' })
 
     await vi.advanceTimersByTimeAsync(1000)
-    const afterSecond = stored(workflow.id).graph.nodes as StudioNode[]
+    const afterSecond = stored(job.id).graph.nodes as StudioNode[]
     expect(afterSecond[0].data).toMatchObject({ path: '/two' })
     expect(useEditorStore.getState().dirty).toBe(false)
   })
 
   it('does not clobber a revision written by another tab', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
-    // Another tab saved this workflow while it was open here.
-    dbState.records.set(workflow.id, { ...workflow, revision: 9, name: 'renamed elsewhere' })
+    // Another tab saved this job while it was open here.
+    dbState.records.set(job.id, { ...job, revision: 9, name: 'renamed elsewhere' })
 
     editor.updateNodeData('a', { path: '/mine' })
     await editor.save()
@@ -174,15 +174,15 @@ describe('autosave', () => {
     expect(conflict?.revision).toBe(9)
     expect(conflict?.name).toBe('renamed elsewhere')
     // The local work is still persisted, on top of the newer stored revision.
-    const nodes = stored(workflow.id).graph.nodes as StudioNode[]
+    const nodes = stored(job.id).graph.nodes as StudioNode[]
     expect(nodes[0].data).toMatchObject({ path: '/mine' })
-    expect(stored(workflow.id).revision).toBe(10)
+    expect(stored(job.id).revision).toBe(10)
   })
 
   it('rebases a queued write on the revision it just wrote itself', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     let release!: () => void
     dbState.gate = new Promise<void>((resolve) => {
@@ -201,16 +201,16 @@ describe('autosave', () => {
     await Promise.all([first, second])
 
     expect(useEditorStore.getState().conflict).toBeNull()
-    expect(stored(workflow.id).revision).toBe(5)
-    const nodes = stored(workflow.id).graph.nodes as StudioNode[]
+    expect(stored(job.id).revision).toBe(5)
+    const nodes = stored(job.id).graph.nodes as StudioNode[]
     expect(nodes[0].data).toMatchObject({ path: '/two' })
     expect(useEditorStore.getState().dirty).toBe(false)
   })
 
   it('reports no conflict for its own consecutive writes', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     editor.updateNodeData('a', { path: '/one' })
     await editor.save()
@@ -219,15 +219,15 @@ describe('autosave', () => {
     await editor.save()
 
     expect(useEditorStore.getState().conflict).toBeNull()
-    expect(stored(workflow.id).revision).toBe(5)
+    expect(stored(job.id).revision).toBe(5)
   })
 })
 
 describe('history', () => {
   it('ignores edge selection changes', () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     editor.onEdgesChange([{ id: 'e1', type: 'select', selected: true }])
 
@@ -238,9 +238,9 @@ describe('history', () => {
   })
 
   it('ignores node selection changes', () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     editor.onNodesChange([{ id: 'a', type: 'select', selected: true }])
 
@@ -250,9 +250,9 @@ describe('history', () => {
   })
 
   it('records a canvas delete of nodes and their edges as one entry', () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     // React Flow's deleteElements dispatches the edges and the nodes in two
     // callbacks inside the same turn.
@@ -273,9 +273,9 @@ describe('history', () => {
   })
 
   it('keeps separate gestures in separate entries', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     editor.onEdgesChange([{ id: 'e1', type: 'remove' }])
     await nextTurn()
@@ -285,9 +285,9 @@ describe('history', () => {
   })
 
   it('coalesces successive edits to the same field into one entry', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     for (const path of ['/d', '/da', '/dat', '/data']) {
       editor.updateNodeData('a', { path })
@@ -302,9 +302,9 @@ describe('history', () => {
   })
 
   it('starts a new entry after the coalescing window and for another field', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     editor.updateNodeData('a', { path: '/one' })
     await vi.advanceTimersByTimeAsync(600)
@@ -322,9 +322,9 @@ describe('live linting', () => {
   })
 
   it('skips scheduled linting when the preference is off', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
     useSettingsStore.getState().setCanvas({ liveLint: false })
 
     const before = useEditorStore.getState().issues
@@ -339,14 +339,179 @@ describe('live linting', () => {
   })
 
   it('lints on a change when the preference is on', async () => {
-    const workflow = makeWorkflow()
+    const job = makeJob()
     const editor = useEditorStore.getState()
-    editor.open(workflow)
+    editor.open(job)
 
     const before = useEditorStore.getState().issues
     editor.updateNodeData('a', { path: '' })
     await vi.advanceTimersByTimeAsync(400)
 
     expect(useEditorStore.getState().issues).not.toBe(before)
+  })
+})
+
+describe('run step status', () => {
+  function transformNode(id: string, transform: string, disabled = false): StudioNode {
+    return {
+      id,
+      type: 'transform',
+      position: { x: 0, y: 0 },
+      data: { kind: 'transform', transform, params: {}, disabled },
+    }
+  }
+
+  function link(source: string, target: string): StudioEdge {
+    return { id: `e-${source}-${target}`, source, target, type: 'pipeline' }
+  }
+
+  function validationNode(id: string, validator: string): StudioNode {
+    return {
+      id,
+      type: 'validation',
+      position: { x: 0, y: 0 },
+      data: { kind: 'validation', validator, params: { columns: ['id'] } },
+    }
+  }
+
+  /** src → t1 → muted → t2 → v1 → v2 → (t3 → out1 | t4 → out2). */
+  function branchedJob(): Job {
+    return makeJob({
+      graph: {
+        nodes: [
+          sourceNode('src', '/in'),
+          transformNode('t1', 'filter'),
+          transformNode('muted', 'distinct', true),
+          transformNode('t2', 'select'),
+          validationNode('v1', 'not_null'),
+          validationNode('v2', 'unique'),
+          transformNode('t3', 'sort'),
+          transformNode('t4', 'drop'),
+          sinkNode('out1'),
+          sinkNode('out2'),
+        ],
+        edges: [
+          link('src', 't1'),
+          link('t1', 'muted'),
+          link('muted', 't2'),
+          link('t2', 'v1'),
+          link('v1', 'v2'),
+          link('v2', 't3'),
+          link('t3', 'out1'),
+          link('v2', 't4'),
+          link('t4', 'out2'),
+        ],
+      },
+    })
+  }
+
+  it('numbers a whole run of validation rules inside the shared chain', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    const state = useEditorStore.getState()
+    const ordinals = nodeOrdinals({ nodes: state.nodes, edges: state.edges })
+
+    // src 1 → t1 2 → t2 3 (the muted node is skipped) → v1 4 → v2 5 → branches.
+    expect(ordinals.v1).toBe(4)
+    expect(ordinals.v2).toBe(5)
+    expect(ordinals.t3).toBe(6)
+    expect(ordinals.muted).toBeUndefined()
+  })
+
+  it('maps a transformation index to the node the compiler emitted it from', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    const ids = useEditorStore.getState().transformNodeIdsInOrder()
+    const { pipeline } = useEditorStore.getState().compile()
+    const nodes = useEditorStore.getState().nodes
+
+    // Muted nodes and per-destination transformations never reach the main array.
+    expect(ids).toEqual(['t1', 't2'])
+    expect(pipeline?.transformations).toHaveLength(ids.length)
+    for (const [index, id] of ids.entries()) {
+      const node = nodes.find((candidate) => candidate.id === id)
+      const spec = pipeline?.transformations?.[index]
+      const emitted = spec && 'type' in spec ? spec.type : undefined
+      expect(node?.data.kind === 'transform' && node.data.transform).toBe(emitted)
+    }
+  })
+
+  it('sets, replaces and clears node statuses, and forgets them on close', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    editor.setStepStatuses({ t1: 'pending', t2: 'pending' })
+    editor.setStepStatus('t1', 'running', 'filter')
+    expect(useEditorStore.getState().stepStatus).toEqual({ t1: 'running', t2: 'pending' })
+
+    editor.clearStepStatus()
+    expect(useEditorStore.getState().stepStatus).toEqual({})
+
+    editor.setStepStatus('t1', 'error')
+    editor.close()
+    expect(useEditorStore.getState().stepStatus).toEqual({})
+  })
+})
+
+describe('opening a job saved before validations became per-rule nodes', () => {
+  /** src → checks (one node, two rules, warn + report) → out. */
+  function legacyJob(): Job {
+    return makeJob({
+      graph: {
+        nodes: [
+          sourceNode('src', '/in'),
+          {
+            id: 'checks',
+            type: 'validations',
+            position: { x: 200, y: 0 },
+            // The pre-split shape, exactly as it sits in IndexedDB.
+            data: {
+              kind: 'validations',
+              onFailure: 'warn',
+              rules: [
+                { type: 'not_null', columns: ['id'] },
+                { type: 'row_count', min: 1 },
+              ],
+              report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+            },
+          } as unknown as StudioNode,
+          sinkNode('out'),
+        ],
+        edges: [
+          { id: 'e-src-checks', source: 'src', target: 'checks', type: 'pipeline' },
+          { id: 'e-checks-out', source: 'checks', target: 'out', type: 'pipeline' },
+        ],
+      },
+    })
+  }
+
+  it('splits the rules into nodes and keeps the policy in the settings', () => {
+    const editor = useEditorStore.getState()
+    editor.open(legacyJob())
+
+    const state = useEditorStore.getState()
+    const rules = state.nodes.filter((node) => node.data.kind === 'validation')
+    expect(rules).toHaveLength(2)
+    expect(
+      rules.map((node) => (node.data.kind === 'validation' ? node.data.validator : '')),
+    ).toEqual(['not_null', 'row_count'])
+    expect(state.nodes.some((node) => node.id === 'checks')).toBe(false)
+    expect(state.settings.validations).toEqual({
+      onFailure: 'warn',
+      report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+    })
+
+    // The chain still runs source → rules → sink, and compiles to the same JSON.
+    const { pipeline } = state.compile()
+    expect(pipeline?.validations).toEqual({
+      on_failure: 'warn',
+      report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+      rules: [
+        { type: 'not_null', columns: ['id'] },
+        { type: 'row_count', min: 1 },
+      ],
+    })
   })
 })

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -69,12 +69,21 @@ class Pipeline:
         validation_engine: Optional[ValidationEngine] = None,
         input_df: Optional[DataFrame] = None,
         columns: Optional[Dict[str, Any]] = None,
+        input_view: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> None:
         self.config = config
         self._transform_engine = transform_engine or TransformationEngine()
         self._validation_engine = validation_engine or ValidationEngine()
         self._input_df = input_df
         self._columns: Dict[str, Any] = columns or {}
+        # input_view aceita uma string (nome, escopo "session") ou um dict
+        # {"name": ..., "type": "session"|"global"}. Normaliza para nome + escopo.
+        if isinstance(input_view, dict):
+            self._input_view = input_view.get("name")
+            self._input_view_scope = input_view.get("type", "session")
+        else:
+            self._input_view = input_view
+            self._input_view_scope = "session"
 
     @classmethod
     def from_file(cls, path: str) -> Pipeline:
@@ -97,6 +106,12 @@ class Pipeline:
                 rows_read = 0
                 log.info("Input df injetado externamente", colunas=len(df.columns))
             else:
+                # Marcadores de etapa (scope="input") para o status do nó de origem.
+                log.info(
+                    "Input started",
+                    scope="input", index=0, total=1, step=True,
+                    format=self.config.input.format, path=self.config.input.path,
+                )
                 df = ReaderFactory.create(spark, self.config.input).read()
                 df = df.withColumn("ingestion_ts", F.current_timestamp())
                 rows_read = df.count()
@@ -104,6 +119,7 @@ class Pipeline:
                     "Leitura concluida",
                     linhas=rows_read,
                     formato=self.config.input.format,
+                    scope="input", index=0, total=1, step=True,
                 )
 
             for col_name, value in self._columns.items():
@@ -111,16 +127,34 @@ class Pipeline:
             if self._columns:
                 log.info("Colunas injetadas", colunas=list(self._columns))
 
+            # Registra (e cacheia) a entrada como temp view, se pedido — permite
+            # self-join / SQL sobre a entrada sem reler a base (o cache evita
+            # recomputar a linhagem da fonte a cada leitura da view).
+            if self._input_view:
+                df.cache()
+                if self._input_view_scope == "global":
+                    df.createOrReplaceGlobalTempView(self._input_view)
+                else:
+                    df.createOrReplaceTempView(self._input_view)
+                log.info(
+                    "Entrada registrada como temp view",
+                    view=self._input_view,
+                    scope=self._input_view_scope,
+                )
+
             # O engine é reusado entre execuções no Sparquet; zera o store
             # de runtime para não vazar variáveis coletadas de um run anterior.
             self._transform_engine.reset_runtime()
-            df = self._transform_engine.apply(df, self.config.transformations)
+            df = self._transform_engine.apply(
+                df, self.config.transformations, top_level=True
+            )
             log.info("Transformacoes aplicadas")
 
             validation_results = self._validation_engine.validate(
                 df, self.config.validations
             )
             self._write_validation_report(spark, validation_results, log)
+            self._write_validation_outputs(spark, df, validation_results, log)
 
             output_metrics = self._write_outputs(spark, df, log)
             rows_written = sum(m.rows_written for m in output_metrics)
@@ -173,6 +207,7 @@ class Pipeline:
 
         from pyspark.sql.types import (
             BooleanType,
+            DoubleType,
             LongType,
             StringType,
             StructField,
@@ -182,12 +217,24 @@ class Pipeline:
         schema = StructType([
             StructField("pipeline", StringType()),
             StructField("rule_type", StringType()),
+            StructField("check_name", StringType()),
+            StructField("severity", StringType()),
             StructField("passed", BooleanType()),
             StructField("failed_count", LongType()),
+            StructField("metric_value", DoubleType()),
             StructField("message", StringType()),
         ])
         rows = [
-            (self.config.name, r.rule_type, r.passed, int(r.failed_count), r.message)
+            (
+                self.config.name,
+                r.rule_type,
+                r.check_name,
+                r.severity,
+                r.passed,
+                int(r.failed_count),
+                float(r.metric_value) if r.metric_value is not None else None,
+                r.message,
+            )
             for r in results
         ]
         report_df = spark.createDataFrame(rows, schema).withColumn(
@@ -201,11 +248,67 @@ class Pipeline:
         )
         WriterFactory.create(spark, report).write(report_df)
 
+    def _write_validation_outputs(
+        self, spark: SparkSession, df: DataFrame, results, log
+    ) -> None:
+        """Roteia LINHAS a partir das validações — apartado das saídas principais.
+
+        1. `validations.outputs.{valid,invalid}` — split de quarentena por linha
+           (bronze → silver_ok / silver_quarentena), baseado nos checks row-level.
+        2. Destino próprio de um check `sql` com `failed_rows` (`rule.output`) — grava
+           exatamente as linhas que a query marcou como ruins.
+
+        Em `on_failure="fail"` com violação, o engine aborta antes daqui (nada é escrito).
+        """
+        validations = self.config.validations
+
+        if validations.outputs:
+            split = self._validation_engine.split(df, validations)
+            by_key = {"valid": split.valid, "invalid": split.invalid}
+            for key, output in validations.outputs.items():
+                target = by_key.get(key)
+                if target is None:
+                    log.warning(
+                        "validations.outputs: chave desconhecida (use 'valid'/'invalid')",
+                        chave=key,
+                    )
+                    continue
+                projected = self._project_columns(target, output)
+                log.info(
+                    "Escrevendo quarentena de validacao",
+                    tipo=key,
+                    formato=output.format,
+                    path=output.path,
+                )
+                WriterFactory.create(spark, output).write(projected)
+
+        # Destino por check (ex.: sql failed_rows com output próprio).
+        for rule, result in zip(validations.rules, results):
+            raw_output = rule.params.get("output")
+            failed = getattr(result, "failed_rows", None)
+            if raw_output and failed is not None:
+                out_cfg = OutputConfig.from_dict(raw_output)
+                projected = self._project_columns(failed, out_cfg)
+                log.info(
+                    "Escrevendo linhas que falharam",
+                    regra=result.rule_type,
+                    path=out_cfg.path,
+                )
+                WriterFactory.create(spark, out_cfg).write(projected)
+
     def _write_outputs(
         self, spark: SparkSession, df: DataFrame, log
     ) -> List[OutputMetrics]:
         metrics: List[OutputMetrics] = []
-        for output in self.config.outputs:
+        total = len(self.config.outputs)
+        for index, output in enumerate(self.config.outputs):
+            # Marcador de etapa (scope="output") para o Studio pintar o status do
+            # nó de destino ao vivo. Ver TransformationEngine.apply(top_level=True).
+            log.info(
+                "Output started",
+                scope="output", index=index, total=total, step=True,
+                format=output.format, path=output.path,
+            )
             # Transformações próprias do destino (ex: explode, to_json, join),
             # aplicadas sobre o df principal sem afetar as demais saídas.
             output_df = df
@@ -227,6 +330,11 @@ class Pipeline:
                 linhas=rows_written,
             )
             WriterFactory.create(spark, output).write(output_df)
+            log.info(
+                "Output written",
+                scope="output", index=index, total=total, step=True,
+                format=output.format, path=output.path, linhas=rows_written,
+            )
             metrics.append(
                 OutputMetrics(
                     format=output.format,

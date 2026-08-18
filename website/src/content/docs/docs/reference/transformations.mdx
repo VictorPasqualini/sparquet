@@ -131,7 +131,7 @@ Adds or replaces computed columns from SQL expressions. Two mutually exclusive f
   in map order, which is why `revenue_brl` above can reference `revenue`.
 </Aside>
 
-`name` is accepted as a legacy alias of `column`, and `add_column` as a legacy alias of the whole transformation. Both are parsed for backward compatibility; write `with_column` in new pipelines.
+`name` is accepted as a legacy alias of `column`, parsed for backward compatibility; write `column` in new pipelines.
 
 ### `struct`
 
@@ -226,9 +226,32 @@ Joins a second source read inline.
 | `with` | source config | any readable format |
 | `on` | string, list, or SQL expression | `"id"`, `["a","b"]`, or `"l.id = r.id AND l.dt = r.dt"` |
 | `how` | join type | `inner` (default), `left`, `right`, `full`, `cross`, `leftsemi`, `leftanti`, … |
+| `broadcast` | `true` / `"right"` / `"left"` / `false` | map-side (broadcast) join hint |
 | `with_transformations` | list | applied to the right side **before** the join |
 
 The left DataFrame is aliased `l` and the right one `r`, so an expression `on` can disambiguate columns. Inside `with_transformations` the aliases do not exist yet — use bare column names there.
+
+#### Broadcast join
+
+Set `broadcast` when one side is small enough to fit in each executor's memory (a dimension, a lookup). Spark ships that side to every executor and joins map-side, skipping the shuffle of the large side entirely.
+
+```json
+{
+  "type": "join",
+  "with": { "format": "delta", "path": "ref.dim_product" },
+  "on": "product_id",
+  "how": "left",
+  "broadcast": true
+}
+```
+
+| Value | Broadcasts |
+|---|---|
+| `true` or `"right"` | the second source (the `with` side — the small dimension/lookup) |
+| `"left"` | the main DataFrame |
+| `false` or absent | no hint — Spark decides by size |
+
+Broadcasting a side that is not actually small can exhaust executor memory; leave it absent when in doubt.
 
 In Studio, `with` and `with_transformations` come from the node's **second input**, not from a form field.
 
@@ -333,7 +356,7 @@ The path is relative to the pipeline file. The fragment may be a single object o
 | `drop` | remove columns |
 | `rename` | rename columns |
 | `cast` | change column types |
-| `with_column` (`add_column`) | compute columns |
+| `with_column` | compute columns |
 | `struct` | build a nested column |
 | `drop_duplicates` | deduplicate, optionally by subset |
 | `distinct` | deduplicate over all columns |

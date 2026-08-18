@@ -88,9 +88,9 @@ See [Parameters and variables](/docs/reference/parameters/) for the formatting r
 
 ## How a canvas becomes a file
 
-Studio does not store a proprietary project format — it compiles the graph. Two rules define the mapping:
+Studio does not store a proprietary format — it compiles the graph. Two rules define the mapping:
 
-**1. The shared chain is the main pipeline.** The transformations every destination has in common become the top-level `transformations`. Once the graph forks, each branch becomes that destination's own `transformations`.
+**1. The shared chain is the main one.** The transformations every destination has in common become the top-level `transformations`. Once the graph forks, each branch becomes that destination's own `transformations`.
 
 ```
 source → filter → cast ─┬─→ [group_by] → delta        ← group_by belongs to this output
@@ -116,7 +116,7 @@ The framework detects its environment and adapts the session:
 | EMR / Dataproc / Synapse | Builds a session with your `configs` |
 | Local | Applies `master` too (`local[*]` by default) |
 
-The session is a process-wide singleton: the first `SparkFramework` instance wins, and later pipelines share it. That is what makes running several pipelines in one job cheap.
+The session is a process-wide singleton: the first `Sparquet` instance wins, and later pipelines share it. That is what makes running several pipelines in one job cheap.
 
 ## Failure model
 

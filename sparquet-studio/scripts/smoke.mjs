@@ -2,7 +2,7 @@
  * End-to-end smoke test.
  *
  * Boots the built app (or an already-running dev server), drives it in a real
- * Chrome and asserts the flows a first-time user takes: the library loads, a
+ * Chrome and asserts the pipelines a first-time user takes: the library loads, a
  * template opens, the canvas draws nodes AND edges, the palette adds a node,
  * and the compiled JSON stays in step with the graph.
  *
@@ -100,15 +100,15 @@ async function main() {
       localStorage.clear()
     })
     await page.goto(BASE_URL, { waitUntil: 'networkidle2' })
-    await page.waitForSelector('a[href*="workflows"]', { timeout: 15_000 })
+    await page.waitForSelector('a[href*="jobs"]', { timeout: 15_000 })
 
-    const seeded = await page.$$eval('a[href*="workflows"]', (links) =>
+    const seeded = await page.$$eval('a[href*="jobs"]', (links) =>
       links.map((link) => link.getAttribute('href')),
     )
-    check('seed creates starter workflows', seeded.length >= 2, `${seeded.length} links`)
+    check('seed creates starter jobs', seeded.length >= 2, `${seeded.length} links`)
 
-    const projectCount = await page.$$eval('a[href*="projects/"]', (links) => links.length)
-    check('seed runs once', projectCount <= 2, `${projectCount} project links`)
+    const workflowCount = await page.$$eval('a[href*="workflows/"]', (links) => links.length)
+    check('seed runs once', workflowCount <= 2, `${workflowCount} workflow links`)
 
     /* --------------------------------------------------- canvas renders */
 
@@ -169,6 +169,136 @@ async function main() {
       .then(() => true)
       .catch(() => false)
     check('JSON panel opens', jsonVisible)
+
+    /* ------------------------------------------- pipeline editor */
+
+    // A pipeline is a second canvas with its own store and route, so prove it
+    // mounts and accepts a stage rather than trusting that the screen renders.
+    const workflowHref = await page
+      .goto(BASE_URL, { waitUntil: 'networkidle2' })
+      .then(() => page.$$eval('a[href*="workflows/"]', (links) => links[0]?.getAttribute('href')))
+      .catch(() => null)
+
+    // Hash routing: the href already carries `#/`, so append it verbatim.
+    if (workflowHref) {
+      await page.goto(`${BASE_URL}/${workflowHref}`, { waitUntil: 'networkidle2' })
+      await page
+        .waitForFunction(
+          () =>
+            Array.from(document.querySelectorAll('button')).some((candidate) =>
+              /^new pipeline$/i.test(candidate.textContent?.trim() ?? ''),
+            ),
+          { timeout: 15_000 },
+        )
+        .catch(() => null)
+    }
+
+    const pipelineCreated = !workflowHref
+      ? false
+      : await page
+          .evaluate(() => {
+            const button = Array.from(document.querySelectorAll('button')).find((candidate) =>
+              /^new pipeline$/i.test(candidate.textContent?.trim() ?? ''),
+            )
+            if (!(button instanceof HTMLElement)) return false
+            button.click()
+            return true
+          })
+          .catch(() => false)
+
+    if (!pipelineCreated) {
+      check(
+        'pipeline can be created',
+        false,
+        workflowHref
+          ? 'no "New pipeline" control on the workflow screen'
+          : 'no seeded workflow to open',
+      )
+    } else {
+      // The dialog needs a name before "Create pipeline" enables, so type one the way
+      // a user would — a click on a disabled button would silently do nothing.
+      await page
+        .waitForFunction(
+          () =>
+            Array.from(document.querySelectorAll('button')).some((candidate) =>
+              /^create pipeline$/i.test(candidate.textContent?.trim() ?? ''),
+            ),
+          { timeout: 10_000 },
+        )
+        .catch(() => null)
+      const nameField = await page.$('[role="dialog"] input:not([type="checkbox"])')
+      if (nameField) {
+        await nameField.click()
+        await nameField.type('Smoke pipeline')
+      }
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('button')).some(
+            (candidate) =>
+              /^create pipeline$/i.test(candidate.textContent?.trim() ?? '') &&
+              !candidate.hasAttribute('disabled'),
+          ),
+        { timeout: 10_000 },
+      ).catch(() => null)
+      await page.evaluate(() => {
+        const confirm = Array.from(document.querySelectorAll('button')).find((candidate) =>
+          /^create pipeline$/i.test(candidate.textContent?.trim() ?? ''),
+        )
+        if (confirm instanceof HTMLElement) confirm.click()
+      })
+
+      const onPipelineRoute = await page
+        .waitForFunction(() => location.hash.includes('/pipelines/'), { timeout: 15_000 })
+        .then(() => true)
+        .catch(() => false)
+      const hash = await page.evaluate(() => location.hash).catch(() => '')
+      check('pipeline opens its own editor', onPipelineRoute, onPipelineRoute ? '' : `at ${hash}`)
+
+      if (onPipelineRoute) {
+        // React Flow must mount even with zero stages: an empty pipeline is a valid state.
+        const mounted = await page
+          .waitForFunction(() => Boolean(document.querySelector('.react-flow')), {
+            timeout: 20_000,
+          })
+          .then(() => true)
+          .catch(() => false)
+        check('pipeline canvas mounts', mounted)
+
+        // A stage is a doorway into the job it runs, and double-click is the gesture
+        // people try first — it crosses two stores and a route, so prove it end to end.
+        const staged = !mounted
+          ? false
+          : await page
+              .evaluate(() => {
+                const add = Array.from(document.querySelectorAll('button')).find((candidate) =>
+                  / as a stage$/.test(candidate.getAttribute('aria-label') ?? ''),
+                )
+                if (!(add instanceof HTMLElement)) return false
+                add.click()
+                return true
+              })
+              .catch(() => false)
+
+        const stageBox = !staged
+          ? false
+          : await page
+              .waitForSelector('.react-flow__node', { timeout: 15_000 })
+              .then(() => true)
+              .catch(() => false)
+
+        if (!stageBox) {
+          check('double-clicking a stage opens its job', false, 'no stage could be added')
+        } else {
+          await page.click('.react-flow__node', { clickCount: 2 }).catch(() => null)
+          const onJobRoute = await page
+            .waitForFunction(() => location.hash.includes('/jobs/'), { timeout: 15_000 })
+            .then(() => true)
+            .catch(() => false)
+          const at = await page.evaluate(() => location.hash).catch(() => '')
+          check('double-clicking a stage opens its job', onJobRoute, onJobRoute ? '' : `at ${at}`)
+        }
+      }
+    }
 
     /* ------------------------------------------------------- routes */
 

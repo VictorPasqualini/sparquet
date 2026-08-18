@@ -90,11 +90,11 @@ That file runs as-is, and opens on the Studio canvas as nine connected nodes.
 
 ## What the language covers
 
-**Transformations** — `filter` `select` `drop` `rename` `cast` `with_column` `struct` `drop_duplicates` `distinct` `sort` `fill_na` `sql` `group_by` `join` `union` `checkpoint` `stop_if_empty` `collect` `debug` (plus `add_column` as a legacy alias)
+**Transformations** — `filter` `select` `drop` `rename` `cast` `with_column` `struct` `drop_duplicates` `distinct` `sort` `fill_na` `sql` `group_by` `join` (with `broadcast` map-side hint) `union` `checkpoint` `stop_if_empty` `collect` `debug`
 
-**IO** — `parquet` `delta` `iceberg` `csv` `txt` `view` read and write; `kafka` write-only. Delta and Iceberg support `MERGE` upserts and Delta time travel on read.
+**IO** — `parquet` `delta` `iceberg` `csv` `txt` `view` `kafka` read and write; relational via JDBC (`postgresql` `mysql` `mariadb` `sqlserver` `oracle`); warehouses (`bigquery` `snowflake` `redshift`); NoSQL/search (`mongodb` `documentdb` `dynamodb` `cassandra` `elasticsearch`). Delta and Iceberg support `MERGE` upserts and Delta time travel; external connectors need their driver JAR on the Spark classpath.
 
-**Validations** — `not_null` `unique` `range` `regex` `row_count` `custom_sql`, with `fail` / `warn` / `skip` policies and an optional per-rule report written to any sink.
+**Validations** — powered by **[`sparquet-cola`](https://github.com/VictorPasqualini/sparquet-cola)**, a standalone data-quality library (pyspark-only) that installs as a dependency (`pip install sparquet-cola`) and is usable on its own. Rules: `not_null` `unique` `range` `regex` `row_count` `sql` (boolean invariant OR `failed_rows` mode), plus SODA-style `check` (a metric vs a warn/fail threshold) and `schema` (columns and types). `fail` / `warn` / `skip` policies, an optional per-rule metrics report, and row-level **quarantine** (`validations.outputs`: split valid/invalid to their own sinks) — all written apart from the main output.
 
 **Beyond the basics**
 
@@ -136,4 +136,4 @@ Issues and pull requests are welcome, on either half. For Studio, keep `npm run 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).

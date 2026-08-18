@@ -48,7 +48,7 @@ async function main() {
     localStorage.clear()
   })
   await page.goto(BASE_URL, { waitUntil: 'networkidle2' })
-  await page.waitForSelector('a[href*="workflows"]', { timeout: 20_000 })
+  await page.waitForSelector('a[href*="jobs"]', { timeout: 20_000 })
 
   const shot = async (name) => {
     await page.screenshot({ path: `${OUT}/${name}.png` })
@@ -68,10 +68,10 @@ async function main() {
     await wait(900)
   }
 
-  const workflows = await page.$$eval('a[href*="workflows"]', (links) =>
+  const jobs = await page.$$eval('a[href*="jobs"]', (links) =>
     links.map((link) => link.getAttribute('href')),
   )
-  const target = workflows[0]
+  const target = jobs[0]
 
   await shot('01-dashboard-dark')
 

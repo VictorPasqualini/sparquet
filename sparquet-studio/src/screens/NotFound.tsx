@@ -14,7 +14,7 @@ export function NotFound() {
         description={
           <>
             <span className="block">
-              The link may be out of date, or the workflow it pointed to was deleted.
+              The link may be out of date, or the job it pointed to was deleted.
             </span>
             <code className="mt-2 inline-block rounded bg-surface-sunken px-1.5 py-0.5 font-mono text-2xs text-content-subtle">
               {pathname}
