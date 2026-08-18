@@ -1,7 +1,7 @@
 ---
 /**
- * Studio, connectors, the assistant and the runtimes — the four sections that
- * answer "what does this actually look like, and will it fit my stack?".
+ * Studio, the assistant, the connector surface and the runtimes — the sections
+ * that answer "what does this look like, and will it fit my stack?".
  */
 import { Image } from 'astro:assets'
 
@@ -16,31 +16,36 @@ interface Props {
 const { locale } = Astro.props
 const copy = LANDING[locale]
 
-const FILE_CONNECTORS = [
-  { name: 'Parquet', note: 'Spark native' },
-  { name: 'Delta Lake', note: 'MERGE · time travel' },
-  { name: 'Iceberg', note: 'MERGE INTO' },
-  { name: 'CSV', note: 'header · inferSchema' },
-  { name: 'Text', note: 'value column' },
-  { name: 'Temp view', note: 'auto-cached' },
-]
+/** Typed out by the assistant demo once the section scrolls into view. */
+const generated = `{
+  "input":  { "format": "delta", "path": "sales.orders" },
+  "transformations": [
+    { "type": "filter", "condition": "status = 'CONFIRMED'" },
+    { "type": "drop_duplicates", "columns": ["id"] },
+    { "type": "group_by", "by": ["customer_id"],
+      "agg": ["sum(revenue) as revenue"] }
+  ],
+  "validations": {
+    "on_failure": "fail",
+    "rules": [{ "type": "not_null", "columns": ["id"] }]
+  },
+  "output": {
+    "format": "delta", "path": "analytics.customer_revenue",
+    "mode": "merge", "options": { "merge_keys": ["customer_id"] }
+  }
+}`
 
-const LAKEHOUSE_FEATURES = [
-  { name: 'MERGE upserts', note: 'delta · iceberg' },
-  { name: 'Time travel', note: 'delta' },
-  { name: 'Partitioned writes', note: 'file formats' },
-  { name: 'Column projection', note: 'per destination' },
-  { name: 'Custom connectors', note: 'register your own' },
-]
-
-const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
+const totalConnectors = copy.connectors.groups.reduce(
+  (total, group) => total + group.items.length,
+  0,
+)
 ---
 
 <!-- ------------------------------------------------------------- studio -->
 <section class="rule-top bg-ink-900/40">
   <div class="mx-auto max-w-6xl px-5 py-20 md:py-24">
     <div class="grid items-center gap-12 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
-      <div>
+      <div class="reveal">
         <p class="eyebrow">{copy.studio.eyebrow}</p>
         <h2
           class="mt-3 text-balance text-3xl font-semibold leading-tight tracking-tight text-white sm:text-4xl"
@@ -48,6 +53,17 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
           {copy.studio.title}
         </h2>
         <p class="mt-5 text-base leading-relaxed text-ink-300">{copy.studio.body}</p>
+
+        <dl class="mt-6 space-y-2.5 border-l border-brand-500/25 pl-4">
+          {
+            copy.studio.vocabulary.map((entry) => (
+              <div class="text-sm leading-relaxed">
+                <dt class="inline font-semibold text-white">{entry.term}</dt>
+                <dd class="inline text-ink-400">, {entry.body}</dd>
+              </div>
+            ))
+          }
+        </dl>
 
         <ul class="mt-6 space-y-3">
           {
@@ -79,7 +95,10 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
         </a>
       </div>
 
-      <figure class="overflow-hidden rounded-2xl border border-white/10 shadow-2xl shadow-black/50">
+      <figure
+        class="reveal spotlight overflow-hidden rounded-2xl border border-white/10 shadow-2xl shadow-black/50"
+        style="--reveal-delay: 120ms"
+      >
         <Image
           src={studioShot}
           alt={copy.studio.imageAlt}
@@ -93,91 +112,11 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
   </div>
 </section>
 
-<!-- --------------------------------------------------------- connectors -->
-<section class="mx-auto max-w-6xl px-5 py-20 md:py-24">
-  <div class="max-w-2xl">
-    <p class="eyebrow">{copy.connectors.eyebrow}</p>
-    <h2
-      class="mt-3 text-balance text-3xl font-semibold leading-tight tracking-tight text-white sm:text-4xl"
-    >
-      {copy.connectors.title}
-    </h2>
-    <p class="mt-4 text-base leading-relaxed text-ink-300">{copy.connectors.body}</p>
-  </div>
-
-  <div class="mt-10 grid gap-8 md:grid-cols-2">
-    <div>
-      <h3 class="text-xs font-semibold uppercase tracking-wider text-ink-500">
-        {copy.connectors.readWrite}
-      </h3>
-      <ul class="mt-3 grid gap-2 sm:grid-cols-2">
-        {
-          FILE_CONNECTORS.map((connector) => (
-            <li class="card-surface flex items-baseline justify-between gap-3 px-4 py-3">
-              <span class="text-sm font-medium text-white">{connector.name}</span>
-              <span class="font-mono text-[0.65rem] text-ink-500">{connector.note}</span>
-            </li>
-          ))
-        }
-      </ul>
-
-      <h3 class="mt-6 text-xs font-semibold uppercase tracking-wider text-ink-500">
-        {copy.connectors.writeOnly}
-      </h3>
-      <ul class="mt-3 grid gap-2 sm:grid-cols-2">
-        {
-          STREAM_CONNECTORS.map((connector) => (
-            <li class="card-surface flex items-baseline justify-between gap-3 px-4 py-3">
-              <span class="text-sm font-medium text-white">{connector.name}</span>
-              <span class="font-mono text-[0.65rem] text-ink-500">{connector.note}</span>
-            </li>
-          ))
-        }
-      </ul>
-    </div>
-
-    <div>
-      <h3 class="text-xs font-semibold uppercase tracking-wider text-ink-500">
-        {copy.connectors.lakehouse}
-      </h3>
-      <ul class="mt-3 grid gap-2 sm:grid-cols-2">
-        {
-          LAKEHOUSE_FEATURES.map((connector) => (
-            <li class="card-surface flex items-baseline justify-between gap-3 px-4 py-3">
-              <span class="text-sm font-medium text-white">{connector.name}</span>
-              <span class="font-mono text-[0.65rem] text-ink-500">{connector.note}</span>
-            </li>
-          ))
-        }
-      </ul>
-
-      <div class="card-surface mt-4 p-4">
-        <pre class="overflow-x-auto font-mono text-[0.7rem] leading-relaxed text-ink-300"><code>{`{
-  "format": "delta",
-  "path": "analytics.orders",
-  "mode": "merge",
-  "options": {
-    "merge_keys": ["order_id"],
-    "merge_condition": "T.deleted = false"
-  }
-}`}</code></pre>
-      </div>
-
-      <a
-        href={docsOf(locale, 'reference/connectors/')}
-        class="mt-4 inline-block text-sm font-medium text-brand-400 underline-offset-4 hover:underline"
-      >
-        {copy.connectors.cta} →
-      </a>
-    </div>
-  </div>
-</section>
-
 <!-- ------------------------------------------------------------------ ai -->
-<section class="rule-top bg-ink-900/40">
+<section class="relative overflow-hidden">
   <div class="mx-auto max-w-6xl px-5 py-20 md:py-24">
     <div class="grid items-center gap-12 lg:grid-cols-2">
-      <div>
+      <div class="reveal">
         <p class="eyebrow">{copy.ai.eyebrow}</p>
         <h2
           class="mt-3 text-balance text-3xl font-semibold leading-tight tracking-tight text-white sm:text-4xl"
@@ -205,7 +144,7 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
         </a>
       </div>
 
-      <div class="card-surface p-5">
+      <div class="reveal card-surface spotlight p-5" style="--reveal-delay: 100ms">
         <div class="flex items-start gap-3">
           <span
             class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white/8 text-xs text-ink-300"
@@ -225,8 +164,26 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
               ></path>
             </svg>
           </span>
+
           <div class="min-w-0 flex-1">
-            <div class="rounded-xl border border-brand-500/25 bg-brand-500/8 p-3">
+            <div
+              class="overflow-hidden rounded-xl border border-brand-500/25 bg-ink-950/70"
+              data-stream-root
+            >
+              <div
+                class="flex items-center justify-between border-b border-white/8 px-3 py-1.5 font-mono text-[0.62rem] text-ink-500"
+              >
+                <span>orders_curated.json</span>
+                <span data-stream-status>generating…</span>
+              </div>
+              <pre
+                class="max-h-64 overflow-hidden px-3 py-2.5 font-mono text-[0.65rem] leading-relaxed text-ink-300"><code
+                  class="caret"
+                  data-stream-target
+                  data-stream-text={generated}></code></pre>
+            </div>
+
+            <div class="mt-3 rounded-xl border border-brand-500/25 bg-brand-500/8 p-3">
               <p class="text-sm font-medium text-white">{copy.ai.answer}</p>
               <div class="mt-3 flex flex-wrap gap-2">
                 <span class="rounded-lg bg-brand-500 px-2.5 py-1 text-xs font-semibold text-ink-950">
@@ -237,6 +194,7 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
                 </span>
               </div>
             </div>
+
             <p class="mt-2 font-mono text-[0.65rem] text-ink-500">
               anthropic · openai · google · openai-compatible
             </p>
@@ -247,9 +205,59 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
   </div>
 </section>
 
+<!-- --------------------------------------------------------- connectors -->
+<section class="rule-top bg-ink-900/40">
+  <div class="mx-auto max-w-6xl px-5 py-20 md:py-24">
+    <div class="reveal max-w-2xl">
+      <p class="eyebrow">{copy.connectors.eyebrow}</p>
+      <h2
+        class="mt-3 text-balance text-3xl font-semibold leading-tight tracking-tight text-white sm:text-4xl"
+      >
+        {copy.connectors.title}
+      </h2>
+      <p class="mt-4 text-base leading-relaxed text-ink-300">{copy.connectors.body}</p>
+    </div>
+
+    <div class="mt-10 grid gap-x-8 gap-y-8 sm:grid-cols-2 lg:grid-cols-3">
+      {
+        copy.connectors.groups.map((group, index) => (
+          <div class="reveal" style={`--reveal-delay: ${(index % 3) * 80}ms`}>
+            <div class="flex items-baseline justify-between">
+              <h3 class="text-xs font-semibold uppercase tracking-wider text-ink-500">
+                {group.label}
+              </h3>
+              <span class="font-mono text-[0.62rem] text-ink-600">{group.items.length}</span>
+            </div>
+            <div class="mt-2 h-px w-full bg-white/8">
+              <div class="rule-draw h-px w-full bg-brand-500/40" />
+            </div>
+            <ul class="mt-3 flex flex-wrap gap-1.5">
+              {group.items.map((item) => (
+                <li class="rounded-lg border border-white/8 bg-ink-900/60 px-2.5 py-1 text-xs text-ink-300 transition-colors hover:border-brand-500/40 hover:text-white">
+                  {item}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))
+      }
+    </div>
+
+    <p class="reveal mt-10 flex flex-wrap items-center gap-3 text-sm">
+      <span class="font-mono text-ink-500">{totalConnectors} total</span>
+      <a
+        href={docsOf(locale, 'reference/connectors/')}
+        class="font-medium text-brand-400 underline-offset-4 hover:underline"
+      >
+        {copy.connectors.cta} →
+      </a>
+    </p>
+  </div>
+</section>
+
 <!-- ---------------------------------------------------------------- runs -->
 <section class="mx-auto max-w-6xl px-5 py-20 md:py-24">
-  <div class="max-w-2xl">
+  <div class="reveal max-w-2xl">
     <p class="eyebrow">{copy.runs.eyebrow}</p>
     <h2
       class="mt-3 text-balance text-3xl font-semibold leading-tight tracking-tight text-white sm:text-4xl"
@@ -261,8 +269,11 @@ const STREAM_CONNECTORS = [{ name: 'Kafka', note: 'batch publish' }]
 
   <div class="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
     {
-      copy.runs.targets.map((target) => (
-        <div class="card-surface p-5">
+      copy.runs.targets.map((target, index) => (
+        <div
+          class="reveal card-surface spotlight p-5"
+          style={`--reveal-delay: ${(index % 4) * 70}ms`}
+        >
           <h3 class="text-[0.95rem] font-semibold text-white">{target.name}</h3>
           <p class="mt-1.5 text-sm leading-relaxed text-ink-400">{target.body}</p>
         </div>

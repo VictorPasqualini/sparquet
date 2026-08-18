@@ -72,7 +72,7 @@ const ogImage = new URL('/og.png', site)
         operatingSystem: 'Any',
         description,
         url: canonical.href,
-        license: 'https://opensource.org/licenses/MIT',
+        license: 'https://www.apache.org/licenses/LICENSE-2.0',
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
       })}
     />
@@ -85,6 +85,10 @@ const ogImage = new URL('/og.png', site)
     >
       {ui.nav.skipToContent}
     </a>
+
+    <script>
+      import '../scripts/motion.ts'
+    </script>
 
     <Header locale={locale} />
     <main id="main">
