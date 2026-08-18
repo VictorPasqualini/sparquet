@@ -10,7 +10,7 @@ import {
 import { nanoid } from 'nanoid'
 import { create } from 'zustand'
 
-import { defaultsFor, getFormat, getTransformation } from '@/catalog'
+import { defaultsFor, getFormat, getTransformation, getValidator } from '@/catalog'
 import {
   autoLayout,
   chainToSink,
@@ -20,7 +20,7 @@ import {
   isSinkNode,
   isSourceNode,
   isTransformNode,
-  isValidationsNode,
+  isValidationNode,
   longestCommonPrefix,
   NODE_RENDER_SIZE,
   NOTE_RENDER_SIZE,
@@ -29,6 +29,7 @@ import {
 } from '@/lib/compiler'
 import { mergeParams } from '@/lib/params'
 import * as db from '@/lib/storage/db'
+import { upgradeJob } from '@/lib/storage/migrations'
 import { lintJob } from '@/lib/validation/lint'
 import type { PipelineSpec } from '@/types/pipeline'
 import { HANDLE } from '@/types/studio'
@@ -69,7 +70,7 @@ interface PendingWrite {
   settings: JobSettings
 }
 
-export type PanelId = 'inspector' | 'json' | 'ai' | 'run' | 'issues'
+export type PanelId = 'inspector' | 'settings' | 'json' | 'ai' | 'run' | 'issues'
 
 interface EditorState {
   job: Job | null
@@ -112,10 +113,12 @@ interface EditorState {
   addTransform: (type: string, position: XYPosition) => string
   addSource: (position: XYPosition, format?: string) => string
   addSink: (position: XYPosition, format?: string) => string
-  addValidations: (position: XYPosition) => string
+  /** One `validations.rules` entry, e.g. `not_null`. */
+  addValidation: (type: string, position: XYPosition) => string
   addNote: (position: XYPosition) => string
   updateNodeData: (id: string, patch: Partial<StudioNodeData> | Record<string, unknown>) => void
-  updateTransformParam: (id: string, key: string, value: unknown) => void
+  /** Writes one key of a transformation's or a validation rule's `params`. */
+  updateNodeParam: (id: string, key: string, value: unknown) => void
   removeNodes: (ids: string[]) => void
   duplicateNode: (id: string) => void
   toggleDisabled: (id: string) => void
@@ -358,12 +361,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
       // state that holds it is replaced.
       void flush()
       forgetCoalescing()
+      // Storage migrates records on boot, but a job can also arrive from a merged
+      // bundle or an older backup: upgrading here means the editor never opens a
+      // shape it cannot draw. The record is rewritten by the next save.
+      const migrated = upgradeJob(job)
       set({
-        job,
-        nodes: job.graph.nodes,
-        edges: job.graph.edges,
-        params: job.params,
-        settings: job.settings,
+        job: migrated,
+        nodes: migrated.graph.nodes,
+        edges: migrated.graph.edges,
+        params: migrated.params,
+        settings: migrated.settings,
         selectedNodeId: null,
         issues: [],
         dirty: false,
@@ -525,8 +532,18 @@ export const useEditorStore = create<EditorState>((set, get) => {
       )
     },
 
-    addValidations: (position) =>
-      insert({ kind: 'validations', onFailure: 'fail', rules: [], report: null }, position),
+    addValidation: (type, position) => {
+      const def = getValidator(type)
+      return insert(
+        {
+          kind: 'validation',
+          validator: type,
+          params: def ? defaultsFor(def.fields) : {},
+          label: def?.label,
+        },
+        position,
+      )
+    },
 
     addNote: (position) =>
       insert({ kind: 'note', text: 'Double-click to edit', tone: 'brand' }, position),
@@ -545,12 +562,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
       )
     },
 
-    updateTransformParam: (id, key, value) => {
+    updateNodeParam: (id, key, value) => {
       commit(
         () =>
           set((state) => ({
             nodes: state.nodes.map((node) => {
-              if (node.id !== id || node.data.kind !== 'transform') return node
+              if (node.id !== id) return node
+              if (node.data.kind !== 'transform' && node.data.kind !== 'validation') return node
               const params = { ...node.data.params }
               if (value === undefined || value === '' || value === null) delete params[key]
               else params[key] = value
@@ -583,7 +601,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     toggleDisabled: (id) => {
       const node = get().nodes.find((n) => n.id === id)
-      if (!node || node.data.kind !== 'transform') return
+      if (!node) return
+      if (node.data.kind !== 'transform' && node.data.kind !== 'validation') return
       get().updateNodeData(id, { disabled: !node.data.disabled })
     },
 
@@ -718,10 +737,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
  *
  * The selection mirrors `compileGraph()` (`lib/compiler/toJson.ts`) and reuses the
  * same primitives: walk back from every destination, keep the prefix all of them
- * share, and stop at the validations node, because the framework runs the main
- * transformations, then validations, then each output's own transformations.
- * Chains the compiler rejects are skipped here too — a graph that does not
- * compile has no steps to report.
+ * share, and stop at the LAST validation rule of the run, because the framework
+ * runs the main transformations, then the validations block, then each output's own
+ * transformations. Chains the compiler rejects are skipped here too — a graph that
+ * does not compile has no steps to report.
  *
  * Returns a fresh array, so read it through `getState()` or memoise it rather
  * than passing it straight to `useEditorStore` as a selector.
@@ -743,9 +762,20 @@ export function mainChainTransformNodeIds(state: StudioGraph): string[] {
 
   if (middles.length === 0) return []
   const prefix = longestCommonPrefix(middles, (a, b) => a.id === b.id)
-  const validationsIndex = prefix.findIndex(isValidationsNode)
-  const mainPrefix = validationsIndex >= 0 ? prefix.slice(0, validationsIndex + 1) : prefix
-  return mainPrefix.filter(isTransformNode).map((node) => node.id)
+  return sharedChainOf(prefix)
+    .filter(isTransformNode)
+    .map((node) => node.id)
+}
+
+/**
+ * The part of a shared prefix that runs before the outputs branch: everything up to
+ * and including the last validation rule, or the whole prefix when there is none.
+ */
+function sharedChainOf(prefix: StudioNode[]): StudioNode[] {
+  for (let index = prefix.length - 1; index >= 0; index -= 1) {
+    if (isValidationNode(prefix[index])) return prefix.slice(0, index + 1)
+  }
+  return prefix
 }
 
 /**
@@ -781,7 +811,7 @@ export function runtimeEndpointNodeIds(state: StudioGraph): {
 
 /**
  * A 1-based number for every node a run touches, in execution order: the source,
- * the shared transformations, the validations block, then each destination's own
+ * the shared transformations, every validation rule, then each destination's own
  * branch followed by the destination itself.
  *
  * It gives every box on the canvas a stable handle ("step 3") that matches the
@@ -815,8 +845,7 @@ export function nodeOrdinals(state: StudioGraph): Record<string, number> {
     chains.map((entry) => entry.middle),
     (a, b) => a.id === b.id,
   )
-  const validationsIndex = prefix.findIndex(isValidationsNode)
-  const mainPrefix = validationsIndex >= 0 ? prefix.slice(0, validationsIndex + 1) : prefix
+  const mainPrefix = sharedChainOf(prefix)
 
   const first = chains[0]
   if (first) push(first.head.id)

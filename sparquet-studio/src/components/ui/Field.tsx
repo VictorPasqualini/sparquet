@@ -295,7 +295,7 @@ export function Select({
         <RadixSelect.Content
           position="popper"
           sideOffset={6}
-          className="z-50 max-h-72 w-[var(--radix-select-trigger-width)] overpipeline-hidden rounded-xl border border-line bg-surface-overlay shadow-pop animate-slide-up"
+          className="z-50 max-h-72 w-[var(--radix-select-trigger-width)] overflow-hidden rounded-xl border border-line bg-surface-overlay shadow-pop animate-slide-up"
         >
           <RadixSelect.Viewport className="p-1">
             {options.map((option) => (

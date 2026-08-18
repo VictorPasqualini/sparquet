@@ -29,7 +29,6 @@ import {
   Ruler,
   Search,
   SearchX,
-  ShieldCheck,
   Sigma,
   StickyNote,
   Table2,
@@ -51,6 +50,7 @@ import {
   type NodeAccent,
   type NodeFamily,
   type TransformationDef,
+  type ValidatorDef,
 } from '@/catalog'
 import { EmptyState, IconButton, Input, Kbd } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
@@ -146,7 +146,6 @@ interface PaletteSection {
 }
 
 const TRANSFORM_FAMILIES: NodeFamily[] = ['shape', 'compute']
-const QUALITY_TERMS = ['validation', 'validations', 'quality', 'rule', 'check', 'assert', 'dq']
 const NOTE_TERMS = ['note', 'sticky', 'annotation', 'comment', 'label', 'text', 'docs']
 
 const matchesTerms = (query: string, terms: string[]): boolean =>
@@ -160,6 +159,17 @@ function transformEntry(def: TransformationDef): PaletteEntry {
     summary: def.summary,
     accent: def.accent,
     payload: { kind: 'transform', type: def.type },
+  }
+}
+
+function validatorEntry(def: ValidatorDef): PaletteEntry {
+  return {
+    key: `validation:${def.type}`,
+    icon: iconFor(def.icon),
+    label: def.label,
+    summary: def.summary,
+    accent: 'validate',
+    payload: { kind: 'validation', type: def.type },
   }
 }
 
@@ -187,7 +197,7 @@ export function NodePalette() {
   const addTransform = useEditorStore((s) => s.addTransform)
   const addSource = useEditorStore((s) => s.addSource)
   const addSink = useEditorStore((s) => s.addSink)
-  const addValidations = useEditorStore((s) => s.addValidations)
+  const addValidation = useEditorStore((s) => s.addValidation)
   const addNote = useEditorStore((s) => s.addNote)
 
   const add = useCallback(
@@ -204,15 +214,15 @@ export function NodePalette() {
         case 'sink':
           addSink(position, payload.format)
           break
-        case 'validations':
-          addValidations(position)
+        case 'validation':
+          addValidation(payload.type, position)
           break
         case 'note':
           addNote(position)
           break
       }
     },
-    [addTransform, addSource, addSink, addValidations, addNote],
+    [addTransform, addSource, addSink, addValidation, addNote],
   )
 
   const sections = useMemo<PaletteSection[]>(() => {
@@ -228,9 +238,6 @@ export function NodePalette() {
     const formats = (list: FormatDef[], kind: 'source' | 'sink'): PaletteEntry[] =>
       list.filter((def) => matchedFormats.has(def.id)).map((def) => formatEntry(def, kind))
 
-    const qualityVisible =
-      matchesTerms(term, QUALITY_TERMS) || (term !== '' && found.validators.length > 0)
-
     const all: PaletteSection[] = [
       { id: 'sources', title: 'Sources', entries: formats(READABLE_FORMATS, 'source') },
       { id: 'transform', title: 'Transform', entries: byFamily(TRANSFORM_FAMILIES) },
@@ -241,21 +248,12 @@ export function NodePalette() {
       {
         id: 'quality',
         title: 'Quality',
-        entries: qualityVisible
-          ? [
-              {
-                key: 'validations',
-                icon: <ShieldCheck className="h-3.5 w-3.5" aria-hidden />,
-                label: 'Validations',
-                summary: 'Run data-quality rules on the result before anything is written.',
-                accent: 'validate',
-                payload: { kind: 'validations' },
-              },
-            ]
-          : [],
+        // One node per rule, exactly like transformations: each entry drops a single
+        // check onto the chain. The block-level policy lives in the job settings.
+        entries: found.validators.map((def) => validatorEntry(def)),
         hint:
-          term !== '' && found.validators.length > 0
-            ? `Rules: ${found.validators.map((rule) => rule.label).join(', ')}`
+          found.validators.length > 0
+            ? 'Rules report on the data without changing it — use transformations to remove rows.'
             : undefined,
       },
       { id: 'destinations', title: 'Destinations', entries: formats(WRITABLE_FORMATS, 'sink') },

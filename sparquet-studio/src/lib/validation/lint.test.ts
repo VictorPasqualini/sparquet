@@ -13,7 +13,7 @@ import type {
   StudioNode,
   TransformNodeData,
   ValidationIssue,
-  ValidationsNodeData,
+  ValidationNodeData,
   JobSettings,
 } from '@/types/studio'
 
@@ -54,11 +54,16 @@ const sink = (id: string, patch: Partial<SinkNodeData> = {}): StudioNode => ({
   },
 })
 
-const validations = (id: string, patch: Partial<ValidationsNodeData> = {}): StudioNode => ({
+const validation = (
+  id: string,
+  validator = 'not_null',
+  params: Record<string, unknown> = { columns: ['id'] },
+  patch: Partial<ValidationNodeData> = {},
+): StudioNode => ({
   id,
-  type: 'validations',
+  type: 'validation',
   position: { x: 0, y: 0 },
-  data: { kind: 'validations', onFailure: 'fail', rules: [], report: null, ...patch },
+  data: { kind: 'validation', validator, params, ...patch },
 })
 
 const link = (from: string, to: string, handle: string = HANDLE.in): StudioEdge => ({
@@ -73,7 +78,8 @@ const lint = (
   nodes: StudioNode[],
   edges: StudioEdge[],
   params: ParamDefinition[] = [],
-): ValidationIssue[] => lintJob({ nodes, edges }, SETTINGS, params)
+  settings: JobSettings = SETTINGS,
+): ValidationIssue[] => lintJob({ nodes, edges }, settings, params)
 
 const idsOf = (issues: ValidationIssue[]): string[] => issues.map((issue) => issue.id)
 
@@ -84,12 +90,12 @@ const param = (key: string): ParamDefinition => ({
   value: 'x',
 })
 
-/** src → filter → validations → sink; the reference graph every rule deviates from. */
+/** src → filter → not_null → sink; the reference graph every rule deviates from. */
 const cleanGraph = (): { nodes: StudioNode[]; edges: StudioEdge[] } => ({
   nodes: [
     source('src'),
     transform('f', 'filter', { condition: 'valor > 0' }),
-    validations('v'),
+    validation('v'),
     sink('out'),
   ],
   edges: [link('src', 'f'), link('f', 'v'), link('v', 'out')],
@@ -178,52 +184,68 @@ describe('lintJob', () => {
     })
 
     it('flags a validation rule missing its required columns', () => {
-      const nodes = [
-        source('src'),
-        validations('v', { rules: [{ type: 'not_null' }] }),
-        sink('out'),
-      ]
+      const nodes = [source('src'), validation('v', 'not_null', {}), sink('out')]
       const issues = lint(nodes, [link('src', 'v'), link('v', 'out')])
-      expect(idsOf(issues)).toContain('field:v:rule0:columns')
+      expect(idsOf(issues)).toContain('field:v:columns')
     })
 
     it('flags a quality report that has no format', () => {
-      const issues = lint(
-        [
-          source('src'),
-          validations('v', {
-            rules: [{ type: 'not_null', columns: ['id'] }],
-            report: { format: '', path: '/dq/report' },
-          }),
-          sink('out'),
-        ],
-        [link('src', 'v'), link('v', 'out')],
-      )
-      const issue = issues.find((entry) => entry.id === 'field:v:report-format')
+      const { nodes, edges } = cleanGraph()
+      const issues = lint(nodes, edges, [], {
+        ...SETTINGS,
+        validations: { onFailure: 'fail', report: { format: '', path: '/dq/report' } },
+      })
+      const issue = issues.find((entry) => entry.id === 'settings:report-format')
       expect(issue?.severity).toBe('error')
-      expect(idsOf(issues)).not.toContain('field:v:report-path')
+      expect(issue?.nodeId).toBeUndefined()
+      expect(idsOf(issues)).not.toContain('settings:report-path')
     })
 
-    it('accepts a complete quality report', () => {
-      const issues = lint(
-        [
-          source('src'),
-          validations('v', {
-            rules: [{ type: 'not_null', columns: ['id'] }],
-            report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
-          }),
-          sink('out'),
-        ],
-        [link('src', 'v'), link('v', 'out')],
-      )
-      expect(idsOf(issues).filter((id) => id.startsWith('field:v:report'))).toEqual([])
+    it('accepts a complete quality report and quarantine outputs', () => {
+      const { nodes, edges } = cleanGraph()
+      const issues = lint(nodes, edges, [], {
+        ...SETTINGS,
+        validations: {
+          onFailure: 'warn',
+          report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+          outputs: {
+            valid: { format: 'delta', path: 'silver.ok', mode: 'overwrite' },
+            invalid: { format: 'delta', path: 'silver.bad', mode: 'overwrite' },
+          },
+        },
+      })
+      expect(idsOf(issues).filter((id) => id.startsWith('settings:'))).toEqual([])
+    })
+
+    it('flags a quarantine output without a path', () => {
+      const { nodes, edges } = cleanGraph()
+      const issues = lint(nodes, edges, [], {
+        ...SETTINGS,
+        validations: {
+          onFailure: 'fail',
+          outputs: { invalid: { format: 'delta', path: '' } },
+        },
+      })
+      expect(idsOf(issues)).toContain('settings:outputs.invalid-path')
+    })
+
+    it('warns when validation destinations are configured but no rule exists', () => {
+      const issues = lint([source('src'), sink('out')], [link('src', 'out')], [], {
+        ...SETTINGS,
+        validations: {
+          onFailure: 'warn',
+          report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+        },
+      })
+      const issue = issues.find((entry) => entry.id === 'settings:validations-unused')
+      expect(issue?.severity).toBe('warning')
     })
 
     it('accepts filled catalog fields', () => {
       const nodes = [
         source('src'),
         transform('f', 'filter', { condition: 'valor > 0' }),
-        validations('v', { rules: [{ type: 'not_null', columns: ['id'] }] }),
+        validation('v'),
         sink('out'),
       ]
       const issues = lint(nodes, [link('src', 'f'), link('f', 'v'), link('v', 'out')])
@@ -417,13 +439,13 @@ describe('lintJob', () => {
   })
 
   describe('validations placement', () => {
-    it('flags a second validations node and one sitting in a branch', () => {
+    it('flags rules that live in per-output branches', () => {
       const issues = lint(
         [
           source('src'),
           transform('cp', 'checkpoint', {}),
-          validations('v1'),
-          validations('v2'),
+          validation('v1'),
+          validation('v2', 'unique'),
           sink('out1', { path: '/a' }),
           sink('out2', { path: '/b' }),
         ],
@@ -435,16 +457,59 @@ describe('lintJob', () => {
           link('v2', 'out2'),
         ],
       )
-      expect(idsOf(issues)).toContain('duplicate-validations:v2')
       expect(idsOf(issues)).toContain('validations-branch:v1')
       expect(idsOf(issues)).toContain('validations-branch:v2')
     })
 
-    it('accepts a single validations node on the main chain', () => {
+    it('accepts a run of rules on the main chain', () => {
+      const issues = idsOf(
+        lint(
+          [
+            source('src'),
+            validation('v1'),
+            validation('v2', 'unique'),
+            validation('v3', 'row_count', { min: 1 }),
+            sink('out'),
+          ],
+          [link('src', 'v1'), link('v1', 'v2'), link('v2', 'v3'), link('v3', 'out')],
+        ),
+      )
+      expect(issues.filter((id) => id.startsWith('validations-'))).toEqual([])
+    })
+
+    it('flags a rule dropped on the canvas without an incoming connection', () => {
       const { nodes, edges } = cleanGraph()
-      const issues = idsOf(lint(nodes, edges))
-      expect(issues).not.toContain('validations-branch:v')
-      expect(issues.filter((id) => id.startsWith('duplicate-validations:'))).toEqual([])
+      const issues = lint([...nodes, validation('loose', 'unique')], edges)
+      expect(idsOf(issues)).toContain('orphan:loose')
+    })
+
+    it('flags a transformation wedged between two rules', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v1'),
+          transform('f', 'filter', { condition: 'valor > 0' }),
+          validation('v2', 'unique'),
+          sink('out'),
+        ],
+        [link('src', 'v1'), link('v1', 'f'), link('f', 'v2'), link('v2', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'validations-split:f')
+      expect(issue?.severity).toBe('error')
+    })
+
+    it('accepts a transformation placed after the whole run of rules', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v1'),
+          validation('v2', 'unique'),
+          transform('f', 'filter', { condition: 'valor > 0' }),
+          sink('out'),
+        ],
+        [link('src', 'v1'), link('v1', 'v2'), link('v2', 'f'), link('f', 'out')],
+      )
+      expect(idsOf(issues)).not.toContain('validations-split:f')
     })
 
     it('keeps the main chain when one source feeds both the chain and a join right side', () => {
@@ -454,7 +519,7 @@ describe('lintJob', () => {
           transform('stop', 'stop_if_empty', {}),
           transform('side', 'filter', { condition: 'status = 1' }),
           transform('j', 'join', { on: 'id', how: 'left' }),
-          validations('v'),
+          validation('v'),
           sink('out'),
         ],
         [
@@ -476,7 +541,7 @@ describe('lintJob', () => {
           source('src'),
           transform('f', 'filter', { condition: 'valor > 0' }),
           transform('probe', 'debug', { actions: ['count'] }),
-          validations('v'),
+          validation('v'),
           sink('out'),
         ],
         [link('src', 'f'), link('f', 'probe'), link('f', 'v'), link('v', 'out')],
@@ -484,12 +549,12 @@ describe('lintJob', () => {
       expect(idsOf(issues)).not.toContain('validations-branch:v')
     })
 
-    it('still flags a validations node inside a join right chain', () => {
+    it('still flags a rule inside a join right chain', () => {
       const issues = lint(
         [
           source('src'),
           source('right', { path: '/ref' }),
-          validations('v'),
+          validation('v'),
           transform('j', 'join', { on: 'id', how: 'inner' }),
           sink('out'),
         ],
@@ -503,13 +568,13 @@ describe('lintJob', () => {
       expect(idsOf(issues)).toContain('validations-branch:v')
     })
 
-    it('reports a pipeline with no validations block', () => {
+    it('reports a pipeline with no validation rule', () => {
       const issues = lint([source('src'), sink('out')], [link('src', 'out')])
       const issue = issues.find((entry) => entry.id === 'no-validations')
       expect(issue?.severity).toBe('info')
     })
 
-    it('stays quiet when a validations block exists', () => {
+    it('stays quiet when a rule exists', () => {
       const { nodes, edges } = cleanGraph()
       expect(idsOf(lint(nodes, edges))).not.toContain('no-validations')
     })
@@ -600,9 +665,7 @@ describe('lintJob', () => {
       const rule = lint(
         [
           source('src'),
-          validations('v', {
-            rules: [{ type: 'regex', column: 'cpf', pattern: '^[0-9]{11}$' }],
-          }),
+          validation('v', 'regex', { column: 'cpf', pattern: '^[0-9]{11}$' }),
           sink('out'),
         ],
         [link('src', 'v'), link('v', 'out')],

@@ -260,7 +260,7 @@ function CodeBlock({ code, label }: { code: string; label: string }) {
   }, [code])
 
   return (
-    <figure className="mt-3 overpipeline-hidden rounded-lg border border-line bg-surface-sunken">
+    <figure className="mt-3 overflow-hidden rounded-lg border border-line bg-surface-sunken">
       <figcaption className="flex items-center gap-2 border-b border-line px-2.5 py-1.5">
         <span className="font-mono text-2xs text-content-subtle">json</span>
         <IconButton
@@ -276,7 +276,7 @@ function CodeBlock({ code, label }: { code: string; label: string }) {
       <pre
         tabIndex={0}
         aria-label={`JSON snippet from “${label}”`}
-        className="scroll-area max-h-96 overpipeline-x-auto p-3 font-mono text-2xs leading-relaxed text-content-muted"
+        className="scroll-area max-h-96 overflow-x-auto p-3 font-mono text-2xs leading-relaxed text-content-muted"
       >
         {code}
       </pre>

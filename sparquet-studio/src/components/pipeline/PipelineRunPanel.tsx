@@ -508,7 +508,7 @@ function LogStream({
       </button>
 
       {open && (
-        <div className="max-h-72 overpipeline-auto rounded-xl border border-line bg-surface-sunken p-2 font-mono text-2xs">
+        <div className="max-h-72 overflow-auto rounded-xl border border-line bg-surface-sunken p-2 font-mono text-2xs">
           {logs.map((line, index) => (
             <div key={`${line.ts}-${index}`} className="flex gap-2 py-0.5">
               <span className="shrink-0 text-content-subtle">{formatClockTime(line.ts)}</span>

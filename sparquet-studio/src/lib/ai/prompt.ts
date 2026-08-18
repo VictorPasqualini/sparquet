@@ -178,8 +178,8 @@ function describeNode(node: StudioNode): string {
       return `source node "${data.label ?? data.format}" — format ${data.format}, path ${data.path || '(empty)'}`
     case 'transform':
       return `transformation node "${data.label ?? data.transform}" — type ${data.transform}, params ${JSON.stringify(data.params)}`
-    case 'validations':
-      return `validations node — on_failure ${data.onFailure}, ${data.rules.length} rule(s)`
+    case 'validation':
+      return `validation rule node — type ${data.validator}, params ${JSON.stringify(data.params)}`
     case 'sink':
       return `output node "${data.label ?? data.format}" — format ${data.format}, path ${data.path || '(empty)'}, mode ${data.mode}`
     case 'note':

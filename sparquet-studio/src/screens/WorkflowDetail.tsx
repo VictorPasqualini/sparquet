@@ -4,27 +4,16 @@ import {
   Copy,
   FileJson,
   FolderSymlink,
-  List,
   ListOrdered,
   MoreHorizontal,
   Palette,
   Pencil,
   Plus,
   Search,
-  Share2,
   Trash2,
   Workflow as JobIcon,
 } from 'lucide-react'
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -47,7 +36,6 @@ import {
   SectionTitle,
   Segmented,
   Select,
-  Spinner,
   Textarea,
   useConfirm,
 } from '@/components/ui'
@@ -65,20 +53,7 @@ import {
   type JobTemplate,
 } from '@/types/studio'
 
-/** Only the pipeline view pulls React Flow, and only the workflow screen offers it. */
-const InferredPipelineView = lazy(() =>
-  import('@/components/pipeline/InferredPipelineView').then((m) => ({ default: m.InferredPipelineView })),
-)
-
 type SortKey = 'updated' | 'name'
-type ViewKey = 'files' | 'pipeline'
-
-const VIEWS: { id: ViewKey; label: string; icon: typeof List }[] = [
-  // The vocabulary: a Workflow holds Jobs (one pipeline JSON each) and Pipelines
-  // (ordered sets of Jobs that run in sequence).
-  { id: 'files', label: 'Jobs', icon: List },
-  { id: 'pipeline', label: 'Pipeline', icon: Share2 },
-]
 
 /** Workflow accents mapped onto the semantic palette — no raw colors anywhere. */
 const ACCENT_DOT: Record<WorkflowAccent, string> = {
@@ -106,7 +81,6 @@ export function WorkflowDetail() {
   const deletePipeline = useLibraryStore((state) => state.deletePipeline)
 
   const [confirm, confirmDialog] = useConfirm()
-  const [view, setView] = useState<ViewKey>('files')
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortKey>('updated')
   const [creating, setCreating] = useState(false)
@@ -114,8 +88,6 @@ export function WorkflowDetail() {
   const [renaming, setRenaming] = useState<Job | null>(null)
   const [renamingPipeline, setRenamingPipeline] = useState<Pipeline | null>(null)
   const [moving, setMoving] = useState<Job | null>(null)
-
-  const tabsRef = useRef<HTMLDivElement>(null)
 
   const [name, setName] = useState(workflow?.name ?? '')
   const [description, setDescription] = useState(workflow?.description ?? '')
@@ -324,60 +296,23 @@ export function WorkflowDetail() {
       </header>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div
-          ref={tabsRef}
-          role="tablist"
-          aria-label="Workflow views"
-          className="flex items-center gap-0.5 rounded-lg border border-line bg-surface-sunken p-0.5"
-        >
-          {VIEWS.map((tab, index) => {
-            const active = tab.id === view
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                id={viewTabId(tab.id)}
-                aria-selected={active}
-                aria-controls={viewPanelId(tab.id)}
-                tabIndex={active ? 0 : -1}
-                onKeyDown={(event) => onViewTabKeyDown(event, index, setView, tabsRef)}
-                onClick={() => setView(tab.id)}
-                className={cn(
-                  'flex items-center gap-1.5 rounded-md px-2 py-1 text-2xs font-medium transition-colors',
-                  active
-                    ? 'bg-surface text-content shadow-sm'
-                    : 'text-content-subtle hover:text-content',
-                )}
-              >
-                <tab.icon className="h-3.5 w-3.5" aria-hidden />
-                {tab.label}
-              </button>
-            )
-          })}
-        </div>
-
-        {view === 'files' && (
-          <>
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search jobs"
-              aria-label="Search jobs"
-              leading={<Search />}
-              className="h-8 w-64 py-1 text-xs"
-            />
-            <Segmented
-              size="sm"
-              value={sort}
-              onChange={setSort}
-              options={[
-                { value: 'updated', label: 'Updated', title: 'Most recently updated first' },
-                { value: 'name', label: 'Name', title: 'Alphabetical' },
-              ]}
-            />
-          </>
-        )}
+        <Input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search jobs"
+          aria-label="Search jobs"
+          leading={<Search />}
+          className="h-8 w-64 py-1 text-xs"
+        />
+        <Segmented
+          size="sm"
+          value={sort}
+          onChange={setSort}
+          options={[
+            { value: 'updated', label: 'Updated', title: 'Most recently updated first' },
+            { value: 'name', label: 'Name', title: 'Alphabetical' },
+          ]}
+        />
 
         <div className="ml-auto flex items-center gap-2">
           <Button
@@ -386,8 +321,8 @@ export function WorkflowDetail() {
             disabled={owned.length === 0}
             title={
               owned.length === 0
-                ? 'Create a job first — a pipeline orders files that already exist'
-                : 'Chain several pipelines into one sequential run'
+                ? 'Create a job first — a pipeline orders jobs that already exist'
+                : 'Chain several jobs into one sequential run'
             }
             onClick={() => setCreatingPipeline(true)}
           >
@@ -404,100 +339,62 @@ export function WorkflowDetail() {
         </div>
       </div>
 
-      {view === 'pipeline' ? (
-        <div
-          role="tabpanel"
-          id={viewPanelId('pipeline')}
-          aria-labelledby={viewTabId('pipeline')}
-          className="space-y-3"
-        >
-          <Suspense
-            fallback={
-              <div className="flex items-center justify-center py-24">
-                <Spinner className="h-5 w-5" />
-              </div>
-            }
-          >
-            <InferredPipelineView jobs={owned} />
-          </Suspense>
+      <div className="space-y-6">
+        {ownedPipelines.length > 0 && (
+          <section className="space-y-2">
+            <SectionTitle>Pipelines</SectionTitle>
+            <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface shadow-card">
+              {ownedPipelines.map((pipeline) => (
+                <PipelineRow
+                  key={pipeline.id}
+                  pipeline={pipeline}
+                  jobs={owned}
+                  onOpen={() => navigate(`/pipelines/${pipeline.id}`)}
+                  onRename={() => setRenamingPipeline(pipeline)}
+                  onDelete={() => void handleDeletePipeline(pipeline)}
+                />
+              ))}
+            </ul>
+          </section>
+        )}
 
-          {/* The map above is derived and read-only; this is the way to an
-              order the author decides and the runner executes. */}
-          <div className="card flex flex-wrap items-center gap-3 px-4 py-3">
-            <ListOrdered className="h-4 w-4 shrink-0 text-brand-500" aria-hidden />
-            <p className="min-w-0 flex-1 text-2xs leading-relaxed text-content-muted">
-              Need these files to run one after another? A pipeline lets you draw the order
-              yourself and run the whole sequence.
-            </p>
-            <Button
-              size="sm"
-              disabled={owned.length === 0}
-              onClick={() => setCreatingPipeline(true)}
-            >
-              New pipeline
-            </Button>
+        {owned.length === 0 ? (
+          <div className="card">
+            <EmptyState
+              icon={<JobIcon />}
+              title="No jobs in this workflow"
+              description="Start from a blank canvas or pick a template that already wires a source, transformations and a destination."
+              action={
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<Plus className="h-4 w-4" />}
+                  onClick={() => setCreating(true)}
+                >
+                  New job
+                </Button>
+              }
+            />
           </div>
-        </div>
-      ) : (
-        <div
-          role="tabpanel"
-          id={viewPanelId('files')}
-          aria-labelledby={viewTabId('files')}
-          className="space-y-6"
-        >
-          {ownedPipelines.length > 0 && (
-            <section className="space-y-2">
-              <SectionTitle>Pipelines</SectionTitle>
-              <ul className="divide-y divide-line overpipeline-hidden rounded-xl border border-line bg-surface shadow-card">
-                {ownedPipelines.map((pipeline) => (
-                  <PipelineRow
-                    key={pipeline.id}
-                    pipeline={pipeline}
-                    jobs={owned}
-                    onOpen={() => navigate(`/pipelines/${pipeline.id}`)}
-                    onRename={() => setRenamingPipeline(pipeline)}
-                    onDelete={() => void handleDeletePipeline(pipeline)}
-                  />
-                ))}
-              </ul>
-            </section>
-          )}
-
-          {owned.length === 0 ? (
-            <div className="card">
-              <EmptyState
-                icon={<JobIcon />}
-                title="No jobs in this workflow"
-                description="Start from a blank canvas or pick a template that already wires a source, transformations and a destination."
-                action={
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    icon={<Plus className="h-4 w-4" />}
-                    onClick={() => setCreating(true)}
-                  >
-                    New job
-                  </Button>
-                }
-              />
-            </div>
-          ) : rows.length === 0 ? (
-            <div className="card">
-              <EmptyState
-                icon={<Search />}
-                title="No matches"
-                description={`Nothing in this workflow matches "${query.trim()}".`}
-                action={
-                  <Button size="sm" onClick={() => setQuery('')}>
-                    Clear search
-                  </Button>
-                }
-              />
-            </div>
-          ) : (
+        ) : rows.length === 0 ? (
+          <div className="card">
+            <EmptyState
+              icon={<Search />}
+              title="No matches"
+              description={`Nothing in this workflow matches "${query.trim()}".`}
+              action={
+                <Button size="sm" onClick={() => setQuery('')}>
+                  Clear search
+                </Button>
+              }
+            />
+          </div>
+        ) : (
+          <section className="space-y-2">
+            {ownedPipelines.length > 0 && <SectionTitle>Jobs</SectionTitle>}
             <ul
-              aria-label="Pipelines"
-              className="divide-y divide-line overpipeline-hidden rounded-xl border border-line bg-surface shadow-card"
+              aria-label="Jobs"
+              className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface shadow-card"
             >
               {rows.map((job) => (
                 <JobRow
@@ -512,9 +409,25 @@ export function WorkflowDetail() {
                 />
               ))}
             </ul>
-          )}
-        </div>
-      )}
+          </section>
+        )}
+
+        {/* Nothing here orders the jobs: a Pipeline is the only place the author
+            draws the sequence and runs it, so the way in stays on screen even
+            when this workflow has none yet. */}
+        {owned.length > 0 && ownedPipelines.length === 0 && (
+          <div className="card flex flex-wrap items-center gap-3 px-4 py-3">
+            <ListOrdered className="h-4 w-4 shrink-0 text-brand-500" aria-hidden />
+            <p className="min-w-0 flex-1 text-2xs leading-relaxed text-content-muted">
+              Need these jobs to run one after another? A pipeline lets you draw the order
+              yourself and run the whole sequence.
+            </p>
+            <Button size="sm" onClick={() => setCreatingPipeline(true)}>
+              New pipeline
+            </Button>
+          </div>
+        )}
+      </div>
 
       {creating && (
         <NewJobModal workflowId={workflow.id} onClose={() => setCreating(false)} />
@@ -662,13 +575,13 @@ function PipelineRow({ pipeline, jobs, onOpen, onRename, onDelete }: PipelineRow
         <span className="min-w-0 flex-1">
           <span className="block truncate text-xs font-medium text-content">{pipeline.name}</span>
           <span className="block truncate text-2xs text-content-subtle">
-            {pipeline.description || 'Runs its pipelines one after another'}
+            {pipeline.description || 'Runs its jobs one after another'}
           </span>
         </span>
 
         {broken > 0 && (
           <Badge tone="danger">
-            {broken} missing {broken === 1 ? 'pipeline' : 'pipelines'}
+            {broken} missing {broken === 1 ? 'job' : 'jobs'}
           </Badge>
         )}
 
@@ -853,7 +766,7 @@ function TemplateOption({
 }
 
 /**
- * Creating a pipeline is picking the pipelines and the order they run in: the click
+ * Creating a pipeline is picking the jobs and the order they run in: the click
  * order IS the order, and the stages are linked head to tail from it. Everything
  * else — moving boxes, extra links, removing a stage — happens on the canvas.
  */
@@ -908,7 +821,7 @@ function NewPipelineModal({
         if (!open) onClose()
       }}
       title="New pipeline"
-      description="Chain pipelines of this workflow into one run. Pick them in the order they should execute — you can rewire everything on the canvas afterwards."
+      description="Chain jobs of this workflow into one run. Pick them in the order they should execute — you can rewire everything on the canvas afterwards."
       size="lg"
       footer={
         <>
@@ -1176,24 +1089,6 @@ function AccentPicker({
 }
 
 /* ------------------------------------------------------------------- utils */
-
-const viewTabId = (view: ViewKey) => `workflow-view-tab-${view}`
-const viewPanelId = (view: ViewKey) => `workflow-view-panel-${view}`
-
-/** Tabs owe the roving-focus contract: arrows move the selection and the focus. */
-function onViewTabKeyDown(
-  event: ReactKeyboardEvent<HTMLButtonElement>,
-  index: number,
-  setView: (view: ViewKey) => void,
-  tabsRef: { current: HTMLDivElement | null },
-): void {
-  const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
-  if (delta === 0) return
-  event.preventDefault()
-  const next = (index + delta + VIEWS.length) % VIEWS.length
-  setView(VIEWS[next].id)
-  tabsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
-}
 
 /** Sticky notes are canvas annotations, never part of the compiled pipeline. */
 function countNodes(job: Job): number {

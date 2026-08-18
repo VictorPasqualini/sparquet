@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StudioEdge, StudioNode, Job } from '@/types/studio'
 
-import { useEditorStore } from './editor'
+import { nodeOrdinals, useEditorStore } from './editor'
 import { useSettingsStore } from './settings'
 
 const dbState = vi.hoisted(() => ({
@@ -365,7 +365,16 @@ describe('run step status', () => {
     return { id: `e-${source}-${target}`, source, target, type: 'pipeline' }
   }
 
-  /** src → t1 → muted → t2 → validations → (t3 → out1 | t4 → out2). */
+  function validationNode(id: string, validator: string): StudioNode {
+    return {
+      id,
+      type: 'validation',
+      position: { x: 0, y: 0 },
+      data: { kind: 'validation', validator, params: { columns: ['id'] } },
+    }
+  }
+
+  /** src → t1 → muted → t2 → v1 → v2 → (t3 → out1 | t4 → out2). */
   function branchedJob(): Job {
     return makeJob({
       graph: {
@@ -374,17 +383,8 @@ describe('run step status', () => {
           transformNode('t1', 'filter'),
           transformNode('muted', 'distinct', true),
           transformNode('t2', 'select'),
-          {
-            id: 'checks',
-            type: 'validations',
-            position: { x: 0, y: 0 },
-            data: {
-              kind: 'validations',
-              onFailure: 'fail',
-              rules: [{ type: 'not_null', columns: ['id'] }],
-              report: null,
-            },
-          },
+          validationNode('v1', 'not_null'),
+          validationNode('v2', 'unique'),
           transformNode('t3', 'sort'),
           transformNode('t4', 'drop'),
           sinkNode('out1'),
@@ -394,15 +394,30 @@ describe('run step status', () => {
           link('src', 't1'),
           link('t1', 'muted'),
           link('muted', 't2'),
-          link('t2', 'checks'),
-          link('checks', 't3'),
+          link('t2', 'v1'),
+          link('v1', 'v2'),
+          link('v2', 't3'),
           link('t3', 'out1'),
-          link('checks', 't4'),
+          link('v2', 't4'),
           link('t4', 'out2'),
         ],
       },
     })
   }
+
+  it('numbers a whole run of validation rules inside the shared chain', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    const state = useEditorStore.getState()
+    const ordinals = nodeOrdinals({ nodes: state.nodes, edges: state.edges })
+
+    // src 1 → t1 2 → t2 3 (the muted node is skipped) → v1 4 → v2 5 → branches.
+    expect(ordinals.v1).toBe(4)
+    expect(ordinals.v2).toBe(5)
+    expect(ordinals.t3).toBe(6)
+    expect(ordinals.muted).toBeUndefined()
+  })
 
   it('maps a transformation index to the node the compiler emitted it from', () => {
     const editor = useEditorStore.getState()
@@ -437,5 +452,66 @@ describe('run step status', () => {
     editor.setStepStatus('t1', 'error')
     editor.close()
     expect(useEditorStore.getState().stepStatus).toEqual({})
+  })
+})
+
+describe('opening a job saved before validations became per-rule nodes', () => {
+  /** src → checks (one node, two rules, warn + report) → out. */
+  function legacyJob(): Job {
+    return makeJob({
+      graph: {
+        nodes: [
+          sourceNode('src', '/in'),
+          {
+            id: 'checks',
+            type: 'validations',
+            position: { x: 200, y: 0 },
+            // The pre-split shape, exactly as it sits in IndexedDB.
+            data: {
+              kind: 'validations',
+              onFailure: 'warn',
+              rules: [
+                { type: 'not_null', columns: ['id'] },
+                { type: 'row_count', min: 1 },
+              ],
+              report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+            },
+          } as unknown as StudioNode,
+          sinkNode('out'),
+        ],
+        edges: [
+          { id: 'e-src-checks', source: 'src', target: 'checks', type: 'pipeline' },
+          { id: 'e-checks-out', source: 'checks', target: 'out', type: 'pipeline' },
+        ],
+      },
+    })
+  }
+
+  it('splits the rules into nodes and keeps the policy in the settings', () => {
+    const editor = useEditorStore.getState()
+    editor.open(legacyJob())
+
+    const state = useEditorStore.getState()
+    const rules = state.nodes.filter((node) => node.data.kind === 'validation')
+    expect(rules).toHaveLength(2)
+    expect(
+      rules.map((node) => (node.data.kind === 'validation' ? node.data.validator : '')),
+    ).toEqual(['not_null', 'row_count'])
+    expect(state.nodes.some((node) => node.id === 'checks')).toBe(false)
+    expect(state.settings.validations).toEqual({
+      onFailure: 'warn',
+      report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+    })
+
+    // The chain still runs source → rules → sink, and compiles to the same JSON.
+    const { pipeline } = state.compile()
+    expect(pipeline?.validations).toEqual({
+      on_failure: 'warn',
+      report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+      rules: [
+        { type: 'not_null', columns: ['id'] },
+        { type: 'row_count', min: 1 },
+      ],
+    })
   })
 })

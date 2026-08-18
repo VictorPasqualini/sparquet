@@ -5,7 +5,7 @@ import type {
   SinkNodeData,
   SourceNodeData,
   TransformNodeData,
-  ValidationsNodeData,
+  ValidationNodeData,
 } from '@/types/studio'
 
 import { resolveIssueField, retainOptions } from './Inspector'
@@ -35,13 +35,10 @@ const transform = (type: string, params: Record<string, unknown> = {}): Transfor
   params,
 })
 
-const validations = (patch: Partial<ValidationsNodeData> = {}): ValidationsNodeData => ({
-  kind: 'validations',
-  onFailure: 'fail',
-  rules: [{ type: 'not_null', columns: [] }],
-  report: { format: 'csv', path: '', mode: 'overwrite' },
-  ...patch,
-})
+const validation = (
+  validator: string,
+  params: Record<string, unknown> = {},
+): ValidationNodeData => ({ kind: 'validation', validator, params })
 
 describe('retainOptions', () => {
   it('drops keys the new format does not declare', () => {
@@ -137,20 +134,23 @@ describe('resolveIssueField', () => {
     expect(resolveIssueField('s1', source(), 'mode')).toBeNull()
   })
 
-  it('scopes rule and report paths to the form that renders them', () => {
-    const node = validations()
-    expect(resolveIssueField('v1', node, 'rules[0].columns')).toEqual({
-      nodeId: 'v1-rule0',
+  it('resolves the fields of a validation rule on its own node', () => {
+    expect(resolveIssueField('v1', validation('not_null'), 'columns')).toEqual({
+      nodeId: 'v1',
       key: 'columns',
     })
-    expect(resolveIssueField('v1', node, 'report.path')).toEqual({
-      nodeId: 'v1-report',
-      key: 'path',
+    expect(resolveIssueField('v1', validation('check', { metric: 'row_count' }), 'must_be')).toEqual(
+      { nodeId: 'v1', key: 'must_be' },
+    )
+    expect(resolveIssueField('v1', validation('not_null'), 'columns[0]')).toEqual({
+      nodeId: 'v1',
+      key: 'columns',
     })
-    expect(resolveIssueField('v1', node, 'rules[1].columns')).toBeNull()
   })
 
-  it('returns null for report fields while no report is configured', () => {
-    expect(resolveIssueField('v1', validations({ report: null }), 'report.path')).toBeNull()
+  it('returns null for a key the rule form does not render', () => {
+    // The block-level policy moved to the job settings, so no node anchors it.
+    expect(resolveIssueField('v1', validation('not_null'), 'report.path')).toBeNull()
+    expect(resolveIssueField('v1', validation('not_null'), 'on_failure')).toBeNull()
   })
 })
