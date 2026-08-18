@@ -9,11 +9,7 @@
 
 import { getFormat, getTransformation, getValidationSink, getValidator } from '@/catalog'
 import type { FieldSpec } from '@/catalog/types'
-import {
-  DEFAULT_VALIDATION_POLICY,
-  HANDLE,
-  validationSinkRoleOfHandle,
-} from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
 import type {
   IssueSeverity,
   ParamDefinition,
@@ -154,9 +150,10 @@ interface LintContext {
   sinks: SinkNode[]
   /**
    * Destinations the validation step writes BESIDES `outputs[]`, by role. They are
-   * copies taken on the side: the trunk still carries every row past them.
+   * copies taken on the side: the trunk still carries every row past them. Each
+   * declares its role on the node and carries no connection at all.
    */
-  sideSinks: { role: ValidationSinkRole; node: SinkNode; parent: StudioNode }[]
+  sideSinks: { role: ValidationSinkRole; node: SinkNode }[]
   /** One node per `validations.rules` entry, in no particular order. */
   validations: ValidationNode[]
   /** Main chain: the input source plus the prefix every destination shares. */
@@ -225,20 +222,16 @@ const buildContext = (graph: StudioGraph): LintContext => {
   const validations = nodes.filter(isValidationNode)
 
   /**
-   * Side outputs are held apart from `sinks` for the same reason the compiler holds
-   * them apart: they are NOT branches of the main chain, and folding them into the
-   * shared-prefix computation would truncate the trunk at the rule they hang off.
+   * Quality destinations are held apart from `sinks` for the same reason the
+   * compiler holds them apart: they are NOT part of the chain at all. Counting one
+   * as a sink would collapse the shared prefix — and with it the trunk — to what an
+   * unconnected node has in common with the chain, which is nothing.
    */
   const sideSinks: LintContext['sideSinks'] = []
   const sinks: SinkNode[] = []
   for (const node of nodes.filter(isSinkNode)) {
-    const link = (incoming.get(node.id) ?? [])
-      .map((edge) => ({ role: validationSinkRoleOfHandle(edge.sourceHandle), edge }))
-      .find((candidate): candidate is { role: ValidationSinkRole; edge: StudioEdge } =>
-        candidate.role !== null,
-      )
-    const parent = link ? nodeById.get(link.edge.source) : undefined
-    if (link && parent) sideSinks.push({ role: link.role, node, parent })
+    const role = node.data.dqRole
+    if (role) sideSinks.push({ role, node })
     else sinks.push(node)
   }
 
@@ -566,7 +559,7 @@ const SINK_OPTION_SKIP: ReadonlySet<string> = new Set(['merge_keys'])
 const checkSinks = (ctx: LintContext): void => {
   const destinations = new Map<string, string>()
 
-  // Side outputs are real writes too — same format/path/mode rules, and the
+  // Quality destinations are real writes too — same format/path/mode rules, and the
   // duplicate-path check has to see them: a quality report pointed at the job's own
   // table would silently overwrite it.
   for (const node of [...ctx.sinks, ...ctx.sideSinks.map((entry) => entry.node)]) {
@@ -830,45 +823,43 @@ const isRowLevelRule = (node: ValidationNode): boolean => {
  * The three destinations the validation step writes on the side.
  *
  * Their format/path/mode are checked with every other sink in `checkSinks`; what is
- * left here is what only makes sense for a SIDE output — whether the rules upstream
- * can actually fill it, and whether the projection it asks for exists.
+ * left here is what only makes sense for a quality destination — whether any rule
+ * can actually fill it, whether two nodes claim the same dataset, and whether the
+ * projection it asks for is ever read.
+ *
+ * Nothing here looks at edges: the `validations` block is job-scoped, so these
+ * nodes are declarations and stay deliberately unconnected.
  */
 const checkValidationSinks = (ctx: LintContext): void => {
-  const active = ctx.validations.filter((node) => !node.data.disabled)
-  const activeIds = new Set(active.map((node) => node.id))
+  // A rule reaches the compiled block only when it is enabled AND on the trunk —
+  // the chain every destination shares. Anything else emits no `validations` key.
+  const compiled = ctx.validations.filter(
+    (node) => !node.data.disabled && ctx.trunk.has(node.id),
+  )
+  const claimed = new Set<ValidationSinkRole>()
 
-  for (const { role, node, parent } of ctx.sideSinks) {
+  for (const { role, node } of ctx.sideSinks) {
     const def = getValidationSink(role)
 
-    if (!isValidationNode(parent)) {
+    if (claimed.has(role)) {
       ctx.issues.push({
-        id: `dq-sink-parent:${node.id}`,
+        id: `dq-sink-duplicate:${node.id}`,
         severity: 'error',
-        message: `"${labelOf(node)}" is wired to a side output of a node that is not a validation rule.`,
+        message: `Another node already writes the ${def.label.toLowerCase()}.`,
         nodeId: node.id,
-        hint: `${def.label} is written by the validations block. Connect it to the last rule of the run, or wire it into the main chain to make it an ordinary destination.`,
+        hint: `The block writes \`${def.jsonKey}\` exactly once, so the compiler keeps the first of the two and drops this one. Delete it, or switch its role.`,
       })
       continue
     }
+    claimed.add(role)
 
-    if (!activeIds.has(parent.id)) {
+    if (compiled.length === 0) {
       ctx.issues.push({
-        id: `dq-sink-muted:${node.id}`,
+        id: `dq-sink-no-rules:${node.id}`,
         severity: 'error',
-        message: `"${labelOf(node)}" hangs off a muted rule.`,
+        message: `"${labelOf(node)}" has no validation rule to fill it.`,
         nodeId: node.id,
-        hint: 'A muted rule is left out of the compiled JSON, and with it this destination.',
-      })
-      continue
-    }
-
-    if (!ctx.trunk.has(parent.id)) {
-      ctx.issues.push({
-        id: `dq-sink-branch:${node.id}`,
-        severity: 'error',
-        message: `"${labelOf(node)}" hangs off a rule that is not on the main chain.`,
-        nodeId: node.id,
-        hint: 'Only rules every destination passes through compile into the validations block; a rule off the trunk writes nothing.',
+        hint: 'The validations block only reaches the JSON alongside at least one rule on the main chain, so nothing would ever be written here. Add a rule from the Quality section, or delete this node.',
       })
       continue
     }
@@ -876,7 +867,7 @@ const checkValidationSinks = (ctx: LintContext): void => {
     // The quarantine split is decided by row-level rules alone. With none of them on
     // the chain every row counts as valid, so `invalid` is written empty and `valid`
     // is a full second copy of the data — a silent, expensive no-op.
-    if (role !== 'report' && !active.some(isRowLevelRule)) {
+    if (role !== 'report' && !compiled.some(isRowLevelRule)) {
       ctx.issues.push({
         id: `dq-sink-no-row-rule:${node.id}`,
         severity: 'warning',
@@ -1097,19 +1088,23 @@ const trackColumns = (columns: Set<string> | null, node: TransformNode): Set<str
 }
 
 const checkOutputColumns = (ctx: LintContext): void => {
-  // The quarantine outputs go through the same `_project_columns`, over the same
-  // DataFrame, so the projection is checked against the same chain. The report has
-  // a schema of its own and is handled by `checkValidationSinks`.
+  // The quarantine outputs go through the same `_project_columns`, but they have no
+  // chain of their own to walk: they are written from the DataFrame the rules saw,
+  // which is what the TRUNK produces. The report has a schema of its own and is
+  // handled by `checkValidationSinks`.
   const quarantine = ctx.sideSinks
     .filter((entry) => entry.role !== 'report')
     .map((entry) => entry.node)
+  const trunkNodes = [...ctx.trunk]
+    .map((id) => ctx.nodeById.get(id))
+    .filter((node): node is StudioNode => node !== undefined)
 
   for (const sink of [...ctx.sinks, ...quarantine]) {
     const requested = sink.data.columns
     if (!requested || requested.length === 0) continue
 
     let columns: Set<string> | null = null
-    for (const node of chainTo(ctx, sink.id)) {
+    for (const node of sink.data.dqRole ? trunkNodes : chainTo(ctx, sink.id)) {
       if (!isTransformNode(node)) continue
       if (node.data.disabled) continue
       columns = trackColumns(columns, node)

@@ -24,30 +24,45 @@ Press <kbd>/</kbd> anywhere to focus the palette search.
 | Source | `input`, or a join/union `with` | none |
 | Transformation | an entry of `transformations` | one (two for `join` and `union`) |
 | Validation rule | one entry of `validations.rules` — one box per rule | one |
-| Destination (side output) | `validations.report` or `validations.outputs.valid`/`.invalid`, when linked from a rule's bottom handle | one |
+| Quality destination | `validations.report` or `validations.outputs.valid`/`.invalid` | none — it is a declaration |
 | Destination | an entry of `outputs` | one |
 | Note | nothing | none |
 
 A node shows its most meaningful parameter under the title — the condition of a filter, the expression of a computed column, the join type and key — so a Job is readable without opening anything.
 
-## Validation side outputs
+## Quality destinations
 
-A validation rule carries three extra handles along its **bottom** edge: `report`,
-`valid rows` and `invalid rows`. Link one to a destination and it compiles into
-`validations.report` or `validations.outputs.valid` / `.invalid` — never into the
-job's own `outputs`.
+The `validations` block writes up to three datasets of its own, and each is a box you
+add from the palette's **Quality** section — not something you wire up:
 
-The geometry is the meaning: they hang *below* the chain, which carries on to the
-right untouched.
+| Palette item | Compiles to |
+|---|---|
+| Quality report | `validations.report` — one row per rule |
+| Quarantine — valid rows | `validations.outputs.valid` |
+| Quarantine — invalid rows | `validations.outputs.invalid` |
 
-<Aside type="caution" title="A copy, not a split">
-  Quarantine does not divert rows. The framework writes the side outputs and then
-  writes the job's own destinations from the **same, complete** DataFrame — invalid
-  rows included. If the main destination must not carry them, filter them out
-  explicitly with a `filter` node.
+They take **no connections**: the `validations` block is one per Job, so these belong
+to the Job, not to any single rule. Drop one anywhere on the canvas and it compiles.
+A Job may hold one of each; a second is an error, as is a quality destination with no
+validation rule to fill it.
+
+<Aside type="caution" title="Quarantine audits — `filter` routes">
+  Quarantine is a **copy, not a split**. The framework writes the quarantine sinks
+  and then writes the Job's own destinations from the **same, complete** DataFrame —
+  invalid rows included. So a Job with quarantine writes the bad rows twice: once to
+  the quarantine sink, once to the main destination.
+
+  Use it to **audit**: "which rows broke a rule, and how many?" — without touching
+  the flow.
+
+  To **route** — only the good rows reach the curated table — use the pipeline
+  itself: a `filter` node before the destination, and a second branch for the
+  rejects. The cost is that you restate the condition in SQL, so keep it in step
+  with the rules; the gain is that the main destination carries exactly what you
+  meant.
 </Aside>
 
-`on_failure` is not a sink and stays in **Job settings**: it decides whether a
+`on_failure` is not a destination and stays in **Job settings**: it decides whether a
 violation aborts the run.
 
 ## Connecting

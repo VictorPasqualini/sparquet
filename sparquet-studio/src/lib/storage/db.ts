@@ -60,7 +60,7 @@ const IDB_STORE = 'records'
 export const APP_ID = 'sparquet-studio'
 
 /** Bumped whenever the persisted record shape changes; drives `migrate()`. */
-export const STORAGE_VERSION = 4
+export const STORAGE_VERSION = 5
 
 /* --------------------------------------------------------------- backends */
 
@@ -286,6 +286,13 @@ async function migrateStep(store: StorageBackend, version: number): Promise<numb
       // wired to the last rule. Only `on_failure` stays in the settings.
       await upgradeStoredJobs(store)
       return 4
+    }
+    case 4: {
+      // v5 moves the role of those destinations off the EDGE and onto the node, and
+      // drops the links: the validations block is job-scoped, so they belong to the
+      // job rather than to whichever rule happened to be last.
+      await upgradeStoredJobs(store)
+      return 5
     }
     default:
       throw new Error(

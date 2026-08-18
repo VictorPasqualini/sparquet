@@ -1,11 +1,9 @@
 import type { NodeProps } from '@xyflow/react'
-import { memo, useMemo } from 'react'
+import { memo } from 'react'
 
 import { getFormat, getValidationSink } from '@/catalog'
 import { Badge, type BadgeTone } from '@/components/ui'
-import { validationSinkLink } from '@/lib/compiler'
-import { useEditorStore } from '@/store/editor'
-import type { SinkNode as SinkNodeType, ValidationSinkRole } from '@/types/studio'
+import type { SinkNode as SinkNodeType } from '@/types/studio'
 
 import { catalogIcon } from '../icons'
 import { NodeShell, truncateMiddle, useNodeIssues } from '../NodeShell'
@@ -29,21 +27,6 @@ export function projectionLabel(columns: string[] | null): string | null {
   return `Projects ${columns.length} column${columns.length === 1 ? '' : 's'}`
 }
 
-/**
- * Which of the validation step's side outputs this destination is, if any.
- *
- * Read from the graph, not from the node: the link's source handle is what decides,
- * so re-dragging it changes the box immediately with nothing to keep in sync.
- */
-export function useValidationSinkRole(nodeId: string): ValidationSinkRole | null {
-  const nodes = useEditorStore((state) => state.nodes)
-  const edges = useEditorStore((state) => state.edges)
-  return useMemo(
-    () => validationSinkLink({ nodes, edges }, nodeId)?.role ?? null,
-    [edges, nodeId, nodes],
-  )
-}
-
 export const SinkNode = memo(function SinkNodeRenderer({
   id,
   data,
@@ -52,8 +35,9 @@ export const SinkNode = memo(function SinkNodeRenderer({
   const format = getFormat(data.format)
   const issues = useNodeIssues(id)
   const projection = projectionLabel(data.columns)
-  const role = useValidationSinkRole(id)
-  const sideDef = role ? getValidationSink(role) : null
+  // The role is stored on the node: the `validations` block is job-scoped, so this
+  // destination belongs to the job and hangs off no rule in particular.
+  const sideDef = data.dqRole ? getValidationSink(data.dqRole) : null
 
   return (
     <NodeShell
@@ -64,14 +48,16 @@ export const SinkNode = memo(function SinkNodeRenderer({
       subtitle={sideDef?.subtitle}
       selected={selected}
       issues={issues}
-      inputs="single"
+      // A quality destination is a declaration, not a step: the validations block
+      // writes it from the DataFrame every rule saw, so there is nothing to wire in
+      // and nothing to pass on.
+      inputs={sideDef ? 'none' : 'single'}
       hasOutput={false}
-      acceptsSideOutput
       badges={
         <>
-          {/* The chip repeats the role in words: the drop-down handle it hangs
-              from is a position, and position alone is not an accessible signal. */}
-          {sideDef && <Badge tone="brand">side output</Badge>}
+          {/* The chip repeats the role in words, so the node says what it is even
+              when its title has been renamed. */}
+          {sideDef && <Badge tone="brand">quality</Badge>}
           <Badge tone="info">{format?.label ?? data.format}</Badge>
           <Badge tone={MODE_TONE[data.mode] ?? 'neutral'}>{data.mode}</Badge>
         </>

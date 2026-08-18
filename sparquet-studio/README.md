@@ -27,7 +27,7 @@ If you know n8n, you already know the idea. This is that, for data engineering.
 | | |
 |---|---|
 | **Visual job editor** | Drag sources, transformations, validations and destinations onto a canvas. Joins and unions take a second input, so a branching Job reads like a diagram instead of nested JSON. |
-| **Data quality on the canvas** | Every validation rule is a box, and so are the three datasets the `validations` block writes: the quality report and the two quarantine outputs hang off the last rule as *side* outputs, drawn beside a main chain that keeps every row. |
+| **Data quality on the canvas** | Every validation rule is a box, and so are the three datasets the `validations` block writes: the quality report and the two quarantine outputs come from the Quality section of the palette and sit beside a main chain that keeps every row. |
 | **Every Sparquet feature, typed** | All 20 transformations, 7 IO formats and 6 validators, with per-field help, defaults and the gotchas that only live in the framework source (positional `union`, `merge_keys`, `{{runtime}}` pushdown, dot-path `struct`, …). |
 | **AI that writes jobs** | Describe what you need and get a complete, valid Job back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI, Google or any OpenAI-compatible endpoint. |
 | **Live linting** | 20+ rules run as you type: unreachable nodes, a `merge` write without `merge_keys`, a `{{var}}` no `collect` publishes, a `{param}` you never declared, `collect` before `checkpoint`, two sinks fighting over one path, a quarantine output with no row-level rule to fill it. |
@@ -95,25 +95,30 @@ A run of them compiles into the single `validations` block the framework execute
 and `on_failure` — what a broken rule does to the *run* — stays in **Job settings**,
 next to the Spark configs.
 
-The three things that block **writes** are boxes too. The last rule of the run
-exposes three extra handles along its bottom edge:
+The three things that block **writes** are boxes too — three more entries in the
+same **Quality** section of the palette, added by a click or a drag like any other
+node:
 
-| Handle | Compiles into | What lands in it |
+| Palette entry | Compiles into | What lands in it |
 |---|---|---|
-| `report` | `validations.report` | One row per rule: `pipeline`, `rule_type`, `check_name`, `severity`, `passed`, `failed_count`, `metric_value`, `message`, `validated_at`. |
-| `valid rows` | `validations.outputs.valid` | A copy of the rows that break no row-level rule. |
-| `invalid rows` | `validations.outputs.invalid` | A copy of the rows those same rules rejected. |
+| Quality report | `validations.report` | One row per rule: `pipeline`, `rule_type`, `check_name`, `severity`, `passed`, `failed_count`, `metric_value`, `message`, `validated_at`. |
+| Quarantine — valid rows | `validations.outputs.valid` | A copy of the rows that break no row-level rule. |
+| Quarantine — invalid rows | `validations.outputs.invalid` | A copy of the rows those same rules rejected. |
 
-Drag from a handle onto a destination node and it stops being an entry of
-`outputs[]`: it compiles into the validation block instead, and the box says so
-(*side output* chip, dashed link, its own inspector header).
+These boxes take **no connection at all** — no input handle, no output handle — and
+they never enter `outputs[]`. The reason is that the `validations` block is
+**job-scoped**: a job has exactly one, so the report and the quarantine copies belong
+to the job rather than to whichever rule happens to be last. Drop one anywhere and the
+compiler finds it; the linter speaks up only when the job has no rule to fill it, or
+when a second box claims the same dataset. Auto-layout parks them in a row under the
+rules, clear of the line the data flows along.
 
 > **Quarantine copies rows out — it does not divert them.** `Pipeline.run()` calls
 > `_write_validation_outputs(df)` and then `_write_outputs(df)` with the **same,
 > complete** DataFrame. The invalid rows are written to the quarantine *and* to
-> every destination on the main chain. That is why the side outputs hang **below**
-> the rule while the chain carries on to the right: nothing is taken off it. If the
-> main destination must not carry the bad rows, remove them yourself with a `filter`.
+> every destination on the main chain — which is exactly why these boxes sit off the
+> chain rather than on it: nothing is taken off it. If the main destination must not
+> carry the bad rows, remove them yourself with a `filter`.
 
 Only row-level rules can sort a row into `valid` / `invalid`: `not_null`, `unique`,
 `range`, `regex`, and the `check` metrics that count rows one by one

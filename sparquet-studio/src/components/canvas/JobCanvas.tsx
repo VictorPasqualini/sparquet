@@ -51,16 +51,18 @@ import {
   type NodeAccent,
 } from '@/catalog'
 import { Button, EmptyState, Input, Kbd } from '@/components/ui'
+import { isValidationSinkNode } from '@/lib/compiler'
 import { cn } from '@/lib/utils/cn'
 import { useEditorStore } from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
 import {
   HANDLE,
-  validationSinkRoleOfHandle,
+  isValidationSinkRole,
   type NodeKind,
   type StudioEdge,
   type StudioNode,
   type StudioNodeData,
+  type ValidationSinkRole,
 } from '@/types/studio'
 
 import { catalogIcon } from './icons'
@@ -76,6 +78,8 @@ interface NodeDropPayload {
   type?: string
   /** IO format id, for `kind: 'source' | 'sink'`. */
   format?: string
+  /** On a sink: which dataset of the `validations` block it declares. */
+  dqRole?: ValidationSinkRole
 }
 
 const GRID: [number, number] = [16, 16]
@@ -110,6 +114,7 @@ export function JobCanvas() {
   const select = useEditorStore((state) => state.select)
   const addSource = useEditorStore((state) => state.addSource)
   const addSink = useEditorStore((state) => state.addSink)
+  const addValidationSink = useEditorStore((state) => state.addValidationSink)
   const addTransform = useEditorStore((state) => state.addTransform)
   const addValidation = useEditorStore((state) => state.addValidation)
   const addNote = useEditorStore((state) => state.addNote)
@@ -130,7 +135,8 @@ export function JobCanvas() {
           addSource(position, payload.format)
           break
         case 'sink':
-          addSink(position, payload.format)
+          if (payload.dqRole) addValidationSink(payload.dqRole, position)
+          else addSink(position, payload.format)
           break
         case 'transform':
           if (payload.type) addTransform(payload.type, position)
@@ -143,7 +149,7 @@ export function JobCanvas() {
           break
       }
     },
-    [addNote, addSink, addSource, addTransform, addValidation],
+    [addNote, addSink, addSource, addTransform, addValidation, addValidationSink],
   )
 
   /* ------------------------------------------------------------ drag & drop */
@@ -224,13 +230,10 @@ export function JobCanvas() {
       // Notes are annotations, and a source reads from storage — neither takes input.
       if (sourceNode.data.kind === 'note' || targetNode.data.kind === 'note') return false
       if (targetNode.data.kind === 'source') return false
-      // A validation side output IS a written dataset: only a destination can take it.
-      if (
-        validationSinkRoleOfHandle(connection.sourceHandle) !== null &&
-        targetNode.data.kind !== 'sink'
-      ) {
-        return false
-      }
+      // A quality destination is a declaration, not a chain member: the validations
+      // block writes it from the DataFrame every rule saw, so it has nothing to
+      // receive and nothing to pass on.
+      if (isValidationSinkNode(sourceNode) || isValidationSinkNode(targetNode)) return false
       return !reaches(edges, target, source)
     },
     [edges, nodes],
@@ -272,16 +275,16 @@ export function JobCanvas() {
       }
 
       event.preventDefault()
-      if (connectSource.nodeId === nodeId) {
+      if (connectSource === nodeId) {
         cancelConnect()
         return
       }
-      // A validation side output writes a dataset, so it can only end on one.
-      if (connectSource.handle !== HANDLE.out && node.data.kind !== 'sink') return
+      // A quality destination has no input handle, so nothing can land on it.
+      if (isValidationSinkNode(node)) return
       onConnect({
-        source: connectSource.nodeId,
+        source: connectSource,
         target: nodeId,
-        sourceHandle: connectSource.handle,
+        sourceHandle: HANDLE.out,
         targetHandle: freeTargetHandle(node, edges),
       })
       cancelConnect()
@@ -617,6 +620,19 @@ function buildOptions(query: string): QuickAddOption[] {
     })
   }
 
+  // The datasets the validations block writes: added like any other node, then left
+  // unconnected — the block is job-scoped, so they belong to no rule in particular.
+  for (const sink of found.validationSinks) {
+    options.push({
+      id: `dq-sink-${sink.role}`,
+      label: sink.label,
+      hint: 'quality',
+      icon: catalogIcon(sink.icon),
+      accent: 'output',
+      payload: { kind: 'sink', format: sink.defaultFormat, dqRole: sink.role },
+    })
+  }
+
   for (const format of WRITABLE_FORMATS) {
     if (!found.formats.includes(format)) continue
     options.push({
@@ -656,7 +672,14 @@ function parsePayload(raw: string): NodeDropPayload | null {
     if (!parsed || typeof parsed !== 'object') return null
     const candidate = parsed as Partial<NodeDropPayload>
     if (!candidate.kind) return null
-    return { kind: candidate.kind, type: candidate.type, format: candidate.format }
+    return {
+      kind: candidate.kind,
+      type: candidate.type,
+      format: candidate.format,
+      // The payload crossed the DataTransfer boundary as text, so the role is
+      // narrowed rather than trusted.
+      ...(isValidationSinkRole(candidate.dqRole) ? { dqRole: candidate.dqRole } : {}),
+    }
   } catch {
     return null
   }

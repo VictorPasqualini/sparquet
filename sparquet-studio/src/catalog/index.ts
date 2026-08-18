@@ -10,6 +10,7 @@ import { FORMATS } from './formats'
 import { ADVANCED_TRANSFORMATIONS } from './transformations.advanced'
 import { CORE_TRANSFORMATIONS } from './transformations.core'
 import type { FormatDef, TransformationDef, ValidatorDef } from './types'
+import { VALIDATION_SINKS, type ValidationSinkDef } from './validationSinks'
 import { ON_FAILURE_OPTIONS, VALIDATORS } from './validators'
 
 export * from './types'
@@ -50,6 +51,8 @@ export function searchCatalog(query: string): {
   transformations: TransformationDef[]
   formats: FormatDef[]
   validators: ValidatorDef[]
+  /** Quality destinations — the datasets the `validations` block writes. */
+  validationSinks: ValidationSinkDef[]
 } {
   const q = query.trim().toLowerCase()
   if (!q) {
@@ -57,6 +60,7 @@ export function searchCatalog(query: string): {
       transformations: PALETTE_TRANSFORMATIONS,
       formats: FORMATS,
       validators: VALIDATORS,
+      validationSinks: VALIDATION_SINKS,
     }
   }
 
@@ -69,5 +73,8 @@ export function searchCatalog(query: string): {
     ),
     formats: FORMATS.filter((f) => matches([f.id, f.label, f.summary])),
     validators: VALIDATORS.filter((v) => matches([v.type, v.label, v.summary, ...v.keywords])),
+    validationSinks: VALIDATION_SINKS.filter((s) =>
+      matches([s.role, s.label, s.summary, s.jsonKey, ...s.keywords]),
+    ),
   }
 }

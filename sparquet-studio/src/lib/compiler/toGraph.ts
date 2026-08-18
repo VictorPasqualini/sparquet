@@ -23,12 +23,7 @@ import type {
   ValidationSinkRole,
   JobSettings,
 } from '@/types/studio'
-import {
-  DEFAULT_VALIDATION_POLICY,
-  HANDLE,
-  VALIDATION_SINK_HANDLES,
-  VALIDATION_SINK_ROLES,
-} from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY, HANDLE, VALIDATION_SINK_ROLES } from '@/types/studio'
 import { makeEdge, newNodeId } from '@/lib/compiler/graph'
 import { autoLayout } from '@/lib/compiler/layout'
 
@@ -291,8 +286,8 @@ function importTransformation(
 
 /**
  * Splits the `validations` block in three: its rules become one node each, its
- * three written datasets become destination nodes hanging off the last rule, and
- * `on_failure` — run policy, not data — lands in the job settings. The inverse of
+ * three written datasets become standalone quality destinations, and `on_failure` —
+ * run policy, not data — lands in the job settings. The inverse of
  * `buildValidations`.
  */
 function importValidations(
@@ -394,29 +389,31 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
   if (pipeline.validations !== undefined) {
     const { policy, rules, sideSinks } = importValidations(pipeline.validations, issues)
     if (policy) settings.validations = policy
-    let lastRule: ValidationNode | null = null
+    let ruleCount = 0
     for (const rule of rules) {
       const node = makeValidationNode(rule)
       ctx.nodes.push(node)
       ctx.edges.push(makeEdge(tail.id, node.id))
       tail = node
-      lastRule = node
+      ruleCount += 1
     }
 
-    // The side outputs hang off the END of the run — "after every rule ran" is when
-    // the framework writes them. The main chain carries on from the same node,
-    // untouched: `tail` is deliberately left pointing at the last rule.
+    // The three datasets become STANDALONE nodes: the block is job-scoped, so they
+    // belong to no particular rule and take no connection. The main chain carries
+    // on untouched — `tail` is deliberately left pointing at the last rule.
     for (const role of VALIDATION_SINK_ROLES) {
       const raw = sideSinks.get(role)
       if (raw === undefined) continue
       const label = `The validations "${role === 'report' ? 'report' : `outputs.${role}`}"`
-      if (!lastRule) {
-        issues.warning(`${label} destination has no rule to hang off and was dropped.`)
+      if (ruleCount === 0) {
+        // No rules means no `validations` key at all, so the framework never wrote
+        // this dataset either — drawing a box for it would promise a write that
+        // cannot happen.
+        issues.warning(`${label} destination has no validation rule and was dropped.`)
         continue
       }
-      const sink = makeSinkNode(readSinkData(raw, issues, label))
+      const sink = makeSinkNode({ ...readSinkData(raw, issues, label), dqRole: role })
       ctx.nodes.push(sink)
-      ctx.edges.push(makeEdge(lastRule.id, sink.id, HANDLE.in, VALIDATION_SINK_HANDLES[role]))
     }
   }
 

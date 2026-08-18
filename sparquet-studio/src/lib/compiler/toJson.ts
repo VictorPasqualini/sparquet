@@ -44,7 +44,7 @@ import {
   isValidationNode,
   longestCommonPrefix,
   sideParent,
-  validationSinkLink,
+  validationSinkRoleOf,
 } from '@/lib/compiler/graph'
 
 export interface CompileResult {
@@ -243,9 +243,9 @@ function buildRule(node: ValidationNode, issues: Issues): ValidationRuleSpec | n
 }
 
 /**
- * The rule nodes on the shared chain, the job-level run policy and the side-output
+ * The rule nodes on the shared chain, the job-level run policy and the quality
  * destinations → the single `validations` object. No rules means no `validations`
- * key at all, which is also why the side outputs cannot exist without one.
+ * key at all, which is also why a quality destination cannot exist without one.
  */
 function buildValidations(
   nodes: readonly ValidationNode[],
@@ -428,8 +428,12 @@ function reportChainProblem(
 
 /**
  * Splits the destinations in two: the ones the job writes (`outputs[]`) and the
- * ones the validation step writes on the side. A side destination is recognised by
- * the handle its incoming link leaves from, so it is never counted twice.
+ * ones the validation step writes on the side. A quality destination declares its
+ * role on the node, so it is recognised wherever it sits on the canvas — and it can
+ * never be counted twice.
+ *
+ * The first node of a role wins, in `graph.nodes` order, so the emitted JSON stays
+ * the same on every compile of the same canvas.
  */
 function partitionSinks(
   graph: StudioGraph,
@@ -437,36 +441,27 @@ function partitionSinks(
 ): { sinks: SinkNode[]; sideSinks: Map<ValidationSinkRole, SinkNode>; sideIds: Set<string> } {
   const sinks: SinkNode[] = []
   const sideSinks = new Map<ValidationSinkRole, SinkNode>()
-  /** Every sink wired to a side handle, refused ones included — they are reported
+  /** Every quality destination, refused duplicates included — they are reported
    *  here, so the orphan sweep at the end must not report them a second time. */
   const sideIds = new Set<string>()
 
   for (const node of graph.nodes.filter(isSinkNode)) {
     if (isDisabled(node)) continue
-    const link = validationSinkLink(graph, node.id)
-    if (!link) {
+    const role = validationSinkRoleOf(node)
+    if (!role) {
       sinks.push(node)
       continue
     }
     sideIds.add(node.id)
 
-    if (!isValidationNode(link.parent) || isDisabled(link.parent)) {
-      issues.error('A validation side output must hang off a validation rule.', {
+    if (sideSinks.has(role)) {
+      issues.error('Two quality destinations write the same dataset.', {
         nodeId: node.id,
-        hint: 'Re-connect it to the last rule of the run, or wire it into the main chain to make it an ordinary destination.',
+        hint: 'The validations block writes each of `report`, `outputs.valid` and `outputs.invalid` exactly once. Delete this node, or give it another role.',
       })
       continue
     }
-
-    const taken = sideSinks.get(link.role)
-    if (taken) {
-      issues.error('Two destinations claim the same validation side output.', {
-        nodeId: node.id,
-        hint: 'The block writes each of `report`, `outputs.valid` and `outputs.invalid` once. Delete one, or move it to a free handle.',
-      })
-      continue
-    }
-    sideSinks.set(link.role, node)
+    sideSinks.set(role, node)
   }
 
   return { sinks, sideSinks, sideIds }
@@ -484,7 +479,7 @@ export function compileGraph(
     issues.error('The job has no destination.', {
       hint:
         sideSinks.size > 0
-          ? 'The validation report and quarantine are SIDE outputs of the rules — they never replace the job’s own destination. Add one and connect the end of the chain to it.'
+          ? 'The quality report and the quarantine copies are SIDE outputs of the validations block — they never replace the job’s own destination. Add one and connect the end of the chain to it.'
           : 'Add a destination node and connect the end of the chain to it.',
     })
     return { pipeline: null, issues: issues.items }
@@ -592,18 +587,22 @@ export function compileGraph(
     return buildOutput(entry.sink, suffixTransforms, issues)
   })
 
-  // A side output is only meaningful when its rule is part of the compiled block:
-  // otherwise no `validations` key is emitted and the destination is never written.
-  const compiledRules = new Set(validationNodes.map((node) => node.id))
+  // A quality destination is only meaningful alongside a compiled rule: with no
+  // rules there is no `validations` key at all, so nothing would ever be written to
+  // it. They need no connection — the block runs once for the whole job — but they
+  // do need the block to exist.
+  //
+  // Marking them used keeps the orphan sweep below quiet: they are legitimately
+  // unconnected, not left out of the pipeline.
   for (const id of sideIds) ctx.used.add(id)
-  for (const [role, node] of sideSinks) {
-    const link = validationSinkLink(graph, node.id)
-    if (link && compiledRules.has(link.parent.id)) continue
-    sideSinks.delete(role)
-    issues.error('This validation side output hangs off a rule that never runs.', {
-      nodeId: node.id,
-      hint: 'Rules only compile when they sit on the chain every destination shares. Move the rule onto the main chain and re-connect this destination to it.',
-    })
+  if (validationNodes.length === 0) {
+    for (const node of sideSinks.values()) {
+      issues.error('This quality destination has no validation rule to fill it.', {
+        nodeId: node.id,
+        hint: 'The validations block only exists when at least one rule runs on the chain every destination shares. Add a rule from the Quality section, or delete this node.',
+      })
+    }
+    sideSinks.clear()
   }
 
   const validations = buildValidations(

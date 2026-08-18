@@ -10,7 +10,13 @@ import {
 import { nanoid } from 'nanoid'
 import { create } from 'zustand'
 
-import { defaultsFor, getFormat, getTransformation, getValidator } from '@/catalog'
+import {
+  defaultsFor,
+  getFormat,
+  getTransformation,
+  getValidationSink,
+  getValidator,
+} from '@/catalog'
 import {
   autoLayout,
   chainToSink,
@@ -21,20 +27,20 @@ import {
   isSourceNode,
   isTransformNode,
   isValidationNode,
-  isValidationSink,
+  isValidationSinkNode,
   longestCommonPrefix,
   NODE_RENDER_SIZE,
   NOTE_RENDER_SIZE,
   pipelineToGraph,
   serializePipeline,
-  validationSinkLink,
+  validationSinkRoleOf,
 } from '@/lib/compiler'
 import { mergeParams } from '@/lib/params'
 import * as db from '@/lib/storage/db'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { lintJob } from '@/lib/validation/lint'
 import type { PipelineSpec } from '@/types/pipeline'
-import { HANDLE, validationSinkRoleOfHandle } from '@/types/studio'
+import { HANDLE, VALIDATION_SINK_ROLES } from '@/types/studio'
 import type {
   ParamDefinition,
   RunResult,
@@ -44,6 +50,7 @@ import type {
   StudioNode,
   StudioNodeData,
   ValidationIssue,
+  ValidationSinkRole,
   Job,
   JobSettings,
 } from '@/types/studio'
@@ -115,6 +122,11 @@ interface EditorState {
   addTransform: (type: string, position: XYPosition) => string
   addSource: (position: XYPosition, format?: string) => string
   addSink: (position: XYPosition, format?: string) => string
+  /**
+   * One of the datasets the `validations` block writes. It takes no connection —
+   * the block is job-scoped — so it lands wherever it is dropped.
+   */
+  addValidationSink: (role: ValidationSinkRole, position: XYPosition) => string
   /** One `validations.rules` entry, e.g. `not_null`. */
   addValidation: (type: string, position: XYPosition) => string
   addNote: (position: XYPosition) => string
@@ -473,14 +485,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (!target || !source) return
       if (target.data.kind === 'note' || source.data.kind === 'note') return
       if (target.data.kind === 'source') return
-      // A validation side output compiles into `validations.report` / `.outputs.*`:
-      // it is a written dataset, so only a destination node can close that link.
-      if (
-        validationSinkRoleOfHandle(connection.sourceHandle) !== null &&
-        (target.data.kind !== 'sink' || source.data.kind !== 'validation')
-      ) {
-        return
-      }
+      // A quality destination is a declaration, not a chain member: the validations
+      // block writes it from the DataFrame every rule saw, so it has nothing to
+      // receive and nothing to pass on.
+      if (isValidationSinkNode(target) || isValidationSinkNode(source)) return
       if (createsCycle(edges, connection.source, connection.target)) return
 
       // One connection per input handle: a new link replaces the old one.
@@ -537,6 +545,24 @@ export const useEditorStore = create<EditorState>((set, get) => {
           partitionBy: [],
           columns: null,
           options: {},
+        },
+        position,
+      )
+    },
+
+    addValidationSink: (role, position) => {
+      const def = getValidationSink(role)
+      const format = getFormat(def.defaultFormat)
+      return insert(
+        {
+          kind: 'sink',
+          format: def.defaultFormat,
+          path: '',
+          mode: format?.modes[0] ?? 'overwrite',
+          partitionBy: [],
+          columns: null,
+          options: {},
+          dqRole: role,
         },
         position,
       )
@@ -779,14 +805,15 @@ export function mainChainTransformNodeIds(state: StudioGraph): string[] {
 /**
  * The destinations that compile into `outputs[]`.
  *
- * The validation side outputs (report, quarantine) are excluded: they are written
- * from the same DataFrame the rules saw, not from a branch of the chain, and
- * folding them into the shared-prefix computation would cut the main chain short at
- * the rule they hang off.
+ * The quality destinations (report, quarantine) are excluded: they are written from
+ * the same DataFrame the rules saw and carry no connection at all, so a chain walk
+ * that counted them would find no source and drop the real destination with it.
+ * Every walk below shares this filter, which is what keeps `runtimeEndpointNodeIds`
+ * index-aligned with the compiled `outputs` array.
  */
 function mainSinksOf(graph: StudioGraph): StudioNode[] {
   return graph.nodes.filter(
-    (node) => isSinkNode(node) && !isDisabled(node) && !isValidationSink(graph, node.id),
+    (node) => isSinkNode(node) && !isDisabled(node) && !isValidationSinkNode(node),
   )
 }
 
@@ -872,13 +899,20 @@ export function nodeOrdinals(state: StudioGraph): Record<string, number> {
   if (first) push(first.head.id)
   for (const node of mainPrefix) push(node.id)
   // `_write_validation_report` and `_write_validation_outputs` both run BEFORE
-  // `_write_outputs`, so the side outputs are numbered right after the rules and
-  // ahead of the job's own destinations — the order a log reader sees.
-  const rules = new Set(mainPrefix.filter(isValidationNode).map((node) => node.id))
-  for (const sink of graph.nodes.filter(isSinkNode)) {
-    if (isDisabled(sink)) continue
-    const link = validationSinkLink(graph, sink.id)
-    if (link && rules.has(link.parent.id)) push(sink.id)
+  // `_write_outputs`, so the quality destinations are numbered right after the rules
+  // and ahead of the job's own destinations — the order a log reader sees. Without a
+  // rule on the chain no `validations` block is emitted, so nothing is written to
+  // them and they get no number.
+  if (mainPrefix.some(isValidationNode)) {
+    const quality = graph.nodes
+      .filter((node) => !isDisabled(node) && validationSinkRoleOf(node) !== null)
+      // Role order, not canvas order: the numbering must not move when a box does.
+      .sort(
+        (a, b) =>
+          VALIDATION_SINK_ROLES.indexOf(validationSinkRoleOf(a) as ValidationSinkRole) -
+          VALIDATION_SINK_ROLES.indexOf(validationSinkRoleOf(b) as ValidationSinkRole),
+      )
+    for (const sink of quality) push(sink.id)
   }
   for (const entry of chains) {
     for (const node of entry.middle.slice(mainPrefix.length)) push(node.id)

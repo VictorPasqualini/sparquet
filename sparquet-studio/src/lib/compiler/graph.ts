@@ -19,7 +19,7 @@ import type {
   ValidationNode,
   ValidationSinkRole,
 } from '@/types/studio'
-import { HANDLE, validationSinkRoleOfHandle } from '@/types/studio'
+import { HANDLE } from '@/types/studio'
 
 /* ------------------------------------------------------------- type guards */
 
@@ -106,63 +106,26 @@ export function sideParent(graph: StudioGraph, nodeId: string): StudioNode | und
   return parentsOn(graph, nodeId, HANDLE.inRight)[0]
 }
 
-/* -------------------------------------------------- validation side outputs */
-
-export interface ValidationSinkLink {
-  role: ValidationSinkRole
-  /** The rule node the side output hangs off. */
-  parent: StudioNode
-  edge: StudioEdge
-}
+/* ---------------------------------------------------- quality destinations */
 
 /**
- * Is this node a SIDE output of the validation step, and which one?
+ * Which dataset of the `validations` block this node writes, or `null` for an
+ * ordinary destination.
  *
- * The role is read off the edge, never stored on the node, so the graph stays the
- * only source of truth: re-drag the link to another handle and the destination
- * changes meaning immediately, with nothing left to keep in sync.
- *
- * `null` for an ordinary destination on the main chain.
+ * The role is stored ON the node (`SinkNodeData.dqRole`) rather than read off an
+ * incoming edge, because the `validations` block is job-scoped: a job has exactly
+ * one, so a report or a quarantine copy belongs to the job and not to any single
+ * rule. These nodes are declarations — they carry no connection at all, which is
+ * why every chain walk below has to skip them.
  */
-export function validationSinkLink(
-  graph: StudioGraph,
-  nodeId: string,
-): ValidationSinkLink | null {
-  for (const edge of graph.edges) {
-    if (edge.target !== nodeId) continue
-    const role = validationSinkRoleOfHandle(edge.sourceHandle)
-    if (!role) continue
-    const parent = nodeById(graph, edge.source)
-    if (!parent) continue
-    return { role, parent, edge }
-  }
-  return null
+export function validationSinkRoleOf(node: StudioNode): ValidationSinkRole | null {
+  if (!isSinkNode(node)) return null
+  return node.data.dqRole ?? null
 }
 
-/** Shorthand for callers that only need to keep side outputs out of a chain walk. */
-export function isValidationSink(graph: StudioGraph, nodeId: string): boolean {
-  return validationSinkLink(graph, nodeId) !== null
-}
-
-/**
- * Rule nodes with no rule downstream of them — the end of a validation run, and the
- * only place the canvas offers the side-output handles. There is normally exactly
- * one; a graph mid-edit can have several disconnected runs.
- */
-export function isLastValidationOfRun(graph: StudioGraph, nodeId: string): boolean {
-  const seen = new Set<string>([nodeId])
-  const pending = [nodeId]
-  while (pending.length > 0) {
-    const current = pending.pop()
-    if (current === undefined) continue
-    for (const child of primaryChildren(graph, current)) {
-      if (seen.has(child.id)) continue
-      seen.add(child.id)
-      if (isValidationNode(child)) return false
-      pending.push(child.id)
-    }
-  }
-  return true
+/** Shorthand for callers that only need to keep quality sinks out of a chain walk. */
+export function isValidationSinkNode(node: StudioNode): boolean {
+  return validationSinkRoleOf(node) !== null
 }
 
 /* ------------------------------------------------------------------ chains */
@@ -241,8 +204,8 @@ export function makeEdge(
   sourceHandle: string = HANDLE.out,
 ): StudioEdge {
   return {
-    // The source handle is part of the id: the same pair of nodes can be linked
-    // from the main output and from a validation side output at the same time.
+    // Both handles are part of the id so the same pair of nodes can be linked
+    // twice — a source feeding both inputs of a join, say — without colliding.
     id: `e-${sourceId}-${sourceHandle}-${targetHandle}-${targetId}`,
     source: sourceId,
     target: targetId,

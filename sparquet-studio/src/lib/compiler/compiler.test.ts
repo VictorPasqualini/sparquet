@@ -12,6 +12,7 @@ import type {
   StudioGraph,
   TransformNode,
   ValidationNode,
+  ValidationSinkRole,
   JobSettings,
 } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
@@ -39,7 +40,12 @@ const transformNode = (
   data: { kind: 'transform', transform, params, ...extra },
 })
 
-const sinkNode = (id: string, format = 'parquet', path = '/out'): SinkNode => ({
+const sinkNode = (
+  id: string,
+  format = 'parquet',
+  path = '/out',
+  dqRole?: ValidationSinkRole,
+): SinkNode => ({
   id,
   type: 'sink',
   position: { x: 0, y: 0 },
@@ -51,6 +57,7 @@ const sinkNode = (id: string, format = 'parquet', path = '/out'): SinkNode => ({
     partitionBy: [],
     columns: null,
     options: {},
+    ...(dqRole ? { dqRole } : {}),
   },
 })
 
@@ -72,15 +79,6 @@ const link = (source: string, target: string, handle: string = HANDLE.in): Studi
   target,
   sourceHandle: HANDLE.out,
   targetHandle: handle,
-})
-
-/** A link leaving one of a rule node's validation side outputs. */
-const sideLink = (source: string, target: string, sourceHandle: string): StudioEdge => ({
-  id: `${source}->${target}:${sourceHandle}`,
-  source,
-  target,
-  sourceHandle,
-  targetHandle: HANDLE.in,
 })
 
 const errorsOf = (issues: { severity: string; message: string }[]) =>
@@ -306,8 +304,8 @@ describe('round trip', () => {
     expect(compiled.validations?.rules).toHaveLength(2)
     expect(compiled.validations?.report?.path).toBe('/dq/report')
 
-    // One node per rule; the report is a destination hanging off the LAST of them,
-    // beside the job's own output — never in place of it.
+    // One node per rule; the report is a STANDALONE destination beside the job's
+    // own output — never in place of it, and wired to nothing.
     const { graph, settings } = pipelineToGraph(pipeline)
     const rules = graph.nodes.filter((node) => node.data.kind === 'validation')
     expect(rules).toHaveLength(2)
@@ -317,10 +315,11 @@ describe('round trip', () => {
 
     const sinks = graph.nodes.filter((node) => node.data.kind === 'sink')
     expect(sinks).toHaveLength(2)
-    const reportEdge = graph.edges.find((edge) => edge.sourceHandle === HANDLE.outReport)
-    expect(reportEdge?.source).toBe(rules[1].id)
-    const reportSink = sinks.find((node) => node.id === reportEdge?.target)
+    const reportSink = sinks.find(
+      (node) => node.data.kind === 'sink' && node.data.dqRole === 'report',
+    )
     expect(reportSink?.data.kind === 'sink' && reportSink.data.path).toBe('/dq/report')
+    expect(graph.edges.some((edge) => edge.target === reportSink?.id)).toBe(false)
 
     // Only the run policy is left in the settings.
     expect(settings.validations).toEqual({ onFailure: 'warn' })
@@ -350,20 +349,23 @@ describe('round trip', () => {
     const sinks = graph.nodes.filter((node) => node.data.kind === 'sink')
     expect(sinks).toHaveLength(3)
 
-    const rule = graph.nodes.find((node) => node.data.kind === 'validation')
-    const bySourceHandle = (handle: string) =>
-      graph.edges.find((edge) => edge.sourceHandle === handle)
-    const validEdge = bySourceHandle(HANDLE.outValid)
-    const invalidEdge = bySourceHandle(HANDLE.outInvalid)
-    expect(validEdge?.source).toBe(rule?.id)
-    expect(invalidEdge?.source).toBe(rule?.id)
-
-    const pathOf = (id?: string) => {
-      const node = sinks.find((sink) => sink.id === id)
+    const pathOfRole = (role: string) => {
+      const node = sinks.find((sink) => sink.data.kind === 'sink' && sink.data.dqRole === role)
       return node?.data.kind === 'sink' ? node.data.path : undefined
     }
-    expect(pathOf(validEdge?.target)).toBe('silver.ok')
-    expect(pathOf(invalidEdge?.target)).toBe('silver.quarentena')
+    expect(pathOfRole('valid')).toBe('silver.ok')
+    expect(pathOfRole('invalid')).toBe('silver.quarentena')
+
+    // Neither is wired to anything: the block is job-scoped, so they hang off no rule.
+    const quarantineIds = sinks
+      .filter((sink) => sink.data.kind === 'sink' && sink.data.dqRole !== undefined)
+      .map((sink) => sink.id)
+    expect(quarantineIds).toHaveLength(2)
+    expect(
+      graph.edges.some(
+        (edge) => quarantineIds.includes(edge.target) || quarantineIds.includes(edge.source),
+      ),
+    ).toBe(false)
 
     // The main chain still ends at the job's own destination, untouched.
     expect(compiled.output?.path).toBe('silver.pedidos')
@@ -569,10 +571,9 @@ describe('compileGraph', () => {
       ],
     }
 
-    const report = sinkNode('dq', 'csv', '/dq')
+    const report = sinkNode('dq', 'csv', '/dq', 'report')
     report.data.mode = 'append'
     graph.nodes.push(report)
-    graph.edges.push(sideLink('v3', 'dq', HANDLE.outReport))
 
     const { pipeline, issues } = compileGraph(graph, {
       ...SETTINGS,
@@ -698,22 +699,22 @@ describe('compileGraph', () => {
   })
 })
 
-/* --------------------------------------------------- validation side outputs */
+/* ------------------------------------------------- quality destinations */
 
-describe('validation side outputs', () => {
-  /** src → v1 → out, with `dq` hanging off v1 through `handle`. */
-  const withSideSink = (handle: string, sinkId = 'dq'): StudioGraph => ({
+describe('quality destinations', () => {
+  /** src → v1 → out, plus a standalone quality destination in the given role. */
+  const withQualitySink = (role: ValidationSinkRole, sinkId = 'dq'): StudioGraph => ({
     nodes: [
       sourceNode('src'),
       validationNode('v1', 'not_null', { columns: ['id'] }),
       sinkNode('out', 'delta', 'silver.pedidos'),
-      sinkNode(sinkId, 'delta', 'dq.rows'),
+      sinkNode(sinkId, 'delta', 'dq.rows', role),
     ],
-    edges: [link('src', 'v1'), link('v1', 'out'), sideLink('v1', sinkId, handle)],
+    edges: [link('src', 'v1'), link('v1', 'out')],
   })
 
-  it('compiles a side sink into validations, never into outputs', () => {
-    const { pipeline, issues } = compileGraph(withSideSink(HANDLE.outInvalid), SETTINGS)
+  it('compiles a quality sink into validations, never into outputs', () => {
+    const { pipeline, issues } = compileGraph(withQualitySink('invalid'), SETTINGS)
     expect(errorsOf(issues)).toEqual([])
     expect(pipeline?.validations?.outputs).toEqual({
       invalid: { format: 'delta', path: 'dq.rows', mode: 'overwrite' },
@@ -723,23 +724,68 @@ describe('validation side outputs', () => {
     expect(pipeline?.output?.path).toBe('silver.pedidos')
   })
 
+  it('finds a quality sink wherever it sits, with no connection at all', () => {
+    // Same graph, but the node is declared before the source and after the sink in
+    // node order — position on the canvas carries no meaning for these.
+    const graph: StudioGraph = {
+      nodes: [
+        sinkNode('dq', 'csv', '/dq/report', 'report'),
+        sourceNode('src'),
+        validationNode('v1', 'not_null', { columns: ['id'] }),
+        sinkNode('out', 'delta', 'silver.pedidos'),
+      ],
+      edges: [link('src', 'v1'), link('v1', 'out')],
+    }
+
+    const { pipeline, issues } = compileGraph(graph, SETTINGS)
+    expect(errorsOf(issues)).toEqual([])
+    expect(pipeline?.validations?.report).toEqual({
+      format: 'csv',
+      path: '/dq/report',
+      mode: 'overwrite',
+    })
+    // And it is never reported as an unreachable node, because it is not one.
+    expect(issues.map((issue) => issue.message)).not.toContain(
+      'This node does not reach a destination and was left out.',
+    )
+  })
+
+  it('keeps the shared prefix intact: a quality sink is not a second chain', () => {
+    const graph: StudioGraph = {
+      nodes: [
+        sourceNode('src'),
+        transformNode('t1', 'filter', { condition: '1 = 1' }),
+        validationNode('v1', 'not_null', { columns: ['id'] }),
+        sinkNode('out', 'delta', 'silver.pedidos'),
+        sinkNode('dq', 'csv', '/dq', 'report'),
+      ],
+      edges: [link('src', 't1'), link('t1', 'v1'), link('v1', 'out')],
+    }
+
+    const { pipeline, issues } = compileGraph(graph, SETTINGS)
+    expect(errorsOf(issues)).toEqual([])
+    // The filter stays a MAIN transformation: had the quality sink been walked as a
+    // chain, the shared prefix would have collapsed and pushed it onto the output.
+    expect(pipeline?.transformations).toEqual([{ type: 'filter', condition: '1 = 1' }])
+    expect(pipeline?.output?.transformations).toBeUndefined()
+  })
+
   it('orders the quarantine keys valid then invalid, whatever the canvas order', () => {
-    const graph = withSideSink(HANDLE.outInvalid)
-    graph.nodes.push(sinkNode('ok', 'delta', 'dq.ok'))
-    graph.edges.push(sideLink('v1', 'ok', HANDLE.outValid))
+    const graph = withQualitySink('invalid')
+    graph.nodes.push(sinkNode('ok', 'delta', 'dq.ok', 'valid'))
 
     const { pipeline } = compileGraph(graph, SETTINGS)
     expect(Object.keys(pipeline?.validations?.outputs ?? {})).toEqual(['valid', 'invalid'])
   })
 
-  it('does not let a side sink stand in for the job destination', () => {
+  it('does not let a quality sink stand in for the job destination', () => {
     const graph: StudioGraph = {
       nodes: [
         sourceNode('src'),
         validationNode('v1', 'not_null', { columns: ['id'] }),
-        sinkNode('dq', 'delta', 'dq.rows'),
+        sinkNode('dq', 'delta', 'dq.rows', 'report'),
       ],
-      edges: [link('src', 'v1'), sideLink('v1', 'dq', HANDLE.outReport)],
+      edges: [link('src', 'v1')],
     }
 
     const { pipeline, issues } = compileGraph(graph, SETTINGS)
@@ -747,37 +793,39 @@ describe('validation side outputs', () => {
     expect(errorsOf(issues)).toContain('The job has no destination.')
   })
 
-  it('refuses two destinations on the same side output', () => {
-    const graph = withSideSink(HANDLE.outReport)
-    graph.nodes.push(sinkNode('dq2', 'csv', '/dq/other'))
-    graph.edges.push(sideLink('v1', 'dq2', HANDLE.outReport))
+  it('refuses two destinations in the same role, keeping the first', () => {
+    const graph = withQualitySink('report')
+    graph.nodes.push(sinkNode('dq2', 'csv', '/dq/other', 'report'))
 
     const { pipeline, issues } = compileGraph(graph, SETTINGS)
     expect(pipeline).toBeNull()
-    expect(errorsOf(issues)).toContain(
-      'Two destinations claim the same validation side output.',
+    expect(errorsOf(issues)).toContain('Two quality destinations write the same dataset.')
+    // The second one is the one reported: the first keeps the role, deterministically.
+    const duplicate = issues.find(
+      (issue) => issue.message === 'Two quality destinations write the same dataset.',
     )
+    expect(duplicate?.nodeId).toBe('dq2')
   })
 
-  it('refuses a side output that does not leave a rule', () => {
+  it('refuses a quality sink in a job with no compiled rule', () => {
     const graph: StudioGraph = {
       nodes: [
         sourceNode('src'),
         transformNode('t1', 'filter', { condition: '1 = 1' }),
         sinkNode('out'),
-        sinkNode('dq', 'csv', '/dq'),
+        sinkNode('dq', 'csv', '/dq', 'report'),
       ],
-      edges: [link('src', 't1'), link('t1', 'out'), sideLink('t1', 'dq', HANDLE.outReport)],
+      edges: [link('src', 't1'), link('t1', 'out')],
     }
 
     const { pipeline, issues } = compileGraph(graph, SETTINGS)
     expect(pipeline).toBeNull()
     expect(errorsOf(issues)).toContain(
-      'A validation side output must hang off a validation rule.',
+      'This quality destination has no validation rule to fill it.',
     )
   })
 
-  it('refuses a side output whose rule never compiles', () => {
+  it('refuses a quality sink whose only rule never compiles', () => {
     // The rule sits past the fan-out, so it is not part of the block.
     const graph: StudioGraph = {
       nodes: [
@@ -786,25 +834,19 @@ describe('validation side outputs', () => {
         validationNode('v1', 'not_null', { columns: ['id'] }),
         sinkNode('a', 'csv', '/a'),
         sinkNode('b', 'csv', '/b'),
-        sinkNode('dq', 'csv', '/dq'),
+        sinkNode('dq', 'csv', '/dq', 'report'),
       ],
-      edges: [
-        link('src', 't1'),
-        link('t1', 'v1'),
-        link('v1', 'a'),
-        link('t1', 'b'),
-        sideLink('v1', 'dq', HANDLE.outReport),
-      ],
+      edges: [link('src', 't1'), link('t1', 'v1'), link('v1', 'a'), link('t1', 'b')],
     }
 
     const { pipeline, issues } = compileGraph(graph, SETTINGS)
     expect(pipeline).toBeNull()
     expect(errorsOf(issues)).toContain(
-      'This validation side output hangs off a rule that never runs.',
+      'This quality destination has no validation rule to fill it.',
     )
   })
 
-  it('keeps the side sinks out of the main row when laying the canvas out', () => {
+  it('keeps the quality sinks out of the main row when laying the canvas out', () => {
     const { graph } = pipelineToGraph({
       name: 'q',
       input: { format: 'delta', path: 'bronze.p' },
@@ -817,21 +859,22 @@ describe('validation side outputs', () => {
     })
 
     const laid = autoLayout(graph)
-    const invalidEdge = laid.edges.find((edge) => edge.sourceHandle === HANDLE.outInvalid)
-    const side = laid.nodes.find((node) => node.id === invalidEdge?.target)
+    const side = laid.nodes.find(
+      (node) => node.data.kind === 'sink' && node.data.dqRole === 'invalid',
+    )
     const main = laid.nodes.filter((node) => node.id !== side?.id)
     const lowestMain = Math.max(...main.map((node) => node.position.y))
-    // Below the whole diagram, and in its parent rule's column, so the link reads
-    // as a drop off the chain rather than another step in it.
+    const rule = laid.nodes.find((node) => node.data.kind === 'validation')
+    // Below the whole diagram, in the last rule's column: near what fills it, and
+    // clear of the row the data actually flows along.
     expect(side?.position.y).toBeGreaterThan(lowestMain)
-    const rule = laid.nodes.find((node) => node.id === invalidEdge?.source)
     expect(side?.position.x).toBe(rule?.position.x)
     // The main destination stays on the row, to the right of the rule.
     const output = main.find((node) => node.data.kind === 'sink')
     expect(output?.position.y).toBe(rule?.position.y)
   })
 
-  it('drops the side destinations of a validations block with no usable rule', () => {
+  it('drops the quality destinations of a validations block with no usable rule', () => {
     const { graph, issues } = pipelineToGraph({
       name: 'q',
       input: { format: 'delta', path: 'bronze.p' },
@@ -845,7 +888,7 @@ describe('validation side outputs', () => {
 
     expect(graph.nodes.filter((node) => node.data.kind === 'sink')).toHaveLength(1)
     expect(issues.map((issue) => issue.message)).toContain(
-      'The validations "report" destination has no rule to hang off and was dropped.',
+      'The validations "report" destination has no validation rule and was dropped.',
     )
   })
 

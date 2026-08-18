@@ -10,7 +10,7 @@ import { graphlib, layout } from '@dagrejs/dagre'
 
 import type { StudioGraph, StudioNode, ValidationSinkRole } from '@/types/studio'
 import { VALIDATION_SINK_ROLES } from '@/types/studio'
-import { validationSinkLink } from '@/lib/compiler/graph'
+import { isValidationNode, validationSinkRoleOf } from '@/lib/compiler/graph'
 
 export interface LayoutOptions {
   direction?: 'LR' | 'TB'
@@ -53,16 +53,16 @@ export function autoLayout(graph: StudioGraph, options: LayoutOptions = {}): Stu
       : { width: settings.nodeWidth, height: settings.nodeHeight }
 
   /**
-   * The validation side outputs are kept OUT of the ranking. Dagre would give them
-   * a rank of their own and push them into the main row, which is exactly the wrong
-   * story: they are not a stage the data passes through, they hang off the rules
-   * while the chain carries on to the right. They are placed by hand below.
+   * The quality destinations are kept OUT of the ranking. They have no edges at
+   * all, so dagre would drop them into the first column, right where the input
+   * belongs — exactly the wrong story: they are not a stage the data passes
+   * through, they are datasets the validations block writes while the chain carries
+   * on to the right. They are placed by hand below, under the rules.
    */
-  const side = new Map<string, { role: ValidationSinkRole; parentId: string }>()
+  const side = new Map<string, ValidationSinkRole>()
   for (const node of graph.nodes) {
-    if (node.data.kind !== 'sink') continue
-    const link = validationSinkLink(graph, node.id)
-    if (link) side.set(node.id, { role: link.role, parentId: link.parent.id })
+    const role = validationSinkRoleOf(node)
+    if (role) side.set(node.id, role)
   }
 
   const dag = new graphlib.Graph({ multigraph: false, compound: false })
@@ -114,20 +114,29 @@ export function autoLayout(graph: StudioGraph, options: LayoutOptions = {}): Stu
   }
   if (!Number.isFinite(bottom)) bottom = 0
 
-  // One row per parent rule, under the whole diagram so nothing can collide with
-  // it, starting at the parent's column so the drop is visibly its own.
-  const rowIndexOf = new Map<string, number>()
-  for (const [nodeId, info] of [...side].sort(
-    (a, b) => VALIDATION_SINK_ROLES.indexOf(a[1].role) - VALIDATION_SINK_ROLES.indexOf(b[1].role),
-  )) {
-    const column = rowIndexOf.get(info.parentId) ?? 0
-    rowIndexOf.set(info.parentId, column + 1)
-    const anchor = placedAt.get(info.parentId)
+  /**
+   * One row under the whole diagram, starting at the last rule's column: near the
+   * rules that fill them, and clear of the row the data actually flows along.
+   * Falls back to the leftmost placed node when the graph has no rule to sit under.
+   */
+  const ruleColumns = graph.nodes
+    .filter((node) => !side.has(node.id) && isValidationNode(node))
+    .map((node) => placedAt.get(node.id)?.x)
+    .filter((x): x is number => x !== undefined)
+  const anchorX =
+    ruleColumns.length > 0
+      ? Math.max(...ruleColumns)
+      : Math.min(0, ...[...placedAt.values()].map((position) => position.x))
+
+  const ordered = [...side].sort(
+    (a, b) => VALIDATION_SINK_ROLES.indexOf(a[1]) - VALIDATION_SINK_ROLES.indexOf(b[1]),
+  )
+  ordered.forEach(([nodeId], column) => {
     placedAt.set(nodeId, {
-      x: (anchor?.x ?? 0) + column * (settings.nodeWidth + settings.nodeSep),
+      x: anchorX + column * (settings.nodeWidth + settings.nodeSep),
       y: bottom + settings.rankSep,
     })
-  }
+  })
 
   const nodes = graph.nodes.map((node) => {
     const position = placedAt.get(node.id)

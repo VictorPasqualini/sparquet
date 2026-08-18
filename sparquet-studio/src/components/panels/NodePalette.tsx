@@ -6,6 +6,7 @@ import {
   Bug,
   ChevronRight,
   CircleSlash,
+  ClipboardList,
   Columns3,
   Combine,
   CopyMinus,
@@ -29,6 +30,8 @@ import {
   Ruler,
   Search,
   SearchX,
+  ShieldAlert,
+  ShieldCheck,
   Sigma,
   StickyNote,
   Table2,
@@ -50,6 +53,7 @@ import {
   type NodeAccent,
   type NodeFamily,
   type TransformationDef,
+  type ValidationSinkDef,
   type ValidatorDef,
 } from '@/catalog'
 import { EmptyState, IconButton, Input, Kbd } from '@/components/ui'
@@ -67,6 +71,7 @@ const ICONS: Record<string, LucideIcon> = {
   Braces,
   Bug,
   CircleSlash,
+  ClipboardList,
   Columns3,
   Combine,
   CopyMinus,
@@ -88,6 +93,8 @@ const ICONS: Record<string, LucideIcon> = {
   Radio,
   Regex,
   Ruler,
+  ShieldAlert,
+  ShieldCheck,
   Sigma,
   Table2,
   Terminal,
@@ -173,6 +180,25 @@ function validatorEntry(def: ValidatorDef): PaletteEntry {
   }
 }
 
+/**
+ * One of the three datasets the `validations` block writes.
+ *
+ * It is added exactly like every other node — click or drag — and then sits on the
+ * canvas unconnected: the block is job-scoped, so the destination belongs to the
+ * job and not to any single rule. The caveat rides along in the tooltip because
+ * "copy, not split" is the one thing that is easy to get wrong here.
+ */
+function validationSinkEntry(def: ValidationSinkDef): PaletteEntry {
+  return {
+    key: `dq-sink:${def.role}`,
+    icon: iconFor(def.icon),
+    label: def.label,
+    summary: `${def.summary} ${def.caveat}`,
+    accent: 'output',
+    payload: { kind: 'sink', format: def.defaultFormat, dqRole: def.role },
+  }
+}
+
 function formatEntry(def: FormatDef, kind: 'source' | 'sink'): PaletteEntry {
   return {
     key: `${kind}:${def.id}`,
@@ -197,6 +223,7 @@ export function NodePalette() {
   const addTransform = useEditorStore((s) => s.addTransform)
   const addSource = useEditorStore((s) => s.addSource)
   const addSink = useEditorStore((s) => s.addSink)
+  const addValidationSink = useEditorStore((s) => s.addValidationSink)
   const addValidation = useEditorStore((s) => s.addValidation)
   const addNote = useEditorStore((s) => s.addNote)
 
@@ -212,7 +239,8 @@ export function NodePalette() {
           addSource(position, payload.format)
           break
         case 'sink':
-          addSink(position, payload.format)
+          if (payload.dqRole) addValidationSink(payload.dqRole, position)
+          else addSink(position, payload.format)
           break
         case 'validation':
           addValidation(payload.type, position)
@@ -222,7 +250,7 @@ export function NodePalette() {
           break
       }
     },
-    [addTransform, addSource, addSink, addValidation, addNote],
+    [addTransform, addSource, addSink, addValidationSink, addValidation, addNote],
   )
 
   const sections = useMemo<PaletteSection[]>(() => {
@@ -249,8 +277,13 @@ export function NodePalette() {
         id: 'quality',
         title: 'Quality',
         // One node per rule, exactly like transformations: each entry drops a single
-        // check onto the chain. The block-level policy lives in the job settings.
-        entries: found.validators.map((def) => validatorEntry(def)),
+        // check onto the chain. The three destinations after them are declarations
+        // rather than steps — they take no connection, because the validations block
+        // is job-scoped. The block-level policy lives in the job settings.
+        entries: [
+          ...found.validators.map((def) => validatorEntry(def)),
+          ...found.validationSinks.map((def) => validationSinkEntry(def)),
+        ],
         hint:
           found.validators.length > 0
             ? 'Rules report on the data without changing it — use transformations to remove rows.'

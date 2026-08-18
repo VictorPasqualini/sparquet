@@ -24,31 +24,45 @@ Aperte <kbd>/</kbd> em qualquer lugar para focar a busca da palette.
 | Source | `input`, ou um `with` de join/union | nenhum |
 | Transformation | uma entrada de `transformations` | um (dois para `join` e `union`) |
 | Validation rule | uma entrada de `validations.rules` — uma caixa por regra | um |
-| Destination (saída lateral) | `validations.report` ou `validations.outputs.valid`/`.invalid`, quando ligada ao handle inferior de uma regra | um |
+| Quality destination | `validations.report` ou `validations.outputs.valid`/`.invalid` | nenhum — é uma declaração |
 | Destination | uma entrada de `outputs` | um |
 | Note | nada | nenhum |
 
 Um nó mostra seu parâmetro mais significativo sob o título — a condição de um filter, a expressão de uma coluna calculada, o tipo e a chave do join — então um Job é legível sem abrir nada.
 
-## Saídas laterais da validação
+## Destinos de qualidade
 
-Uma regra de validação tem três handles extras na borda **inferior**: `report`,
-`valid rows` e `invalid rows`. Ligue um deles a um destino e ele compila para
-`validations.report` ou `validations.outputs.valid` / `.invalid` — nunca para os
-`outputs` do próprio Job.
+O bloco `validations` grava até três datasets próprios, e cada um é uma caixa que você
+adiciona pela seção **Quality** da paleta — não algo que você liga com uma aresta:
 
-A geometria é o significado: elas pendem *abaixo* da cadeia, que segue à direita
-intacta.
+| Item da paleta | Compila para |
+|---|---|
+| Quality report | `validations.report` — uma linha por regra |
+| Quarantine — valid rows | `validations.outputs.valid` |
+| Quarantine — invalid rows | `validations.outputs.invalid` |
 
-<Aside type="caution" title="É cópia, não desvio">
-  A quarentena não desvia linhas. O framework grava as saídas laterais e depois
-  grava os destinos do Job a partir do **mesmo DataFrame completo** — inclusive as
-  inválidas. Se o destino principal não pode carregá-las, filtre-as
-  explicitamente com um nó `filter`.
+Eles **não recebem conexões**: o bloco `validations` é um por Job, então pertencem ao
+Job, não a uma regra específica. Solte um em qualquer lugar do canvas e ele compila.
+Um Job aceita um de cada; um segundo é erro, assim como um destino de qualidade sem
+nenhuma regra de validação para alimentá-lo.
+
+<Aside type="caution" title="Quarentena audita — `filter` roteia">
+  Quarentena é **cópia, não desvio**. O framework grava os destinos de quarentena e
+  depois grava os destinos do próprio Job a partir do **mesmo DataFrame completo** —
+  inclusive as linhas inválidas. Ou seja, um Job com quarentena grava as linhas ruins
+  duas vezes: uma na quarentena, outra no destino principal.
+
+  Use para **auditar**: "quais linhas violaram uma regra, e quantas?" — sem mexer no
+  fluxo.
+
+  Para **rotear** — só as linhas boas chegando na tabela final — use o próprio
+  pipeline: um nó `filter` antes do destino, e um segundo branch para as rejeitadas.
+  O custo é reescrever a condição em SQL, então mantenha-a em sincronia com as
+  regras; o ganho é o destino principal carregar exatamente o que você quis.
 </Aside>
 
-`on_failure` não é um destino e continua nas **configurações do Job**: ela decide
-se uma violação aborta a execução.
+`on_failure` não é um destino e continua nas **configurações do Job**: ela decide se
+uma violação aborta a execução.
 
 ## Conectando
 

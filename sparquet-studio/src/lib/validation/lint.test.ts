@@ -74,15 +74,6 @@ const link = (from: string, to: string, handle: string = HANDLE.in): StudioEdge 
   targetHandle: handle,
 })
 
-/** A link leaving one of a rule node's validation side outputs. */
-const sideLink = (from: string, to: string, sourceHandle: string): StudioEdge => ({
-  id: `${from}->${to}:${sourceHandle}`,
-  source: from,
-  target: to,
-  sourceHandle,
-  targetHandle: HANDLE.in,
-})
-
 const lint = (
   nodes: StudioNode[],
   edges: StudioEdge[],
@@ -204,46 +195,54 @@ describe('lintJob', () => {
           source('src'),
           validation('v'),
           sink('out'),
-          sink('dq', { format: '', path: '/dq/report' }),
+          sink('dq', { format: '', path: '/dq/report', dqRole: 'report' }),
         ],
-        [link('src', 'v'), link('v', 'out'), sideLink('v', 'dq', HANDLE.outReport)],
+        [link('src', 'v'), link('v', 'out')],
       )
-      // A side output is a destination like any other: same node-scoped rule.
+      // A quality destination is a real write: same node-scoped rules as any sink.
       const issue = issues.find((entry) => entry.id === 'field:dq:format')
       expect(issue?.severity).toBe('error')
       expect(issue?.nodeId).toBe('dq')
     })
 
-    it('accepts a complete report and quarantine wired to a row-level rule', () => {
+    it('accepts a complete report and quarantine beside a row-level rule', () => {
       const issues = lint(
         [
           source('src'),
           validation('v'),
           sink('out'),
-          sink('dq', { format: 'csv', path: '/dq/report' }),
-          sink('ok', { format: 'delta', path: 'silver.ok' }),
-          sink('bad', { format: 'delta', path: 'silver.bad' }),
+          sink('dq', { format: 'csv', path: '/dq/report', dqRole: 'report' }),
+          sink('ok', { format: 'delta', path: 'silver.ok', dqRole: 'valid' }),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
         ],
-        [
-          link('src', 'v'),
-          link('v', 'out'),
-          sideLink('v', 'dq', HANDLE.outReport),
-          sideLink('v', 'ok', HANDLE.outValid),
-          sideLink('v', 'bad', HANDLE.outInvalid),
-        ],
+        [link('src', 'v'), link('v', 'out')],
       )
       expect(idsOf(issues).filter((id) => id.startsWith('dq-'))).toEqual([])
     })
 
-    it('warns about a quarantine sink with only aggregate rules upstream', () => {
+    it('never reports an unconnected quality destination as an orphan', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq/report', dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      // It is a declaration, not a chain member: having no incoming link is correct.
+      expect(idsOf(issues)).not.toContain('orphan:dq')
+    })
+
+    it('warns about a quarantine sink with only aggregate rules on the chain', () => {
       const issues = lint(
         [
           source('src'),
           validation('v', 'row_count', { min: 1 }),
           sink('out'),
-          sink('bad', { format: 'delta', path: 'silver.bad' }),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
         ],
-        [link('src', 'v'), link('v', 'out'), sideLink('v', 'bad', HANDLE.outInvalid)],
+        [link('src', 'v'), link('v', 'out')],
       )
       const issue = issues.find((entry) => entry.id === 'dq-sink-no-row-rule:bad')
       expect(issue?.severity).toBe('warning')
@@ -260,9 +259,9 @@ describe('lintJob', () => {
             must_be: '< 1%',
           }),
           sink('out'),
-          sink('bad', { format: 'delta', path: 'silver.bad' }),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
         ],
-        [link('src', 'v'), link('v', 'out'), sideLink('v', 'bad', HANDLE.outInvalid)],
+        [link('src', 'v'), link('v', 'out')],
       )
       expect(idsOf(issues)).not.toContain('dq-sink-no-row-rule:bad')
     })
@@ -273,45 +272,66 @@ describe('lintJob', () => {
           source('src'),
           validation('v'),
           sink('out'),
-          sink('dq', { format: 'csv', path: '/dq', columns: ['passed'] }),
+          sink('dq', { format: 'csv', path: '/dq', columns: ['passed'], dqRole: 'report' }),
         ],
-        [link('src', 'v'), link('v', 'out'), sideLink('v', 'dq', HANDLE.outReport)],
+        [link('src', 'v'), link('v', 'out')],
       )
       expect(idsOf(issues)).toContain('dq-report-columns:dq')
     })
 
-    it('flags a side output hanging off a muted rule', () => {
+    it('flags a quality destination in a job whose only rule is muted', () => {
       const issues = lint(
         [
           source('src'),
           validation('v', 'not_null', { columns: ['id'] }, { disabled: true }),
           sink('out'),
-          sink('dq', { format: 'csv', path: '/dq' }),
+          sink('dq', { format: 'csv', path: '/dq', dqRole: 'report' }),
         ],
-        [link('src', 'v'), link('v', 'out'), sideLink('v', 'dq', HANDLE.outReport)],
+        [link('src', 'v'), link('v', 'out')],
       )
-      const issue = issues.find((entry) => entry.id === 'dq-sink-muted:dq')
+      const issue = issues.find((entry) => entry.id === 'dq-sink-no-rules:dq')
       expect(issue?.severity).toBe('error')
     })
 
-    it('keeps the main chain intact around a side output', () => {
+    it('flags a quality destination in a job with no rule at all', () => {
+      const issues = lint(
+        [source('src'), sink('out'), sink('dq', { format: 'csv', path: '/dq', dqRole: 'report' })],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-no-rules:dq')
+      expect(issue?.severity).toBe('error')
+    })
+
+    it('flags a second destination claiming the same dataset', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq/a', dqRole: 'report' }),
+          sink('dq2', { format: 'csv', path: '/dq/b', dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-duplicate:dq2')
+      expect(issue?.severity).toBe('error')
+      // The first one keeps the role, so it is not flagged as well.
+      expect(idsOf(issues)).not.toContain('dq-sink-duplicate:dq')
+    })
+
+    it('keeps the main chain intact around a quality destination', () => {
       const issues = lint(
         [
           source('src'),
           validation('v'),
           transform('t', 'filter', { condition: 'a > 1' }),
           sink('out'),
-          sink('bad', { format: 'delta', path: 'silver.bad' }),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
         ],
-        [
-          link('src', 'v'),
-          link('v', 't'),
-          link('t', 'out'),
-          sideLink('v', 'bad', HANDLE.outInvalid),
-        ],
+        [link('src', 'v'), link('v', 't'), link('t', 'out')],
       )
-      // The transform after the rule stays on the trunk: the side output is not a
-      // fan-out, so it must not push the chain into per-output branches.
+      // The transform after the rule stays on the trunk: an unconnected quality
+      // destination is not a second sink chain, so it must not shorten the prefix.
       expect(idsOf(issues)).not.toContain('orphan:t')
       expect(idsOf(issues)).not.toContain('validations-branch:v')
     })

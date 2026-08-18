@@ -69,7 +69,7 @@ export const StageNode = memo(function StageNodeRenderer({
   const select = usePipelineEditorStore((state) => state.select)
 
   const connectSource = useConnectSource()
-  const isConnectSource = connectSource?.nodeId === stage.id
+  const isConnectSource = connectSource === stage.id
   const canReceive = connectSource !== null && !isConnectSource
 
   const look = stepLook(status)
@@ -87,7 +87,7 @@ export const StageNode = memo(function StageNodeRenderer({
 
   const finish = () => {
     if (connectSource === null) return
-    connect(connectSource.nodeId, stage.id)
+    connect(connectSource, stage.id)
     cancelConnect()
     select(stage.id)
   }

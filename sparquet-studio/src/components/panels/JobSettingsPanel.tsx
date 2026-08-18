@@ -110,9 +110,9 @@ export function JobSettingsPanel() {
 
           <Callout>
             The three datasets this block writes are <strong>boxes on the canvas</strong>, not
-            settings. Drag from the{' '}
-            {VALIDATION_SINKS.map((sink) => sink.handleLabel).join(', ')} handles under the
-            last rule onto a destination node.
+            settings: {VALIDATION_SINKS.map((sink) => sink.label).join(', ')}. Add them from
+            the Quality section of the palette. They take no connection — the block runs once
+            for the whole job, so they belong to no rule in particular.
           </Callout>
 
           <Callout>

@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest'
 import type { Job, StudioGraph, StudioNode, ValidationNodeData } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
 
-import { upgradeJob, upgradeValidations, upgradeValidationSinks } from './migrations'
+import {
+  LEGACY_VALIDATION_SINK_HANDLES,
+  upgradeJob,
+  upgradeValidations,
+  upgradeValidationSinkNodes,
+  upgradeValidationSinks,
+} from './migrations'
 
 /** The pre-split node: every rule and the block policy on one box. */
 const legacyNode = (id: string, data: Record<string, unknown>): StudioNode =>
@@ -165,9 +171,9 @@ describe('upgradeValidationSinks', () => {
       (item) => item.sourceHandle !== undefined && item.sourceHandle !== HANDLE.out,
     )
     expect(sideEdges.map((item) => item.sourceHandle)).toEqual([
-      HANDLE.outReport,
-      HANDLE.outValid,
-      HANDLE.outInvalid,
+      LEGACY_VALIDATION_SINK_HANDLES.report,
+      LEGACY_VALIDATION_SINK_HANDLES.valid,
+      LEGACY_VALIDATION_SINK_HANDLES.invalid,
     ])
     // "After all rules ran" is the last rule, not the first.
     expect(sideEdges.every((item) => item.source === 'v2')).toBe(true)
@@ -258,7 +264,7 @@ describe('upgradeJob', () => {
     expect(upgraded.settings.validations?.onFailure).toBe('warn')
   })
 
-  it('runs both hops: the rules split AND the datasets become nodes', () => {
+  it('runs every hop: rules split, datasets become nodes, roles move onto them', () => {
     const legacy: Job = {
       ...job,
       graph: {
@@ -278,14 +284,89 @@ describe('upgradeJob', () => {
     const upgraded = upgradeJob(legacy)
 
     expect(upgraded.settings.validations).toEqual({ onFailure: 'warn' })
-    const reportEdge = upgraded.graph.edges.find(
-      (item) => item.sourceHandle === HANDLE.outReport,
+    const sink = upgraded.graph.nodes.find(
+      (item) => item.data.kind === 'sink' && item.data.dqRole === 'report',
     )
-    expect(reportEdge).toBeDefined()
-    const sink = upgraded.graph.nodes.find((item) => item.id === reportEdge?.target)
     expect(sink?.data.kind === 'sink' && sink.data.path).toBe('/dq')
+    // The role is on the node now, so no link is left pointing at it.
+    expect(upgraded.graph.edges.some((item) => item.target === sink?.id)).toBe(false)
 
     // Running it again is a no-op, so the storage migration can skip the write.
     expect(upgradeJob(upgraded)).toBe(upgraded)
+  })
+})
+
+/* ------------------------------------- v5: the role moves onto the node */
+
+describe('upgradeValidationSinkNodes', () => {
+  const rule = (id: string): StudioNode =>
+    ({
+      id,
+      type: 'validation',
+      position: { x: 200, y: 0 },
+      data: { kind: 'validation', validator: 'not_null', params: { columns: ['id'] } },
+    }) as StudioNode
+
+  /** The v4 shape: the datasets hang off the last rule, the role in the handle id. */
+  const v4Graph = (): StudioGraph => ({
+    nodes: [
+      node('src', 'source'),
+      rule('v1'),
+      node('out', 'sink'),
+      node('dq-report', 'sink'),
+      node('dq-invalid', 'sink'),
+    ],
+    edges: [
+      edge('src', 'v1'),
+      edge('v1', 'out'),
+      {
+        id: 'e-report',
+        source: 'v1',
+        target: 'dq-report',
+        sourceHandle: LEGACY_VALIDATION_SINK_HANDLES.report,
+        targetHandle: HANDLE.in,
+      },
+      {
+        id: 'e-invalid',
+        source: 'v1',
+        target: 'dq-invalid',
+        sourceHandle: LEGACY_VALIDATION_SINK_HANDLES.invalid,
+        targetHandle: HANDLE.in,
+      },
+    ],
+  })
+
+  it('stores the role on the node and drops the link', () => {
+    const upgraded = upgradeValidationSinkNodes(v4Graph())
+
+    expect(upgraded.changed).toBe(true)
+    const roleOf = (id: string) => {
+      const found = upgraded.graph.nodes.find((item) => item.id === id)
+      return found?.data.kind === 'sink' ? found.data.dqRole : undefined
+    }
+    expect(roleOf('dq-report')).toBe('report')
+    expect(roleOf('dq-invalid')).toBe('invalid')
+    // The job's own destination keeps its role-free data and its incoming link.
+    expect(roleOf('out')).toBeUndefined()
+    expect(upgraded.graph.edges.map((item) => item.id)).toEqual(['e-src-v1', 'e-v1-out'])
+  })
+
+  it('leaves a graph with no legacy link untouched', () => {
+    const graph: StudioGraph = {
+      nodes: [node('src', 'source'), node('out', 'sink')],
+      edges: [edge('src', 'out')],
+    }
+    const upgraded = upgradeValidationSinkNodes(graph)
+
+    expect(upgraded.changed).toBe(false)
+    expect(upgraded.graph).toBe(graph)
+  })
+
+  it('is idempotent: a second pass changes nothing', () => {
+    const once = upgradeValidationSinkNodes(v4Graph())
+    const twice = upgradeValidationSinkNodes(once.graph)
+
+    expect(twice.changed).toBe(false)
+    expect(twice.graph).toBe(once.graph)
   })
 })

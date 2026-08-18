@@ -58,7 +58,10 @@ export type ValidationNodeData = {
   comment?: string
 }
 
-/** One entry of `outputs` (or the single `output`). */
+/**
+ * One entry of `outputs` (or the single `output`) — unless `dqRole` is set, which
+ * makes it one of the datasets the `validations` block writes instead.
+ */
 export type SinkNodeData = {
   kind: 'sink'
   label?: string
@@ -69,6 +72,16 @@ export type SinkNodeData = {
   /** `null` means "write every column". */
   columns: string[] | null
   options: Record<string, unknown>
+  /**
+   * Set on a QUALITY destination: the node compiles into `validations.report` or
+   * `validations.outputs.{valid,invalid}` instead of `outputs[]`.
+   *
+   * The role lives on the NODE, never on an incoming edge, because the `validations`
+   * block is JOB-scoped — a job has exactly one — so these datasets belong to the
+   * job, not to any particular rule. They are declarations: the canvas gives them
+   * no input and no output handle, and they sit wherever the author drops them.
+   */
+  dqRole?: ValidationSinkRole
   comment?: string
 }
 
@@ -99,12 +112,6 @@ export const HANDLE = {
   inRight: 'in-right',
   /** Single outgoing handle. */
   out: 'out',
-  /** Side output: the data-quality report (`validations.report`). */
-  outReport: 'out-report',
-  /** Side output: rows that broke no row-level rule (`validations.outputs.valid`). */
-  outValid: 'out-valid',
-  /** Side output: rows that broke one (`validations.outputs.invalid`). */
-  outInvalid: 'out-invalid',
 } as const
 
 /**
@@ -115,34 +122,22 @@ export const HANDLE = {
  * complete DataFrame — so a quarantine sink copies rows out, it never removes them
  * from the main chain. Every destination on the trunk still receives every row,
  * invalid ones included.
+ *
+ * A destination declares which one it is in `SinkNodeData.dqRole`. Nothing about
+ * the role is read off an edge: these nodes take no connection at all.
  */
 export type ValidationSinkRole = 'report' | 'valid' | 'invalid'
 
-/** Declaration order — also the order these are written and laid out. */
+/** Declaration order — also the order these are written, laid out and numbered. */
 export const VALIDATION_SINK_ROLES = ['report', 'valid', 'invalid'] as const satisfies
   readonly ValidationSinkRole[]
 
-/** Source handle a rule node exposes for each side output. */
-export const VALIDATION_SINK_HANDLES: Record<ValidationSinkRole, string> = Object.freeze({
-  report: HANDLE.outReport,
-  valid: HANDLE.outValid,
-  invalid: HANDLE.outInvalid,
-})
-
-/** Reverse of `VALIDATION_SINK_HANDLES`, for reading a role off an edge. */
-export const VALIDATION_SINK_ROLE_BY_HANDLE: Readonly<Record<string, ValidationSinkRole>> =
-  Object.freeze({
-    [HANDLE.outReport]: 'report',
-    [HANDLE.outValid]: 'valid',
-    [HANDLE.outInvalid]: 'invalid',
-  })
-
-/** Is this a handle that turns the destination behind it into a side output? */
-export function validationSinkRoleOfHandle(
-  handle: string | null | undefined,
-): ValidationSinkRole | null {
-  if (typeof handle !== 'string') return null
-  return VALIDATION_SINK_ROLE_BY_HANDLE[handle] ?? null
+/**
+ * Narrows a value that crossed a boundary — a drag payload, a stored record — to a
+ * role. Anything else is an ordinary destination.
+ */
+export function isValidationSinkRole(value: unknown): value is ValidationSinkRole {
+  return (VALIDATION_SINK_ROLES as readonly string[]).includes(value as string)
 }
 
 export type StudioEdge = Edge
@@ -171,8 +166,8 @@ export interface ParamDefinition {
  * Only `on_failure` lives here: it decides what happens to the run when a rule is
  * broken, which is a job-wide setting like the Spark configs — not a dataset. The
  * three datasets the block writes (`report`, `outputs.valid`, `outputs.invalid`)
- * are destination NODES on the canvas, reached through the side handles of a rule
- * node; see `ValidationSinkRole`.
+ * are standalone destination NODES on the canvas, added from the Quality section of
+ * the palette; see `ValidationSinkRole`.
  */
 export interface ValidationPolicy {
   onFailure: OnFailureMode

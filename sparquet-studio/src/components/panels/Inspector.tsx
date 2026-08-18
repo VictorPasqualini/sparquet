@@ -75,7 +75,6 @@ import {
   Toggle,
   useConfirm,
 } from '@/components/ui'
-import { useValidationSinkRole } from '@/components/canvas/nodes/SinkNode'
 import { cn } from '@/lib/utils/cn'
 import { useEditorStore } from '@/store/editor'
 import type {
@@ -749,8 +748,9 @@ export function retainOptions(
 function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData }) {
   const updateNodeData = useEditorStore((state) => state.updateNodeData)
   const sink = data.kind === 'sink' ? data : null
-  const sideRole = useValidationSinkRole(id)
-  const sideDef = sink && sideRole ? getValidationSink(sideRole) : null
+  // The role is stored on the node, so nothing has to be looked up in the graph.
+  const sideRole = sink?.dqRole ?? null
+  const sideDef = sideRole ? getValidationSink(sideRole) : null
   const format = getFormat(data.format)
   const formats = sink ? WRITABLE_FORMATS : READABLE_FORMATS
   const optionSpecs = (sink ? format?.writeOptions : format?.readOptions) ?? []
@@ -791,7 +791,7 @@ function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData 
     <div className="space-y-4">
       {sideDef && (
         <section
-          aria-label={`${sideDef.label} — validation side output`}
+          aria-label={`${sideDef.label} — quality destination`}
           className="space-y-1.5 rounded-lg border border-state-info/25 bg-state-info/5 p-2.5"
         >
           <p className="text-2xs font-semibold text-content">

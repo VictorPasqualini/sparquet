@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StudioEdge, StudioNode, Job } from '@/types/studio'
-import { HANDLE } from '@/types/studio'
 
 import { nodeOrdinals, useEditorStore } from './editor'
 import { useSettingsStore } from './settings'
@@ -488,7 +487,7 @@ describe('opening a job saved before validations became per-rule nodes', () => {
     })
   }
 
-  it('splits the rules into nodes and turns the report into a side-output node', () => {
+  it('splits the rules into nodes and turns the report into a quality node', () => {
     const editor = useEditorStore.getState()
     editor.open(legacyJob())
 
@@ -503,12 +502,13 @@ describe('opening a job saved before validations became per-rule nodes', () => {
     // Only the run policy stays in the settings; the report is a box now.
     expect(state.settings.validations).toEqual({ onFailure: 'warn' })
 
-    const lastRule = rules[rules.length - 1]
-    const reportEdge = state.edges.find((edge) => edge.sourceHandle === HANDLE.outReport)
-    expect(reportEdge?.source).toBe(lastRule.id)
-    const reportSink = state.nodes.find((node) => node.id === reportEdge?.target)
-    expect(reportSink?.data.kind).toBe('sink')
-    // The main destination is untouched: the side output is drawn beside it.
+    const reportSink = state.nodes.find(
+      (node) => node.data.kind === 'sink' && node.data.dqRole === 'report',
+    )
+    expect(reportSink).toBeDefined()
+    // A declaration, not a chain member: nothing points at it.
+    expect(state.edges.some((edge) => edge.target === reportSink?.id)).toBe(false)
+    // The main destination is untouched: the quality box is drawn beside it.
     expect(state.nodes.filter((node) => node.data.kind === 'sink')).toHaveLength(2)
 
     // The chain still runs source → rules → sink, and compiles to the same JSON.

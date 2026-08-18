@@ -10,7 +10,7 @@
  * there is nothing to upgrade, which is what lets callers skip the write.
  */
 
-import { isLastValidationOfRun, isValidationNode, makeEdge } from '@/lib/compiler/graph'
+import { isSinkNode, isValidationNode, makeEdge, primaryChildren } from '@/lib/compiler/graph'
 import type { OnFailureMode } from '@/types/pipeline'
 import { ON_FAILURE_MODES } from '@/types/pipeline'
 import type {
@@ -24,12 +24,22 @@ import type {
   ValidationPolicy,
   ValidationSinkRole,
 } from '@/types/studio'
-import {
-  DEFAULT_VALIDATION_POLICY,
-  HANDLE,
-  VALIDATION_SINK_HANDLES,
-  VALIDATION_SINK_ROLES,
-} from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY, HANDLE, VALIDATION_SINK_ROLES } from '@/types/studio'
+
+/**
+ * Source-handle ids storage v4 used to carry the role of a quality destination.
+ *
+ * They exist nowhere else any more — the canvas has no side-output handles — so the
+ * legacy shape is spelled out here, next to the only code that still reads it.
+ */
+export const LEGACY_VALIDATION_SINK_HANDLES: Readonly<Record<ValidationSinkRole, string>> =
+  Object.freeze({ report: 'out-report', valid: 'out-valid', invalid: 'out-invalid' })
+
+const LEGACY_ROLE_BY_HANDLE: Readonly<Record<string, ValidationSinkRole>> = Object.freeze({
+  'out-report': 'report',
+  'out-valid': 'valid',
+  'out-invalid': 'invalid',
+})
 
 /**
  * The pre-split shape: ONE node carrying every rule plus the block-level policy.
@@ -217,6 +227,27 @@ function legacySinkSpecs(policy: LegacyValidationPolicy): [ValidationSinkRole, J
 }
 
 /**
+ * Rule nodes with no rule downstream — the end of a validation run, and where v4
+ * anchored the datasets it moved onto the canvas. There is normally exactly one; a
+ * graph mid-edit can have several disconnected runs.
+ */
+function isLastValidationOfRun(graph: StudioGraph, nodeId: string): boolean {
+  const seen = new Set<string>([nodeId])
+  const pending = [nodeId]
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (current === undefined) continue
+    for (const child of primaryChildren(graph, current)) {
+      if (seen.has(child.id)) continue
+      seen.add(child.id)
+      if (isValidationNode(child)) return false
+      pending.push(child.id)
+    }
+  }
+  return true
+}
+
+/**
  * Moves `validations.report` and `validations.outputs` out of the job settings and
  * onto the canvas, as destination nodes hanging off the LAST rule of the run — the
  * point where "every rule has run" is true, which is when the framework writes them.
@@ -269,7 +300,7 @@ export function upgradeValidationSinks(
         y: anchor.position.y + 220,
       }),
     )
-    edges.push(makeEdge(anchor.id, id, HANDLE.in, VALIDATION_SINK_HANDLES[role]))
+    edges.push(makeEdge(anchor.id, id, HANDLE.in, LEGACY_VALIDATION_SINK_HANDLES[role]))
   })
 
   return {
@@ -279,10 +310,56 @@ export function upgradeValidationSinks(
   }
 }
 
+/* ---------------------------------------- v5: the role moves onto the node */
+
+/** Which dataset a v4 link declared, or `null` for an ordinary connection. */
+function legacyRoleOf(edge: StudioEdge): ValidationSinkRole | null {
+  if (typeof edge.sourceHandle !== 'string') return null
+  return LEGACY_ROLE_BY_HANDLE[edge.sourceHandle] ?? null
+}
+
+/**
+ * Takes the role off the EDGE and puts it on the destination node.
+ *
+ * v4 hung the three datasets off a rule through a handle whose id carried the role.
+ * But the `validations` block is job-scoped — one per job — so a report or a
+ * quarantine copy belongs to no particular rule, and "the last rule" was always an
+ * arbitrary place to hang it from. Three labels crowded under one node also left no
+ * room for a fourth dataset later.
+ *
+ * The destinations become standalone declarations: role in `SinkNodeData.dqRole`,
+ * the links dropped. Positions are kept, so an upgraded canvas still looks familiar.
+ */
+export function upgradeValidationSinkNodes(graph: StudioGraph): {
+  graph: StudioGraph
+  changed: boolean
+} {
+  const roleByTarget = new Map<string, ValidationSinkRole>()
+  for (const edge of graph.edges) {
+    const role = legacyRoleOf(edge)
+    // First link wins, in stored order: two of them into one box never compiled.
+    if (role && !roleByTarget.has(edge.target)) roleByTarget.set(edge.target, role)
+  }
+  if (roleByTarget.size === 0) return { graph, changed: false }
+
+  const nodes: StudioNode[] = graph.nodes.map((node) => {
+    const role = roleByTarget.get(node.id)
+    if (!role || !isSinkNode(node)) return node
+    return { ...node, data: { ...node.data, dqRole: role } }
+  })
+  // Every legacy link goes, including any that pointed at something other than a
+  // destination: the handle it left from no longer exists, so React Flow could not
+  // draw it anyway.
+  const edges = graph.edges.filter((edge) => legacyRoleOf(edge) === null)
+
+  return { graph: { nodes, edges }, changed: true }
+}
+
 /** Brings one stored job up to the current shape. Returns it as-is when already current. */
 export function upgradeJob(job: Job): Job {
   const split = upgradeValidations(job.graph, job.settings)
   const sinks = upgradeValidationSinks(split.graph, split.settings)
-  if (!split.changed && !sinks.changed) return job
-  return { ...job, graph: sinks.graph, settings: sinks.settings }
+  const roles = upgradeValidationSinkNodes(sinks.graph)
+  if (!split.changed && !sinks.changed && !roles.changed) return job
+  return { ...job, graph: roles.graph, settings: sinks.settings }
 }
