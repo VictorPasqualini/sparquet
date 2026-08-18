@@ -11,7 +11,7 @@ import type {
   StudioEdge,
   StudioGraph,
   TransformNode,
-  ValidationsNode,
+  ValidationNode,
   JobSettings,
 } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
@@ -54,16 +54,16 @@ const sinkNode = (id: string, format = 'parquet', path = '/out'): SinkNode => ({
   },
 })
 
-const validationsNode = (id: string): ValidationsNode => ({
+const validationNode = (
+  id: string,
+  validator = 'not_null',
+  params: Record<string, unknown> = { columns: ['id'] },
+  extra: { disabled?: boolean } = {},
+): ValidationNode => ({
   id,
-  type: 'validations',
+  type: 'validation',
   position: { x: 0, y: 0 },
-  data: {
-    kind: 'validations',
-    onFailure: 'warn',
-    rules: [{ type: 'not_null', columns: ['id'] }],
-    report: null,
-  },
+  data: { kind: 'validation', validator, params, ...extra },
 })
 
 const link = (source: string, target: string, handle: string = HANDLE.in): StudioEdge => ({
@@ -297,9 +297,40 @@ describe('round trip', () => {
     expect(compiled.validations?.rules).toHaveLength(2)
     expect(compiled.validations?.report?.path).toBe('/dq/report')
 
-    const { graph } = pipelineToGraph(pipeline)
+    // One node per rule; the block-level policy lands in the job settings.
+    const { graph, settings } = pipelineToGraph(pipeline)
     expect(graph.nodes.filter((node) => node.data.kind === 'sink')).toHaveLength(1)
-    expect(graph.nodes.filter((node) => node.data.kind === 'validations')).toHaveLength(1)
+    const rules = graph.nodes.filter((node) => node.data.kind === 'validation')
+    expect(rules).toHaveLength(2)
+    expect(rules.map((node) => (node.data.kind === 'validation' ? node.data.validator : ''))).toEqual(
+      ['not_null', 'range'],
+    )
+    expect(settings.validations).toEqual({
+      onFailure: 'warn',
+      report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
+    })
+  })
+
+  it('keeps the quarantine outputs of a validations block', () => {
+    const pipeline = {
+      name: 'quarantine',
+      input: { format: 'delta', path: 'bronze.pedidos' },
+      validations: {
+        on_failure: 'warn',
+        outputs: {
+          valid: { format: 'delta', path: 'silver.ok', mode: 'overwrite' },
+          invalid: { format: 'delta', path: 'silver.quarentena', mode: 'overwrite' },
+        },
+        rules: [{ type: 'not_null', columns: ['id'] }],
+      },
+      output: { format: 'delta', path: 'silver.pedidos', mode: 'overwrite' },
+    }
+
+    const compiled = expectRoundTrip(pipeline)
+    expect(compiled.validations?.outputs?.invalid.path).toBe('silver.quarentena')
+
+    const { settings } = pipelineToGraph(pipeline)
+    expect(settings.validations?.outputs?.valid.path).toBe('silver.ok')
   })
 
   it('keeps an $include directive', () => {
@@ -399,12 +430,12 @@ describe('compileGraph', () => {
     expect(pipeline?.validations).toBeUndefined()
   })
 
-  it('compiles nodes after the validations into the destination transformations', () => {
+  it('compiles nodes after the validation rules into the destination transformations', () => {
     const graph: StudioGraph = {
       nodes: [
         sourceNode('src'),
         transformNode('t1', 'filter', { condition: '1 = 1' }),
-        validationsNode('val'),
+        validationNode('val'),
         transformNode('t2', 'with_column', {
           column: 'value',
           expression: 'to_json(payload)',
@@ -422,11 +453,11 @@ describe('compileGraph', () => {
     ])
   })
 
-  it('gives every destination its own copy of a shared post-validations node', () => {
+  it('gives every destination its own copy of a node shared after the rules', () => {
     const graph: StudioGraph = {
       nodes: [
         sourceNode('src'),
-        validationsNode('val'),
+        validationNode('val'),
         transformNode('t1', 'with_column', {
           column: 'value',
           expression: 'to_json(payload)',
@@ -483,12 +514,96 @@ describe('compileGraph', () => {
     expect(errorsOf(issues)).toContain('A node can only have one incoming main connection.')
   })
 
+  it('compiles a run of rule nodes into one validations block, in canvas order', () => {
+    const graph: StudioGraph = {
+      nodes: [
+        sourceNode('src'),
+        transformNode('t1', 'filter', { condition: '1 = 1' }),
+        validationNode('v1', 'not_null', { columns: ['id'] }),
+        validationNode('v2', 'unique', { columns: ['id'] }),
+        validationNode('v3', 'row_count', { min: 1 }),
+        sinkNode('out'),
+      ],
+      edges: [
+        link('src', 't1'),
+        link('t1', 'v1'),
+        link('v1', 'v2'),
+        link('v2', 'v3'),
+        link('v3', 'out'),
+      ],
+    }
+
+    const { pipeline, issues } = compileGraph(graph, {
+      ...SETTINGS,
+      validations: { onFailure: 'warn', report: { format: 'csv', path: '/dq', mode: 'append' } },
+    })
+    expect(errorsOf(issues)).toEqual([])
+    expect(pipeline?.validations).toEqual({
+      on_failure: 'warn',
+      report: { format: 'csv', path: '/dq', mode: 'append' },
+      rules: [
+        { type: 'not_null', columns: ['id'] },
+        { type: 'unique', columns: ['id'] },
+        { type: 'row_count', min: 1 },
+      ],
+    })
+    // Rules are not transformations: the main array keeps only the filter.
+    expect(pipeline?.transformations).toEqual([{ type: 'filter', condition: '1 = 1' }])
+  })
+
+  it('emits no validations key when no rule node is on the chain', () => {
+    const graph: StudioGraph = {
+      nodes: [sourceNode('src'), sinkNode('out')],
+      edges: [link('src', 'out')],
+    }
+
+    const { pipeline } = compileGraph(graph, {
+      ...SETTINGS,
+      // Policy alone never produces a block — the framework needs rules.
+      validations: { onFailure: 'warn', report: { format: 'csv', path: '/dq' } },
+    })
+    expect(pipeline?.validations).toBeUndefined()
+  })
+
+  it('leaves a muted rule out of the block', () => {
+    const graph: StudioGraph = {
+      nodes: [
+        sourceNode('src'),
+        validationNode('v1', 'not_null', { columns: ['id'] }),
+        validationNode('v2', 'unique', { columns: ['id'] }, { disabled: true }),
+        sinkNode('out'),
+      ],
+      edges: [link('src', 'v1'), link('v1', 'v2'), link('v2', 'out')],
+    }
+
+    const { pipeline, issues } = compileGraph(graph, SETTINGS)
+    expect(errorsOf(issues)).toEqual([])
+    expect(pipeline?.validations?.rules).toEqual([{ type: 'not_null', columns: ['id'] }])
+  })
+
+  it('reports a transformation wedged between two rules', () => {
+    const graph: StudioGraph = {
+      nodes: [
+        sourceNode('src'),
+        validationNode('v1'),
+        transformNode('t1', 'filter', { condition: '1 = 1' }),
+        validationNode('v2', 'unique', { columns: ['id'] }),
+        sinkNode('out'),
+      ],
+      edges: [link('src', 'v1'), link('v1', 't1'), link('t1', 'v2'), link('v2', 'out')],
+    }
+
+    const { pipeline, issues } = compileGraph(graph, SETTINGS)
+    expect(pipeline).toBeNull()
+    expect(errorsOf(issues)).toContain('This node runs between two validation rules.')
+  })
+
   it('reports validations placed after the chain diverges', () => {
     const graph: StudioGraph = {
       nodes: [
         sourceNode('src'),
         transformNode('t1', 'filter', { condition: '1 = 1' }),
-        validationsNode('val'),
+        validationNode('val'),
         sinkNode('out-a', 'parquet', '/out-a'),
         sinkNode('out-b', 'parquet', '/out-b'),
       ],
@@ -681,6 +796,7 @@ describe('the shipped example configs', () => {
     '02_join_e_pushdown_runtime.json',
     '03_payload_struct_multi_saida.json',
     '04_merge_delta.json',
+    '05_data_quality_soda.json',
   ]
 
   for (const file of EXAMPLES) {

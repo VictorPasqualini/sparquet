@@ -10,12 +10,12 @@ import { NoteNode } from './nodes/NoteNode'
 import { SinkNode } from './nodes/SinkNode'
 import { SourceNode } from './nodes/SourceNode'
 import { TransformNode } from './nodes/TransformNode'
-import { ValidationsNode } from './nodes/ValidationsNode'
+import { ValidationNode } from './nodes/ValidationNode'
 
 export const nodeTypes: NodeTypes = {
   source: SourceNode,
   transform: TransformNode,
-  validations: ValidationsNode,
+  validation: ValidationNode,
   sink: SinkNode,
   note: NoteNode,
 }

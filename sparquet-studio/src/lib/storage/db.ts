@@ -30,6 +30,7 @@ import {
 } from 'idb-keyval'
 import { nanoid } from 'nanoid'
 
+import { upgradeJob } from '@/lib/storage/migrations'
 import type { Pipeline, Workflow, StudioGraph, Job } from '@/types/studio'
 
 /* ------------------------------------------------------------------- keys */
@@ -59,7 +60,7 @@ const IDB_STORE = 'records'
 export const APP_ID = 'sparquet-studio'
 
 /** Bumped whenever the persisted record shape changes; drives `migrate()`. */
-export const STORAGE_VERSION = 2
+export const STORAGE_VERSION = 3
 
 /* --------------------------------------------------------------- backends */
 
@@ -263,6 +264,17 @@ async function migrateStep(store: StorageBackend, version: number): Promise<numb
     case 1:
       // v2 only ADDS pipeline records; workflows and jobs are untouched.
       return 2
+    case 2: {
+      // v3 turns the single `validations` node into one node per rule and moves the
+      // block-level policy (on_failure, report, quarantine outputs) into the job
+      // settings. Jobs that never had a validations node are left byte-identical.
+      const jobs = await readJobs(store)
+      for (const job of jobs) {
+        const upgraded = upgradeJob(job)
+        if (upgraded !== job) await store.set(KEY.workflow(job.id), upgraded)
+      }
+      return 3
+    }
     default:
       throw new Error(
         `No migration path from storage version ${version} (${store.kind} backend).`,

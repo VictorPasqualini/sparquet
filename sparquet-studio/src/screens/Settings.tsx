@@ -1176,7 +1176,7 @@ function ProbeResult<T>({
 function Command({ command }: { command: string }) {
   return (
     <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-sunken px-3 py-2">
-      <code className="min-w-0 flex-1 overpipeline-x-auto whitespace-pre font-mono text-2xs text-content">
+      <code className="min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-2xs text-content">
         {command}
       </code>
       <IconButton

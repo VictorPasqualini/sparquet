@@ -12,6 +12,7 @@ import {
   Play,
   Redo2,
   Save,
+  Settings2,
   SlidersHorizontal,
   Undo2,
 } from 'lucide-react'
@@ -32,6 +33,7 @@ import { CommandPalette } from '@/components/layout/CommandPalette'
 import { AiPanel } from '@/components/panels/AiPanel'
 import { Inspector } from '@/components/panels/Inspector'
 import { IssuesPanel } from '@/components/panels/IssuesPanel'
+import { JobSettingsPanel } from '@/components/panels/JobSettingsPanel'
 import { NodePalette } from '@/components/panels/NodePalette'
 import { RunPanel } from '@/components/panels/RunPanel'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
@@ -56,6 +58,7 @@ const SIDE_PANELS: {
   shortcut: string
 }[] = [
   { id: 'inspector', label: 'Inspector', tab: 'Inspector', icon: SlidersHorizontal, shortcut: 'I' },
+  { id: 'settings', label: 'Job settings', tab: 'Job', icon: Settings2, shortcut: '⌘,' },
   { id: 'ai', label: 'AI assistant', tab: 'AI', icon: Bot, shortcut: '⌘/' },
   { id: 'json', label: 'JSON', tab: 'JSON', icon: Braces, shortcut: '⌘J' },
   { id: 'run', label: 'Run', tab: 'Run', icon: Play, shortcut: '⌘⏎' },
@@ -390,6 +393,7 @@ function SidePanel() {
         className="flex min-h-0 flex-1 flex-col"
       >
         {activePanel === 'inspector' && <Inspector />}
+        {activePanel === 'settings' && <JobSettingsPanel />}
         {activePanel === 'ai' && <AiPanel />}
         {activePanel === 'json' && (
           <Suspense
@@ -495,6 +499,11 @@ function EditorShortcuts() {
       if (mod && event.key.toLowerCase() === 'e') {
         event.preventDefault()
         togglePanel('issues')
+        return
+      }
+      if (mod && event.key === ',') {
+        event.preventDefault()
+        togglePanel('settings')
         return
       }
       if (mod && event.key === 'Enter') {

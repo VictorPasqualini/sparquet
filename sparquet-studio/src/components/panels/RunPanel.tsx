@@ -831,7 +831,7 @@ function RunReport({ run, mode }: { run: RunResult; mode: RunMode }) {
       {showMetrics && run.outputMetrics && run.outputMetrics.length > 1 && (
         <section className="space-y-2">
           <SectionTitle>Outputs</SectionTitle>
-          <div className="overpipeline-x-auto rounded-xl border border-line bg-surface">
+          <div className="overflow-x-auto rounded-xl border border-line bg-surface">
             <table className="w-full border-collapse text-left text-xs">
               <thead>
                 <tr className="bg-surface-sunken text-2xs uppercase tracking-wider text-content-subtle">
@@ -875,7 +875,7 @@ function RunReport({ run, mode }: { run: RunResult; mode: RunMode }) {
       {run.validations && run.validations.length > 0 && (
         <section className="space-y-2">
           <SectionTitle>Validations</SectionTitle>
-          <div className="overpipeline-x-auto rounded-xl border border-line bg-surface">
+          <div className="overflow-x-auto rounded-xl border border-line bg-surface">
             <table className="w-full border-collapse text-left text-xs">
               <thead>
                 <tr className="bg-surface-sunken text-2xs uppercase tracking-wider text-content-subtle">
@@ -1218,7 +1218,7 @@ function LogStream({ logs }: { logs: RunLogLine[] }) {
             })}
           </div>
 
-          <div className="max-h-64 overpipeline-auto rounded-xl border border-line bg-surface-sunken p-2 font-mono text-2xs">
+          <div className="max-h-64 overflow-auto rounded-xl border border-line bg-surface-sunken p-2 font-mono text-2xs">
             {visible.length === 0 ? (
               <p className="px-1 py-2 text-content-subtle">
                 Nothing on this stream for this run.

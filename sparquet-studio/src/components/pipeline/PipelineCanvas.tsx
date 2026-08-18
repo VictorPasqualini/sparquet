@@ -97,6 +97,11 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
         type: 'stage' as const,
         position: stage.position,
         selected: stage.id === selectedStageId,
+        // React Flow labels a node `Node <id>` by default; spelling the gesture
+        // out here is the only place a keyboard user meets it.
+        ariaLabel: stage.job
+          ? `Stage ${stage.order}: ${stage.name}. Press Enter to open it in the editor.`
+          : `Stage ${stage.order}: the job it points at was deleted.`,
         data: { stage, issues: issuesByStage.get(stage.id) ?? [], onOpen },
       })),
     [issuesByStage, onOpen, resolved.stages, selectedStageId],
@@ -177,11 +182,13 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
     [addStage, screenToFlowPosition],
   )
 
-  /* --------------------------------------------------- keyboard connections */
+  /* ------------------------------------------------------ keyboard gestures */
 
   /**
-   * Handles are pointer-only, so `C` is the keyboard equivalent of dragging one:
-   * press it on the focused stage, tab to the next stage, press it again.
+   * Two gestures live on the focused stage. `Enter` opens the job it runs — the
+   * keyboard twin of double-clicking the box. `C` is the keyboard equivalent of
+   * dragging a handle: press it on the focused stage, tab to the next stage,
+   * press it again.
    */
   const onKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
@@ -190,12 +197,27 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
         cancelConnect()
         return
       }
+
+      const focused = event.target as HTMLElement
+      const isStage = focused.classList.contains('react-flow__node')
+
+      if (event.key === 'Enter') {
+        // Mid-link, Enter would navigate out of a gesture that is still running.
+        if (!isStage || connectSource !== null) return
+        if (event.metaKey || event.ctrlKey || event.altKey) return
+        const stage = resolved.stages.find((candidate) => candidate.id === focused.dataset.id)
+        // A broken stage points at a deleted job: nothing to open.
+        if (!stage?.job) return
+        event.preventDefault()
+        onOpen(stage.jobId)
+        return
+      }
+
       if (event.key.toLowerCase() !== 'c') return
       if (event.metaKey || event.ctrlKey || event.altKey) return
 
-      const element = event.target as HTMLElement
-      if (!element.classList.contains('react-flow__node')) return
-      const stageId = element.getAttribute('data-id')
+      if (!isStage) return
+      const stageId = focused.getAttribute('data-id')
       if (!stageId) return
 
       event.preventDefault()
@@ -212,7 +234,7 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
       cancelConnect()
       select(stageId)
     },
-    [connect, connectSource, select],
+    [connect, connectSource, onOpen, resolved.stages, select],
   )
 
   return (
@@ -266,7 +288,8 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
               description="Click a pipeline in the list on the left to add it — or drag it in. Then link the boxes to say which one runs first."
             />
             <p className="border-t border-line px-6 py-2.5 text-center text-2xs text-content-subtle">
-              Focus a stage and press <Kbd>c</Kbd> to link it to another one.
+              Focus a stage and press <Kbd>c</Kbd> to link it to another one, or{' '}
+              <Kbd>enter</Kbd> to open the job it runs.
             </p>
           </div>
         </div>

@@ -16,7 +16,7 @@ import type {
   StudioGraph,
   StudioNode,
   TransformNode,
-  ValidationsNode,
+  ValidationNode,
 } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
 
@@ -30,8 +30,9 @@ export function isTransformNode(node: StudioNode): node is TransformNode {
   return node.data.kind === 'transform'
 }
 
-export function isValidationsNode(node: StudioNode): node is ValidationsNode {
-  return node.data.kind === 'validations'
+/** One rule of the `validations` block; a run of them compiles into that block. */
+export function isValidationNode(node: StudioNode): node is ValidationNode {
+  return node.data.kind === 'validation'
 }
 
 export function isSinkNode(node: StudioNode): node is SinkNode {

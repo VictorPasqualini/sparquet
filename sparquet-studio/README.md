@@ -74,7 +74,7 @@ Studio nests three things:
 > reserved for a sequence of several of them. A Pipeline with four stages is four
 > framework `Pipeline` runs, in order, sharing one Spark session.
 
-A Workflow's screen has two tabs: **Jobs** lists the Jobs it holds together with the Pipelines built out of them, and **Pipeline** draws how those Jobs connect — inferred read-only from the paths and temp views they share.
+A Workflow's screen is one list: the Jobs it holds, together with the Pipelines built out of them. **New pipeline** turns a set of Jobs into an ordered run.
 
 ## Your first job
 
@@ -283,7 +283,7 @@ A **Pipeline** is an ordered set of Jobs from the same Workflow. It stores no JS
 1. **Create it.** In a Workflow, press **New pipeline**. It opens on its own canvas at `/pipelines/:id`.
 2. **Add stages.** The Workflow's Jobs are listed on the left — click one to append it at the end of the row, or drag it onto the canvas. The same Job may appear more than once.
 3. **Draw the order.** Link a box's right handle to the next box's left handle. Nothing is inferred from paths here: two stages that share no path at all can still have to run in a fixed order (a truncate before a load), so the order is the one you draw. Cycles are refused; a stage nothing links to still runs, at the end, with a warning.
-4. **Drill in.** Opening a box takes you to that Job's own canvas, with every panel it normally has. Come back and the stage already reflects the edit.
+4. **Drill in.** Double-click a stage — or focus it and press <kbd>Enter</kbd>, or use its **Open** button — to land on that Job's own canvas, with every panel it normally has. Come back and the stage already reflects the edit. A stage whose Job was deleted opens nothing; it stays flagged as broken.
 5. **Run it.** Same runner and same token as a single Job — the request goes to `POST /run/flow/stream` and arrives as Server-Sent Events.
 
 **How a stage hands data to the next.** Stages do not pass a DataFrame between themselves. They share **one Spark session**, and a stage reads what an earlier one wrote: a path or table (stage 1 writes `bronze.orders`, stage 2 reads it), or a temp view (a `view` output read back as the next stage's `input`, without touching storage). There is no extra wiring for it, and none is needed — a link on the canvas sets *when* a stage runs, not *what* it receives.
@@ -313,8 +313,8 @@ src/
 │  ├─ compiler/  graph ⇄ JSON. compileGraph() and pipelineToGraph() are inverses,
 │  │             proven by round-trip tests over the framework's own examples.
 │  ├─ validation/ the lint rules that run as you type.
-│  ├─ flow/      Pipelines: stage resolution, execution order, and the run plan;
-│  │             plus the read-only map inferred from the Jobs' paths and views.
+│  ├─ pipeline/  Pipelines: describing a Job, stage resolution, execution order
+│  │             and the run plan.
 │  ├─ ai/        provider-agnostic streaming client, prompt builder, proposal parser.
 │  ├─ runner/    typed client for the local FastAPI service.
 │  └─ storage/   IndexedDB persistence, export/import, migrations.

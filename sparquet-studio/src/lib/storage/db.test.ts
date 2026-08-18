@@ -474,6 +474,38 @@ describe('migrate', () => {
     expect(backup).toMatchObject({ version: 0, workflows: [workflow] })
     expect(await db.listWorkflows()).toEqual([workflow])
   })
+
+  it('rewrites a v2 job whose validations still live in one node', async () => {
+    memory.set('sparquet-studio:db:meta:version', 2)
+    memory.set('sparquet-studio:db:project:p1', makeWorkflow())
+    memory.set(
+      'sparquet-studio:db:workflow:w1',
+      makeJob('p1', {
+        graph: {
+          nodes: [
+            {
+              id: 'checks',
+              type: 'validations',
+              position: { x: 0, y: 0 },
+              data: {
+                kind: 'validations',
+                onFailure: 'warn',
+                rules: [{ type: 'not_null', columns: ['id'] }],
+                report: null,
+              },
+            },
+          ],
+          edges: [],
+        } as unknown as Job['graph'],
+      }),
+    )
+
+    expect(await db.migrate()).toBe(db.STORAGE_VERSION)
+
+    const job = await db.getJob('w1')
+    expect(job?.graph.nodes.map((node) => node.data.kind)).toEqual(['validation'])
+    expect(job?.settings.validations).toEqual({ onFailure: 'warn' })
+  })
 })
 
 describe('clearAll', () => {

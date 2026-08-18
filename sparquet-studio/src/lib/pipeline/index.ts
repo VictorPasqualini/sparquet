@@ -1,16 +1,12 @@
-/** Public surface of the pipeline modules: the derived file map and pipelines. */
+/** Public surface of the pipeline modules: describing a Job, and Pipelines. */
 
-export { deriveInferredPipeline, describeJob, linkBetween } from '@/lib/pipeline/inferredPipeline'
+export { describeJob } from '@/lib/pipeline/describe'
 export type {
   JobDescription,
-  JobLink,
-  JobSummary,
   JobEndpoint,
-  JobLinkVia,
   JobStep,
   JobStepKind,
-  InferredPipeline,
-} from '@/lib/pipeline/inferredPipeline'
+} from '@/lib/pipeline/describe'
 
 export {
   linkRejection,

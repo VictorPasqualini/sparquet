@@ -557,7 +557,7 @@ export function AiPanel() {
             </>
           }
         >
-          <pre className="scroll-area max-h-[60vh] overpipeline-x-auto rounded-lg border border-line bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-content">
+          <pre className="scroll-area max-h-[60vh] overflow-x-auto rounded-lg border border-line bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-content">
             {safeJson(viewing.proposal.pipeline)}
           </pre>
         </Modal>
@@ -701,7 +701,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
   }
 
   return (
-    <div className="overpipeline-hidden rounded-lg border border-line bg-surface-sunken">
+    <div className="overflow-hidden rounded-lg border border-line bg-surface-sunken">
       <div className="flex items-center justify-between gap-2 border-b border-line px-2 py-1">
         <span className="truncate font-mono text-2xs text-content-subtle">
           {lang || 'code'}
@@ -710,7 +710,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
           {copied ? <Check /> : <Copy />}
         </IconButton>
       </div>
-      <pre className="scroll-area max-h-64 overpipeline-x-auto px-2 py-1.5 font-mono text-2xs leading-relaxed text-content">
+      <pre className="scroll-area max-h-64 overflow-x-auto px-2 py-1.5 font-mono text-2xs leading-relaxed text-content">
         {code.replace(/\n+$/, '')}
       </pre>
     </div>

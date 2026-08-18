@@ -71,7 +71,7 @@ export const NODE_DND_MIME = 'application/sparquet-node'
 
 interface NodeDropPayload {
   kind: NodeKind
-  /** Transformation registry key, for `kind: 'transform'`. */
+  /** Registry key: the transformation type, or the validator type. */
   type?: string
   /** IO format id, for `kind: 'source' | 'sink'`. */
   format?: string
@@ -110,7 +110,7 @@ export function JobCanvas() {
   const addSource = useEditorStore((state) => state.addSource)
   const addSink = useEditorStore((state) => state.addSink)
   const addTransform = useEditorStore((state) => state.addTransform)
-  const addValidations = useEditorStore((state) => state.addValidations)
+  const addValidation = useEditorStore((state) => state.addValidation)
   const addNote = useEditorStore((state) => state.addNote)
   const togglePanel = useEditorStore((state) => state.togglePanel)
 
@@ -134,15 +134,15 @@ export function JobCanvas() {
         case 'transform':
           if (payload.type) addTransform(payload.type, position)
           break
-        case 'validations':
-          addValidations(position)
+        case 'validation':
+          if (payload.type) addValidation(payload.type, position)
           break
         case 'note':
           addNote(position)
           break
       }
     },
-    [addNote, addSink, addSource, addTransform, addValidations],
+    [addNote, addSink, addSource, addTransform, addValidation],
   )
 
   /* ------------------------------------------------------------ drag & drop */
@@ -595,6 +595,18 @@ function buildOptions(query: string): QuickAddOption[] {
     })
   }
 
+  // Rules sit between the transformations and the destinations, like the run does.
+  for (const validator of found.validators) {
+    options.push({
+      id: `validation-${validator.type}`,
+      label: validator.label,
+      hint: 'rule',
+      icon: catalogIcon(validator.icon),
+      accent: 'validate',
+      payload: { kind: 'validation', type: validator.type },
+    })
+  }
+
   for (const format of WRITABLE_FORMATS) {
     if (!found.formats.includes(format)) continue
     options.push({
@@ -604,17 +616,6 @@ function buildOptions(query: string): QuickAddOption[] {
       icon: catalogIcon(format.icon),
       accent: 'output',
       payload: { kind: 'sink', format: format.id },
-    })
-  }
-
-  if (found.validators.length > 0 || matches(query, 'validations quality rules')) {
-    options.push({
-      id: 'validations',
-      label: 'Validations',
-      hint: 'quality',
-      icon: catalogIcon('ShieldCheck'),
-      accent: 'validate',
-      payload: { kind: 'validations' },
     })
   }
 
@@ -696,7 +697,7 @@ function miniMapColor(node: Node): string {
       return ACCENT_COLOR.input
     case 'transform':
       return ACCENT_COLOR[getTransformation(data.transform)?.accent ?? 'transform']
-    case 'validations':
+    case 'validation':
       return ACCENT_COLOR.validate
     case 'sink':
       return ACCENT_COLOR.output

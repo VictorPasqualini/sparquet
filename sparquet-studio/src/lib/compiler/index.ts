@@ -8,7 +8,7 @@ export {
   isSinkNode,
   isSourceNode,
   isTransformNode,
-  isValidationsNode,
+  isValidationNode,
   longestCommonPrefix,
   makeEdge,
   newNodeId,

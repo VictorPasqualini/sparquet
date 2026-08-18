@@ -92,8 +92,29 @@ export const StageNode = memo(function StageNodeRenderer({
     select(stage.id)
   }
 
+  /**
+   * Drilling into the job is what people try first on a box, so the whole stage
+   * opens on a double-click — `PipelineCanvas` binds Enter to the same thing for
+   * the keyboard. A broken stage points at a deleted job: there is nothing to
+   * open, and navigating to a dead route would hide the very state it reports.
+   */
+  const openJob = () => {
+    if (broken) return
+    onOpen(stage.jobId)
+  }
+
   return (
     <div
+      onDoubleClick={(event) => {
+        // The pane zooms on double-click; a box is not the pane.
+        event.stopPropagation()
+        openJob()
+      }}
+      title={
+        broken
+          ? undefined
+          : `Open "${stage.name}" in the editor — double-click, or press Enter`
+      }
       className={cn(
         'relative rounded-xl border bg-surface shadow-card transition-shadow hover:shadow-raised',
         selected ? 'border-brand-500 ring-2 ring-brand-500/40' : 'border-line',
@@ -238,15 +259,15 @@ export const StageNode = memo(function StageNodeRenderer({
 
         {/* Always visible, not only in the hover toolbar: drilling into the
             pipeline is the whole point of a stage, and it must be reachable
-            without a pointer. */}
+            without a pointer — and without knowing the gestures. */}
         {!broken && (
           <Button
             size="xs"
             variant="ghost"
             className="nodrag shrink-0"
             icon={<ExternalLink className="h-3 w-3" />}
-            onClick={() => onOpen(stage.jobId)}
-            aria-label={`Open ${stage.name} in the editor`}
+            onClick={openJob}
+            aria-label={`Open ${stage.name} in the editor. Double-click the stage, or press Enter, to do the same.`}
           >
             Open
           </Button>

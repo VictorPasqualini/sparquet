@@ -350,7 +350,7 @@ function PreviewDialog({ template, onClose, onUse }: PreviewDialogProps) {
       <pre
         tabIndex={0}
         aria-label={`${template.name} pipeline JSON`}
-        className="scroll-area max-h-[55vh] overpipeline-x-auto rounded-lg border border-line bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-content-muted"
+        className="scroll-area max-h-[55vh] overflow-x-auto rounded-lg border border-line bg-surface-sunken p-3 font-mono text-2xs leading-relaxed text-content-muted"
       >
         {json}
       </pre>

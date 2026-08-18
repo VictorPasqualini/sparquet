@@ -3,7 +3,7 @@
  *
  * Everything the catalog knows about a node is rendered here: its fields, the traps
  * worth knowing before running it, and examples. Writes always go through the editor
- * store (`updateNodeData` / `updateTransformParam`) so a single undo covers every edit
+ * store (`updateNodeData` / `updateNodeParam`) so a single undo covers every edit
  * made from this panel.
  */
 
@@ -21,7 +21,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   MousePointerClick,
-  Plus,
+  Settings2,
   ShieldCheck,
   SlidersHorizontal,
   StickyNote,
@@ -42,12 +42,10 @@ import {
 import { toast } from 'sonner'
 
 import {
-  defaultsFor,
   getFormat,
   getTransformation,
   getValidator,
   READABLE_FORMATS,
-  VALIDATORS,
   WRITABLE_FORMATS,
   type CatalogExample,
   type FieldSpec,
@@ -64,7 +62,6 @@ import {
   Menu,
   MenuContent,
   MenuItem,
-  MenuLabel,
   MenuSeparator,
   MenuTrigger,
   Popover,
@@ -79,22 +76,16 @@ import {
 } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { useEditorStore } from '@/store/editor'
-import type { OnFailureMode, OutputSpec, ValidationRuleSpec } from '@/types/pipeline'
 import type {
   NoteNodeData,
   SinkNodeData,
   SourceNodeData,
   StudioNodeData,
   TransformNodeData,
-  ValidationsNodeData,
+  ValidationNodeData,
 } from '@/types/studio'
 
-import {
-  fieldAnchorId,
-  FieldRenderer,
-  focusField,
-  PlaceholderHints,
-} from './fields/FieldRenderer'
+import { fieldAnchorId, FieldRenderer, focusField } from './fields/FieldRenderer'
 import { JsonField, StringListField } from './fields/widgets'
 
 type IconComponent = ComponentType<{ className?: string }>
@@ -143,12 +134,13 @@ function describeNode(data: StudioNodeData): NodeDescriptor {
       fallbackLabel: format?.label ?? data.format,
     }
   }
-  if (data.kind === 'validations') {
+  if (data.kind === 'validation') {
+    const def = getValidator(data.validator)
     return {
-      icon: ShieldCheck,
+      icon: iconByName(def?.icon, ShieldCheck),
       accent: 'validate',
-      type: 'validations',
-      fallbackLabel: 'Validations',
+      type: `${data.validator} · rule`,
+      fallbackLabel: def?.label ?? data.validator,
     }
   }
   return { icon: StickyNote, accent: 'control', type: 'note', fallbackLabel: 'Note' }
@@ -180,21 +172,13 @@ function nodeJson(data: StudioNodeData): unknown {
       ...(Object.keys(data.options).length > 0 ? { options: data.options } : {}),
     }
   }
-  if (data.kind === 'validations') {
-    return {
-      on_failure: data.onFailure,
-      rules: data.rules,
-      ...(data.report ? { report: data.report } : {}),
-    }
+  if (data.kind === 'validation') {
+    return { type: data.validator, ...data.params }
   }
   return { text: data.text, tone: data.tone }
 }
 
 /* ------------------------------------------------------------- field focus */
-
-/** Rule and report forms render their fields under their own anchor scope. */
-const ruleScope = (nodeId: string, index: number): string => `${nodeId}-rule${index}`
-const reportScope = (nodeId: string): string => `${nodeId}-report`
 
 interface FocusRequest {
   /** Anchor scope the field was rendered under. */
@@ -267,23 +251,10 @@ function anchorScopes(nodeId: string, data: StudioNodeData): AnchorScope[] {
     const keys = anchorKeys(getTransformation(data.transform)?.fields, data.params)
     return [{ nodeId, prefix: '', keys: [...keys, SKIP_FIELD.key] }]
   }
-  if (data.kind === 'validations') {
-    const scopes: AnchorScope[] = data.rules.map((rule, index) => ({
-      nodeId: ruleScope(nodeId, index),
-      prefix: `rules[${index}].`,
-      keys: anchorKeys(
-        getValidator(String(rule.type))?.fields,
-        rule as Record<string, unknown>,
-      ),
-    }))
-    if (data.report) {
-      scopes.push({
-        nodeId: reportScope(nodeId),
-        prefix: 'report.',
-        keys: ['format', 'path', 'mode'],
-      })
-    }
-    return scopes
+  if (data.kind === 'validation') {
+    return [
+      { nodeId, prefix: '', keys: anchorKeys(getValidator(data.validator)?.fields, data.params) },
+    ]
   }
   return []
 }
@@ -358,7 +329,7 @@ export function Inspector() {
             <IoBody id={node.id} data={data} />
           )}
           {data.kind === 'transform' && <TransformBody id={node.id} data={data} />}
-          {data.kind === 'validations' && <ValidationsBody id={node.id} data={data} />}
+          {data.kind === 'validation' && <ValidationBody id={node.id} data={data} />}
           {data.kind === 'note' && <NoteBody id={node.id} data={data} />}
         </div>
       </div>
@@ -436,7 +407,9 @@ function InspectorHeader({ id, data }: { id: string; data: StudioNodeData }) {
     if (confirmed) removeNodes([id])
   }
 
-  const muted = data.kind === 'transform' && data.disabled === true
+  // Transformations and validation rules are the two kinds a run can leave out.
+  const canMute = data.kind === 'transform' || data.kind === 'validation'
+  const muted = canMute && data.disabled === true
 
   return (
     <div className="shrink-0 border-b border-line px-3 py-2.5">
@@ -476,7 +449,7 @@ function InspectorHeader({ id, data }: { id: string; data: StudioNodeData }) {
             <MenuItem icon={<CopyPlus />} shortcut="⌘D" onSelect={() => duplicateNode(id)}>
               Duplicate
             </MenuItem>
-            {data.kind === 'transform' && (
+            {canMute && (
               <MenuItem icon={muted ? <Eye /> : <EyeOff />} onSelect={() => toggleDisabled(id)}>
                 {muted ? 'Unmute' : 'Mute'}
               </MenuItem>
@@ -699,7 +672,7 @@ function ExamplesPopover({ examples }: { examples: CatalogExample[] }) {
           Examples
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="max-h-[24rem] w-[22rem] space-y-3 overpipeline-y-auto p-3">
+      <PopoverContent className="max-h-[24rem] w-[22rem] space-y-3 overflow-y-auto p-3">
         {examples.map((example) => (
           <div key={example.title} className="space-y-1">
             <div className="flex items-start justify-between gap-2">
@@ -717,7 +690,7 @@ function ExamplesPopover({ examples }: { examples: CatalogExample[] }) {
                 <Copy />
               </IconButton>
             </div>
-            <pre className="overpipeline-x-auto rounded-lg border border-line bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-content-muted">
+            <pre className="overflow-x-auto rounded-lg border border-line bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-content-muted">
               {example.json}
             </pre>
           </div>
@@ -997,7 +970,7 @@ function skipCaseIndex(raw: string): number {
 function TransformBody({ id, data }: { id: string; data: TransformNodeData }) {
   const def = getTransformation(data.transform)
   const updateNodeData = useEditorStore((state) => state.updateNodeData)
-  const updateTransformParam = useEditorStore((state) => state.updateTransformParam)
+  const updateNodeParam = useEditorStore((state) => state.updateNodeParam)
 
   const mainFields = (def?.fields ?? []).filter((field) => field.group !== 'advanced')
   const advancedFields = (def?.fields ?? []).filter((field) => field.group === 'advanced')
@@ -1065,7 +1038,7 @@ function TransformBody({ id, data }: { id: string; data: TransformNodeData }) {
           value={data.params[field.key]}
           params={data.params}
           nodeId={id}
-          onChange={(value) => updateTransformParam(id, field.key, value)}
+          onChange={(value) => updateNodeParam(id, field.key, value)}
         />
       ))}
 
@@ -1083,7 +1056,7 @@ function TransformBody({ id, data }: { id: string; data: TransformNodeData }) {
               value={data.params[field.key]}
               params={data.params}
               nodeId={id}
-              onChange={(value) => updateTransformParam(id, field.key, value)}
+              onChange={(value) => updateNodeParam(id, field.key, value)}
             />
           ))}
         </Section>
@@ -1136,268 +1109,102 @@ function TransformBody({ id, data }: { id: string; data: TransformNodeData }) {
   )
 }
 
-/* ------------------------------------------------------------------- validations */
+/* -------------------------------------------------------------------- validation */
 
-const ON_FAILURE_HINTS: Record<OnFailureMode, string> = {
-  fail: 'Every rule runs first, then a single error lists the failures and aborts. No output and no report are written.',
-  warn: 'Failures are logged and the run continues — outputs and the quality report are written.',
-  skip: 'Identical to warn in the engine: failures are logged, everything is still written.',
-}
-
-const ON_FAILURE_OPTIONS: { value: OnFailureMode; label: string }[] = [
-  { value: 'fail', label: 'Fail' },
-  { value: 'warn', label: 'Warn' },
-  { value: 'skip', label: 'Skip' },
-]
-
-function ValidationsBody({ id, data }: { id: string; data: ValidationsNodeData }) {
+function ValidationBody({ id, data }: { id: string; data: ValidationNodeData }) {
+  const def = getValidator(data.validator)
   const updateNodeData = useEditorStore((state) => state.updateNodeData)
-  const [collapsed, setCollapsed] = useState<number[]>([])
+  const updateNodeParam = useEditorStore((state) => state.updateNodeParam)
+  const togglePanel = useEditorStore((state) => state.togglePanel)
 
-  useFocusRequest((request) => {
-    const index = data.rules.findIndex(
-      (_, position) => ruleScope(id, position) === request.nodeId,
-    )
-    if (index >= 0) setCollapsed((previous) => previous.filter((item) => item !== index))
-  })
-
-  const addRule = (type: string) => {
-    const validator = getValidator(type)
-    const rule: ValidationRuleSpec = {
-      type,
-      ...(validator ? defaultsFor(validator.fields) : {}),
-    }
-    updateNodeData(id, { rules: [...data.rules, rule] })
-  }
-
-  const removeRule = (index: number) => {
-    setCollapsed((previous) =>
-      previous.filter((item) => item !== index).map((item) => (item > index ? item - 1 : item)),
-    )
-    updateNodeData(id, { rules: data.rules.filter((_, i) => i !== index) })
-  }
-
-  const setRuleParam = (index: number, key: string, value: unknown) => {
-    const rules = data.rules.map((rule, i) => {
-      if (i !== index) return rule
-      const next: ValidationRuleSpec = { ...rule }
-      if (value === undefined || value === null || value === '') delete next[key]
-      else next[key] = value
-      return next
-    })
-    updateNodeData(id, { rules })
-  }
-
-  const setReport = (patch: Partial<OutputSpec>) => {
-    const current: OutputSpec = data.report ?? { format: 'csv', path: '', mode: 'overwrite' }
-    updateNodeData(id, { report: { ...current, ...patch } })
-  }
-
-  const reportFormat = getFormat(data.report?.format ?? '')
+  const mainFields = (def?.fields ?? []).filter((field) => field.group !== 'advanced')
+  const advancedFields = (def?.fields ?? []).filter((field) => field.group === 'advanced')
 
   return (
     <div className="space-y-4">
-      <Field label="On failure" help={ON_FAILURE_HINTS[data.onFailure]}>
-        <Segmented
-          value={data.onFailure}
-          onChange={(value) => updateNodeData(id, { onFailure: value })}
-          options={ON_FAILURE_OPTIONS}
-        />
-      </Field>
-
-      <Section
-        title="Rules"
-        count={data.rules.length}
-        opensFor={(request) => request.nodeId.startsWith(`${id}-rule`)}
-        action={
-          <Menu>
-            <MenuTrigger asChild>
-              <Button size="xs" variant="ghost" icon={<Plus />}>
-                Add rule
-              </Button>
-            </MenuTrigger>
-            <MenuContent align="end" className="max-h-80 w-64 overpipeline-y-auto">
-              <MenuLabel>Validators</MenuLabel>
-              {VALIDATORS.map((validator) => {
-                const Icon = iconByName(validator.icon, ShieldCheck)
-                return (
-                  <MenuItem
-                    key={validator.type}
-                    icon={<Icon />}
-                    onSelect={() => addRule(validator.type)}
-                  >
-                    <span className="flex flex-col gap-0.5">
-                      <span className="text-content">{validator.label}</span>
-                      <span className="text-2xs leading-relaxed text-content-subtle">
-                        {validator.summary}
-                      </span>
-                    </span>
-                  </MenuItem>
-                )
-              })}
-            </MenuContent>
-          </Menu>
-        }
-      >
-        {data.rules.length === 0 && (
-          <p className="text-2xs leading-relaxed text-content-subtle">
-            No rules yet. Validations report on the data without changing it — use
-            transformations when rows must actually be removed.
+      {def && (
+        <div className="flex items-start justify-between gap-2">
+          <p className="min-w-0 text-2xs leading-relaxed text-content-muted">
+            {renderInlineCode(def.summary)}
           </p>
-        )}
+          <ExamplesPopover examples={def.examples} />
+        </div>
+      )}
 
-        {data.rules.map((rule, index) => {
-          const validator = getValidator(String(rule.type))
-          const Icon = iconByName(validator?.icon, ShieldCheck)
-          const open = !collapsed.includes(index)
-          const params = rule as Record<string, unknown>
+      {!def && (
+        <>
+          <Callout tone="warning" icon={<AlertTriangle />}>
+            <span className="font-medium text-content">
+              {renderInlineCode(`\`${data.validator}\` is not a built-in validator.`)}
+            </span>{' '}
+            Register it before the run, or Studio can only edit its parameters as raw JSON.
+          </Callout>
+          <Field label="Parameters" help="Written into the rule exactly as typed.">
+            <JsonField
+              rows={10}
+              value={data.params}
+              onChange={(value) =>
+                updateNodeData(id, {
+                  params:
+                    value && typeof value === 'object' && !Array.isArray(value)
+                      ? (value as Record<string, unknown>)
+                      : {},
+                })
+              }
+            />
+          </Field>
+        </>
+      )}
 
-          return (
-            <div key={index} className="rounded-lg border border-line bg-surface">
-              <div className="flex items-center gap-1 pr-1">
-                <button
-                  type="button"
-                  aria-expanded={open}
-                  onClick={() =>
-                    setCollapsed((previous) =>
-                      open ? [...previous, index] : previous.filter((item) => item !== index),
-                    )
-                  }
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
-                >
-                  <ChevronRight
-                    className={cn(
-                      'h-3.5 w-3.5 shrink-0 text-content-subtle transition-transform',
-                      open && 'rotate-90',
-                    )}
-                    aria-hidden
-                  />
-                  <Icon className="h-3.5 w-3.5 shrink-0 text-node-validate" />
-                  <span className="min-w-0 truncate text-xs text-content">
-                    {validator?.label ?? String(rule.type)}
-                  </span>
-                </button>
-                <IconButton
-                  size="xs"
-                  label={`Remove ${validator?.label ?? String(rule.type)} rule`}
-                  onClick={() => removeRule(index)}
-                >
-                  <Trash2 />
-                </IconButton>
-              </div>
-
-              {open && (
-                <div className="space-y-3 border-t border-line px-2.5 py-2.5">
-                  {validator ? (
-                    validator.fields.map((field) => (
-                      <FieldRenderer
-                        key={field.key}
-                        field={field}
-                        value={params[field.key]}
-                        params={params}
-                        nodeId={ruleScope(id, index)}
-                        onChange={(value) => setRuleParam(index, field.key, value)}
-                      />
-                    ))
-                  ) : (
-                    <Callout tone="warning" icon={<AlertTriangle />}>
-                      {renderInlineCode(
-                        `\`${String(rule.type)}\` is not a built-in validator — register it at runtime before the pipeline runs.`,
-                      )}
-                    </Callout>
-                  )}
-                  {validator && validator.gotchas.length > 0 && (
-                    <GotchaList items={validator.gotchas} />
-                  )}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </Section>
-
-      <Section
-        title="Quality report"
-        defaultOpen={Boolean(data.report)}
-        opensFor={(request) => request.nodeId === reportScope(id)}
-      >
-        <Toggle
-          checked={Boolean(data.report)}
-          onCheckedChange={(checked) =>
-            updateNodeData(id, {
-              report: checked ? { format: 'csv', path: '', mode: 'overwrite' } : null,
-            })
-          }
-          label="Write a report"
-          description="One row per rule: pipeline, rule_type, passed, failed_count, message, validated_at."
+      {mainFields.map((field) => (
+        <FieldRenderer
+          key={field.key}
+          field={field}
+          value={data.params[field.key]}
+          params={data.params}
+          nodeId={id}
+          onChange={(value) => updateNodeParam(id, field.key, value)}
         />
+      ))}
 
-        {data.report && (
-          <div className="space-y-3 rounded-lg border border-line bg-surface p-2.5">
-            <div id={fieldAnchorId(reportScope(id), 'format')} className="scroll-mt-4">
-              <Field label="Format" htmlFor={`${id}-report-format`}>
-                <Select
-                  id={`${id}-report-format`}
-                  ariaLabel="Report format"
-                  value={data.report.format}
-                  onValueChange={(value) => {
-                    // The mode select renders blank on a value the new format rejects.
-                    const next = getFormat(value)
-                    const keepsMode =
-                      !next || next.modes.some((mode) => mode === data.report?.mode)
-                    setReport({
-                      format: value,
-                      ...(keepsMode ? {} : { mode: next?.modes[0] ?? 'overwrite' }),
-                    })
-                  }}
-                  options={WRITABLE_FORMATS.map((item) => ({
-                    value: item.id,
-                    label: item.label,
-                    hint: item.summary,
-                  }))}
-                />
-              </Field>
-            </div>
-            <div id={fieldAnchorId(reportScope(id), 'path')} className="scroll-mt-4">
-              <Field
-                label={reportFormat?.pathLabel ?? 'Path'}
-                help={reportFormat?.pathHelp}
-                htmlFor={`${id}-report-path`}
-              >
-                <Input
-                  id={`${id}-report-path`}
-                  mono
-                  value={data.report.path}
-                  placeholder={reportFormat?.pathPlaceholder}
-                  onChange={(event) => setReport({ path: event.target.value })}
-                />
-                <PlaceholderHints value={data.report.path} />
-              </Field>
-            </div>
-            <div id={fieldAnchorId(reportScope(id), 'mode')} className="scroll-mt-4">
-              <Field label="Write mode" help={MODE_HINTS[String(data.report.mode ?? '')]}>
-                <Select
-                  ariaLabel="Report write mode"
-                  value={String(data.report.mode ?? 'overwrite')}
-                  onValueChange={(value) => setReport({ mode: value })}
-                  options={(reportFormat?.modes ?? []).map((mode) => ({
-                    value: mode,
-                    label: mode,
-                    hint: MODE_HINTS[mode],
-                  }))}
-                />
-              </Field>
-            </div>
-          </div>
-        )}
+      {advancedFields.length > 0 && (
+        <Section
+          title="Advanced"
+          count={advancedFields.length}
+          defaultOpen={false}
+          opensFor={(request) => advancedFields.some((field) => field.key === request.key)}
+        >
+          {advancedFields.map((field) => (
+            <FieldRenderer
+              key={field.key}
+              field={field}
+              value={data.params[field.key]}
+              params={data.params}
+              nodeId={id}
+              onChange={(value) => updateNodeParam(id, field.key, value)}
+            />
+          ))}
+        </Section>
+      )}
 
-        <Callout>
-          The report is only written when the run reaches the outputs — in
-          <span className="font-mono"> fail </span>
-          mode a violation aborts before it.
-        </Callout>
-      </Section>
+      <Callout icon={<ShieldCheck />}>
+        <p>
+          Rules measure the data without changing it — use a transformation when rows
+          must actually go. Every rule on the chain compiles into one{' '}
+          <span className="font-mono">validations</span> block.
+        </p>
+        <Button
+          size="xs"
+          variant="ghost"
+          className="mt-1.5 -ml-1.5"
+          icon={<Settings2 />}
+          onClick={() => togglePanel('settings', true)}
+        >
+          What happens on failure
+        </Button>
+      </Callout>
 
+      {def && <GotchaList items={def.gotchas} />}
       <CommentSection id={id} comment={data.comment} />
     </div>
   )

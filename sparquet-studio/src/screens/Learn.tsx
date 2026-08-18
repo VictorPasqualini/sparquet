@@ -323,7 +323,7 @@ export function ProgressBar({ value, total }: { value: number; total: number }) 
   const percent = total === 0 ? 0 : Math.round((value / total) * 100)
   return (
     <div
-      className="mt-2 h-1.5 w-full overpipeline-hidden rounded-full bg-surface-sunken"
+      className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-sunken"
       role="progressbar"
       aria-valuenow={value}
       aria-valuemin={0}

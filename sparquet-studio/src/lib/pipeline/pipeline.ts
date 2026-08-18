@@ -7,9 +7,8 @@
  * that order stage by stage.
  *
  * The order comes from links the author DRAWS. Nothing is inferred from paths:
- * `inferredPipeline.ts` already derives a read-only map that way, and guessing would
- * be the wrong answer here (two stages can share no path at all and still have
- * to run in a fixed order, e.g. a truncate before a load).
+ * two stages can share no path at all and still have to run in a fixed order
+ * (e.g. a truncate before a load), so guessing would be the wrong answer.
  *
  * A stage stores only a `jobId`. The pipeline JSON is compiled from the
  * referenced job at run time, so a stage can never drift from the file it
@@ -26,7 +25,7 @@ import {
   describeJob,
   topologicalOrder,
   type JobDescription,
-} from '@/lib/pipeline/inferredPipeline'
+} from '@/lib/pipeline/describe'
 import { paramValues } from '@/lib/params'
 import type { PipelineSpec } from '@/types/pipeline'
 import type {

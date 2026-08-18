@@ -13,7 +13,7 @@ export type PaletteDragPayload =
   | { kind: 'transform'; type: string }
   | { kind: 'source'; format: string }
   | { kind: 'sink'; format: string }
-  | { kind: 'validations' }
+  | { kind: 'validation'; type: string }
   | { kind: 'note' }
 
 /** Icon tile tint per node family. Written out so Tailwind keeps the classes. */

@@ -170,108 +170,50 @@ async function main() {
       .catch(() => false)
     check('JSON panel opens', jsonVisible)
 
-    /* --------------------------------------------- inferred pipeline tab */
+    /* ------------------------------------------- pipeline editor */
 
-    // The pipeline view is the only place a whole workflow is drawn as file boxes, and
-    // it lazy-loads React Flow a second time — worth proving it mounts, links the
-    // seeded files and opens a drill-down, not just that the tab exists.
+    // A pipeline is a second canvas with its own store and route, so prove it
+    // mounts and accepts a stage rather than trusting that the screen renders.
     const workflowHref = await page
       .goto(BASE_URL, { waitUntil: 'networkidle2' })
       .then(() => page.$$eval('a[href*="workflows/"]', (links) => links[0]?.getAttribute('href')))
       .catch(() => null)
 
-    if (!workflowHref) {
-      check('inferred pipeline tab renders', false, 'no seeded workflow to open')
-    } else {
-      // Hash routing: the href already carries `#/`, so append it verbatim.
+    // Hash routing: the href already carries `#/`, so append it verbatim.
+    if (workflowHref) {
       await page.goto(`${BASE_URL}/${workflowHref}`, { waitUntil: 'networkidle2' })
-      const opened = await page
+      await page
         .waitForFunction(
           () =>
-            Array.from(document.querySelectorAll('[role="tab"]')).some((tab) =>
-              /^pipeline$/i.test(tab.textContent?.trim() ?? ''),
+            Array.from(document.querySelectorAll('button')).some((candidate) =>
+              /^new pipeline$/i.test(candidate.textContent?.trim() ?? ''),
             ),
           { timeout: 15_000 },
         )
-        .then(() => true)
-        .catch(() => false)
-      check('workflow pipeline tab exists', opened)
-
-      if (opened) {
-        await page.evaluate(() => {
-          const tab = Array.from(document.querySelectorAll('[role="tab"]')).find((candidate) =>
-            /^pipeline$/i.test(candidate.textContent?.trim() ?? ''),
-          )
-          if (tab instanceof HTMLElement) tab.click()
-        })
-
-        // Lazy chunk + React Flow measuring pass, so wait for the boxes themselves.
-        const pipeline = await page
-          .waitForFunction(
-            () => {
-              const nodes = document.querySelectorAll('.react-flow__node')
-              return nodes.length > 0
-                ? {
-                    nodes: nodes.length,
-                    edges: document.querySelectorAll('.react-flow__edge-path').length,
-                  }
-                : false
-            },
-            { timeout: 25_000 },
-          )
-          .then((handle) => handle.jsonValue())
-          .catch(() => null)
-
-        check('pipeline map renders one box per job', Boolean(pipeline && pipeline.nodes > 0), pipeline ? `${pipeline.nodes} files, ${pipeline.edges} links` : 'no boxes')
-
-        // Drill-down: the disclosure must actually reveal the ordered step list.
-        const expanded = await page
-          .evaluate(() => {
-            const button = Array.from(
-              document.querySelectorAll('.react-flow__node [aria-expanded]'),
-            ).find((candidate) => candidate.getAttribute('aria-expanded') === 'false')
-            if (!(button instanceof HTMLElement)) return 'no-disclosure'
-            button.click()
-            return button.getAttribute('aria-controls') ?? 'no-target'
-          })
-          .catch(() => 'error')
-
-        const stepsShown =
-          expanded.startsWith('no-') || expanded === 'error'
-            ? false
-            : await page
-                .waitForFunction(
-                  (id) => {
-                    const panel = document.getElementById(id)
-                    return Boolean(panel && panel.querySelectorAll('li').length > 0)
-                  },
-                  { timeout: 10_000 },
-                  expanded,
-                )
-                .then(() => true)
-                .catch(() => false)
-
-        check('pipeline map box drills down into its steps', stepsShown, expanded.startsWith('no-') ? expanded : '')
-      }
+        .catch(() => null)
     }
 
-    /* ------------------------------------------- pipeline editor */
-
-    // A pipeline is a second canvas with its own store and route, so prove it
-    // mounts and accepts a stage rather than trusting that the tab renders.
-    const pipelineCreated = await page
-      .evaluate(() => {
-        const button = Array.from(document.querySelectorAll('button')).find((candidate) =>
-          /^new pipeline$/i.test(candidate.textContent?.trim() ?? ''),
-        )
-        if (!(button instanceof HTMLElement)) return false
-        button.click()
-        return true
-      })
-      .catch(() => false)
+    const pipelineCreated = !workflowHref
+      ? false
+      : await page
+          .evaluate(() => {
+            const button = Array.from(document.querySelectorAll('button')).find((candidate) =>
+              /^new pipeline$/i.test(candidate.textContent?.trim() ?? ''),
+            )
+            if (!(button instanceof HTMLElement)) return false
+            button.click()
+            return true
+          })
+          .catch(() => false)
 
     if (!pipelineCreated) {
-      check('pipeline can be created', false, 'no "New pipeline" control on the workflow screen')
+      check(
+        'pipeline can be created',
+        false,
+        workflowHref
+          ? 'no "New pipeline" control on the workflow screen'
+          : 'no seeded workflow to open',
+      )
     } else {
       // The dialog needs a name before "Create pipeline" enables, so type one the way
       // a user would — a click on a disabled button would silently do nothing.
@@ -321,6 +263,40 @@ async function main() {
           .then(() => true)
           .catch(() => false)
         check('pipeline canvas mounts', mounted)
+
+        // A stage is a doorway into the job it runs, and double-click is the gesture
+        // people try first — it crosses two stores and a route, so prove it end to end.
+        const staged = !mounted
+          ? false
+          : await page
+              .evaluate(() => {
+                const add = Array.from(document.querySelectorAll('button')).find((candidate) =>
+                  / as a stage$/.test(candidate.getAttribute('aria-label') ?? ''),
+                )
+                if (!(add instanceof HTMLElement)) return false
+                add.click()
+                return true
+              })
+              .catch(() => false)
+
+        const stageBox = !staged
+          ? false
+          : await page
+              .waitForSelector('.react-flow__node', { timeout: 15_000 })
+              .then(() => true)
+              .catch(() => false)
+
+        if (!stageBox) {
+          check('double-clicking a stage opens its job', false, 'no stage could be added')
+        } else {
+          await page.click('.react-flow__node', { clickCount: 2 }).catch(() => null)
+          const onJobRoute = await page
+            .waitForFunction(() => location.hash.includes('/jobs/'), { timeout: 15_000 })
+            .then(() => true)
+            .catch(() => false)
+          const at = await page.evaluate(() => location.hash).catch(() => '')
+          check('double-clicking a stage opens its job', onJobRoute, onJobRoute ? '' : `at ${at}`)
+        }
       }
     }
 

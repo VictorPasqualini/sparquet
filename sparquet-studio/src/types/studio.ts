@@ -8,17 +8,11 @@
 
 import type { Edge, Node } from '@xyflow/react'
 
-import type {
-  OnFailureMode,
-  OutputSpec,
-  SparkSettings,
-  ValidationRuleSpec,
-  WriteMode,
-} from './pipeline'
+import type { OnFailureMode, OutputSpec, SparkSettings, WriteMode } from './pipeline'
 
 /* ------------------------------------------------------------------ nodes */
 
-export type NodeKind = 'source' | 'transform' | 'validations' | 'sink' | 'note'
+export type NodeKind = 'source' | 'transform' | 'validation' | 'sink' | 'note'
 
 /** A data source: the pipeline `input`, or the right-hand side of a join/union. */
 export type SourceNodeData = {
@@ -46,16 +40,21 @@ export type TransformNodeData = {
   comment?: string
 }
 
-/** The single `validations` block. Runs after transformations, before writes. */
-export type ValidationsNodeData = {
-  kind: 'validations'
+/**
+ * ONE entry of `validations.rules`, chained on the canvas exactly like a
+ * transformation. A run of these nodes compiles into the single `validations`
+ * block the framework expects; the block-level policy lives in `JobSettings`
+ * (see `ValidationPolicy`) because it belongs to the job, not to one rule.
+ */
+export type ValidationNodeData = {
+  kind: 'validation'
   label?: string
-  onFailure: OnFailureMode
-  rules: ValidationRuleSpec[]
-  /** Optional data-quality report sink. */
-  report?: OutputSpec | null
-  /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
-  outputs?: Record<string, OutputSpec> | null
+  /** Validator registry key, e.g. `not_null`, `range`, `check`. */
+  validator: string
+  /** Every JSON key of the rule except `type`. */
+  params: Record<string, unknown>
+  /** Muted rules stay on the canvas but are omitted from the compiled JSON. */
+  disabled?: boolean
   comment?: string
 }
 
@@ -82,15 +81,15 @@ export type NoteNodeData = {
 }
 
 export type StudioNodeData =
-  SourceNodeData | TransformNodeData | ValidationsNodeData | SinkNodeData | NoteNodeData
+  SourceNodeData | TransformNodeData | ValidationNodeData | SinkNodeData | NoteNodeData
 
 export type SourceNode = Node<SourceNodeData, 'source'>
 export type TransformNode = Node<TransformNodeData, 'transform'>
-export type ValidationsNode = Node<ValidationsNodeData, 'validations'>
+export type ValidationNode = Node<ValidationNodeData, 'validation'>
 export type SinkNode = Node<SinkNodeData, 'sink'>
 export type NoteNode = Node<NoteNodeData, 'note'>
 
-export type StudioNode = SourceNode | TransformNode | ValidationsNode | SinkNode | NoteNode
+export type StudioNode = SourceNode | TransformNode | ValidationNode | SinkNode | NoteNode
 
 /** Handle ids used across the canvas. */
 export const HANDLE = {
@@ -122,12 +121,38 @@ export interface ParamDefinition {
   description?: string
 }
 
+/**
+ * Block-level `validations` configuration.
+ *
+ * `on_failure`, the quality `report` and the quarantine `outputs` describe what the
+ * job does with the verdict of ALL its rules, so they belong to the job rather than
+ * to any single rule node — putting them on one node would make that node special.
+ */
+export interface ValidationPolicy {
+  onFailure: OnFailureMode
+  /** Optional data-quality report sink (`validations.report`). */
+  report?: OutputSpec | null
+  /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
+  outputs?: Record<string, OutputSpec> | null
+}
+
 export interface JobSettings {
   /** `name` inside the compiled pipeline JSON. */
   pipelineName: string
   description: string
   spark: SparkSettings
+  /**
+   * Optional so that records written before validations became per-rule nodes stay
+   * readable: every consumer falls back to `DEFAULT_VALIDATION_POLICY`.
+   */
+  validations?: ValidationPolicy
 }
+
+/**
+ * What a job validates with until the author says otherwise — the engine default.
+ * Frozen because it is handed straight to readers as a fallback value.
+ */
+export const DEFAULT_VALIDATION_POLICY: ValidationPolicy = Object.freeze({ onFailure: 'fail' })
 
 export interface Job {
   id: string
@@ -176,9 +201,8 @@ export interface PipelineStage {
 }
 
 /**
- * A manual execution-order link: `source` runs before `target`. Drawn by the
- * author — never inferred from paths, which is what the read-only inferred pipeline
- * (`lib/pipeline/inferredPipeline.ts`) does instead.
+ * A manual execution-order link: `source` runs before `target`. Always drawn by
+ * the author — never inferred from the paths the jobs happen to share.
  */
 export interface PipelineLink {
   id: string
