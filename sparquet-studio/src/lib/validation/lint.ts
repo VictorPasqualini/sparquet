@@ -7,10 +7,13 @@
  * positive would cost more than a missing warning.
  */
 
-import { getFormat, getTransformation, getValidator } from '@/catalog'
+import { getFormat, getTransformation, getValidationSink, getValidator } from '@/catalog'
 import type { FieldSpec } from '@/catalog/types'
-import type { OutputSpec } from '@/types/pipeline'
-import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
+import {
+  DEFAULT_VALIDATION_POLICY,
+  HANDLE,
+  validationSinkRoleOfHandle,
+} from '@/types/studio'
 import type {
   IssueSeverity,
   ParamDefinition,
@@ -23,6 +26,7 @@ import type {
   ValidationIssue,
   ValidationNode,
   ValidationPolicy,
+  ValidationSinkRole,
   JobSettings,
 } from '@/types/studio'
 
@@ -146,7 +150,13 @@ interface LintContext {
   outgoing: Map<string, StudioEdge[]>
   sources: SourceNode[]
   transforms: TransformNode[]
+  /** Destinations the job itself writes — `outputs[]`. Side outputs are not here. */
   sinks: SinkNode[]
+  /**
+   * Destinations the validation step writes BESIDES `outputs[]`, by role. They are
+   * copies taken on the side: the trunk still carries every row past them.
+   */
+  sideSinks: { role: ValidationSinkRole; node: SinkNode; parent: StudioNode }[]
   /** One node per `validations.rules` entry, in no particular order. */
   validations: ValidationNode[]
   /** Main chain: the input source plus the prefix every destination shares. */
@@ -212,8 +222,25 @@ const buildContext = (graph: StudioGraph): LintContext => {
 
   const transforms = nodes.filter(isTransformNode)
   const sources = nodes.filter(isSourceNode)
-  const sinks = nodes.filter(isSinkNode)
   const validations = nodes.filter(isValidationNode)
+
+  /**
+   * Side outputs are held apart from `sinks` for the same reason the compiler holds
+   * them apart: they are NOT branches of the main chain, and folding them into the
+   * shared-prefix computation would truncate the trunk at the rule they hang off.
+   */
+  const sideSinks: LintContext['sideSinks'] = []
+  const sinks: SinkNode[] = []
+  for (const node of nodes.filter(isSinkNode)) {
+    const link = (incoming.get(node.id) ?? [])
+      .map((edge) => ({ role: validationSinkRoleOfHandle(edge.sourceHandle), edge }))
+      .find((candidate): candidate is { role: ValidationSinkRole; edge: StudioEdge } =>
+        candidate.role !== null,
+      )
+    const parent = link ? nodeById.get(link.edge.source) : undefined
+    if (link && parent) sideSinks.push({ role: link.role, node, parent })
+    else sinks.push(node)
+  }
 
   const rightChain = new Set<string>()
   for (const node of transforms) {
@@ -296,6 +323,7 @@ const buildContext = (graph: StudioGraph): LintContext => {
     sources,
     transforms,
     sinks,
+    sideSinks,
     validations,
     trunk,
     rightChain,
@@ -538,7 +566,10 @@ const SINK_OPTION_SKIP: ReadonlySet<string> = new Set(['merge_keys'])
 const checkSinks = (ctx: LintContext): void => {
   const destinations = new Map<string, string>()
 
-  for (const node of ctx.sinks) {
+  // Side outputs are real writes too — same format/path/mode rules, and the
+  // duplicate-path check has to see them: a quality report pointed at the job's own
+  // table would silently overwrite it.
+  for (const node of [...ctx.sinks, ...ctx.sideSinks.map((entry) => entry.node)]) {
     const { format, path, mode, options } = node.data
     const named = requireFormat(ctx, node, format)
     const def = named ? getFormat(format) : undefined
@@ -768,64 +799,117 @@ const checkValidationRules = (ctx: LintContext): void => {
 }
 
 /**
- * The block-level policy lives in the job settings, so its problems are job-scoped:
- * they carry no `nodeId` and their `field` paths are rooted at `validations.`.
+ * Row-level rules are the only ones that can label a ROW: they run per row and their
+ * verdict is what `ValidationEngine.split()` routes on. An aggregate rule
+ * (`row_count`, `schema`, `sql`, and the `check` metrics that reduce the whole
+ * frame) answers about the dataset, so it can never mark an individual row.
+ */
+const ROW_LEVEL_VALIDATORS: ReadonlySet<string> = new Set([
+  'not_null',
+  'unique',
+  'range',
+  'regex',
+])
+
+/** `check` is row-level only for the metrics that count rows one by one. */
+const ROW_LEVEL_CHECK_METRICS: ReadonlySet<string> = new Set([
+  'missing_count',
+  'missing_percent',
+  'invalid_count',
+  'invalid_percent',
+])
+
+const isRowLevelRule = (node: ValidationNode): boolean => {
+  if (node.data.validator === 'check') {
+    return ROW_LEVEL_CHECK_METRICS.has(text(node.data.params.metric))
+  }
+  return ROW_LEVEL_VALIDATORS.has(node.data.validator)
+}
+
+/**
+ * The three destinations the validation step writes on the side.
+ *
+ * Their format/path/mode are checked with every other sink in `checkSinks`; what is
+ * left here is what only makes sense for a SIDE output — whether the rules upstream
+ * can actually fill it, and whether the projection it asks for exists.
+ */
+const checkValidationSinks = (ctx: LintContext): void => {
+  const active = ctx.validations.filter((node) => !node.data.disabled)
+  const activeIds = new Set(active.map((node) => node.id))
+
+  for (const { role, node, parent } of ctx.sideSinks) {
+    const def = getValidationSink(role)
+
+    if (!isValidationNode(parent)) {
+      ctx.issues.push({
+        id: `dq-sink-parent:${node.id}`,
+        severity: 'error',
+        message: `"${labelOf(node)}" is wired to a side output of a node that is not a validation rule.`,
+        nodeId: node.id,
+        hint: `${def.label} is written by the validations block. Connect it to the last rule of the run, or wire it into the main chain to make it an ordinary destination.`,
+      })
+      continue
+    }
+
+    if (!activeIds.has(parent.id)) {
+      ctx.issues.push({
+        id: `dq-sink-muted:${node.id}`,
+        severity: 'error',
+        message: `"${labelOf(node)}" hangs off a muted rule.`,
+        nodeId: node.id,
+        hint: 'A muted rule is left out of the compiled JSON, and with it this destination.',
+      })
+      continue
+    }
+
+    if (!ctx.trunk.has(parent.id)) {
+      ctx.issues.push({
+        id: `dq-sink-branch:${node.id}`,
+        severity: 'error',
+        message: `"${labelOf(node)}" hangs off a rule that is not on the main chain.`,
+        nodeId: node.id,
+        hint: 'Only rules every destination passes through compile into the validations block; a rule off the trunk writes nothing.',
+      })
+      continue
+    }
+
+    // The quarantine split is decided by row-level rules alone. With none of them on
+    // the chain every row counts as valid, so `invalid` is written empty and `valid`
+    // is a full second copy of the data — a silent, expensive no-op.
+    if (role !== 'report' && !active.some(isRowLevelRule)) {
+      ctx.issues.push({
+        id: `dq-sink-no-row-rule:${node.id}`,
+        severity: 'warning',
+        message: `"${labelOf(node)}" has no row-level rule to sort rows with.`,
+        nodeId: node.id,
+        hint: 'Only not_null, unique, range, regex and the missing/invalid checks label a single row. Aggregate rules (row_count, schema, sql, and metrics like avg or freshness) judge the whole DataFrame, so every row would come out valid.',
+      })
+    }
+
+    // `_write_validation_report` builds its own DataFrame and writes it straight —
+    // it never calls `_project_columns`, so a projection here is dead config.
+    if (role === 'report' && node.data.columns !== null && node.data.columns.length > 0) {
+      ctx.issues.push({
+        id: `dq-report-columns:${node.id}`,
+        severity: 'warning',
+        message: 'The quality report ignores the column projection.',
+        nodeId: node.id,
+        field: 'columns',
+        hint: 'The report has a fixed schema (pipeline, rule_type, check_name, severity, passed, failed_count, metric_value, message, validated_at) and is written without a select. Turn the projection off.',
+      })
+    }
+  }
+}
+
+/**
+ * What is left of the block-level policy after the three datasets became nodes:
+ * `on_failure` alone. It is job-scoped, so the issue carries no `nodeId`.
  */
 const checkValidationPolicy = (ctx: LintContext, settings: JobSettings): void => {
   const policy: ValidationPolicy | undefined = settings.validations
   if (!policy) return
 
-  const destinations: [string, OutputSpec | null | undefined][] = [
-    ['report', policy.report],
-    ...Object.entries(policy.outputs ?? {}).map(
-      ([key, value]): [string, OutputSpec] => [`outputs.${key}`, value],
-    ),
-  ]
-
-  const configured = destinations.filter(([, value]) => Boolean(value))
-
-  for (const [scope, destination] of configured) {
-    if (!destination) continue
-    const label = scope === 'report' ? 'Validation report' : `Validation ${scope}`
-    const def = getFormat(destination.format ?? '')
-    if (text(destination.format) === '') {
-      ctx.issues.push({
-        id: `settings:${scope}-format`,
-        severity: 'error',
-        message: `${label}: a format is required.`,
-        field: `validations.${scope}.format`,
-        hint: 'A destination without a format is dropped from the compiled JSON, so nothing is ever written to it.',
-      })
-    } else if (def && !def.canWrite) {
-      ctx.issues.push({
-        id: `settings:${scope}-format-write`,
-        severity: 'error',
-        message: `${label}: ${def.label} cannot be written.`,
-        field: `validations.${scope}.format`,
-        hint: 'The writer registry has no entry for this format — pick a writable destination in the job settings.',
-      })
-    }
-    if (text(destination.path) === '') {
-      ctx.issues.push({
-        id: `settings:${scope}-path`,
-        severity: 'error',
-        message: `${label}: a path is required.`,
-        field: `validations.${scope}.path`,
-        hint: 'It is a full output config — it needs a format and a path like any other destination.',
-      })
-    }
-  }
-
   const active = ctx.validations.filter((node) => !node.data.disabled)
-  if (configured.length > 0 && active.length === 0) {
-    ctx.issues.push({
-      id: 'settings:validations-unused',
-      severity: 'warning',
-      message: 'The job configures validation destinations but has no rule.',
-      hint: 'Without a rule node no `validations` block is compiled, so neither the quality report nor the quarantine outputs are written. Add a rule, or switch the destinations off in the job settings.',
-    })
-  }
-
   if (policy.onFailure !== DEFAULT_VALIDATION_POLICY.onFailure && active.length === 0) {
     ctx.issues.push({
       id: 'settings:on-failure-unused',
@@ -1013,7 +1097,14 @@ const trackColumns = (columns: Set<string> | null, node: TransformNode): Set<str
 }
 
 const checkOutputColumns = (ctx: LintContext): void => {
-  for (const sink of ctx.sinks) {
+  // The quarantine outputs go through the same `_project_columns`, over the same
+  // DataFrame, so the projection is checked against the same chain. The report has
+  // a schema of its own and is handled by `checkValidationSinks`.
+  const quarantine = ctx.sideSinks
+    .filter((entry) => entry.role !== 'report')
+    .map((entry) => entry.node)
+
+  for (const sink of [...ctx.sinks, ...quarantine]) {
     const requested = sink.data.columns
     if (!requested || requested.length === 0) continue
 
@@ -1058,6 +1149,7 @@ export function lintJob(
   checkSinks(ctx)
   checkTransforms(ctx)
   checkValidationRules(ctx)
+  checkValidationSinks(ctx)
   checkValidationPolicy(ctx, settings)
   checkPlaceholders(ctx, settings, params)
   checkOutputColumns(ctx)

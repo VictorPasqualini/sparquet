@@ -10,19 +10,26 @@
  * there is nothing to upgrade, which is what lets callers skip the write.
  */
 
-import { makeEdge } from '@/lib/compiler/graph'
-import type { OnFailureMode, OutputSpec } from '@/types/pipeline'
+import { isLastValidationOfRun, isValidationNode, makeEdge } from '@/lib/compiler/graph'
+import type { OnFailureMode } from '@/types/pipeline'
 import { ON_FAILURE_MODES } from '@/types/pipeline'
 import type {
   Job,
   JobSettings,
+  SinkNode,
   StudioEdge,
   StudioGraph,
   StudioNode,
   ValidationNode,
   ValidationPolicy,
+  ValidationSinkRole,
 } from '@/types/studio'
-import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
+import {
+  DEFAULT_VALIDATION_POLICY,
+  HANDLE,
+  VALIDATION_SINK_HANDLES,
+  VALIDATION_SINK_ROLES,
+} from '@/types/studio'
 
 /**
  * The pre-split shape: ONE node carrying every rule plus the block-level policy.
@@ -65,17 +72,22 @@ function legacyRules(data: LegacyValidationsData): JsonRecord[] {
   )
 }
 
-function legacyPolicy(data: LegacyValidationsData): ValidationPolicy {
+/**
+ * The policy shape of storage v3, when the three written datasets were still
+ * settings rather than nodes. `upgradeValidations` may still produce it (it reads
+ * even older records); `upgradeValidationSinks` is what clears it.
+ */
+type LegacyValidationPolicy = ValidationPolicy & { report?: unknown; outputs?: unknown }
+
+function legacyPolicy(data: LegacyValidationsData): LegacyValidationPolicy {
   const raw = typeof data.onFailure === 'string' ? data.onFailure : ''
   const onFailure: OnFailureMode = ON_FAILURE_MODES.includes(raw as OnFailureMode)
     ? (raw as OnFailureMode)
     : DEFAULT_VALIDATION_POLICY.onFailure
 
-  const policy: ValidationPolicy = { onFailure }
-  if (isRecord(data.report)) policy.report = data.report as unknown as OutputSpec
-  if (isRecord(data.outputs)) {
-    policy.outputs = data.outputs as unknown as Record<string, OutputSpec>
-  }
+  const policy: LegacyValidationPolicy = { onFailure }
+  if (isRecord(data.report)) policy.report = data.report
+  if (isRecord(data.outputs)) policy.outputs = data.outputs
   return policy
 }
 
@@ -161,9 +173,116 @@ export function upgradeValidations(
   }
 }
 
+/* ------------------------------------------- v4: policy sinks become nodes */
+
+/** `partition_by` / `columns` survive only when they are lists of strings. */
+function stringList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  return value.filter((entry): entry is string => typeof entry === 'string')
+}
+
+function sinkNodeOf(
+  id: string,
+  spec: JsonRecord,
+  position: { x: number; y: number },
+): SinkNode {
+  return {
+    id,
+    type: 'sink',
+    position,
+    data: {
+      kind: 'sink',
+      format: typeof spec.format === 'string' ? spec.format : '',
+      path: typeof spec.path === 'string' ? spec.path : '',
+      mode: typeof spec.mode === 'string' ? spec.mode : '',
+      partitionBy: stringList(spec.partition_by) ?? [],
+      columns: stringList(spec.columns),
+      options: isRecord(spec.options) ? { ...spec.options } : {},
+    },
+  }
+}
+
+/** The stored policy's three datasets, in the order they are written and drawn. */
+function legacySinkSpecs(policy: LegacyValidationPolicy): [ValidationSinkRole, JsonRecord][] {
+  const specs: [ValidationSinkRole, JsonRecord][] = []
+  if (isRecord(policy.report)) specs.push(['report', policy.report])
+  if (isRecord(policy.outputs)) {
+    for (const role of VALIDATION_SINK_ROLES) {
+      if (role === 'report') continue
+      const entry = policy.outputs[role]
+      if (isRecord(entry)) specs.push([role, entry])
+    }
+  }
+  return specs
+}
+
+/**
+ * Moves `validations.report` and `validations.outputs` out of the job settings and
+ * onto the canvas, as destination nodes hanging off the LAST rule of the run — the
+ * point where "every rule has run" is true, which is when the framework writes them.
+ *
+ * `on_failure` stays behind: it is run policy, not a dataset.
+ *
+ * A job that configured them without ever having a rule compiled no `validations`
+ * block, so nothing was written for it either — those specs are dropped with a
+ * console warning rather than left dangling off nothing.
+ */
+export function upgradeValidationSinks(
+  graph: StudioGraph,
+  settings: JobSettings,
+): { graph: StudioGraph; settings: JobSettings; changed: boolean } {
+  const policy = settings.validations as LegacyValidationPolicy | undefined
+  if (!policy) return { graph, settings, changed: false }
+
+  const specs = legacySinkSpecs(policy)
+  const stripped: ValidationPolicy = { onFailure: policy.onFailure }
+  if (specs.length === 0) {
+    // Still rewrite when the legacy keys were present but empty, so the record
+    // stops carrying shapes the model no longer describes.
+    const hadKeys = 'report' in policy || 'outputs' in policy
+    return hadKeys
+      ? { graph, settings: { ...settings, validations: stripped }, changed: true }
+      : { graph, settings, changed: false }
+  }
+
+  const rules = graph.nodes.filter(isValidationNode)
+  const anchor = rules.find((node) => isLastValidationOfRun(graph, node.id)) ?? null
+
+  if (!anchor) {
+    console.warn(
+      `Sparquet Studio: dropped ${specs.length} validation destination(s) from a job with no validation rule — ` +
+        'without a rule no `validations` block was ever compiled, so nothing was written to them.',
+    )
+    return { graph, settings: { ...settings, validations: stripped }, changed: true }
+  }
+
+  const nodes = [...graph.nodes]
+  const edges = [...graph.edges]
+  specs.forEach(([role, spec], index) => {
+    // Deterministic id and position: running the upgrade twice on a copy of the
+    // same record has to produce the same graph.
+    const id = `${anchor.id}-dq-${role}`
+    if (nodes.some((node) => node.id === id)) return
+    nodes.push(
+      sinkNodeOf(id, spec, {
+        x: anchor.position.x + index * 300,
+        y: anchor.position.y + 220,
+      }),
+    )
+    edges.push(makeEdge(anchor.id, id, HANDLE.in, VALIDATION_SINK_HANDLES[role]))
+  })
+
+  return {
+    graph: { nodes, edges },
+    settings: { ...settings, validations: stripped },
+    changed: true,
+  }
+}
+
 /** Brings one stored job up to the current shape. Returns it as-is when already current. */
 export function upgradeJob(job: Job): Job {
-  const upgraded = upgradeValidations(job.graph, job.settings)
-  if (!upgraded.changed) return job
-  return { ...job, graph: upgraded.graph, settings: upgraded.settings }
+  const split = upgradeValidations(job.graph, job.settings)
+  const sinks = upgradeValidationSinks(split.graph, split.settings)
+  if (!split.changed && !sinks.changed) return job
+  return { ...job, graph: sinks.graph, settings: sinks.settings }
 }

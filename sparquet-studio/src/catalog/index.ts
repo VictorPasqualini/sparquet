@@ -13,6 +13,8 @@ import type { FormatDef, TransformationDef, ValidatorDef } from './types'
 import { ON_FAILURE_OPTIONS, VALIDATORS } from './validators'
 
 export * from './types'
+export { getValidationSink, VALIDATION_SINKS } from './validationSinks'
+export type { ValidationSinkDef } from './validationSinks'
 
 export const TRANSFORMATIONS: TransformationDef[] = [
   ...CORE_TRANSFORMATIONS,

@@ -6,7 +6,8 @@ import { IconButton, Tooltip } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { useEditorStore } from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
-import { HANDLE } from '@/types/studio'
+import { getValidationSink } from '@/catalog'
+import { HANDLE, validationSinkRoleOfHandle } from '@/types/studio'
 
 export function PipelineEdge({
   id,
@@ -16,6 +17,7 @@ export function PipelineEdge({
   targetY,
   sourcePosition,
   targetPosition,
+  sourceHandleId,
   targetHandleId,
   markerEnd,
   selected,
@@ -36,6 +38,10 @@ export function PipelineEdge({
 
   const active = hovered || selected === true
   const isSecondary = targetHandleId === HANDLE.inRight
+  // A side output is drawn dashed AND labelled: the data leaving here is a copy,
+  // and the main chain past the rule still carries every row.
+  const sideRole = validationSinkRoleOfHandle(sourceHandleId)
+  const sideDef = sideRole ? getValidationSink(sideRole) : null
 
   return (
     <g onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
@@ -46,6 +52,7 @@ export function PipelineEdge({
         className={cn(
           // `dashdraw` ships with the React Flow base stylesheet.
           animate && '[animation:dashdraw_0.5s_linear_infinite] [stroke-dasharray:5]',
+          sideDef && !animate && '[stroke-dasharray:4_4]',
           active && 'stroke-brand-500',
         )}
       />
@@ -71,6 +78,13 @@ export function PipelineEdge({
           ) : isSecondary ? (
             <span className="rounded-full border border-line bg-surface px-1.5 py-px text-2xs text-content-subtle">
               right
+            </span>
+          ) : sideDef ? (
+            <span
+              className="rounded-full border border-line bg-surface px-1.5 py-px text-2xs text-content-subtle"
+              title={`${sideDef.label} — a side output. ${sideDef.caveat}`}
+            >
+              side output
             </span>
           ) : null}
         </div>

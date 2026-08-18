@@ -56,6 +56,7 @@ import { useEditorStore } from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
 import {
   HANDLE,
+  validationSinkRoleOfHandle,
   type NodeKind,
   type StudioEdge,
   type StudioNode,
@@ -223,6 +224,13 @@ export function JobCanvas() {
       // Notes are annotations, and a source reads from storage — neither takes input.
       if (sourceNode.data.kind === 'note' || targetNode.data.kind === 'note') return false
       if (targetNode.data.kind === 'source') return false
+      // A validation side output IS a written dataset: only a destination can take it.
+      if (
+        validationSinkRoleOfHandle(connection.sourceHandle) !== null &&
+        targetNode.data.kind !== 'sink'
+      ) {
+        return false
+      }
       return !reaches(edges, target, source)
     },
     [edges, nodes],
@@ -264,14 +272,16 @@ export function JobCanvas() {
       }
 
       event.preventDefault()
-      if (connectSource === nodeId) {
+      if (connectSource.nodeId === nodeId) {
         cancelConnect()
         return
       }
+      // A validation side output writes a dataset, so it can only end on one.
+      if (connectSource.handle !== HANDLE.out && node.data.kind !== 'sink') return
       onConnect({
-        source: connectSource,
+        source: connectSource.nodeId,
         target: nodeId,
-        sourceHandle: HANDLE.out,
+        sourceHandle: connectSource.handle,
         targetHandle: freeTargetHandle(node, edges),
       })
       cancelConnect()

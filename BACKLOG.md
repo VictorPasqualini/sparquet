@@ -206,6 +206,16 @@ Pendente:
       `dependencies` (`sparquet-cola>=0.1.0`, sem cap — mantido retrocompatível) e é
       validado contra o pacote do PyPI;
       os shims `sparquet.validation.*` seguem reexportando dele.
+- [ ] **Studio — histórico de execuções** — guardar cada execução de um Job/Pipeline
+      (quando, quanto durou, sucesso/erro, linhas lidas/escritas, validações) em vez de
+      só o último run em memória. Base para comparar execuções e investigar regressões.
+- [ ] **Studio — histórico de status por etapa** — persistir o status de cada etapa do
+      Job (input, transformações, validações, outputs) junto da execução, para responder
+      "onde quebrou da última vez?" sem reexecutar.
+- [ ] **Studio — consumo de tokens por execução** — contabilizar uso na régua
+      **1 token = 1 Job executado** (um Pipeline de N Jobs consome N tokens), com o
+      total por execução visível no histórico.
+
 - [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
       (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
       mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.

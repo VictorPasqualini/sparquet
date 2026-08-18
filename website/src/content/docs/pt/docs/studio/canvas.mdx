@@ -23,11 +23,32 @@ Aperte <kbd>/</kbd> em qualquer lugar para focar a busca da palette.
 |---|---|---|
 | Source | `input`, ou um `with` de join/union | nenhum |
 | Transformation | uma entrada de `transformations` | um (dois para `join` e `union`) |
-| Validations | o bloco `validations` | um |
+| Validation rule | uma entrada de `validations.rules` — uma caixa por regra | um |
+| Destination (saída lateral) | `validations.report` ou `validations.outputs.valid`/`.invalid`, quando ligada ao handle inferior de uma regra | um |
 | Destination | uma entrada de `outputs` | um |
 | Note | nada | nenhum |
 
 Um nó mostra seu parâmetro mais significativo sob o título — a condição de um filter, a expressão de uma coluna calculada, o tipo e a chave do join — então um Job é legível sem abrir nada.
+
+## Saídas laterais da validação
+
+Uma regra de validação tem três handles extras na borda **inferior**: `report`,
+`valid rows` e `invalid rows`. Ligue um deles a um destino e ele compila para
+`validations.report` ou `validations.outputs.valid` / `.invalid` — nunca para os
+`outputs` do próprio Job.
+
+A geometria é o significado: elas pendem *abaixo* da cadeia, que segue à direita
+intacta.
+
+<Aside type="caution" title="É cópia, não desvio">
+  A quarentena não desvia linhas. O framework grava as saídas laterais e depois
+  grava os destinos do Job a partir do **mesmo DataFrame completo** — inclusive as
+  inválidas. Se o destino principal não pode carregá-las, filtre-as
+  explicitamente com um nó `filter`.
+</Aside>
+
+`on_failure` não é um destino e continua nas **configurações do Job**: ela decide
+se uma violação aborta a execução.
 
 ## Conectando
 

@@ -29,9 +29,10 @@ import type {
   ValidationIssue,
   ValidationNode,
   ValidationPolicy,
+  ValidationSinkRole,
   JobSettings,
 } from '@/types/studio'
-import { DEFAULT_VALIDATION_POLICY } from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY, VALIDATION_SINK_ROLES } from '@/types/studio'
 import {
   chainToSink,
   isCompilable,
@@ -43,6 +44,7 @@ import {
   isValidationNode,
   longestCommonPrefix,
   sideParent,
+  validationSinkLink,
 } from '@/lib/compiler/graph'
 
 export interface CompileResult {
@@ -219,18 +221,6 @@ function buildOutput(
   return spec
 }
 
-function buildReport(report: OutputSpec): OutputSpec | null {
-  if (!isRecord(report) || isBlank(report.format) || isBlank(report.path)) return null
-  const cloned = jsonClone(report)
-  if (!isRecord(cloned)) return null
-  const pruned: JsonRecord = {}
-  for (const [key, value] of Object.entries(cloned)) {
-    if (isBlank(value)) continue
-    pruned[key] = value
-  }
-  return orderKeys(pruned, OUTPUT_KEY_ORDER) as unknown as OutputSpec
-}
-
 /** One rule node → one entry of `validations.rules`. */
 function buildRule(node: ValidationNode, issues: Issues): ValidationRuleSpec | null {
   const type = node.data.validator
@@ -253,12 +243,14 @@ function buildRule(node: ValidationNode, issues: Issues): ValidationRuleSpec | n
 }
 
 /**
- * The rule nodes on the shared chain plus the job-level policy → the single
- * `validations` object. No rules means no `validations` key at all.
+ * The rule nodes on the shared chain, the job-level run policy and the side-output
+ * destinations → the single `validations` object. No rules means no `validations`
+ * key at all, which is also why the side outputs cannot exist without one.
  */
 function buildValidations(
   nodes: readonly ValidationNode[],
   policy: ValidationPolicy | undefined,
+  sideSinks: ReadonlyMap<ValidationSinkRole, SinkNode>,
   issues: Issues,
 ): ValidationsSpec | null {
   const rules: ValidationRuleSpec[] = []
@@ -271,12 +263,20 @@ function buildValidations(
   const spec: ValidationsSpec = {
     on_failure: policy?.onFailure ?? DEFAULT_VALIDATION_POLICY.onFailure,
   }
-  const report = policy?.report ? buildReport(policy.report) : null
-  if (report) spec.report = report
-  const outputs = policy?.outputs
-  if (isRecord(outputs) && Object.keys(outputs).length > 0) {
-    spec.outputs = jsonClone(outputs) as Record<string, OutputSpec>
+
+  const report = sideSinks.get('report')
+  if (report) spec.report = buildOutput(report, [], issues)
+
+  // `valid` before `invalid`, always, so two identical canvases never produce two
+  // different files.
+  const quarantine: Record<string, OutputSpec> = {}
+  for (const role of VALIDATION_SINK_ROLES) {
+    if (role === 'report') continue
+    const node = sideSinks.get(role)
+    if (node) quarantine[role] = buildOutput(node, [], issues)
   }
+  if (Object.keys(quarantine).length > 0) spec.outputs = quarantine
+
   spec.rules = rules
   return spec
 }
@@ -426,17 +426,66 @@ function reportChainProblem(
 
 /* ---------------------------------------------------------------- compile */
 
+/**
+ * Splits the destinations in two: the ones the job writes (`outputs[]`) and the
+ * ones the validation step writes on the side. A side destination is recognised by
+ * the handle its incoming link leaves from, so it is never counted twice.
+ */
+function partitionSinks(
+  graph: StudioGraph,
+  issues: Issues,
+): { sinks: SinkNode[]; sideSinks: Map<ValidationSinkRole, SinkNode>; sideIds: Set<string> } {
+  const sinks: SinkNode[] = []
+  const sideSinks = new Map<ValidationSinkRole, SinkNode>()
+  /** Every sink wired to a side handle, refused ones included — they are reported
+   *  here, so the orphan sweep at the end must not report them a second time. */
+  const sideIds = new Set<string>()
+
+  for (const node of graph.nodes.filter(isSinkNode)) {
+    if (isDisabled(node)) continue
+    const link = validationSinkLink(graph, node.id)
+    if (!link) {
+      sinks.push(node)
+      continue
+    }
+    sideIds.add(node.id)
+
+    if (!isValidationNode(link.parent) || isDisabled(link.parent)) {
+      issues.error('A validation side output must hang off a validation rule.', {
+        nodeId: node.id,
+        hint: 'Re-connect it to the last rule of the run, or wire it into the main chain to make it an ordinary destination.',
+      })
+      continue
+    }
+
+    const taken = sideSinks.get(link.role)
+    if (taken) {
+      issues.error('Two destinations claim the same validation side output.', {
+        nodeId: node.id,
+        hint: 'The block writes each of `report`, `outputs.valid` and `outputs.invalid` once. Delete one, or move it to a free handle.',
+      })
+      continue
+    }
+    sideSinks.set(link.role, node)
+  }
+
+  return { sinks, sideSinks, sideIds }
+}
+
 export function compileGraph(
   graph: StudioGraph,
   settings: JobSettings,
   params?: readonly ParamDefinition[],
 ): CompileResult {
   const issues = createIssues()
-  const sinks = graph.nodes.filter(isSinkNode).filter((node) => !isDisabled(node))
+  const { sinks, sideSinks, sideIds } = partitionSinks(graph, issues)
 
   if (sinks.length === 0) {
     issues.error('The job has no destination.', {
-      hint: 'Add a destination node and connect the end of the chain to it.',
+      hint:
+        sideSinks.size > 0
+          ? 'The validation report and quarantine are SIDE outputs of the rules — they never replace the job’s own destination. Add one and connect the end of the chain to it.'
+          : 'Add a destination node and connect the end of the chain to it.',
     })
     return { pipeline: null, issues: issues.items }
   }
@@ -543,7 +592,26 @@ export function compileGraph(
     return buildOutput(entry.sink, suffixTransforms, issues)
   })
 
-  const validations = buildValidations(validationNodes, settings.validations, issues)
+  // A side output is only meaningful when its rule is part of the compiled block:
+  // otherwise no `validations` key is emitted and the destination is never written.
+  const compiledRules = new Set(validationNodes.map((node) => node.id))
+  for (const id of sideIds) ctx.used.add(id)
+  for (const [role, node] of sideSinks) {
+    const link = validationSinkLink(graph, node.id)
+    if (link && compiledRules.has(link.parent.id)) continue
+    sideSinks.delete(role)
+    issues.error('This validation side output hangs off a rule that never runs.', {
+      nodeId: node.id,
+      hint: 'Rules only compile when they sit on the chain every destination shares. Move the rule onto the main chain and re-connect this destination to it.',
+    })
+  }
+
+  const validations = buildValidations(
+    validationNodes,
+    settings.validations,
+    sideSinks,
+    issues,
+  )
 
   for (const node of graph.nodes) {
     if (isNoteNode(node) || isDisabled(node) || ctx.used.has(node.id)) continue
@@ -634,6 +702,14 @@ export function serializePipeline(pipeline: PipelineSpec): string {
   if (isRecord(raw.validations)) {
     const validations = orderKeys(raw.validations, VALIDATIONS_KEY_ORDER)
     if (isRecord(validations.report)) validations.report = orderOutputDeep(validations.report)
+    if (isRecord(validations.outputs)) {
+      validations.outputs = Object.fromEntries(
+        Object.entries(validations.outputs).map(([key, value]) => [
+          key,
+          orderOutputDeep(value),
+        ]),
+      )
+    }
     if (Array.isArray(validations.rules)) {
       validations.rules = validations.rules.map((rule) =>
         isRecord(rule) ? orderKeys(rule, ['type']) : rule,

@@ -74,6 +74,15 @@ const link = (from: string, to: string, handle: string = HANDLE.in): StudioEdge 
   targetHandle: handle,
 })
 
+/** A link leaving one of a rule node's validation side outputs. */
+const sideLink = (from: string, to: string, sourceHandle: string): StudioEdge => ({
+  id: `${from}->${to}:${sourceHandle}`,
+  source: from,
+  target: to,
+  sourceHandle,
+  targetHandle: HANDLE.in,
+})
+
 const lint = (
   nodes: StudioNode[],
   edges: StudioEdge[],
@@ -189,56 +198,131 @@ describe('lintJob', () => {
       expect(idsOf(issues)).toContain('field:v:columns')
     })
 
-    it('flags a quality report that has no format', () => {
-      const { nodes, edges } = cleanGraph()
-      const issues = lint(nodes, edges, [], {
-        ...SETTINGS,
-        validations: { onFailure: 'fail', report: { format: '', path: '/dq/report' } },
-      })
-      const issue = issues.find((entry) => entry.id === 'settings:report-format')
+    it('flags a quality report node that has no format', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: '', path: '/dq/report' }),
+        ],
+        [link('src', 'v'), link('v', 'out'), sideLink('v', 'dq', HANDLE.outReport)],
+      )
+      // A side output is a destination like any other: same node-scoped rule.
+      const issue = issues.find((entry) => entry.id === 'field:dq:format')
       expect(issue?.severity).toBe('error')
-      expect(issue?.nodeId).toBeUndefined()
-      expect(idsOf(issues)).not.toContain('settings:report-path')
+      expect(issue?.nodeId).toBe('dq')
     })
 
-    it('accepts a complete quality report and quarantine outputs', () => {
-      const { nodes, edges } = cleanGraph()
-      const issues = lint(nodes, edges, [], {
-        ...SETTINGS,
-        validations: {
-          onFailure: 'warn',
-          report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
-          outputs: {
-            valid: { format: 'delta', path: 'silver.ok', mode: 'overwrite' },
-            invalid: { format: 'delta', path: 'silver.bad', mode: 'overwrite' },
-          },
-        },
-      })
-      expect(idsOf(issues).filter((id) => id.startsWith('settings:'))).toEqual([])
+    it('accepts a complete report and quarantine wired to a row-level rule', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq/report' }),
+          sink('ok', { format: 'delta', path: 'silver.ok' }),
+          sink('bad', { format: 'delta', path: 'silver.bad' }),
+        ],
+        [
+          link('src', 'v'),
+          link('v', 'out'),
+          sideLink('v', 'dq', HANDLE.outReport),
+          sideLink('v', 'ok', HANDLE.outValid),
+          sideLink('v', 'bad', HANDLE.outInvalid),
+        ],
+      )
+      expect(idsOf(issues).filter((id) => id.startsWith('dq-'))).toEqual([])
     })
 
-    it('flags a quarantine output without a path', () => {
-      const { nodes, edges } = cleanGraph()
-      const issues = lint(nodes, edges, [], {
-        ...SETTINGS,
-        validations: {
-          onFailure: 'fail',
-          outputs: { invalid: { format: 'delta', path: '' } },
-        },
-      })
-      expect(idsOf(issues)).toContain('settings:outputs.invalid-path')
+    it('warns about a quarantine sink with only aggregate rules upstream', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v', 'row_count', { min: 1 }),
+          sink('out'),
+          sink('bad', { format: 'delta', path: 'silver.bad' }),
+        ],
+        [link('src', 'v'), link('v', 'out'), sideLink('v', 'bad', HANDLE.outInvalid)],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-no-row-rule:bad')
+      expect(issue?.severity).toBe('warning')
+      expect(issue?.nodeId).toBe('bad')
     })
 
-    it('warns when validation destinations are configured but no rule exists', () => {
+    it('accepts a quarantine sink behind a row-level check metric', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v', 'check', {
+            metric: 'missing_percent',
+            column: 'cpf',
+            must_be: '< 1%',
+          }),
+          sink('out'),
+          sink('bad', { format: 'delta', path: 'silver.bad' }),
+        ],
+        [link('src', 'v'), link('v', 'out'), sideLink('v', 'bad', HANDLE.outInvalid)],
+      )
+      expect(idsOf(issues)).not.toContain('dq-sink-no-row-rule:bad')
+    })
+
+    it('warns that a quality report ignores a column projection', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq', columns: ['passed'] }),
+        ],
+        [link('src', 'v'), link('v', 'out'), sideLink('v', 'dq', HANDLE.outReport)],
+      )
+      expect(idsOf(issues)).toContain('dq-report-columns:dq')
+    })
+
+    it('flags a side output hanging off a muted rule', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v', 'not_null', { columns: ['id'] }, { disabled: true }),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq' }),
+        ],
+        [link('src', 'v'), link('v', 'out'), sideLink('v', 'dq', HANDLE.outReport)],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-muted:dq')
+      expect(issue?.severity).toBe('error')
+    })
+
+    it('keeps the main chain intact around a side output', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          transform('t', 'filter', { condition: 'a > 1' }),
+          sink('out'),
+          sink('bad', { format: 'delta', path: 'silver.bad' }),
+        ],
+        [
+          link('src', 'v'),
+          link('v', 't'),
+          link('t', 'out'),
+          sideLink('v', 'bad', HANDLE.outInvalid),
+        ],
+      )
+      // The transform after the rule stays on the trunk: the side output is not a
+      // fan-out, so it must not push the chain into per-output branches.
+      expect(idsOf(issues)).not.toContain('orphan:t')
+      expect(idsOf(issues)).not.toContain('validations-branch:v')
+    })
+
+    it('reports that "on failure" applies to no rule', () => {
       const issues = lint([source('src'), sink('out')], [link('src', 'out')], [], {
         ...SETTINGS,
-        validations: {
-          onFailure: 'warn',
-          report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
-        },
+        validations: { onFailure: 'warn' },
       })
-      const issue = issues.find((entry) => entry.id === 'settings:validations-unused')
-      expect(issue?.severity).toBe('warning')
+      const issue = issues.find((entry) => entry.id === 'settings:on-failure-unused')
+      expect(issue?.severity).toBe('info')
     })
 
     it('accepts filled catalog fields', () => {

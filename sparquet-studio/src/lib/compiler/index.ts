@@ -4,11 +4,13 @@ export {
   chainToSink,
   isCompilable,
   isDisabled,
+  isLastValidationOfRun,
   isNoteNode,
   isSinkNode,
   isSourceNode,
   isTransformNode,
   isValidationNode,
+  isValidationSink,
   longestCommonPrefix,
   makeEdge,
   newNodeId,
@@ -17,8 +19,14 @@ export {
   primaryParent,
   primaryParents,
   sideParent,
+  validationSinkLink,
 } from '@/lib/compiler/graph'
-export type { ChainProblem, ChainProblemCode, ChainResult } from '@/lib/compiler/graph'
+export type {
+  ChainProblem,
+  ChainProblemCode,
+  ChainResult,
+  ValidationSinkLink,
+} from '@/lib/compiler/graph'
 
 export { compileGraph, serializePipeline } from '@/lib/compiler/toJson'
 export type { CompileResult } from '@/lib/compiler/toJson'

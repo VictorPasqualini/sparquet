@@ -7,7 +7,17 @@
  */
 
 import { Handle, NodeToolbar, Position } from '@xyflow/react'
-import { CircleX, Copy, Eye, EyeOff, Link2, TriangleAlert, Trash2, Unlink } from 'lucide-react'
+import {
+  CircleX,
+  Copy,
+  CornerDownRight,
+  Eye,
+  EyeOff,
+  Link2,
+  TriangleAlert,
+  Trash2,
+  Unlink,
+} from 'lucide-react'
 import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -51,11 +61,17 @@ const ACCENT_CHIP: Record<NodeAccent, string> = {
  * React because every node and the canvas itself have to see the same pending
  * source, and the editor store is not ours to extend.
  */
-let connectSourceId: string | null = null
+export interface ConnectSource {
+  nodeId: string
+  /** Which output the link leaves from — the main one, or a validation side output. */
+  handle: string
+}
+
+let connectSource: ConnectSource | null = null
 const connectListeners = new Set<() => void>()
 
 /** Pending connect source, readable outside React. */
-export const readConnectSource = (): string | null => connectSourceId
+export const readConnectSource = (): ConnectSource | null => connectSource
 
 export function subscribeConnectSource(listener: () => void): () => void {
   connectListeners.add(listener)
@@ -64,19 +80,19 @@ export function subscribeConnectSource(listener: () => void): () => void {
   }
 }
 
-function setConnectSource(nodeId: string | null): void {
-  if (connectSourceId === nodeId) return
-  connectSourceId = nodeId
+function setConnectSource(next: ConnectSource | null): void {
+  if (connectSource?.nodeId === next?.nodeId && connectSource?.handle === next?.handle) return
+  connectSource = next
   for (const listener of connectListeners) listener()
 }
 
-/** Node a keyboard-started connection is waiting to leave, or `null`. */
-export function useConnectSource(): string | null {
+/** Node and handle a keyboard-started connection is waiting to leave, or `null`. */
+export function useConnectSource(): ConnectSource | null {
   return useSyncExternalStore(subscribeConnectSource, readConnectSource, readConnectSource)
 }
 
-export function startConnect(nodeId: string): void {
-  setConnectSource(nodeId)
+export function startConnect(nodeId: string, handle: string = HANDLE.out): void {
+  setConnectSource({ nodeId, handle })
 }
 
 export function cancelConnect(): void {
@@ -101,7 +117,28 @@ export interface NodeShellProps {
   disabled?: boolean
   inputs?: 'none' | 'single' | 'dual'
   hasOutput?: boolean
+  /**
+   * Extra outputs drawn UNDER the node, one handle each.
+   *
+   * "Under, not after" is the whole point: what leaves here is a copy taken on the
+   * side while the main chain carries on to the right, unchanged and complete.
+   */
+  sideOutputs?: readonly SideOutput[]
+  /**
+   * Whether a pending link from a side output may land on this node. Only a
+   * destination can receive one, so only `SinkNode` sets it.
+   */
+  acceptsSideOutput?: boolean
   children?: ReactNode
+}
+
+export interface SideOutput {
+  /** Handle id, e.g. `HANDLE.outReport`. */
+  id: string
+  /** Two or three words, drawn beside the handle. */
+  label: string
+  /** Full sentence for the toolbar button and its accessible name. */
+  title: string
 }
 
 export function NodeShell({
@@ -116,6 +153,8 @@ export function NodeShell({
   disabled,
   inputs = 'single',
   hasOutput = true,
+  sideOutputs,
+  acceptsSideOutput = false,
   children,
 }: NodeShellProps) {
   const [hovered, setHovered] = useState(false)
@@ -138,15 +177,19 @@ export function NodeShell({
   const StepIcon = step?.icon
 
   const connectSource = useConnectSource()
-  const isConnectSource = connectSource === nodeId
-  const canReceiveConnection = connectSource !== null && !isConnectSource && inputs !== 'none'
+  const isConnectSource = connectSource?.nodeId === nodeId
+  // A side output writes a dataset, so only a destination can close that link.
+  const acceptsPending =
+    connectSource === null || connectSource.handle === HANDLE.out || acceptsSideOutput
+  const canReceiveConnection =
+    connectSource !== null && !isConnectSource && inputs !== 'none' && acceptsPending
 
   const completeConnection = (targetHandle: string) => {
     if (connectSource === null) return
     onConnect({
-      source: connectSource,
+      source: connectSource.nodeId,
       target: nodeId,
-      sourceHandle: HANDLE.out,
+      sourceHandle: connectSource.handle,
       targetHandle,
     })
     cancelConnect()
@@ -231,6 +274,20 @@ export function NodeShell({
                 </IconButton>
               </Tooltip>
             )}
+            {/* Handles are pointer-only, so every side output needs its own
+                keyboard-reachable way to start a link. */}
+            {connectSource === null &&
+              sideOutputs?.map((side) => (
+                <Tooltip key={side.id} content={side.title}>
+                  <IconButton
+                    size="xs"
+                    label={side.title}
+                    onClick={() => startConnect(nodeId, side.id)}
+                  >
+                    <CornerDownRight />
+                  </IconButton>
+                </Tooltip>
+              ))}
             <Tooltip content="Duplicate">
               <IconButton
                 size="xs"
@@ -397,6 +454,31 @@ export function NodeShell({
         </>
       )}
       {hasOutput && <Handle type="source" position={Position.Right} id={HANDLE.out} />}
+      {sideOutputs && sideOutputs.length > 0 && (
+        <div className="absolute inset-x-0 bottom-0 h-0">
+          {sideOutputs.map((side, index) => {
+            // Spread across the bottom edge: 1 → 50%, 2 → 33/66%, 3 → 25/50/75%.
+            const left = `${((index + 1) / (sideOutputs.length + 1)) * 100}%`
+            return (
+              <span key={side.id}>
+                <Handle
+                  type="source"
+                  position={Position.Bottom}
+                  id={side.id}
+                  style={{ left }}
+                  title={side.title}
+                />
+                <span
+                  className="pointer-events-none absolute top-1.5 -translate-x-1/2 whitespace-nowrap text-2xs leading-none text-content-subtle"
+                  style={{ left }}
+                >
+                  {side.label}
+                </span>
+              </span>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

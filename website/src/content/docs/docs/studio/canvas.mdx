@@ -23,11 +23,32 @@ Press <kbd>/</kbd> anywhere to focus the palette search.
 |---|---|---|
 | Source | `input`, or a join/union `with` | none |
 | Transformation | an entry of `transformations` | one (two for `join` and `union`) |
-| Validations | the `validations` block | one |
+| Validation rule | one entry of `validations.rules` — one box per rule | one |
+| Destination (side output) | `validations.report` or `validations.outputs.valid`/`.invalid`, when linked from a rule's bottom handle | one |
 | Destination | an entry of `outputs` | one |
 | Note | nothing | none |
 
 A node shows its most meaningful parameter under the title — the condition of a filter, the expression of a computed column, the join type and key — so a Job is readable without opening anything.
+
+## Validation side outputs
+
+A validation rule carries three extra handles along its **bottom** edge: `report`,
+`valid rows` and `invalid rows`. Link one to a destination and it compiles into
+`validations.report` or `validations.outputs.valid` / `.invalid` — never into the
+job's own `outputs`.
+
+The geometry is the meaning: they hang *below* the chain, which carries on to the
+right untouched.
+
+<Aside type="caution" title="A copy, not a split">
+  Quarantine does not divert rows. The framework writes the side outputs and then
+  writes the job's own destinations from the **same, complete** DataFrame — invalid
+  rows included. If the main destination must not carry them, filter them out
+  explicitly with a `filter` node.
+</Aside>
+
+`on_failure` is not a sink and stays in **Job settings**: it decides whether a
+violation aborts the run.
 
 ## Connecting
 

@@ -17,8 +17,9 @@ import type {
   StudioNode,
   TransformNode,
   ValidationNode,
+  ValidationSinkRole,
 } from '@/types/studio'
-import { HANDLE } from '@/types/studio'
+import { HANDLE, validationSinkRoleOfHandle } from '@/types/studio'
 
 /* ------------------------------------------------------------- type guards */
 
@@ -105,6 +106,65 @@ export function sideParent(graph: StudioGraph, nodeId: string): StudioNode | und
   return parentsOn(graph, nodeId, HANDLE.inRight)[0]
 }
 
+/* -------------------------------------------------- validation side outputs */
+
+export interface ValidationSinkLink {
+  role: ValidationSinkRole
+  /** The rule node the side output hangs off. */
+  parent: StudioNode
+  edge: StudioEdge
+}
+
+/**
+ * Is this node a SIDE output of the validation step, and which one?
+ *
+ * The role is read off the edge, never stored on the node, so the graph stays the
+ * only source of truth: re-drag the link to another handle and the destination
+ * changes meaning immediately, with nothing left to keep in sync.
+ *
+ * `null` for an ordinary destination on the main chain.
+ */
+export function validationSinkLink(
+  graph: StudioGraph,
+  nodeId: string,
+): ValidationSinkLink | null {
+  for (const edge of graph.edges) {
+    if (edge.target !== nodeId) continue
+    const role = validationSinkRoleOfHandle(edge.sourceHandle)
+    if (!role) continue
+    const parent = nodeById(graph, edge.source)
+    if (!parent) continue
+    return { role, parent, edge }
+  }
+  return null
+}
+
+/** Shorthand for callers that only need to keep side outputs out of a chain walk. */
+export function isValidationSink(graph: StudioGraph, nodeId: string): boolean {
+  return validationSinkLink(graph, nodeId) !== null
+}
+
+/**
+ * Rule nodes with no rule downstream of them — the end of a validation run, and the
+ * only place the canvas offers the side-output handles. There is normally exactly
+ * one; a graph mid-edit can have several disconnected runs.
+ */
+export function isLastValidationOfRun(graph: StudioGraph, nodeId: string): boolean {
+  const seen = new Set<string>([nodeId])
+  const pending = [nodeId]
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (current === undefined) continue
+    for (const child of primaryChildren(graph, current)) {
+      if (seen.has(child.id)) continue
+      seen.add(child.id)
+      if (isValidationNode(child)) return false
+      pending.push(child.id)
+    }
+  }
+  return true
+}
+
 /* ------------------------------------------------------------------ chains */
 
 export type ChainProblemCode = 'multiple-parents' | 'cycle'
@@ -178,12 +238,15 @@ export function makeEdge(
   sourceId: string,
   targetId: string,
   targetHandle: string = HANDLE.in,
+  sourceHandle: string = HANDLE.out,
 ): StudioEdge {
   return {
-    id: `e-${sourceId}-${targetHandle}-${targetId}`,
+    // The source handle is part of the id: the same pair of nodes can be linked
+    // from the main output and from a validation side output at the same time.
+    id: `e-${sourceId}-${sourceHandle}-${targetHandle}-${targetId}`,
     source: sourceId,
     target: targetId,
-    sourceHandle: HANDLE.out,
+    sourceHandle,
     targetHandle,
   }
 }

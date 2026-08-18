@@ -5,7 +5,7 @@
  * every read is guarded: malformed values become issues, never exceptions.
  */
 
-import type { OnFailureMode, OutputSpec, SparkSettings } from '@/types/pipeline'
+import type { OnFailureMode, SparkSettings } from '@/types/pipeline'
 import { ON_FAILURE_MODES } from '@/types/pipeline'
 import type {
   IssueSeverity,
@@ -20,9 +20,15 @@ import type {
   ValidationIssue,
   ValidationNode,
   ValidationPolicy,
+  ValidationSinkRole,
   JobSettings,
 } from '@/types/studio'
-import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
+import {
+  DEFAULT_VALIDATION_POLICY,
+  HANDLE,
+  VALIDATION_SINK_HANDLES,
+  VALIDATION_SINK_ROLES,
+} from '@/types/studio'
 import { makeEdge, newNodeId } from '@/lib/compiler/graph'
 import { autoLayout } from '@/lib/compiler/layout'
 
@@ -284,17 +290,23 @@ function importTransformation(
 }
 
 /**
- * Splits the `validations` block in two: its rules become one node each (the
- * inverse of `buildValidations`), while `on_failure` / `report` / `outputs` are
- * job-wide policy and land in the job settings.
+ * Splits the `validations` block in three: its rules become one node each, its
+ * three written datasets become destination nodes hanging off the last rule, and
+ * `on_failure` — run policy, not data — lands in the job settings. The inverse of
+ * `buildValidations`.
  */
 function importValidations(
   value: unknown,
   issues: Issues,
-): { policy: ValidationPolicy | null; rules: JsonRecord[] } {
+): {
+  policy: ValidationPolicy | null
+  rules: JsonRecord[]
+  sideSinks: Map<ValidationSinkRole, unknown>
+} {
+  const sideSinks = new Map<ValidationSinkRole, unknown>()
   if (!isRecord(value)) {
     issues.warning('The "validations" block is not an object and was skipped.')
-    return { policy: null, rules: [] }
+    return { policy: null, rules: [], sideSinks }
   }
 
   const rules: JsonRecord[] = []
@@ -320,14 +332,29 @@ function importValidations(
   }
 
   const policy: ValidationPolicy = { onFailure }
-  if (isRecord(value.report)) {
-    policy.report = jsonClone(value.report) as unknown as OutputSpec
-  }
+
+  if (isRecord(value.report)) sideSinks.set('report', value.report)
   if (isRecord(value.outputs)) {
-    policy.outputs = jsonClone(value.outputs) as unknown as Record<string, OutputSpec>
+    for (const [key, entry] of Object.entries(value.outputs)) {
+      // The framework itself logs "chave desconhecida (use 'valid'/'invalid')" and
+      // writes nothing, so an unknown key is dead config — say so instead of
+      // drawing a box that can never receive a row.
+      if (key !== 'valid' && key !== 'invalid') {
+        issues.warning(
+          `"validations.outputs.${key}" is not a quarantine key and was dropped.`,
+          { hint: 'The framework only routes rows to "valid" and "invalid".' },
+        )
+        continue
+      }
+      if (!isRecord(entry)) {
+        issues.warning(`"validations.outputs.${key}" is not an object and was dropped.`)
+        continue
+      }
+      sideSinks.set(key, entry)
+    }
   }
 
-  return { policy, rules }
+  return { policy, rules, sideSinks }
 }
 
 export function pipelineToGraph(pipeline: unknown): DecompileResult {
@@ -365,13 +392,31 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
   })
 
   if (pipeline.validations !== undefined) {
-    const { policy, rules } = importValidations(pipeline.validations, issues)
+    const { policy, rules, sideSinks } = importValidations(pipeline.validations, issues)
     if (policy) settings.validations = policy
+    let lastRule: ValidationNode | null = null
     for (const rule of rules) {
       const node = makeValidationNode(rule)
       ctx.nodes.push(node)
       ctx.edges.push(makeEdge(tail.id, node.id))
       tail = node
+      lastRule = node
+    }
+
+    // The side outputs hang off the END of the run — "after every rule ran" is when
+    // the framework writes them. The main chain carries on from the same node,
+    // untouched: `tail` is deliberately left pointing at the last rule.
+    for (const role of VALIDATION_SINK_ROLES) {
+      const raw = sideSinks.get(role)
+      if (raw === undefined) continue
+      const label = `The validations "${role === 'report' ? 'report' : `outputs.${role}`}"`
+      if (!lastRule) {
+        issues.warning(`${label} destination has no rule to hang off and was dropped.`)
+        continue
+      }
+      const sink = makeSinkNode(readSinkData(raw, issues, label))
+      ctx.nodes.push(sink)
+      ctx.edges.push(makeEdge(lastRule.id, sink.id, HANDLE.in, VALIDATION_SINK_HANDLES[role]))
     }
   }
 

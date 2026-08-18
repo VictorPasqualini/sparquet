@@ -8,7 +8,7 @@
 
 import type { Edge, Node } from '@xyflow/react'
 
-import type { OnFailureMode, OutputSpec, SparkSettings, WriteMode } from './pipeline'
+import type { OnFailureMode, SparkSettings, WriteMode } from './pipeline'
 
 /* ------------------------------------------------------------------ nodes */
 
@@ -99,7 +99,51 @@ export const HANDLE = {
   inRight: 'in-right',
   /** Single outgoing handle. */
   out: 'out',
+  /** Side output: the data-quality report (`validations.report`). */
+  outReport: 'out-report',
+  /** Side output: rows that broke no row-level rule (`validations.outputs.valid`). */
+  outValid: 'out-valid',
+  /** Side output: rows that broke one (`validations.outputs.invalid`). */
+  outInvalid: 'out-invalid',
 } as const
+
+/**
+ * The three datasets the validation step writes BESIDES the job's own outputs.
+ *
+ * They are SIDE outputs, not a fork. `Pipeline.run()` calls
+ * `_write_validation_outputs(df)` and then `_write_outputs(df)` with the same,
+ * complete DataFrame — so a quarantine sink copies rows out, it never removes them
+ * from the main chain. Every destination on the trunk still receives every row,
+ * invalid ones included.
+ */
+export type ValidationSinkRole = 'report' | 'valid' | 'invalid'
+
+/** Declaration order — also the order these are written and laid out. */
+export const VALIDATION_SINK_ROLES = ['report', 'valid', 'invalid'] as const satisfies
+  readonly ValidationSinkRole[]
+
+/** Source handle a rule node exposes for each side output. */
+export const VALIDATION_SINK_HANDLES: Record<ValidationSinkRole, string> = Object.freeze({
+  report: HANDLE.outReport,
+  valid: HANDLE.outValid,
+  invalid: HANDLE.outInvalid,
+})
+
+/** Reverse of `VALIDATION_SINK_HANDLES`, for reading a role off an edge. */
+export const VALIDATION_SINK_ROLE_BY_HANDLE: Readonly<Record<string, ValidationSinkRole>> =
+  Object.freeze({
+    [HANDLE.outReport]: 'report',
+    [HANDLE.outValid]: 'valid',
+    [HANDLE.outInvalid]: 'invalid',
+  })
+
+/** Is this a handle that turns the destination behind it into a side output? */
+export function validationSinkRoleOfHandle(
+  handle: string | null | undefined,
+): ValidationSinkRole | null {
+  if (typeof handle !== 'string') return null
+  return VALIDATION_SINK_ROLE_BY_HANDLE[handle] ?? null
+}
 
 export type StudioEdge = Edge
 
@@ -122,18 +166,16 @@ export interface ParamDefinition {
 }
 
 /**
- * Block-level `validations` configuration.
+ * Block-level `validations` RUN POLICY.
  *
- * `on_failure`, the quality `report` and the quarantine `outputs` describe what the
- * job does with the verdict of ALL its rules, so they belong to the job rather than
- * to any single rule node — putting them on one node would make that node special.
+ * Only `on_failure` lives here: it decides what happens to the run when a rule is
+ * broken, which is a job-wide setting like the Spark configs — not a dataset. The
+ * three datasets the block writes (`report`, `outputs.valid`, `outputs.invalid`)
+ * are destination NODES on the canvas, reached through the side handles of a rule
+ * node; see `ValidationSinkRole`.
  */
 export interface ValidationPolicy {
   onFailure: OnFailureMode
-  /** Optional data-quality report sink (`validations.report`). */
-  report?: OutputSpec | null
-  /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
-  outputs?: Record<string, OutputSpec> | null
 }
 
 export interface JobSettings {

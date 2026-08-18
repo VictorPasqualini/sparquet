@@ -225,11 +225,11 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
         startConnect(stageId)
         return
       }
-      if (connectSource === stageId) {
+      if (connectSource.nodeId === stageId) {
         cancelConnect()
         return
       }
-      const rejection = connect(connectSource, stageId)
+      const rejection = connect(connectSource.nodeId, stageId)
       if (rejection) toast.error(REJECTION_MESSAGE[rejection])
       cancelConnect()
       select(stageId)

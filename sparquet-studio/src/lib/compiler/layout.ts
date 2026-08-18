@@ -8,7 +8,9 @@
 
 import { graphlib, layout } from '@dagrejs/dagre'
 
-import type { StudioGraph, StudioNode } from '@/types/studio'
+import type { StudioGraph, StudioNode, ValidationSinkRole } from '@/types/studio'
+import { VALIDATION_SINK_ROLES } from '@/types/studio'
+import { validationSinkLink } from '@/lib/compiler/graph'
 
 export interface LayoutOptions {
   direction?: 'LR' | 'TB'
@@ -50,6 +52,19 @@ export function autoLayout(graph: StudioGraph, options: LayoutOptions = {}): Stu
       ? { width: settings.noteWidth, height: settings.noteHeight }
       : { width: settings.nodeWidth, height: settings.nodeHeight }
 
+  /**
+   * The validation side outputs are kept OUT of the ranking. Dagre would give them
+   * a rank of their own and push them into the main row, which is exactly the wrong
+   * story: they are not a stage the data passes through, they hang off the rules
+   * while the chain carries on to the right. They are placed by hand below.
+   */
+  const side = new Map<string, { role: ValidationSinkRole; parentId: string }>()
+  for (const node of graph.nodes) {
+    if (node.data.kind !== 'sink') continue
+    const link = validationSinkLink(graph, node.id)
+    if (link) side.set(node.id, { role: link.role, parentId: link.parent.id })
+  }
+
   const dag = new graphlib.Graph({ multigraph: false, compound: false })
   dag.setGraph({
     rankdir: settings.direction,
@@ -60,9 +75,12 @@ export function autoLayout(graph: StudioGraph, options: LayoutOptions = {}): Stu
   })
   dag.setDefaultEdgeLabel(() => ({}))
 
-  for (const node of graph.nodes) dag.setNode(node.id, sizeOf(node))
+  for (const node of graph.nodes) {
+    if (side.has(node.id)) continue
+    dag.setNode(node.id, sizeOf(node))
+  }
 
-  const known = new Set(graph.nodes.map((node) => node.id))
+  const known = new Set(graph.nodes.filter((node) => !side.has(node.id)).map((node) => node.id))
   for (const edge of graph.edges) {
     if (edge.source === edge.target) continue
     if (!known.has(edge.source) || !known.has(edge.target)) continue
@@ -76,21 +94,46 @@ export function autoLayout(graph: StudioGraph, options: LayoutOptions = {}): Stu
     return { nodes: graph.nodes.map((node) => ({ ...node })), edges }
   }
 
-  const nodes = graph.nodes.map((node) => {
-    const placed = dag.node(node.id)
-    const { width, height } = sizeOf(node)
+  const measuredOf = (node: StudioNode) =>
     // Seed `measured`: React Flow keeps a node invisible (and skips its edges)
     // until it has dimensions, which otherwise arrive only after a ResizeObserver
     // frame. Real measurements overwrite these on the first paint.
-    const measured =
-      node.measured ??
-      (node.data.kind === 'note' ? { ...NOTE_RENDER_SIZE } : { ...NODE_RENDER_SIZE })
-    if (!placed) return { ...node, measured }
-    return {
-      ...node,
-      measured,
-      position: { x: placed.x - width / 2, y: placed.y - height / 2 },
-    }
+    node.measured ??
+    (node.data.kind === 'note' ? { ...NOTE_RENDER_SIZE } : { ...NODE_RENDER_SIZE })
+
+  const placedAt = new Map<string, { x: number; y: number }>()
+  let bottom = Number.NEGATIVE_INFINITY
+  for (const node of graph.nodes) {
+    if (side.has(node.id)) continue
+    const placed = dag.node(node.id)
+    if (!placed) continue
+    const { width, height } = sizeOf(node)
+    const position = { x: placed.x - width / 2, y: placed.y - height / 2 }
+    placedAt.set(node.id, position)
+    bottom = Math.max(bottom, position.y + height)
+  }
+  if (!Number.isFinite(bottom)) bottom = 0
+
+  // One row per parent rule, under the whole diagram so nothing can collide with
+  // it, starting at the parent's column so the drop is visibly its own.
+  const rowIndexOf = new Map<string, number>()
+  for (const [nodeId, info] of [...side].sort(
+    (a, b) => VALIDATION_SINK_ROLES.indexOf(a[1].role) - VALIDATION_SINK_ROLES.indexOf(b[1].role),
+  )) {
+    const column = rowIndexOf.get(info.parentId) ?? 0
+    rowIndexOf.set(info.parentId, column + 1)
+    const anchor = placedAt.get(info.parentId)
+    placedAt.set(nodeId, {
+      x: (anchor?.x ?? 0) + column * (settings.nodeWidth + settings.nodeSep),
+      y: bottom + settings.rankSep,
+    })
+  }
+
+  const nodes = graph.nodes.map((node) => {
+    const position = placedAt.get(node.id)
+    const measured = measuredOf(node)
+    if (!position) return { ...node, measured }
+    return { ...node, measured, position }
   })
 
   return { nodes, edges }

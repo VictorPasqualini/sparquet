@@ -665,9 +665,9 @@ cd sparquet-studio && npm install && npm run dev     # http://localhost:5273
 | **Job** | **Um JSON de pipeline**, desenhado no canvas de nós. | `/jobs/:id` |
 | **Pipeline** | Conjunto **ordenado** de Jobs, executados em sequência. | `/pipelines/:id` |
 
-A tela do Workflow tem duas abas: **Jobs** (lista os Jobs e os Pipelines montados
-com eles) e **Pipeline** (mapa somente leitura, inferido dos paths/temp views que
-os Jobs compartilham).
+A tela do Workflow é uma lista só: os Jobs que ela guarda, junto com os Pipelines
+montados com eles. **New pipeline** transforma um conjunto de Jobs numa execução
+ordenada.
 
 > **Ponte entre os dois vocabulários** — decisão explícita do produto: no
 > **framework** um JSON continua sendo um *pipeline* (classe `Pipeline`,
@@ -690,7 +690,7 @@ gravam — um path que o próximo lê, ou uma temp view. Execução via
 | Linter | `src/lib/validation/lint.ts` | Regras client-side (merge sem `merge_keys`, `{{var}}` sem `collect`, `{param}` não declarado, etc). |
 | IA | `src/lib/ai/` | Cliente streaming multi-provider (Anthropic/OpenAI/Google/compatível), prompt gerado do catálogo, parser de proposta. |
 | Runner | `sparquet-studio/server/` | Serviço FastAPI opcional que executa o Job (um JSON) com o `Sparquet` real e devolve contadores, validações, preview e logs; `/run/flow/stream` executa um Pipeline inteiro. |
-| Pipelines | `src/lib/flow/` | Ordem dos estágios, resolução/compilação por estágio e plano de execução; mais o mapa somente leitura inferido dos paths e views dos Jobs. |
+| Pipelines | `src/lib/pipeline/` | Descrição de um Job (`describe.ts`), ordem dos estágios, resolução/compilação por estágio e plano de execução. |
 | Estado | `src/store/` | zustand: editor (grafo, histórico, autosave), library (workflows/jobs/pipelines), settings. |
 
 **Regra de ouro ao evoluir o framework**: toda transformação, formato ou validator

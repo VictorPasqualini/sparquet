@@ -1,12 +1,15 @@
 import type { NodeProps } from '@xyflow/react'
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 
-import { getValidator } from '@/catalog'
+import { getValidator, VALIDATION_SINKS } from '@/catalog'
 import { Badge } from '@/components/ui'
+import { isLastValidationOfRun } from '@/lib/compiler'
+import { useEditorStore } from '@/store/editor'
 import type { ValidationNode as ValidationNodeType, ValidationNodeData } from '@/types/studio'
+import { VALIDATION_SINK_HANDLES, validationSinkRoleOfHandle } from '@/types/studio'
 
 import { catalogIcon } from '../icons'
-import { NodeShell, truncateEnd, useNodeIssues } from '../NodeShell'
+import { NodeShell, truncateEnd, useNodeIssues, type SideOutput } from '../NodeShell'
 
 export const ValidationNode = memo(function ValidationNodeRenderer({
   id,
@@ -16,6 +19,7 @@ export const ValidationNode = memo(function ValidationNodeRenderer({
   const def = getValidator(data.validator)
   const issues = useNodeIssues(id)
   const preview = describeRule(data)
+  const sideOutputs = useSideOutputs(id)
 
   return (
     <NodeShell
@@ -23,12 +27,17 @@ export const ValidationNode = memo(function ValidationNodeRenderer({
       accent="validate"
       icon={catalogIcon(def?.icon ?? 'ShieldCheck')}
       title={data.label ?? def?.label ?? data.validator}
-      subtitle="validation rule"
+      subtitle={
+        sideOutputs.length > 0
+          ? 'validation rule · side outputs below, main chain keeps every row'
+          : 'validation rule'
+      }
       selected={selected}
       disabled={data.disabled ?? false}
       issues={issues}
       inputs="single"
       hasOutput
+      sideOutputs={sideOutputs}
       badges={
         def ? undefined : (
           <Badge key="unknown" tone="danger">
@@ -45,6 +54,39 @@ export const ValidationNode = memo(function ValidationNodeRenderer({
     </NodeShell>
   )
 })
+
+/* ------------------------------------------------------------- side outputs */
+
+/**
+ * The three side-output handles this rule offers.
+ *
+ * They belong to the END of the run — "after every rule ran" is the moment the
+ * framework writes them — so only the last rule shows them. A rule that already has
+ * one connected keeps its handle whatever its position, otherwise inserting a rule
+ * behind it would leave an edge React Flow cannot draw.
+ */
+function useSideOutputs(nodeId: string): SideOutput[] {
+  const nodes = useEditorStore((state) => state.nodes)
+  const edges = useEditorStore((state) => state.edges)
+
+  return useMemo(() => {
+    const connected = new Set(
+      edges
+        .filter((edge) => edge.source === nodeId)
+        .map((edge) => validationSinkRoleOfHandle(edge.sourceHandle))
+        .filter((role): role is NonNullable<typeof role> => role !== null),
+    )
+    const isLast = isLastValidationOfRun({ nodes, edges }, nodeId)
+
+    return VALIDATION_SINKS.filter((sink) => isLast || connected.has(sink.role)).map(
+      (sink) => ({
+        id: VALIDATION_SINK_HANDLES[sink.role],
+        label: sink.handleLabel,
+        title: `${sink.label} — written beside the job's own destinations, which still receive every row.`,
+      }),
+    )
+  }, [edges, nodeId, nodes])
+}
 
 /* ------------------------------------------------------------------ preview */
 

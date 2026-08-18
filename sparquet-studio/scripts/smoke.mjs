@@ -300,6 +300,114 @@ async function main() {
       }
     }
 
+    /* ------------------------------ validations write onto the canvas */
+
+    // The data-quality template carries `validations.report`. Importing it must draw
+    // that report as a DESTINATION box hanging off the last rule — not hide it in a
+    // settings form — and the job's own destination must survive next to it.
+    await page.goto(`${BASE_URL}/#/templates`, { waitUntil: 'networkidle2' })
+    const opened = await page
+      .waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('article')).some((card) =>
+            /data quality/i.test(card.textContent ?? ''),
+          ),
+        { timeout: 15_000 },
+      )
+      .then(() =>
+        page.evaluate(() => {
+          const card = Array.from(document.querySelectorAll('article')).find((candidate) =>
+            /data quality/i.test(candidate.textContent ?? ''),
+          )
+          const use = Array.from(card?.querySelectorAll('button') ?? []).find((button) =>
+            /^use template$/i.test(button.textContent?.trim() ?? ''),
+          )
+          if (!(use instanceof HTMLElement)) return false
+          use.click()
+          return true
+        }),
+      )
+      .catch(() => false)
+
+    const createdFromTemplate = !opened
+      ? false
+      : await page
+          .waitForFunction(
+            () =>
+              Array.from(document.querySelectorAll('button')).some(
+                (button) =>
+                  /^create job$/i.test(button.textContent?.trim() ?? '') &&
+                  !button.hasAttribute('disabled'),
+              ),
+            { timeout: 10_000 },
+          )
+          .then(() =>
+            page.evaluate(() => {
+              const confirm = Array.from(document.querySelectorAll('button')).find((button) =>
+                /^create job$/i.test(button.textContent?.trim() ?? ''),
+              )
+              if (!(confirm instanceof HTMLElement)) return false
+              confirm.click()
+              return true
+            }),
+          )
+          .catch(() => false)
+
+    const onTemplateJob = !createdFromTemplate
+      ? false
+      : await page
+          .waitForFunction(() => location.hash.includes('/jobs/'), { timeout: 15_000 })
+          .then(() => true)
+          .catch(() => false)
+
+    if (!onTemplateJob) {
+      check('data-quality template opens as a job', false, 'template flow did not reach a job')
+    } else {
+      await page.waitForSelector('.react-flow__node', { timeout: 15_000 }).catch(() => null)
+      const drawn = await page
+        .waitForFunction(
+          () => {
+            const nodes = Array.from(document.querySelectorAll('.react-flow__node'))
+            const text = (node) => node.textContent ?? ''
+            // The sink's own subtitle; the rule node says "side outputs below".
+            const side = nodes.filter((node) => /validation side output/i.test(text(node)))
+            if (side.length === 0) return false
+            const labels = ['report', 'valid rows', 'invalid rows'].filter((label) =>
+              nodes.some((node) => text(node).includes(label)),
+            )
+            return {
+              side: side.length,
+              nodes: nodes.length,
+              labels: labels.length,
+              // The job's own destination has to still be there, beside the report.
+              mainOutput: nodes.some((node) => text(node).includes('/data/curated/customers')),
+              reportOutput: side.some((node) => text(node).includes('customers_report')),
+            }
+          },
+          { timeout: 15_000 },
+        )
+        .then((handle) => handle.jsonValue())
+        .catch(() => null)
+
+      check(
+        'the quality report is drawn as a side-output box',
+        Boolean(drawn && drawn.side === 1),
+        drawn ? `${drawn.side} side output(s) among ${drawn.nodes} nodes` : 'none found',
+      )
+      check(
+        'the last rule offers all three side outputs',
+        Boolean(drawn && drawn.labels === 3),
+        drawn ? `${drawn.labels}/3 handle labels` : 'no rule node found',
+      )
+
+      // The report is drawn BESIDE the job's own destination, never in place of it.
+      check(
+        'the main destination survives next to the side output',
+        Boolean(drawn && drawn.mainOutput && drawn.reportOutput),
+        drawn ? `main=${drawn.mainOutput} report=${drawn.reportOutput}` : 'nothing drawn',
+      )
+    }
+
     /* ------------------------------------------------------- routes */
 
     for (const [route, needle] of [

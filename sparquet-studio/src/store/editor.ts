@@ -21,18 +21,20 @@ import {
   isSourceNode,
   isTransformNode,
   isValidationNode,
+  isValidationSink,
   longestCommonPrefix,
   NODE_RENDER_SIZE,
   NOTE_RENDER_SIZE,
   pipelineToGraph,
   serializePipeline,
+  validationSinkLink,
 } from '@/lib/compiler'
 import { mergeParams } from '@/lib/params'
 import * as db from '@/lib/storage/db'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { lintJob } from '@/lib/validation/lint'
 import type { PipelineSpec } from '@/types/pipeline'
-import { HANDLE } from '@/types/studio'
+import { HANDLE, validationSinkRoleOfHandle } from '@/types/studio'
 import type {
   ParamDefinition,
   RunResult,
@@ -471,6 +473,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (!target || !source) return
       if (target.data.kind === 'note' || source.data.kind === 'note') return
       if (target.data.kind === 'source') return
+      // A validation side output compiles into `validations.report` / `.outputs.*`:
+      // it is a written dataset, so only a destination node can close that link.
+      if (
+        validationSinkRoleOfHandle(connection.sourceHandle) !== null &&
+        (target.data.kind !== 'sink' || source.data.kind !== 'validation')
+      ) {
+        return
+      }
       if (createsCycle(edges, connection.source, connection.target)) return
 
       // One connection per input handle: a new link replaces the old one.
@@ -749,8 +759,7 @@ export function mainChainTransformNodeIds(state: StudioGraph): string[] {
   const graph: StudioGraph = { nodes: state.nodes, edges: state.edges }
   const middles: StudioNode[][] = []
 
-  for (const sink of graph.nodes.filter(isSinkNode)) {
-    if (isDisabled(sink)) continue
+  for (const sink of mainSinksOf(graph)) {
     const walk = chainToSink(graph, sink.id)
     if (walk.problem) continue
     const chain = walk.nodes.filter(isCompilable)
@@ -765,6 +774,20 @@ export function mainChainTransformNodeIds(state: StudioGraph): string[] {
   return sharedChainOf(prefix)
     .filter(isTransformNode)
     .map((node) => node.id)
+}
+
+/**
+ * The destinations that compile into `outputs[]`.
+ *
+ * The validation side outputs (report, quarantine) are excluded: they are written
+ * from the same DataFrame the rules saw, not from a branch of the chain, and
+ * folding them into the shared-prefix computation would cut the main chain short at
+ * the rule they hang off.
+ */
+function mainSinksOf(graph: StudioGraph): StudioNode[] {
+  return graph.nodes.filter(
+    (node) => isSinkNode(node) && !isDisabled(node) && !isValidationSink(graph, node.id),
+  )
 }
 
 /**
@@ -794,8 +817,7 @@ export function runtimeEndpointNodeIds(state: StudioGraph): {
   const sinkIds: string[] = []
   let sourceId: string | null = null
 
-  for (const sink of graph.nodes.filter(isSinkNode)) {
-    if (isDisabled(sink)) continue
+  for (const sink of mainSinksOf(graph)) {
     const walk = chainToSink(graph, sink.id)
     if (walk.problem) continue
     const chain = walk.nodes.filter(isCompilable)
@@ -829,8 +851,7 @@ export function nodeOrdinals(state: StudioGraph): Record<string, number> {
   }
 
   const chains: { sink: StudioNode; middle: StudioNode[]; head: StudioNode }[] = []
-  for (const sink of graph.nodes.filter(isSinkNode)) {
-    if (isDisabled(sink)) continue
+  for (const sink of mainSinksOf(graph)) {
     const walk = chainToSink(graph, sink.id)
     if (walk.problem) continue
     const chain = walk.nodes.filter(isCompilable)
@@ -850,6 +871,15 @@ export function nodeOrdinals(state: StudioGraph): Record<string, number> {
   const first = chains[0]
   if (first) push(first.head.id)
   for (const node of mainPrefix) push(node.id)
+  // `_write_validation_report` and `_write_validation_outputs` both run BEFORE
+  // `_write_outputs`, so the side outputs are numbered right after the rules and
+  // ahead of the job's own destinations — the order a log reader sees.
+  const rules = new Set(mainPrefix.filter(isValidationNode).map((node) => node.id))
+  for (const sink of graph.nodes.filter(isSinkNode)) {
+    if (isDisabled(sink)) continue
+    const link = validationSinkLink(graph, sink.id)
+    if (link && rules.has(link.parent.id)) push(sink.id)
+  }
   for (const entry of chains) {
     for (const node of entry.middle.slice(mainPrefix.length)) push(node.id)
     push(entry.sink.id)
