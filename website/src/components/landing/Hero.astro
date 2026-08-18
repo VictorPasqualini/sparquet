@@ -10,16 +10,15 @@ const { locale } = Astro.props
 const copy = LANDING[locale].hero
 
 /**
- * The hero shows one pipeline twice: as the file that runs, and as the canvas
- * that writes it. Both halves are real — the JSON below is a valid pipeline and
- * the nodes are the ones Studio renders for it.
+ * The hero shows one contract twice: as the file that runs, and as the Job that
+ * draws it. Both halves are real — the JSON is a valid pipeline and the nodes
+ * are the ones Studio renders for it.
  */
 const pipeline = `{
   "name": "orders_curated",
   "input": {
-    "format": "csv",
-    "path": "/data/landing/orders",
-    "options": { "header": "true", "inferSchema": "true" }
+    "format": "delta",
+    "path": "sales.orders"
   },
   "transformations": [
     { "type": "filter", "condition": "status = 'CONFIRMED'" },
@@ -28,53 +27,69 @@ const pipeline = `{
       "expression": "quantity * unit_price" }
   ],
   "validations": {
-    "on_failure": "warn",
+    "on_failure": "fail",
     "rules": [{ "type": "not_null", "columns": ["id"] }]
   },
   "output": {
     "format": "delta",
     "path": "analytics.orders",
-    "mode": "overwrite"
+    "mode": "merge",
+    "options": { "merge_keys": ["id"] }
   }
 }`
 
 const nodes = [
-  { label: 'CSV', detail: '/data/landing/orders', accent: 'sky' },
+  { label: 'Delta', detail: 'sales.orders', accent: 'sky' },
   { label: 'Filter', detail: "status = 'CONFIRMED'", accent: 'amber' },
-  { label: 'With column', detail: 'revenue = qty * price', accent: 'amber' },
-  { label: 'Validations', detail: '1 rule · warn', accent: 'cyan' },
+  { label: 'With column', detail: 'revenue = qty × price', accent: 'amber' },
+  { label: 'Validations', detail: '1 rule · fail', accent: 'cyan' },
   { label: 'Delta', detail: 'analytics.orders', accent: 'emerald' },
 ]
 
-const ACCENTS: Record<string, string> = {
+const ACCENT_BAR: Record<string, string> = {
   sky: 'bg-sky-400',
   amber: 'bg-brand-500',
   cyan: 'bg-cyan-400',
   emerald: 'bg-emerald-400',
 }
+
+const canvasStatus = copy.canvasStatus
+  .replace('{count}', String(nodes.length))
+  .replace('{file}', copy.fileName)
+
+const ACCENT_STROKE: Record<string, string> = {
+  sky: 'rgb(56 189 248)',
+  amber: 'rgb(245 179 1)',
+  cyan: 'rgb(34 211 238)',
+  emerald: 'rgb(52 211 153)',
+}
 ---
 
 <section class="relative overflow-hidden">
   <div class="grid-surface absolute inset-0 opacity-70" aria-hidden="true"></div>
-  <div class="glow-brand absolute inset-x-0 top-0 h-[520px]" aria-hidden="true"></div>
+  <div class="aurora" aria-hidden="true"></div>
 
   <div class="relative mx-auto max-w-6xl px-5 pb-20 pt-16 md:pb-28 md:pt-24">
     <div class="grid items-start gap-14 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
       <div class="lg:pt-6">
-        <p class="eyebrow">{copy.eyebrow}</p>
+        <p class="eyebrow reveal">{copy.eyebrow}</p>
 
         <h1
-          class="mt-4 text-balance text-4xl font-semibold leading-[1.08] tracking-tight text-white sm:text-5xl lg:text-[3.4rem]"
+          class="reveal mt-4 text-balance text-4xl font-semibold leading-[1.08] tracking-tight text-white sm:text-5xl lg:text-[3.4rem]"
+          style="--reveal-delay: 60ms"
         >
           {copy.title}<br />
           <span class="text-brand-500">{copy.titleAccent}</span>
         </h1>
 
-        <p class="mt-6 max-w-xl text-base leading-relaxed text-ink-300 sm:text-lg">
+        <p
+          class="reveal mt-6 max-w-xl text-base leading-relaxed text-ink-300 sm:text-lg"
+          style="--reveal-delay: 120ms"
+        >
           {copy.subtitle}
         </p>
 
-        <div class="mt-8 flex flex-wrap items-center gap-3">
+        <div class="reveal mt-8 flex flex-wrap items-center gap-3" style="--reveal-delay: 180ms">
           <a
             href={docsOf(locale, 'start/quickstart/')}
             class="rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-ink-950 transition-colors hover:bg-brand-400"
@@ -90,7 +105,7 @@ const ACCENTS: Record<string, string> = {
           <a
             href={GITHUB_URL}
             rel="noopener"
-            class="group inline-flex items-center gap-2 px-1 py-3 text-sm text-ink-400 transition-colors hover:text-white"
+            class="inline-flex items-center gap-2 px-1 py-3 text-sm text-ink-400 transition-colors hover:text-white"
           >
             <svg viewBox="0 0 16 16" class="h-4 w-4 fill-current" aria-hidden="true">
               <path
@@ -101,12 +116,37 @@ const ACCENTS: Record<string, string> = {
           </a>
         </div>
 
-        <p class="mt-6 text-xs text-ink-500">{copy.note}</p>
+        <dl
+          class="reveal mt-10 flex flex-wrap items-end gap-x-8 gap-y-4"
+          style="--reveal-delay: 240ms"
+        >          {
+            copy.stats.map((stat) => (
+              <div>
+                <dt class="sr-only">{stat.label}</dt>
+                <dd>
+                  <span class="block font-mono text-2xl font-semibold tracking-tight text-white">
+                    {stat.value}
+                  </span>
+                  <span class="mt-0.5 block text-xs text-ink-500">{stat.label}</span>
+                </dd>
+              </div>
+            ))
+          }
+        </dl>
+
+        <div class="mt-8 h-px w-full max-w-xl bg-white/10">
+          <div class="rule-draw h-px w-full bg-gradient-to-r from-brand-500/70 to-transparent"></div>
+        </div>
+
+        <p class="mt-4 text-xs text-ink-500">{copy.note}</p>
       </div>
 
       <div class="relative">
-        <!-- The file -->
-        <div class="card-surface overflow-hidden shadow-2xl shadow-black/40">
+        <!-- The contract -->
+        <div
+          class="reveal card-surface spotlight overflow-hidden shadow-2xl shadow-black/40"
+          style="--reveal-delay: 120ms"
+        >
           <div class="flex items-center gap-2 border-b border-white/8 px-4 py-2.5">
             <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
             <span class="h-2.5 w-2.5 rounded-full bg-white/15"></span>
@@ -117,33 +157,87 @@ const ACCENTS: Record<string, string> = {
             class="overflow-x-auto px-4 py-4 font-mono text-[0.72rem] leading-relaxed text-ink-300"><code>{pipeline}</code></pre>
         </div>
 
-        <!-- The same thing, as nodes -->
-        <div class="card-surface mt-4 p-4">
+        <!-- Why the format matters: a model can write this file, a linter can check it -->
+        <p
+          class="reveal mt-4 flex items-start gap-2.5 rounded-xl border border-brand-500/25 bg-brand-500/8 px-3.5 py-2.5 text-[0.8rem] leading-relaxed text-ink-200"
+          style="--reveal-delay: 160ms"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="mt-0.5 h-4 w-4 shrink-0 text-brand-400"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              d="M12 2.6 13.7 8l5.4 1.7-5.4 1.7L12 16.8 10.3 11.4 4.9 9.7 10.3 8 12 2.6ZM18.5 15l.8 2.6 2.7.9-2.7.9-.8 2.6-.9-2.6-2.6-.9 2.6-.9.9-2.6Z"
+            ></path>
+          </svg>
+          {copy.aiNote}
+        </p>
+
+        <!-- The same thing, as a Job -->
+        <div class="reveal card-surface mt-4 p-4" style="--reveal-delay: 240ms">
           <p class="mb-3 text-[0.7rem] uppercase tracking-wider text-ink-500">
             {copy.canvasCaption}
           </p>
-          <ol class="flex flex-wrap items-stretch gap-2">
-            {
-              nodes.map((node, index) => (
-                <li class="flex items-stretch gap-2">
-                  <div class="flex min-w-[8.5rem] overflow-hidden rounded-lg border border-white/10 bg-ink-800">
-                    <span class={`w-1 shrink-0 ${ACCENTS[node.accent]}`} />
-                    <span class="px-2.5 py-1.5">
-                      <span class="block text-[0.7rem] font-medium text-white">{node.label}</span>
-                      <span class="mt-0.5 block truncate font-mono text-[0.62rem] text-ink-400">
-                        {node.detail}
+
+          <div>
+            <ol class="flex flex-wrap items-stretch gap-2">
+              {
+                nodes.map((node, index) => (
+                  <li class="flex items-stretch gap-2">
+                    <div
+                      class="node-pulse flex min-w-[8.5rem] overflow-hidden rounded-lg border border-white/10 bg-ink-800"
+                      style={`animation-delay: ${index * 260}ms`}
+                    >
+                      <span class={`w-1 shrink-0 ${ACCENT_BAR[node.accent]}`} />
+                      <span class="px-2.5 py-1.5">
+                        <span class="block text-[0.7rem] font-medium text-white">{node.label}</span>
+                        <span class="mt-0.5 block truncate font-mono text-[0.62rem] text-ink-400">
+                          {node.detail}
+                        </span>
                       </span>
-                    </span>
-                  </div>
-                  {index < nodes.length - 1 && (
-                    <span class="self-center text-ink-600" aria-hidden="true">
-                      →
-                    </span>
-                  )}
-                </li>
-              ))
-            }
-          </ol>
+                    </div>
+                    {index < nodes.length - 1 && (
+                      <span class="flex w-5 shrink-0 items-center" aria-hidden="true">
+                        <svg viewBox="0 0 20 2" class="h-0.5 w-full overflow-visible">
+                          <line x1="0" y1="1" x2="20" y2="1" stroke="rgb(255 255 255 / 0.12)" stroke-width="1.5" />
+                          <line
+                            class="flow-line"
+                            x1="0"
+                            y1="1"
+                            x2="20"
+                            y2="1"
+                            stroke="rgb(245 179 1 / 0.8)"
+                            stroke-width="1.5"
+                            style={`animation-delay: ${index * 180}ms`}
+                          />
+                        </svg>
+                      </span>
+                    )}
+                  </li>
+                ))
+              }
+            </ol>
+          </div>
+
+          <div class="mt-3 flex items-center gap-2 border-t border-white/8 pt-3">
+            <span class="relative flex h-1.5 w-1.5">
+              <span
+                class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/70"
+              ></span>
+              <span class="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+            </span>
+            <span class="font-mono text-[0.62rem] text-ink-500">{canvasStatus}</span>
+          </div>
+        </div>
+
+        <!-- Accent glow tying the two cards together -->
+        <div
+          class="pointer-events-none absolute -inset-x-6 -bottom-8 h-24 bg-gradient-to-t from-brand-500/8 to-transparent blur-2xl"
+          aria-hidden="true"
+          style={`--stroke: ${ACCENT_STROKE.amber}`}
+        >
         </div>
       </div>
     </div>

@@ -11,6 +11,7 @@ import { defineConfig } from 'astro/config'
  */
 export default defineConfig({
   site: 'https://sparquet.dev',
+  devToolbar: { enabled: false },
   integrations: [
     starlight({
       title: 'Sparquet',

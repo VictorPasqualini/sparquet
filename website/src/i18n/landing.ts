@@ -18,8 +18,11 @@ export interface LandingCopy {
     primaryCta: string
     secondaryCta: string
     note: string
+    stats: { value: string; label: string }[]
+    aiNote: string
     fileName: string
     canvasCaption: string
+    canvasStatus: string
   }
   problem: {
     eyebrow: string
@@ -27,34 +30,28 @@ export interface LandingCopy {
     body: string
     points: { title: string; body: string }[]
   }
-  how: {
+  ways: {
     eyebrow: string
     title: string
     subtitle: string
-    steps: { step: string; title: string; body: string }[]
+    items: { step: string; title: string; body: string; caption: string }[]
+    footnote: string
   }
   features: {
     eyebrow: string
     title: string
     subtitle: string
     items: { title: string; body: string }[]
+    cta: string
   }
   studio: {
     eyebrow: string
     title: string
     body: string
+    vocabulary: { term: string; body: string }[]
     bullets: string[]
     cta: string
     imageAlt: string
-  }
-  connectors: {
-    eyebrow: string
-    title: string
-    body: string
-    readWrite: string
-    writeOnly: string
-    lakehouse: string
-    cta: string
   }
   ai: {
     eyebrow: string
@@ -63,6 +60,13 @@ export interface LandingCopy {
     prompt: string
     answer: string
     bullets: string[]
+    cta: string
+  }
+  connectors: {
+    eyebrow: string
+    title: string
+    body: string
+    groups: { label: string; items: string[] }[]
     cta: string
   }
   runs: {
@@ -82,85 +86,97 @@ export interface LandingCopy {
 
 const EN: LandingCopy = {
   meta: {
-    title: 'Sparquet — data engineering as JSON',
+    title: 'Sparquet, the standard for data engineering',
     description:
-      'Describe a Spark pipeline in one JSON file, design it on a canvas, and run it anywhere Spark runs. Open source, MIT licensed.',
+      'A framework that standardizes data engineering: every pipeline is one declarative JSON contract. Write it, generate it with AI, or design it in Sparquet Studio. Open source, Apache 2.0.',
   },
   hero: {
-    eyebrow: 'Open source data engineering',
-    title: 'Your pipeline is a file.',
-    titleAccent: 'Now it is also a canvas.',
+    eyebrow: 'The best open-source data engineering framework',
+    title: 'Every pipeline your team writes,',
+    titleAccent: 'written the same way.',
     subtitle:
-      'Sparquet runs Spark pipelines described in JSON — readable, diffable, parameterized. Sparquet Studio turns that same file into a node canvas you can draw, lint and execute, without ever hiding the file underneath.',
+      'Sparquet standardizes data engineering: ingestion, transformation, quality and delivery live in one declarative JSON contract instead of a thousand bespoke scripts. And because a pipeline is just JSON, an LLM writes it as well as you do: ask the assistant inside Sparquet Studio, or ChatGPT, Claude or Copilot anywhere else, review the diff and run it on any Spark.',
     primaryCta: 'Get started',
     secondaryCta: 'Read the docs',
-    note: 'MIT licensed · No account · Runs on your infrastructure',
+    note: 'Apache 2.0 · No account · Runs on your infrastructure',
+    stats: [
+      { value: '27', label: 'connectors' },
+      { value: '20', label: 'transformations' },
+      { value: '1', label: 'artifact' },
+    ],
+    aiNote: 'A pipeline is JSON, so any model can write one, and the linter proves it before Spark ever starts.',
     fileName: 'orders_curated.json',
-    canvasCaption: 'The same file, on the Studio canvas',
+    canvasCaption: 'The same contract, as a Job on the Studio canvas',
+    canvasStatus: '{count} nodes · valid · compiles to {file}',
   },
   problem: {
     eyebrow: 'Why it exists',
-    title: 'Pipelines are code nobody wants to write twice.',
-    body: 'Every team rewrites the same read, filter, join, validate and write in a new notebook, with new variable names and a new set of mistakes. Sparquet moves the repetition into a schema, so what changes between jobs is data — not code.',
+    title: 'Ten engineers, ten ways to read a CSV.',
+    body: 'Data teams rarely lack tools, what they lack is a shared shape. Every job invents its own structure, its own naming, its own idea of what "validated" means, until nobody can safely review a pipeline they did not write. Sparquet replaces that with one contract every job obeys.',
     points: [
       {
-        title: 'Declarative, not disposable',
-        body: 'A pipeline is a document you can review in a pull request, diff across environments and reuse with parameters. There is no notebook to archaeologize.',
+        title: 'One contract',
+        body: 'Source, transformations, quality rules and destinations are fields of the same document. A new engineer reads any pipeline on day one.',
       },
       {
-        title: 'Visual without lock-in',
-        body: 'The canvas compiles to the same JSON the CLI runs. Nothing is generated behind your back, and deleting Studio does not break a single job.',
+        title: 'Reviewable by design',
+        body: 'A change shows up as a diff a reviewer can reason about, not as archaeology across notebook cells and cluster state.',
       },
       {
-        title: 'Guardrails built in',
-        body: 'Data quality rules, run conditions and merge semantics are part of the language, not an afterthought bolted on after the first incident.',
+        title: 'Reused, not copied',
+        body: 'Parameters turn one contract into every region, date and client. Values change; the logic stays in a single place.',
       },
     ],
   },
-  how: {
-    eyebrow: 'How it works',
-    title: 'Three steps, one artifact.',
+  ways: {
+    eyebrow: 'How you build one',
+    title: 'Three ways to author it. One artifact.',
     subtitle:
-      'Everything below produces or consumes the same JSON document. Pick the entry point that fits the moment.',
-    steps: [
+      'The standard is the file. How it gets written is your call, and the three paths are interchangeable, in both directions.',
+    items: [
       {
         step: '01',
-        title: 'Describe',
-        body: 'Write the pipeline as JSON, or draw it in Studio and let the compiler write it. Sources, transformations, validations and destinations are all fields in one file.',
+        title: 'Write it',
+        body: 'Author the JSON directly. The schema is small enough to keep in your head and strict enough to review in a pull request.',
+        caption: 'orders_curated.json',
       },
       {
         step: '02',
-        title: 'Validate',
-        body: 'Studio lints the graph as you type — a merge without keys, a runtime variable nothing publishes, a parameter you never declared. Data quality rules run inside the pipeline itself.',
+        title: 'Generate it',
+        body: 'Describe it in plain language, to the assistant inside Studio or to any model you already pay for. The whole language fits in a prompt, so what comes back is valid JSON, not code you have to run to trust.',
+        caption: 'Any LLM',
       },
       {
         step: '03',
-        title: 'Run',
-        body: 'Execute from Python, from the CLI, or from the canvas through a local runner. The same file runs on your laptop, on Databricks, on EMR.',
+        title: 'Draw it',
+        body: 'Open Sparquet Studio and build it on a canvas. Nodes are the entries of the file, connections are their order, and the file is what actually runs.',
+        caption: 'Sparquet Studio',
       },
     ],
+    footnote:
+      'Import a hand-written file into the canvas, or export a drawn one to git. Nothing is lost either way.',
   },
   features: {
-    eyebrow: 'What you get',
+    eyebrow: 'What the standard covers',
     title: 'A complete pipeline language.',
     subtitle:
-      'Twenty transformations, seven IO formats and six validators — every one of them documented, typed in the editor, and understood by the assistant.',
+      'Twenty transformations, twenty-seven connectors and a data quality engine, every one of them documented, typed in the editor and understood by the assistant.',
     items: [
       {
         title: 'Transformations',
-        body: 'filter, select, cast, with_column, struct, group_by, join, union, sort, distinct and more — applied in the order you write them.',
+        body: 'filter, select, cast, with_column, struct, group_by, join, union, sort, distinct and more, applied in the order you write them.',
       },
       {
         title: 'Data quality',
-        body: 'not_null, unique, range, regex, row_count and custom SQL, with fail / warn / skip policies and a per-rule report written to any destination.',
+        body: 'Null, uniqueness, range, regex, row count, SQL invariants and schema checks, with fail / warn / skip policies and a per-rule report.',
       },
       {
-        title: 'Composable jobs',
-        body: 'Temp views hand data between pipelines in one session, and $include shares fragments across files.',
+        title: 'Connectors',
+        body: 'Lakehouse tables, files, relational databases, warehouses, NoSQL, search and streams, the same node model for all of them.',
       },
       {
-        title: 'Lakehouse formats',
-        body: 'Parquet, Delta and Iceberg with MERGE upserts and time travel, plus CSV, text, temp views and Kafka publication.',
+        title: 'Quarantine',
+        body: 'Route the rows that fail a rule to their own destination, so the clean set ships while the bad set stays inspectable.',
       },
       {
         title: 'Parameters',
@@ -168,7 +184,7 @@ const EN: LandingCopy = {
       },
       {
         title: 'Runtime pushdown',
-        body: 'collect a key set into a {{variable}} and push it into a later read as a literal IN (...) — data skipping without hand-written glue.',
+        body: 'collect a key set into a {{variable}} and push it into a later read as a literal IN (...), data skipping without hand-written glue.',
       },
       {
         title: 'Multiple destinations',
@@ -179,41 +195,57 @@ const EN: LandingCopy = {
         body: 'Register your own readers, writers, transformations and validators. Studio keeps unknown node types intact when it opens the file.',
       },
     ],
+    cta: 'See the full reference',
   },
   studio: {
     eyebrow: 'Sparquet Studio',
-    title: 'The canvas that writes the file.',
-    body: 'A browser app that reads and writes exactly the JSON the framework runs. Drag a source, connect transformations, wire a destination — then press ⌘J and read the file you just drew.',
+    title: 'The visual interface for your workflows.',
+    body: 'Studio is where the contract becomes something a team can see. Drag a source, connect transformations, wire a destination, then press ⌘J and read the exact JSON that will run. No proprietary project format, no hidden generation step.',
+    vocabulary: [
+      { term: 'Workflow', body: 'the container, usually one per domain: Sales, Billing, CRM.' },
+      { term: 'Job', body: 'one pipeline JSON, drawn on the canvas.' },
+      { term: 'Pipeline', body: 'an ordered set of Jobs, executed in sequence in one session.' },
+    ],
     bullets: [
-      'Every field documented in place, with the gotchas that usually live in the source code',
+      'Every field documented in place, with the behaviors that usually live only in the source code',
       'Live linting that catches the mistakes Spark only reports after an hour of compute',
-      'Run the pipeline from the canvas through a local runner and read counters, validations and a data preview',
-      'Projects, templates and lessons stored in your browser — no account, no server, no telemetry',
+      'Run a Job or a whole Pipeline from the canvas and read counters, quality results and a data preview',
+      'Everything stored in your browser, no account, no server, no telemetry',
     ],
     cta: 'Explore Studio',
-    imageAlt: 'Sparquet Studio showing a pipeline on the canvas with the inspector open',
-  },
-  connectors: {
-    eyebrow: 'Connectors',
-    title: 'Read from anywhere. Write to anywhere.',
-    body: 'The same node model covers files, lakehouse tables, temp views and streams. Swapping a source is a field, not a rewrite.',
-    readWrite: 'Read and write',
-    writeOnly: 'Write only',
-    lakehouse: 'Lakehouse features',
-    cta: 'See all connectors',
+    imageAlt: 'Sparquet Studio showing a Job on the canvas with the inspector open',
   },
   ai: {
-    eyebrow: 'AI assistant',
-    title: 'Describe the pipeline. Review the diff.',
-    body: 'The assistant knows the language because its prompt is generated from the same catalog that drives the editor — it cannot invent a transformation the framework does not have. Bring your own key: requests go straight from your browser to your provider.',
-    prompt: 'Read orders from Delta, keep the confirmed ones, aggregate revenue per customer and upsert it into analytics.customer_revenue',
-    answer: 'Proposed a pipeline with 6 nodes · 1 destination',
+    eyebrow: 'AI-native by design',
+    title: 'The format is what makes the AI reliable.',
+    body: 'Ask a model for a PySpark job and you get a script nobody can verify without running it on real data. Ask for a Sparquet pipeline and you get a short JSON document: every field exists in the catalog, the linter checks it in place, and the diff is reviewable line by line. Studio ships an assistant that uses your own key, and any model outside it works just as well, because the entire language fits in a prompt.',
+    prompt:
+      'Read orders from the Delta table sales.orders, keep the confirmed ones, drop duplicates by id, fail the run if id has nulls, and upsert revenue per customer into analytics.customer_revenue',
+    answer: 'Proposed a Job with 6 nodes · 1 destination · 2 quality rules',
     bullets: [
-      'Generate a complete pipeline, or modify the one on the canvas',
-      'Ask it to explain, optimize or fix the issues the linter found',
+      'Generate a complete Job, or modify the one already on the canvas',
+      'Works outside Studio too: paste the reference into ChatGPT, Claude, Copilot or your own agent',
+      'Ask it to explain, optimize or fix exactly the issues the linter found',
       'Every proposal is reviewed before it touches your work, and undo is one keystroke',
     ],
     cta: 'How the assistant works',
+  },
+  connectors: {
+    eyebrow: 'Connectors',
+    title: 'Twenty-seven sources and destinations.',
+    body: 'Swapping where the data comes from is a field, not a rewrite. The same node model covers lakehouse tables, plain files, operational databases, warehouses, NoSQL stores and streams.',
+    groups: [
+      { label: 'Lakehouse', items: ['Delta Lake', 'Iceberg', 'Hudi', 'Parquet', 'ORC', 'Avro'] },
+      { label: 'Files', items: ['CSV', 'JSON', 'XML', 'Text', 'Binary'] },
+      { label: 'Databases', items: ['PostgreSQL', 'MySQL', 'MariaDB', 'SQL Server', 'Oracle'] },
+      { label: 'Warehouses', items: ['BigQuery', 'Snowflake', 'Redshift'] },
+      {
+        label: 'NoSQL & search',
+        items: ['MongoDB', 'DocumentDB', 'DynamoDB', 'Cassandra', 'Elasticsearch', 'OpenSearch'],
+      },
+      { label: 'Streaming & views', items: ['Kafka', 'Temp views'] },
+    ],
+    cta: 'See every connector',
   },
   runs: {
     eyebrow: 'Where it runs',
@@ -227,95 +259,107 @@ const EN: LandingCopy = {
     ],
   },
   cta: {
-    title: 'Write your first pipeline in five minutes.',
+    title: 'Standardize your first pipeline in five minutes.',
     body: 'Install the framework, open the studio, and run a real job before your coffee gets cold.',
     primary: 'Start the tutorial',
     secondary: 'Star on GitHub',
-    install: 'pip install spark-framework',
+    install: 'pip install sparquet',
   },
 }
 
 const PT: LandingCopy = {
   meta: {
-    title: 'Sparquet — engenharia de dados como JSON',
+    title: 'Sparquet, o padrão para engenharia de dados',
     description:
-      'Descreva um pipeline Spark em um arquivo JSON, desenhe no canvas e execute onde o Spark rodar. Open source, licença MIT.',
+      'Um framework que padroniza engenharia de dados: cada pipeline é um contrato JSON declarativo. Escreva, gere com IA ou desenhe no Sparquet Studio. Open source, Apache 2.0.',
   },
   hero: {
-    eyebrow: 'Engenharia de dados open source',
-    title: 'Seu pipeline é um arquivo.',
-    titleAccent: 'Agora também é um canvas.',
+    eyebrow: 'O melhor framework open source de engenharia de dados',
+    title: 'Todo pipeline do seu time,',
+    titleAccent: 'escrito do mesmo jeito.',
     subtitle:
-      'O Sparquet executa pipelines Spark descritos em JSON — legíveis, versionáveis, parametrizáveis. O Sparquet Studio transforma esse mesmo arquivo em um canvas de nós para desenhar, validar e executar, sem nunca esconder o arquivo por baixo.',
+      'O Sparquet padroniza a engenharia de dados: ingestão, transformação, qualidade e entrega vivem em um contrato JSON declarativo, não em mil scripts sob medida. E como o pipeline é só JSON, uma LLM escreve tão bem quanto você: peça ao assistente dentro do Sparquet Studio, ou ao ChatGPT, Claude e Copilot em qualquer outro lugar, revise o diff e rode em qualquer Spark.',
     primaryCta: 'Começar agora',
     secondaryCta: 'Ver a documentação',
-    note: 'Licença MIT · Sem cadastro · Roda na sua infraestrutura',
+    note: 'Apache 2.0 · Sem cadastro · Roda na sua infraestrutura',
+    stats: [
+      { value: '27', label: 'conectores' },
+      { value: '20', label: 'transformações' },
+      { value: '1', label: 'artefato' },
+    ],
+    aiNote: 'Pipeline é JSON, então qualquer modelo escreve um, e o linter prova antes de o Spark começar.',
     fileName: 'pedidos_curados.json',
-    canvasCaption: 'O mesmo arquivo, no canvas do Studio',
+    canvasCaption: 'O mesmo contrato, como Job no canvas do Studio',
+    canvasStatus: '{count} nós · válido · compila para {file}',
   },
   problem: {
     eyebrow: 'Por que existe',
-    title: 'Pipeline é o código que ninguém quer escrever duas vezes.',
-    body: 'Todo time reescreve o mesmo ler, filtrar, juntar, validar e gravar em um notebook novo, com nomes novos e um conjunto novo de erros. O Sparquet move a repetição para um schema: o que muda entre jobs vira dado, não código.',
+    title: 'Dez engenheiros, dez jeitos de ler um CSV.',
+    body: 'O que falta a times de dados raramente é ferramenta, é forma comum. Cada job inventa a própria estrutura, a própria nomenclatura e a própria ideia do que significa "validado", até que ninguém consegue revisar com segurança um pipeline que não escreveu. O Sparquet troca isso por um contrato que todo job obedece.',
     points: [
       {
-        title: 'Declarativo, não descartável',
-        body: 'O pipeline é um documento que você revisa em pull request, compara entre ambientes e reaproveita com parâmetros. Não existe notebook para escavar depois.',
+        title: 'Um contrato só',
+        body: 'Fonte, transformações, regras de qualidade e destinos são campos do mesmo documento. Quem entra no time lê qualquer pipeline no primeiro dia.',
       },
       {
-        title: 'Visual sem aprisionamento',
-        body: 'O canvas compila para o mesmo JSON que a CLI executa. Nada é gerado escondido, e remover o Studio não quebra um job sequer.',
+        title: 'Revisável por construção',
+        body: 'Mudança vira diff que o revisor consegue avaliar, não escavação entre células de notebook e estado de cluster.',
       },
       {
-        title: 'Proteções embutidas',
-        body: 'Regras de qualidade, condições de execução e semântica de merge fazem parte da linguagem — não são um remendo depois do primeiro incidente.',
+        title: 'Reaproveitado, não copiado',
+        body: 'Parâmetros transformam um contrato em todas as regiões, datas e clientes. Os valores mudam; a lógica fica em um lugar só.',
       },
     ],
   },
-  how: {
-    eyebrow: 'Como funciona',
-    title: 'Três passos, um artefato.',
+  ways: {
+    eyebrow: 'Como você constrói',
+    title: 'Três formas de escrever. Um artefato.',
     subtitle:
-      'Tudo aqui produz ou consome o mesmo documento JSON. Escolha o ponto de entrada que fizer sentido no momento.',
-    steps: [
+      'O padrão é o arquivo. Como ele nasce é escolha sua, e os três caminhos são intercambiáveis, nos dois sentidos.',
+    items: [
       {
         step: '01',
-        title: 'Descreva',
-        body: 'Escreva o pipeline em JSON, ou desenhe no Studio e deixe o compilador escrever. Fontes, transformações, validações e destinos são campos de um único arquivo.',
+        title: 'Escreva',
+        body: 'Escreva o JSON direto. O schema é pequeno o suficiente para caber na cabeça e rígido o suficiente para ser revisado em um pull request.',
+        caption: 'pedidos_curados.json',
       },
       {
         step: '02',
-        title: 'Valide',
-        body: 'O Studio analisa o grafo enquanto você edita — merge sem chaves, variável de runtime que ninguém publica, parâmetro não declarado. As regras de qualidade rodam dentro do próprio pipeline.',
+        title: 'Gere',
+        body: 'Descreva em linguagem natural, para o assistente dentro do Studio ou para qualquer modelo que você já paga. A linguagem inteira cabe em um prompt, então o que volta é JSON válido, não código que você precisa rodar para confiar.',
+        caption: 'Qualquer LLM',
       },
       {
         step: '03',
-        title: 'Execute',
-        body: 'Rode pelo Python, pela CLI ou direto do canvas com o runner local. O mesmo arquivo roda no seu notebook, no Databricks e no EMR.',
+        title: 'Desenhe',
+        body: 'Abra o Sparquet Studio e monte no canvas. Os nós são as entradas do arquivo, as conexões são a ordem, e o arquivo é o que realmente roda.',
+        caption: 'Sparquet Studio',
       },
     ],
+    footnote:
+      'Importe para o canvas um arquivo escrito na mão, ou exporte para o git um que você desenhou. Nada se perde no caminho.',
   },
   features: {
-    eyebrow: 'O que você ganha',
+    eyebrow: 'O que o padrão cobre',
     title: 'Uma linguagem de pipeline completa.',
     subtitle:
-      'Vinte transformações, sete formatos de IO e seis validadores — todos documentados, tipados no editor e compreendidos pelo assistente.',
+      'Vinte transformações, vinte e sete conectores e um motor de qualidade de dados, todos documentados, tipados no editor e compreendidos pelo assistente.',
     items: [
       {
         title: 'Transformações',
-        body: 'filter, select, cast, with_column, struct, group_by, join, union, sort, distinct e mais — aplicadas na ordem em que você escreve.',
+        body: 'filter, select, cast, with_column, struct, group_by, join, union, sort, distinct e mais, aplicadas na ordem em que você escreve.',
       },
       {
         title: 'Qualidade de dados',
-        body: 'not_null, unique, range, regex, row_count e SQL customizado, com políticas fail / warn / skip e relatório por regra gravado em qualquer destino.',
+        body: 'Nulos, unicidade, faixa, regex, contagem de linhas, invariantes SQL e checagem de schema, com políticas fail / warn / skip e relatório por regra.',
       },
       {
-        title: 'Jobs componíveis',
-        body: 'Views temporárias passam dados entre pipelines na mesma sessão, e $include compartilha fragmentos entre arquivos.',
+        title: 'Conectores',
+        body: 'Tabelas de lakehouse, arquivos, bancos relacionais, data warehouses, NoSQL, busca e streams, o mesmo modelo de nós para todos.',
       },
       {
-        title: 'Formatos de lakehouse',
-        body: 'Parquet, Delta e Iceberg com MERGE e time travel, além de CSV, texto, views temporárias e publicação no Kafka.',
+        title: 'Quarentena',
+        body: 'Roteie as linhas que violam uma regra para um destino próprio: o conjunto limpo segue, o problemático fica disponível para análise.',
       },
       {
         title: 'Parâmetros',
@@ -323,7 +367,7 @@ const PT: LandingCopy = {
       },
       {
         title: 'Pushdown em runtime',
-        body: 'collect leva um conjunto de chaves para uma {{variável}} e empurra o filtro literal IN (...) na leitura seguinte — data skipping sem gambiarra.',
+        body: 'collect leva um conjunto de chaves para uma {{variável}} e empurra o filtro literal IN (...) na leitura seguinte, data skipping sem gambiarra.',
       },
       {
         title: 'Múltiplos destinos',
@@ -334,41 +378,63 @@ const PT: LandingCopy = {
         body: 'Registre seus próprios readers, writers, transformações e validadores. O Studio preserva tipos desconhecidos ao abrir o arquivo.',
       },
     ],
+    cta: 'Ver a referência completa',
   },
   studio: {
     eyebrow: 'Sparquet Studio',
-    title: 'O canvas que escreve o arquivo.',
-    body: 'Um app de navegador que lê e escreve exatamente o JSON que o framework executa. Arraste uma fonte, conecte transformações, ligue um destino — e aperte ⌘J para ler o arquivo que você acabou de desenhar.',
+    title: 'A interface visual dos seus workflows.',
+    body: 'O Studio é onde o contrato vira algo que o time enxerga. Arraste uma fonte, conecte transformações, ligue um destino, e aperte ⌘J para ler o JSON exato que vai rodar. Sem formato proprietário, sem geração escondida.',
+    vocabulary: [
+      {
+        term: 'Workflow',
+        body: 'o container, normalmente um por domínio: Vendas, Faturamento, CRM.',
+      },
+      { term: 'Job', body: 'um JSON de pipeline, desenhado no canvas.' },
+      {
+        term: 'Pipeline',
+        body: 'um conjunto ordenado de Jobs, executados em sequência na mesma sessão.',
+      },
+    ],
     bullets: [
-      'Cada campo documentado no lugar, com as pegadinhas que normalmente só existem no código-fonte',
+      'Cada campo documentado no lugar, com os comportamentos que normalmente só existem no código-fonte',
       'Análise ao vivo que pega os erros que o Spark só reporta depois de uma hora de processamento',
-      'Execute do canvas pelo runner local e leia contadores, validações e uma prévia dos dados',
-      'Projetos, templates e lições guardados no seu navegador — sem cadastro, sem servidor, sem telemetria',
+      'Rode um Job ou um Pipeline inteiro pelo canvas e leia contadores, qualidade e uma prévia dos dados',
+      'Tudo guardado no seu navegador, sem cadastro, sem servidor, sem telemetria',
     ],
     cta: 'Conhecer o Studio',
-    imageAlt: 'Sparquet Studio com um pipeline no canvas e o inspetor aberto',
-  },
-  connectors: {
-    eyebrow: 'Conectores',
-    title: 'Leia de qualquer lugar. Grave em qualquer lugar.',
-    body: 'O mesmo modelo de nós cobre arquivos, tabelas de lakehouse, views temporárias e streams. Trocar de fonte é mudar um campo, não reescrever o job.',
-    readWrite: 'Leitura e escrita',
-    writeOnly: 'Somente escrita',
-    lakehouse: 'Recursos de lakehouse',
-    cta: 'Ver todos os conectores',
+    imageAlt: 'Sparquet Studio com um Job no canvas e o inspetor aberto',
   },
   ai: {
-    eyebrow: 'Assistente de IA',
-    title: 'Descreva o pipeline. Revise a proposta.',
-    body: 'O assistente conhece a linguagem porque o prompt é gerado do mesmo catálogo que alimenta o editor — ele não inventa transformação que o framework não tem. Use sua própria chave: as requisições vão direto do seu navegador para o seu provedor.',
-    prompt: 'Leia pedidos do Delta, mantenha os confirmados, agregue a receita por cliente e faça upsert em analytics.receita_cliente',
-    answer: 'Pipeline proposto com 6 nós · 1 destino',
+    eyebrow: 'IA nativa por design',
+    title: 'O formato é o que torna a IA confiável.',
+    body: 'Peça um job PySpark a um modelo e você recebe um script que ninguém consegue verificar sem rodar em dados reais. Peça um pipeline Sparquet e você recebe um JSON curto: todo campo existe no catálogo, o linter confere ali mesmo e o diff é revisável linha a linha. O Studio traz um assistente que usa a sua própria chave, e qualquer modelo fora dele funciona igual, porque a linguagem inteira cabe em um prompt.',
+    prompt:
+      'Leia pedidos da tabela Delta vendas.pedidos, mantenha os confirmados, remova duplicatas por id, falhe se id tiver nulo e faça upsert da receita por cliente em analytics.receita_cliente',
+    answer: 'Job proposto com 6 nós · 1 destino · 2 regras de qualidade',
     bullets: [
-      'Gere um pipeline completo ou modifique o que está no canvas',
-      'Peça para explicar, otimizar ou corrigir os problemas que o linter encontrou',
+      'Gere um Job completo ou modifique o que já está no canvas',
+      'Funciona fora do Studio também: cole a referência no ChatGPT, Claude, Copilot ou no seu agente',
+      'Peça para explicar, otimizar ou corrigir exatamente os problemas que o linter encontrou',
       'Toda proposta é revisada antes de tocar seu trabalho, e desfazer é uma tecla',
     ],
     cta: 'Como o assistente funciona',
+  },
+  connectors: {
+    eyebrow: 'Conectores',
+    title: 'Vinte e sete fontes e destinos.',
+    body: 'Trocar de onde vêm os dados é mudar um campo, não reescrever o job. O mesmo modelo de nós cobre lakehouse, arquivos, bancos operacionais, data warehouses, NoSQL e streams.',
+    groups: [
+      { label: 'Lakehouse', items: ['Delta Lake', 'Iceberg', 'Hudi', 'Parquet', 'ORC', 'Avro'] },
+      { label: 'Arquivos', items: ['CSV', 'JSON', 'XML', 'Texto', 'Binário'] },
+      { label: 'Bancos', items: ['PostgreSQL', 'MySQL', 'MariaDB', 'SQL Server', 'Oracle'] },
+      { label: 'Data warehouses', items: ['BigQuery', 'Snowflake', 'Redshift'] },
+      {
+        label: 'NoSQL e busca',
+        items: ['MongoDB', 'DocumentDB', 'DynamoDB', 'Cassandra', 'Elasticsearch', 'OpenSearch'],
+      },
+      { label: 'Streaming e views', items: ['Kafka', 'Views temporárias'] },
+    ],
+    cta: 'Ver todos os conectores',
   },
   runs: {
     eyebrow: 'Onde roda',
@@ -376,101 +442,116 @@ const PT: LandingCopy = {
     body: 'O Sparquet é uma biblioteca, não uma plataforma. Não há control plane, não há runtime hospedado e nada liga para casa.',
     targets: [
       { name: 'Local', body: 'Um notebook com PySpark instalado, para desenvolver e testar.' },
-      { name: 'Databricks', body: 'Reaproveita a sessão ativa; jobs e notebooks funcionam sem mudança.' },
+      {
+        name: 'Databricks',
+        body: 'Reaproveita a sessão ativa; jobs e notebooks funcionam sem mudança.',
+      },
       { name: 'EMR e Dataproc', body: 'Submeta como qualquer outra aplicação PySpark.' },
       { name: 'Synapse', body: 'Detectado automaticamente, como todo ambiente suportado.' },
     ],
   },
   cta: {
-    title: 'Escreva seu primeiro pipeline em cinco minutos.',
+    title: 'Padronize seu primeiro pipeline em cinco minutos.',
     body: 'Instale o framework, abra o studio e rode um job de verdade antes do café esfriar.',
     primary: 'Começar o tutorial',
     secondary: 'Dar uma estrela no GitHub',
-    install: 'pip install spark-framework',
+    install: 'pip install sparquet',
   },
 }
 
 const ES: LandingCopy = {
   meta: {
-    title: 'Sparquet — ingeniería de datos como JSON',
+    title: 'Sparquet, el estándar para ingeniería de datos',
     description:
-      'Describe un pipeline de Spark en un archivo JSON, diséñalo en un lienzo y ejecútalo donde corra Spark. Open source, licencia MIT.',
+      'Un framework que estandariza la ingeniería de datos: cada pipeline es un contrato JSON declarativo. Escríbelo, genéralo con IA o diséñalo en Sparquet Studio. Open source, Apache 2.0.',
   },
   hero: {
-    eyebrow: 'Ingeniería de datos open source',
-    title: 'Tu pipeline es un archivo.',
-    titleAccent: 'Ahora también es un lienzo.',
+    eyebrow: 'El mejor framework open source de ingeniería de datos',
+    title: 'Cada pipeline de tu equipo,',
+    titleAccent: 'escrito de la misma forma.',
     subtitle:
-      'Sparquet ejecuta pipelines de Spark descritos en JSON — legibles, versionables, parametrizables. Sparquet Studio convierte ese mismo archivo en un lienzo de nodos para dibujar, validar y ejecutar, sin ocultar nunca el archivo que hay debajo.',
+      'Sparquet estandariza la ingeniería de datos: ingesta, transformación, calidad y entrega viven en un contrato JSON declarativo, no en mil scripts a medida. Y como el pipeline es solo JSON, un LLM lo escribe tan bien como tú: pídeselo al asistente dentro de Sparquet Studio, o a ChatGPT, Claude y Copilot en cualquier otro lugar, revisa el diff y córrelo en cualquier Spark.',
     primaryCta: 'Empezar',
     secondaryCta: 'Ver la documentación',
-    note: 'Licencia MIT · Sin cuenta · Corre en tu infraestructura',
+    note: 'Apache 2.0 · Sin cuenta · Corre en tu infraestructura',
+    stats: [
+      { value: '27', label: 'conectores' },
+      { value: '20', label: 'transformaciones' },
+      { value: '1', label: 'artefacto' },
+    ],
+    aiNote: 'Un pipeline es JSON, así que cualquier modelo escribe uno, y el linter lo prueba antes de que Spark arranque.',
     fileName: 'pedidos_curados.json',
-    canvasCaption: 'El mismo archivo, en el lienzo del Studio',
+    canvasCaption: 'El mismo contrato, como Job en el lienzo del Studio',
+    canvasStatus: '{count} nodos · válido · compila a {file}',
   },
   problem: {
     eyebrow: 'Por qué existe',
-    title: 'Un pipeline es código que nadie quiere escribir dos veces.',
-    body: 'Cada equipo reescribe el mismo leer, filtrar, unir, validar y escribir en un cuaderno nuevo, con nombres nuevos y errores nuevos. Sparquet mueve la repetición a un esquema: lo que cambia entre trabajos son datos, no código.',
+    title: 'Diez ingenieros, diez formas de leer un CSV.',
+    body: 'A los equipos de datos rara vez les faltan herramientas, les falta una forma común. Cada trabajo inventa su estructura, su nomenclatura y su idea de qué significa "validado", hasta que nadie puede revisar con seguridad un pipeline que no escribió. Sparquet lo reemplaza por un contrato que todos cumplen.',
     points: [
       {
-        title: 'Declarativo, no desechable',
-        body: 'El pipeline es un documento que revisas en un pull request, comparas entre entornos y reutilizas con parámetros. No hay cuaderno que excavar después.',
+        title: 'Un solo contrato',
+        body: 'Fuente, transformaciones, reglas de calidad y destinos son campos del mismo documento. Quien entra al equipo lee cualquier pipeline el primer día.',
       },
       {
-        title: 'Visual sin ataduras',
-        body: 'El lienzo compila al mismo JSON que ejecuta la CLI. Nada se genera a tus espaldas, y quitar el Studio no rompe ningún trabajo.',
+        title: 'Revisable por diseño',
+        body: 'Un cambio aparece como un diff que se puede razonar, no como arqueología entre celdas de cuaderno y estado del clúster.',
       },
       {
-        title: 'Salvaguardas incluidas',
-        body: 'Las reglas de calidad, las condiciones de ejecución y la semántica de merge son parte del lenguaje, no un parche tras el primer incidente.',
+        title: 'Reutilizado, no copiado',
+        body: 'Los parámetros convierten un contrato en cada región, fecha y cliente. Cambian los valores; la lógica vive en un solo sitio.',
       },
     ],
   },
-  how: {
-    eyebrow: 'Cómo funciona',
-    title: 'Tres pasos, un artefacto.',
+  ways: {
+    eyebrow: 'Cómo lo construyes',
+    title: 'Tres formas de escribirlo. Un artefacto.',
     subtitle:
-      'Todo lo de abajo produce o consume el mismo documento JSON. Elige el punto de entrada que encaje con el momento.',
-    steps: [
+      'El estándar es el archivo. Cómo se escribe lo decides tú, y los tres caminos son intercambiables, en ambos sentidos.',
+    items: [
       {
         step: '01',
-        title: 'Describe',
-        body: 'Escribe el pipeline en JSON, o dibújalo en el Studio y deja que el compilador lo escriba. Fuentes, transformaciones, validaciones y destinos son campos de un solo archivo.',
+        title: 'Escríbelo',
+        body: 'Escribe el JSON directamente. El esquema es lo bastante pequeño para tenerlo en la cabeza y lo bastante estricto para revisarlo en un pull request.',
+        caption: 'pedidos_curados.json',
       },
       {
         step: '02',
-        title: 'Valida',
-        body: 'El Studio analiza el grafo mientras escribes — un merge sin claves, una variable de runtime que nadie publica, un parámetro sin declarar. Las reglas de calidad corren dentro del propio pipeline.',
+        title: 'Genéralo',
+        body: 'Descríbelo en lenguaje natural, al asistente dentro del Studio o a cualquier modelo que ya pagas. El lenguaje entero cabe en un prompt, así que lo que vuelve es JSON válido, no código que tengas que ejecutar para confiar.',
+        caption: 'Cualquier LLM',
       },
       {
         step: '03',
-        title: 'Ejecuta',
-        body: 'Lánzalo desde Python, desde la CLI o desde el lienzo con el runner local. El mismo archivo corre en tu portátil, en Databricks y en EMR.',
+        title: 'Dibújalo',
+        body: 'Abre Sparquet Studio y móntalo en el lienzo. Los nodos son las entradas del archivo, las conexiones su orden, y el archivo es lo que realmente corre.',
+        caption: 'Sparquet Studio',
       },
     ],
+    footnote:
+      'Importa al lienzo un archivo escrito a mano, o exporta a git uno que dibujaste. No se pierde nada en el camino.',
   },
   features: {
-    eyebrow: 'Lo que obtienes',
+    eyebrow: 'Qué cubre el estándar',
     title: 'Un lenguaje de pipelines completo.',
     subtitle:
-      'Veinte transformaciones, siete formatos de IO y seis validadores — todos documentados, tipados en el editor y comprendidos por el asistente.',
+      'Veinte transformaciones, veintisiete conectores y un motor de calidad de datos, todos documentados, tipados en el editor y comprendidos por el asistente.',
     items: [
       {
         title: 'Transformaciones',
-        body: 'filter, select, cast, with_column, struct, group_by, join, union, sort, distinct y más — aplicadas en el orden en que las escribes.',
+        body: 'filter, select, cast, with_column, struct, group_by, join, union, sort, distinct y más, aplicadas en el orden en que las escribes.',
       },
       {
         title: 'Calidad de datos',
-        body: 'not_null, unique, range, regex, row_count y SQL propio, con políticas fail / warn / skip y un informe por regla escrito en cualquier destino.',
+        body: 'Nulos, unicidad, rango, regex, conteo de filas, invariantes SQL y comprobación de esquema, con políticas fail / warn / skip e informe por regla.',
       },
       {
-        title: 'Trabajos componibles',
-        body: 'Las vistas temporales pasan datos entre pipelines en una sesión, y $include comparte fragmentos entre archivos.',
+        title: 'Conectores',
+        body: 'Tablas de lakehouse, archivos, bases relacionales, data warehouses, NoSQL, búsqueda y streams, el mismo modelo de nodos para todos.',
       },
       {
-        title: 'Formatos de lakehouse',
-        body: 'Parquet, Delta e Iceberg con MERGE y time travel, además de CSV, texto, vistas temporales y publicación en Kafka.',
+        title: 'Cuarentena',
+        body: 'Envía las filas que incumplen una regla a su propio destino: lo limpio se publica y lo problemático queda para revisar.',
       },
       {
         title: 'Parámetros',
@@ -478,7 +559,7 @@ const ES: LandingCopy = {
       },
       {
         title: 'Pushdown en runtime',
-        body: 'collect lleva un conjunto de claves a una {{variable}} y empuja el filtro literal IN (...) en la siguiente lectura — data skipping sin pegamento manual.',
+        body: 'collect lleva un conjunto de claves a una {{variable}} y empuja el filtro literal IN (...) en la siguiente lectura, data skipping sin pegamento manual.',
       },
       {
         title: 'Múltiples destinos',
@@ -489,41 +570,63 @@ const ES: LandingCopy = {
         body: 'Registra tus propios readers, writers, transformaciones y validadores. El Studio conserva intactos los tipos que no conoce.',
       },
     ],
+    cta: 'Ver la referencia completa',
   },
   studio: {
     eyebrow: 'Sparquet Studio',
-    title: 'El lienzo que escribe el archivo.',
-    body: 'Una aplicación de navegador que lee y escribe exactamente el JSON que ejecuta el framework. Arrastra una fuente, conecta transformaciones, enlaza un destino — y pulsa ⌘J para leer el archivo que acabas de dibujar.',
+    title: 'La interfaz visual de tus workflows.',
+    body: 'El Studio es donde el contrato se vuelve algo que el equipo ve. Arrastra una fuente, conecta transformaciones, enlaza un destino, y pulsa ⌘J para leer el JSON exacto que se ejecutará. Sin formato propietario, sin generación oculta.',
+    vocabulary: [
+      {
+        term: 'Workflow',
+        body: 'el contenedor, normalmente uno por dominio: Ventas, Facturación, CRM.',
+      },
+      { term: 'Job', body: 'un JSON de pipeline, dibujado en el lienzo.' },
+      {
+        term: 'Pipeline',
+        body: 'un conjunto ordenado de Jobs, ejecutados en secuencia en una sesión.',
+      },
+    ],
     bullets: [
-      'Cada campo documentado en su sitio, con los detalles que suelen vivir solo en el código fuente',
+      'Cada campo documentado en su sitio, con los comportamientos que suelen vivir solo en el código fuente',
       'Análisis en vivo que atrapa los errores que Spark solo reporta tras una hora de cómputo',
-      'Ejecuta desde el lienzo con el runner local y lee contadores, validaciones y una vista previa de los datos',
-      'Proyectos, plantillas y lecciones guardados en tu navegador — sin cuenta, sin servidor, sin telemetría',
+      'Ejecuta un Job o un Pipeline completo desde el lienzo y lee contadores, calidad y una vista previa',
+      'Todo guardado en tu navegador, sin cuenta, sin servidor, sin telemetría',
     ],
     cta: 'Explorar el Studio',
-    imageAlt: 'Sparquet Studio mostrando un pipeline en el lienzo con el inspector abierto',
-  },
-  connectors: {
-    eyebrow: 'Conectores',
-    title: 'Lee desde donde sea. Escribe donde sea.',
-    body: 'El mismo modelo de nodos cubre archivos, tablas de lakehouse, vistas temporales y streams. Cambiar de fuente es cambiar un campo, no reescribir el trabajo.',
-    readWrite: 'Lectura y escritura',
-    writeOnly: 'Solo escritura',
-    lakehouse: 'Funciones de lakehouse',
-    cta: 'Ver todos los conectores',
+    imageAlt: 'Sparquet Studio mostrando un Job en el lienzo con el inspector abierto',
   },
   ai: {
-    eyebrow: 'Asistente de IA',
-    title: 'Describe el pipeline. Revisa la propuesta.',
-    body: 'El asistente conoce el lenguaje porque su prompt se genera del mismo catálogo que alimenta el editor — no puede inventar una transformación que el framework no tiene. Usa tu propia clave: las peticiones van directas de tu navegador a tu proveedor.',
-    prompt: 'Lee pedidos de Delta, quédate con los confirmados, agrega los ingresos por cliente y haz upsert en analytics.ingresos_cliente',
-    answer: 'Pipeline propuesto con 6 nodos · 1 destino',
+    eyebrow: 'IA nativa por diseño',
+    title: 'El formato es lo que hace confiable a la IA.',
+    body: 'Pídele a un modelo un job de PySpark y recibes un script que nadie puede verificar sin correrlo sobre datos reales. Pídele un pipeline de Sparquet y recibes un JSON corto: cada campo existe en el catálogo, el linter lo revisa ahí mismo y el diff se lee línea por línea. El Studio trae un asistente que usa tu propia clave, y cualquier modelo fuera de él funciona igual, porque el lenguaje entero cabe en un prompt.',
+    prompt:
+      'Lee pedidos de la tabla Delta ventas.pedidos, quédate con los confirmados, elimina duplicados por id, falla si id tiene nulos y haz upsert de los ingresos por cliente en analytics.ingresos_cliente',
+    answer: 'Job propuesto con 6 nodos · 1 destino · 2 reglas de calidad',
     bullets: [
-      'Genera un pipeline completo o modifica el que está en el lienzo',
-      'Pídele que explique, optimice o corrija los problemas que encontró el linter',
+      'Genera un Job completo o modifica el que ya está en el lienzo',
+      'Funciona fuera del Studio también: pega la referencia en ChatGPT, Claude, Copilot o tu propio agente',
+      'Pídele que explique, optimice o corrija justo los problemas que encontró el linter',
       'Cada propuesta se revisa antes de tocar tu trabajo, y deshacer es una tecla',
     ],
     cta: 'Cómo funciona el asistente',
+  },
+  connectors: {
+    eyebrow: 'Conectores',
+    title: 'Veintisiete fuentes y destinos.',
+    body: 'Cambiar de dónde vienen los datos es cambiar un campo, no reescribir el trabajo. El mismo modelo de nodos cubre lakehouse, archivos, bases operativas, data warehouses, NoSQL y streams.',
+    groups: [
+      { label: 'Lakehouse', items: ['Delta Lake', 'Iceberg', 'Hudi', 'Parquet', 'ORC', 'Avro'] },
+      { label: 'Archivos', items: ['CSV', 'JSON', 'XML', 'Texto', 'Binario'] },
+      { label: 'Bases de datos', items: ['PostgreSQL', 'MySQL', 'MariaDB', 'SQL Server', 'Oracle'] },
+      { label: 'Data warehouses', items: ['BigQuery', 'Snowflake', 'Redshift'] },
+      {
+        label: 'NoSQL y búsqueda',
+        items: ['MongoDB', 'DocumentDB', 'DynamoDB', 'Cassandra', 'Elasticsearch', 'OpenSearch'],
+      },
+      { label: 'Streaming y vistas', items: ['Kafka', 'Vistas temporales'] },
+    ],
+    cta: 'Ver todos los conectores',
   },
   runs: {
     eyebrow: 'Dónde corre',
@@ -537,11 +640,11 @@ const ES: LandingCopy = {
     ],
   },
   cta: {
-    title: 'Escribe tu primer pipeline en cinco minutos.',
+    title: 'Estandariza tu primer pipeline en cinco minutos.',
     body: 'Instala el framework, abre el studio y ejecuta un trabajo real antes de que se enfríe el café.',
     primary: 'Empezar el tutorial',
     secondary: 'Estrella en GitHub',
-    install: 'pip install spark-framework',
+    install: 'pip install sparquet',
   },
 }
 
