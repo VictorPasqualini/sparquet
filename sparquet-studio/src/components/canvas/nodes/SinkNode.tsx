@@ -1,7 +1,7 @@
 import type { NodeProps } from '@xyflow/react'
 import { memo } from 'react'
 
-import { getFormat } from '@/catalog'
+import { getFormat, getValidationSink } from '@/catalog'
 import { Badge, type BadgeTone } from '@/components/ui'
 import type { SinkNode as SinkNodeType } from '@/types/studio'
 
@@ -35,19 +35,29 @@ export const SinkNode = memo(function SinkNodeRenderer({
   const format = getFormat(data.format)
   const issues = useNodeIssues(id)
   const projection = projectionLabel(data.columns)
+  // The role is stored on the node: the `validations` block is job-scoped, so this
+  // destination belongs to the job and hangs off no rule in particular.
+  const sideDef = data.dqRole ? getValidationSink(data.dqRole) : null
 
   return (
     <NodeShell
       nodeId={id}
       accent="output"
-      icon={catalogIcon(format?.icon ?? 'Database')}
-      title={data.label ?? 'Output'}
+      icon={catalogIcon(sideDef?.icon ?? format?.icon ?? 'Database')}
+      title={data.label ?? sideDef?.label ?? 'Output'}
+      subtitle={sideDef?.subtitle}
       selected={selected}
       issues={issues}
-      inputs="single"
+      // A quality destination is a declaration, not a step: the validations block
+      // writes it from the DataFrame every rule saw, so there is nothing to wire in
+      // and nothing to pass on.
+      inputs={sideDef ? 'none' : 'single'}
       hasOutput={false}
       badges={
         <>
+          {/* The chip repeats the role in words, so the node says what it is even
+              when its title has been renamed. */}
+          {sideDef && <Badge tone="brand">quality</Badge>}
           <Badge tone="info">{format?.label ?? data.format}</Badge>
           <Badge tone={MODE_TONE[data.mode] ?? 'neutral'}>{data.mode}</Badge>
         </>

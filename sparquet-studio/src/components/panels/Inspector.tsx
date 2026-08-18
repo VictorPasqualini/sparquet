@@ -44,6 +44,7 @@ import { toast } from 'sonner'
 import {
   getFormat,
   getTransformation,
+  getValidationSink,
   getValidator,
   READABLE_FORMATS,
   WRITABLE_FORMATS,
@@ -747,6 +748,9 @@ export function retainOptions(
 function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData }) {
   const updateNodeData = useEditorStore((state) => state.updateNodeData)
   const sink = data.kind === 'sink' ? data : null
+  // The role is stored on the node, so nothing has to be looked up in the graph.
+  const sideRole = sink?.dqRole ?? null
+  const sideDef = sideRole ? getValidationSink(sideRole) : null
   const format = getFormat(data.format)
   const formats = sink ? WRITABLE_FORMATS : READABLE_FORMATS
   const optionSpecs = (sink ? format?.writeOptions : format?.readOptions) ?? []
@@ -785,6 +789,19 @@ function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData 
 
   return (
     <div className="space-y-4">
+      {sideDef && (
+        <section
+          aria-label={`${sideDef.label} — quality destination`}
+          className="space-y-1.5 rounded-lg border border-state-info/25 bg-state-info/5 p-2.5"
+        >
+          <p className="text-2xs font-semibold text-content">
+            {sideDef.label} · <span className="font-mono">{sideDef.jsonKey}</span>
+          </p>
+          <p className="text-2xs leading-relaxed text-content-muted">{sideDef.summary}</p>
+          <p className="text-2xs leading-relaxed text-content-muted">{sideDef.caveat}</p>
+        </section>
+      )}
+
       <div id={fieldAnchorId(id, 'format')} className="scroll-mt-4">
         <Field label="Format" help={format?.summary} htmlFor={`${id}-format`}>
           <Select
@@ -868,7 +885,11 @@ function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData 
                 updateNodeData(id, { columns: checked ? [] : null })
               }
               label="Project specific columns"
-              description="Off writes every column, including the auto-added ingestion_ts."
+              description={
+                sideRole === 'report'
+                  ? 'The report builds its own fixed schema and is written without a select, so a projection here is ignored.'
+                  : 'Off writes every column, including the auto-added ingestion_ts.'
+              }
             />
             {sink.columns !== null && (
               <StringListField

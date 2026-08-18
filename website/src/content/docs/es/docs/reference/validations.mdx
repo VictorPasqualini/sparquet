@@ -245,12 +245,18 @@ Donde `report` persiste *métricas*, `validations.outputs` enruta las *filas mis
 
 Una fila es **inválida** cuando viola cualquier regla *a nivel de fila* — `not_null`, `range`, `regex`, `unique`, y la regla `check` con una métrica `missing_*` / `invalid_*`. Las reglas agregadas (`row_count`, `avg`, `freshness`, `duplicate_count`, `schema`, `sql` booleano) describen la tabla, no filas individuales, así que no contribuyen a la división.
 
-<Aside type="tip">
-  `validations.outputs` es la división "bronze → silver válido + silver inválido"
-  cuando *inválido significa "falló las reglas de DQ"*. Si la división es lógica de
-  negocio ajena a la calidad, hazla en su lugar con dos entradas en los `outputs`
-  del pipeline y un `filter` por destino. Consulta la guía de calidad de datos para
-  el trade-off.
+<Aside type="caution" title="Es una copia, no una bifurcación">
+  `validations.outputs` **no** desvía filas. El pipeline escribe estos destinos y
+  luego escribe su propio `output`/`outputs` desde el **mismo DataFrame completo** —
+  incluidas las inválidas. Un pipeline con cuarentena escribe cada fila mala dos veces.
+
+  Es decir, **audita**: qué filas rompieron una regla, apartadas para inspección, sin
+  cambiar el flujo.
+
+  Para **enrutar** — que solo las filas buenas lleguen a la tabla final — usa el
+  pipeline: un `filter` antes de cada destino. Reescribes la condición en SQL
+  (mantenla al día con las reglas) y, a cambio, el destino principal lleva exactamente
+  lo que querías.
 </Aside>
 
 ## Leer el resultado en Python

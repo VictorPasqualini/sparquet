@@ -61,6 +61,10 @@ const SCHEMA_SKELETON = `{
   "validations": {
     "on_failure": "fail | warn | skip",
     "report": { "format": "csv", "path": "/dq/report", "mode": "overwrite" },
+    "outputs": {
+      "valid": { "format": "delta", "path": "silver.ok", "mode": "overwrite" },
+      "invalid": { "format": "delta", "path": "silver.quarantine", "mode": "overwrite" }
+    },
     "rules": [ { "type": "not_null", "columns": ["id"] } ]
   },
   "outputs": [
@@ -92,6 +96,7 @@ const HARD_RULES = [
   '{param} is substituted in the raw JSON before parsing (values come from the job parameters); {{runtime}} is resolved during execution from a value captured by a "collect" step. Never mix the two syntaxes.',
   'Use "checkpoint" before "collect" so the collected values do not recompute the whole lineage, and before fanning out to several outputs.',
   'Validations report on the data, they do not change it — filter rows with "filter", do not use a validator to drop them.',
+  '"validations.report" and "validations.outputs" ({valid, invalid}) are SIDE outputs, written from the same complete DataFrame the main "outputs" then receive: quarantine copies rows out, it never removes them from the main destinations. Only "valid"/"invalid" are routed. Both need at least one rule, and only row-level rules (not_null, unique, range, regex, and the missing_*/invalid_* check metrics) can sort a row into one of the two.',
   'Every value is a string, number, boolean, list or object of plain JSON: no comments, no trailing commas, no expressions outside strings.',
 ]
 

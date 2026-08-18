@@ -245,11 +245,18 @@ Onde `report` persiste *métricas*, `validations.outputs` roteia as *próprias l
 
 Uma linha é **inválida** quando viola qualquer regra *em nível de linha* — `not_null`, `range`, `regex`, `unique`, e a regra `check` com uma métrica `missing_*` / `invalid_*`. Regras agregadas (`row_count`, `avg`, `freshness`, `duplicate_count`, `schema`, `sql` booleano) descrevem a tabela, não linhas individuais, então não contribuem para o split.
 
-<Aside type="tip">
-  `validations.outputs` é o split "bronze → silver válido + silver inválido" quando
-  *inválido significa "falhou nas regras de DQ"*. Se o split for lógica de negócio não relacionada à
-  qualidade, faça-o com duas entradas nos `outputs` do pipeline e um `filter` por
-  destino em vez disso. Veja o guia de qualidade de dados para o trade-off.
+<Aside type="caution" title="É cópia, não desvio">
+  `validations.outputs` **não** desvia linhas. O pipeline grava esses destinos e
+  depois grava o próprio `output`/`outputs` a partir do **mesmo DataFrame completo** —
+  inclusive as inválidas. Um pipeline com quarentena grava cada linha ruim duas vezes.
+
+  Ou seja, ela **audita**: quais linhas violaram uma regra, guardadas à parte para
+  inspeção, sem mexer no fluxo.
+
+  Para **rotear** — só as linhas boas chegando na tabela final — use o pipeline: um
+  `filter` antes de cada destino. Você reescreve a condição em SQL (mantenha-a em
+  sincronia com as regras) e, em troca, o destino principal carrega exatamente o que
+  você quis.
 </Aside>
 
 ## Lendo o resultado em Python

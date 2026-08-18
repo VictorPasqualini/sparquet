@@ -1,0 +1,49 @@
+{
+  "name": "06_quarentena_validacoes",
+  "description": "Quarentena por linha (validations.outputs): as regras row-level (not_null, range, regex) separam as linhas boas das ruins e cada lado vai para um destino proprio, junto com o relatorio de qualidade (validations.report). ATENCAO: quarentena NAO desvia linhas — o framework chama _write_validation_outputs(df) e depois _write_outputs(df) com o MESMO DataFrame completo, entao a saida principal continua recebendo TODAS as linhas, invalidas inclusive. Para tirar as ruins do fluxo principal, use um filter nas transformations.",
+
+  "input": {
+    "format": "delta",
+    "path": "bronze.pedidos"
+  },
+
+  "transformations": [
+    { "type": "select", "columns": ["id_pedido", "id_cliente", "email", "valor", "dt_pedido"] },
+    { "type": "with_column", "column": "ingestion_ts", "expression": "current_timestamp()" },
+    { "type": "checkpoint" }
+  ],
+
+  "validations": {
+    "on_failure": "warn",
+    "report": {
+      "format": "delta",
+      "path": "dq.validation_report",
+      "mode": "append"
+    },
+    "outputs": {
+      "valid": {
+        "format": "delta",
+        "path": "silver.pedidos_ok",
+        "mode": "overwrite"
+      },
+      "invalid": {
+        "format": "delta",
+        "path": "silver.pedidos_quarentena",
+        "mode": "overwrite",
+        "columns": ["id_pedido", "id_cliente", "email", "valor", "dt_pedido"]
+      }
+    },
+    "rules": [
+      { "type": "not_null", "columns": ["id_pedido", "id_cliente"] },
+      { "type": "range", "column": "valor", "min": 0 },
+      { "type": "regex", "column": "email", "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$" },
+      { "type": "row_count", "min": 1 }
+    ]
+  },
+
+  "output": {
+    "format": "delta",
+    "path": "silver.pedidos",
+    "mode": "overwrite"
+  }
+}

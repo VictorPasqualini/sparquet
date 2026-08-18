@@ -23,11 +23,46 @@ Pulsa <kbd>/</kbd> en cualquier lugar para enfocar la búsqueda de la palette.
 |---|---|---|
 | Source | `input`, o un `with` de join/union | ninguno |
 | Transformation | una entrada de `transformations` | uno (dos para `join` y `union`) |
-| Validations | el bloque `validations` | uno |
+| Validation rule | una entrada de `validations.rules` — una caja por regla | uno |
+| Quality destination | `validations.report` o `validations.outputs.valid`/`.invalid` | ninguno — es una declaración |
 | Destination | una entrada de `outputs` | uno |
 | Note | nada | ninguno |
 
 Un nodo muestra su parámetro más significativo bajo el título — la condición de un filter, la expresión de una columna calculada, el tipo y la clave del join — así que un Job es legible sin abrir nada.
+
+## Destinos de calidad
+
+El bloque `validations` escribe hasta tres datasets propios, y cada uno es una caja que
+añades desde la sección **Quality** de la palette — no algo que conectas con una arista:
+
+| Ítem de la palette | Compila a |
+|---|---|
+| Quality report | `validations.report` — una fila por regla |
+| Quarantine — valid rows | `validations.outputs.valid` |
+| Quarantine — invalid rows | `validations.outputs.invalid` |
+
+**No aceptan conexiones**: el bloque `validations` es uno por Job, así que pertenecen al
+Job, no a una regla concreta. Suelta uno en cualquier lugar del canvas y compila. Un Job
+admite uno de cada; un segundo es un error, igual que un destino de calidad sin ninguna
+regla de validación que lo alimente.
+
+<Aside type="caution" title="La cuarentena audita — `filter` enruta">
+  La cuarentena es una **copia, no una bifurcación**. El framework escribe los destinos
+  de cuarentena y luego escribe los destinos del propio Job desde el **mismo DataFrame
+  completo** — incluidas las filas inválidas. Es decir, un Job con cuarentena escribe
+  las filas malas dos veces: una en la cuarentena, otra en el destino principal.
+
+  Úsala para **auditar**: "¿qué filas rompieron una regla, y cuántas?" — sin tocar el
+  flujo.
+
+  Para **enrutar** — que solo las filas buenas lleguen a la tabla final — usa el
+  pipeline: un nodo `filter` antes del destino, y una segunda rama para los rechazos.
+  El coste es reescribir la condición en SQL, así que mantenla al día con las reglas;
+  la ganancia es que el destino principal lleva exactamente lo que querías.
+</Aside>
+
+`on_failure` no es un destino y sigue en la **configuración del Job**: decide si una
+violación aborta la ejecución.
 
 ## Conectar
 

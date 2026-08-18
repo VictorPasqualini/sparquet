@@ -487,7 +487,7 @@ describe('opening a job saved before validations became per-rule nodes', () => {
     })
   }
 
-  it('splits the rules into nodes and keeps the policy in the settings', () => {
+  it('splits the rules into nodes and turns the report into a quality node', () => {
     const editor = useEditorStore.getState()
     editor.open(legacyJob())
 
@@ -498,10 +498,18 @@ describe('opening a job saved before validations became per-rule nodes', () => {
       rules.map((node) => (node.data.kind === 'validation' ? node.data.validator : '')),
     ).toEqual(['not_null', 'row_count'])
     expect(state.nodes.some((node) => node.id === 'checks')).toBe(false)
-    expect(state.settings.validations).toEqual({
-      onFailure: 'warn',
-      report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
-    })
+
+    // Only the run policy stays in the settings; the report is a box now.
+    expect(state.settings.validations).toEqual({ onFailure: 'warn' })
+
+    const reportSink = state.nodes.find(
+      (node) => node.data.kind === 'sink' && node.data.dqRole === 'report',
+    )
+    expect(reportSink).toBeDefined()
+    // A declaration, not a chain member: nothing points at it.
+    expect(state.edges.some((edge) => edge.target === reportSink?.id)).toBe(false)
+    // The main destination is untouched: the quality box is drawn beside it.
+    expect(state.nodes.filter((node) => node.data.kind === 'sink')).toHaveLength(2)
 
     // The chain still runs source → rules → sink, and compiles to the same JSON.
     const { pipeline } = state.compile()
@@ -513,5 +521,18 @@ describe('opening a job saved before validations became per-rule nodes', () => {
         { type: 'row_count', min: 1 },
       ],
     })
+    expect(pipeline?.outputs).toBeUndefined()
+  })
+
+  it('is idempotent: re-opening the upgraded job adds nothing', () => {
+    const editor = useEditorStore.getState()
+    editor.open(legacyJob())
+    const once = useEditorStore.getState()
+    const upgraded = { ...legacyJob(), graph: { nodes: once.nodes, edges: once.edges }, settings: once.settings }
+
+    useEditorStore.getState().open(upgraded)
+    const twice = useEditorStore.getState()
+    expect(twice.nodes).toHaveLength(once.nodes.length)
+    expect(twice.edges).toHaveLength(once.edges.length)
   })
 })

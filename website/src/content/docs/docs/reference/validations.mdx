@@ -245,11 +245,18 @@ Where `report` persists *metrics*, `validations.outputs` routes the *rows themse
 
 A row is **invalid** when it violates any *row-level* rule — `not_null`, `range`, `regex`, `unique`, and the `check` rule with a `missing_*` / `invalid_*` metric. Aggregate rules (`row_count`, `avg`, `freshness`, `duplicate_count`, `schema`, boolean `sql`) describe the table, not individual rows, so they do not contribute to the split.
 
-<Aside type="tip">
-  `validations.outputs` is the "bronze → valid silver + invalid silver" split when
-  *invalid means "failed the DQ rules"*. If the split is business logic unrelated to
-  quality, do it with two entries in the pipeline `outputs` and a `filter` per
-  destination instead. See the data-quality guide for the trade-off.
+<Aside type="caution" title="A copy, not a split">
+  `validations.outputs` does **not** divert rows. The pipeline writes these sinks and
+  then writes its own `output`/`outputs` from the **same, complete** DataFrame —
+  invalid rows included. A pipeline with quarantine writes every bad row twice.
+
+  So it **audits**: which rows broke a rule, kept apart for inspection, without
+  changing the flow.
+
+  To **route** — only the good rows reaching the curated table — use the pipeline:
+  a `filter` before each destination. You restate the condition in SQL (keep it in
+  step with the rules), and in exchange the main destination carries exactly what you
+  meant.
 </Aside>
 
 ## Reading the result in Python

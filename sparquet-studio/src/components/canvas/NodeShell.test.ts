@@ -13,6 +13,7 @@ describe('keyboard connect source', () => {
   it('starts empty and remembers the node a connection is leaving', () => {
     expect(readConnectSource()).toBeNull()
     startConnect('node-a')
+    // Every node has exactly one output, so the id is the whole pending source.
     expect(readConnectSource()).toBe('node-a')
     cancelConnect()
     expect(readConnectSource()).toBeNull()
