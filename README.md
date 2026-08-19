@@ -117,14 +117,13 @@ See [CLAUDE.md](CLAUDE.md) for the complete schema reference.
 | [ROADMAP.md](ROADMAP.md) | Framework roadmap |
 | [ROADMAP_CASE_OF_SUCCESS.md](ROADMAP_CASE_OF_SUCCESS.md) | A real migration: Spark jobs rewritten as declarative configs |
 | [examples/](examples/) | Runnable example pipelines |
-| [website/](website/) | The public site: landing plus full documentation in English, Portuguese and Spanish |
+| [sparquet.dev](https://sparquet.dev) | The public site: landing plus full documentation in English, Portuguese and Spanish, built from the [sparquet-web](https://github.com/VictorPasqualini/sparquet-web) repository |
 
 ## Repository layout
 
 ```
 sparquet/        the framework (readers, writers, transformations, validations)
 sparquet-studio/        the visual editor (React + TypeScript) and its local runner
-website/                landing page and documentation site (Astro + Starlight)
 examples/               example pipelines, one per capability
 tests/                  unit tests and a full real-world migration case
 docs/                   deployment and reference docs

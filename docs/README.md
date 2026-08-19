@@ -297,7 +297,7 @@ booleano — semântica **pass-when-true** (expresse o invariante, não a viola�
 ```
 
 > Também disponíveis: `check` (métrica + threshold warn/fail, estilo SODA Core) e
-> `schema` (colunas/tipos). Ver a referência completa no website (`/docs`) ou no
+> `schema` (colunas/tipos). Ver a referência completa em [sparquet.dev/docs](https://sparquet.dev/docs) ou no
 > [CLAUDE.md](../CLAUDE.md).
 
 ---
