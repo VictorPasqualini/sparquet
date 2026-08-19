@@ -56,6 +56,6 @@ version = { attr = "sparquet.__version__" }
 [tool.setuptools.packages.find]
 # Distribuição é SÓ o pacote `sparquet`. O motor de DQ `sparquet_cola` agora é um
 # pacote separado (declarado em dependencies). Lista explícita (não `exclude`)
-# para que os outros projetos do monorepo — `sparquet-studio/` (frontend) e
-# `website/` — e qualquer pasta nova nunca entrem no wheel/sdist por acidente.
+# para que os outros projetos do repositório — `sparquet-studio/` (frontend) — e
+# qualquer pasta nova nunca entrem no wheel/sdist por acidente.
 include = ["sparquet", "sparquet.*"]
