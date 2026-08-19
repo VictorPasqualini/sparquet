@@ -2,41 +2,26 @@
  * Job settings — everything the compiled JSON carries that is not a node.
  *
  * `name`, `description` and `spark` sit at the top of the pipeline JSON, and so does
- * the block-level part of `validations`: `on_failure`, the quality `report` and the
- * quarantine `outputs`. Those three describe what the job does with the verdict of
- * ALL its rules, so they belong here rather than on one arbitrary rule node.
+ * the one part of `validations` that is not data: `on_failure`. It decides what a
+ * broken rule does to the RUN, which is a job-wide setting like the Spark configs.
+ *
+ * The three datasets the block WRITES — the quality report and the two quarantine
+ * outputs — are destination nodes on the canvas, hanging off the last rule. A
+ * dataset that gets written deserves a box like any other.
  */
 
 import { ChevronRight, Flame, Settings2, ShieldCheck } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
-import { getFormat, ON_FAILURE_OPTIONS, WRITABLE_FORMATS } from '@/catalog'
-import {
-  Field,
-  Input,
-  SectionTitle,
-  Segmented,
-  Select,
-  Textarea,
-  Toggle,
-} from '@/components/ui'
+import { ON_FAILURE_OPTIONS, VALIDATION_SINKS } from '@/catalog'
+import { Field, Input, SectionTitle, Segmented, Textarea } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
 import { useEditorStore } from '@/store/editor'
-import type { OnFailureMode, OutputSpec, SparkSettings } from '@/types/pipeline'
+import type { OnFailureMode, SparkSettings } from '@/types/pipeline'
 import type { ValidationPolicy } from '@/types/studio'
 import { DEFAULT_VALIDATION_POLICY } from '@/types/studio'
 
-import { PlaceholderHints } from './fields/FieldRenderer'
 import { KeyValueField } from './fields/widgets'
-
-/** Same wording as the sink inspector, so a mode means one thing across the app. */
-const MODE_HINTS: Record<string, string> = {
-  overwrite: 'Replaces what is at the destination.',
-  append: 'Adds rows and keeps what is already there.',
-  merge: 'Upsert on the merge keys — Delta and Iceberg only.',
-  ignore: 'Skips the write when the destination already exists.',
-  error: 'Fails when the destination already exists.',
-}
 
 const ON_FAILURE_CHOICES: { value: OnFailureMode; label: string }[] = ON_FAILURE_OPTIONS.map(
   (option) => ({ value: option.value, label: option.label.split(' — ')[0] }),
@@ -46,8 +31,6 @@ const ON_FAILURE_HINTS: Record<OnFailureMode, string> = Object.fromEntries(
   ON_FAILURE_OPTIONS.map((option) => [option.value, option.hint]),
 ) as Record<OnFailureMode, string>
 
-const NEW_SINK: OutputSpec = { format: 'csv', path: '', mode: 'overwrite' }
-
 export function JobSettingsPanel() {
   const settings = useEditorStore((state) => state.settings)
   const setSettings = useEditorStore((state) => state.setSettings)
@@ -56,7 +39,6 @@ export function JobSettingsPanel() {
   )
 
   const policy: ValidationPolicy = settings.validations ?? DEFAULT_VALIDATION_POLICY
-  const quarantine = policy.outputs ?? null
 
   const setPolicy = (patch: Partial<ValidationPolicy>) => {
     setSettings({ validations: { ...policy, ...patch } })
@@ -71,13 +53,6 @@ export function JobSettingsPanel() {
       }
     }
     setSettings({ spark })
-  }
-
-  const setQuarantine = (key: 'valid' | 'invalid', value: OutputSpec | null) => {
-    const next: Record<string, OutputSpec> = { ...(quarantine ?? {}) }
-    if (value) next[key] = value
-    else delete next[key]
-    setPolicy({ outputs: Object.keys(next).length > 0 ? next : null })
   }
 
   return (
@@ -133,48 +108,19 @@ export function JobSettingsPanel() {
             />
           </Field>
 
-          <SinkToggle
-            id="dq-report"
-            label="Quality report"
-            description="One row per rule: pipeline, rule_type, passed, failed_count, message, validated_at."
-            value={policy.report ?? null}
-            onChange={(report) => setPolicy({ report })}
-          />
-
           <Callout>
-            The report is only written when the run reaches the outputs — in{' '}
-            <span className="font-mono">fail</span> mode a violation aborts before it.
+            The three datasets this block writes are <strong>boxes on the canvas</strong>, not
+            settings: {VALIDATION_SINKS.map((sink) => sink.label).join(', ')}. Add them from
+            the Quality section of the palette. They take no connection — the block runs once
+            for the whole job, so they belong to no rule in particular.
           </Callout>
 
-          <SinkToggle
-            id="dq-valid"
-            label="Quarantine — valid rows"
-            description="Rows that break no row-level rule (not_null, unique, range, regex, missing/invalid checks)."
-            value={quarantine?.valid ?? null}
-            onChange={(value) => setQuarantine('valid', value)}
-          />
-          <SinkToggle
-            id="dq-invalid"
-            label="Quarantine — invalid rows"
-            description="The rows those same checks rejected, kept apart for inspection."
-            value={quarantine?.invalid ?? null}
-            onChange={(value) => setQuarantine('invalid', value)}
-          />
-
           <Callout>
-            The quarantine split is written <em>before</em> and <em>besides</em> the job&apos;s
-            own destinations — it routes rows apart, it does not replace the outputs on the
-            canvas.
+            Those are <strong>side outputs</strong>. The framework writes them from the same
+            complete DataFrame it then hands to the job&apos;s own destinations, so quarantine
+            copies rows out — it never takes them off the main chain. Every destination on the
+            trunk still receives every row, invalid ones included.
           </Callout>
-
-          {ruleCount === 0 && (policy.report || quarantine) && (
-            <Callout tone="warning">
-              This job has no validation rule on the canvas, so no{' '}
-              <span className="font-mono">validations</span> block is compiled and none of
-              these destinations is written. Drag a rule from the Quality section of the
-              palette.
-            </Callout>
-          )}
         </Collapsible>
 
         <Collapsible
@@ -292,93 +238,5 @@ function Callout({
     >
       {children}
     </p>
-  )
-}
-
-/** A destination that is off until it is switched on — report and quarantine alike. */
-function SinkToggle({
-  id,
-  label,
-  description,
-  value,
-  onChange,
-}: {
-  id: string
-  label: string
-  description: string
-  value: OutputSpec | null
-  onChange: (value: OutputSpec | null) => void
-}) {
-  const format = getFormat(value?.format ?? '')
-
-  const patch = (next: Partial<OutputSpec>) => {
-    onChange({ ...(value ?? NEW_SINK), ...next })
-  }
-
-  return (
-    <div className="space-y-2">
-      <Toggle
-        checked={Boolean(value)}
-        onCheckedChange={(checked) => onChange(checked ? { ...NEW_SINK } : null)}
-        label={label}
-        description={description}
-      />
-
-      {value && (
-        <div
-          role="group"
-          aria-label={`${label} destination`}
-          className="space-y-3 rounded-lg border border-line bg-surface p-2.5"
-        >
-          <Field label="Format" htmlFor={`${id}-format`}>
-            <Select
-              id={`${id}-format`}
-              ariaLabel={`${label} format`}
-              value={value.format}
-              onValueChange={(next) => {
-                // The mode select renders blank on a value the new format rejects.
-                const def = getFormat(next)
-                const keepsMode = !def || def.modes.some((mode) => mode === value.mode)
-                patch({
-                  format: next,
-                  ...(keepsMode ? {} : { mode: def?.modes[0] ?? 'overwrite' }),
-                })
-              }}
-              options={WRITABLE_FORMATS.map((item) => ({
-                value: item.id,
-                label: item.label,
-                hint: item.summary,
-              }))}
-            />
-          </Field>
-          <Field
-            label={format?.pathLabel ?? 'Path'}
-            help={format?.pathHelp}
-            htmlFor={`${id}-path`}
-          >
-            <Input
-              id={`${id}-path`}
-              mono
-              value={value.path}
-              placeholder={format?.pathPlaceholder}
-              onChange={(event) => patch({ path: event.target.value })}
-            />
-            <PlaceholderHints value={value.path} />
-          </Field>
-          <Field label="Write mode" help={MODE_HINTS[String(value.mode ?? '')]}>
-            <Select
-              ariaLabel={`${label} write mode`}
-              value={String(value.mode ?? 'overwrite')}
-              onValueChange={(mode) => patch({ mode })}
-              options={(format?.modes ?? []).map((mode) => ({
-                value: mode,
-                label: mode,
-                hint: MODE_HINTS[mode],
-              }))}
-            />
-          </Field>
-        </div>
-      )}
-    </div>
   )
 }

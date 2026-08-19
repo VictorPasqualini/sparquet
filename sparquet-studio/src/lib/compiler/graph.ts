@@ -17,6 +17,7 @@ import type {
   StudioNode,
   TransformNode,
   ValidationNode,
+  ValidationSinkRole,
 } from '@/types/studio'
 import { HANDLE } from '@/types/studio'
 
@@ -105,6 +106,28 @@ export function sideParent(graph: StudioGraph, nodeId: string): StudioNode | und
   return parentsOn(graph, nodeId, HANDLE.inRight)[0]
 }
 
+/* ---------------------------------------------------- quality destinations */
+
+/**
+ * Which dataset of the `validations` block this node writes, or `null` for an
+ * ordinary destination.
+ *
+ * The role is stored ON the node (`SinkNodeData.dqRole`) rather than read off an
+ * incoming edge, because the `validations` block is job-scoped: a job has exactly
+ * one, so a report or a quarantine copy belongs to the job and not to any single
+ * rule. These nodes are declarations — they carry no connection at all, which is
+ * why every chain walk below has to skip them.
+ */
+export function validationSinkRoleOf(node: StudioNode): ValidationSinkRole | null {
+  if (!isSinkNode(node)) return null
+  return node.data.dqRole ?? null
+}
+
+/** Shorthand for callers that only need to keep quality sinks out of a chain walk. */
+export function isValidationSinkNode(node: StudioNode): boolean {
+  return validationSinkRoleOf(node) !== null
+}
+
 /* ------------------------------------------------------------------ chains */
 
 export type ChainProblemCode = 'multiple-parents' | 'cycle'
@@ -178,12 +201,15 @@ export function makeEdge(
   sourceId: string,
   targetId: string,
   targetHandle: string = HANDLE.in,
+  sourceHandle: string = HANDLE.out,
 ): StudioEdge {
   return {
-    id: `e-${sourceId}-${targetHandle}-${targetId}`,
+    // Both handles are part of the id so the same pair of nodes can be linked
+    // twice — a source feeding both inputs of a join, say — without colliding.
+    id: `e-${sourceId}-${sourceHandle}-${targetHandle}-${targetId}`,
     source: sourceId,
     target: targetId,
-    sourceHandle: HANDLE.out,
+    sourceHandle,
     targetHandle,
   }
 }

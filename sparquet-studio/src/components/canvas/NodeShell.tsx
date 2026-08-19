@@ -7,7 +7,16 @@
  */
 
 import { Handle, NodeToolbar, Position } from '@xyflow/react'
-import { CircleX, Copy, Eye, EyeOff, Link2, TriangleAlert, Trash2, Unlink } from 'lucide-react'
+import {
+  CircleX,
+  Copy,
+  Eye,
+  EyeOff,
+  Link2,
+  TriangleAlert,
+  Trash2,
+  Unlink,
+} from 'lucide-react'
 import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -50,12 +59,15 @@ const ACCENT_CHIP: Record<NodeAccent, string> = {
  * two-step alternative: pick a source, then pick a target. It lives outside
  * React because every node and the canvas itself have to see the same pending
  * source, and the editor store is not ours to extend.
+ *
+ * A node id is all it holds: every node has exactly one output, so there is nothing
+ * to choose between.
  */
-let connectSourceId: string | null = null
+let connectSource: string | null = null
 const connectListeners = new Set<() => void>()
 
 /** Pending connect source, readable outside React. */
-export const readConnectSource = (): string | null => connectSourceId
+export const readConnectSource = (): string | null => connectSource
 
 export function subscribeConnectSource(listener: () => void): () => void {
   connectListeners.add(listener)
@@ -64,9 +76,9 @@ export function subscribeConnectSource(listener: () => void): () => void {
   }
 }
 
-function setConnectSource(nodeId: string | null): void {
-  if (connectSourceId === nodeId) return
-  connectSourceId = nodeId
+function setConnectSource(next: string | null): void {
+  if (connectSource === next) return
+  connectSource = next
   for (const listener of connectListeners) listener()
 }
 
@@ -139,7 +151,8 @@ export function NodeShell({
 
   const connectSource = useConnectSource()
   const isConnectSource = connectSource === nodeId
-  const canReceiveConnection = connectSource !== null && !isConnectSource && inputs !== 'none'
+  const canReceiveConnection =
+    connectSource !== null && !isConnectSource && inputs !== 'none'
 
   const completeConnection = (targetHandle: string) => {
     if (connectSource === null) return

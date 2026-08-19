@@ -119,16 +119,27 @@ async function main() {
       { timeout: 15_000 },
     )
 
-    const canvas = await page.evaluate(() => ({
-      nodes: document.querySelectorAll('.react-flow__node').length,
-      visible: Array.from(document.querySelectorAll('.react-flow__node')).filter(
-        (node) => getComputedStyle(node).visibility === 'visible',
-      ).length,
-      edges: document.querySelectorAll('.react-flow__edge-path').length,
-    }))
+    const canvas = await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('.react-flow__node'))
+      return {
+        nodes: nodes.length,
+        visible: nodes.filter((node) => getComputedStyle(node).visibility === 'visible').length,
+        // Quality destinations are declarations, not chain members: they carry no
+        // link by design, so they are excluded before asking whether the chain that
+        // remains is connected.
+        declarations: nodes.filter((node) => /quality destination/i.test(node.textContent ?? ''))
+          .length,
+        edges: document.querySelectorAll('.react-flow__edge-path').length,
+      }
+    })
+    const chained = canvas.nodes - canvas.declarations
     check('nodes render', canvas.nodes > 0, `${canvas.nodes} nodes`)
     check('every node is visible', canvas.visible === canvas.nodes, `${canvas.visible}/${canvas.nodes}`)
-    check('edges render', canvas.edges >= canvas.nodes - 1, `${canvas.edges} edges`)
+    check(
+      'edges render',
+      canvas.edges >= chained - 1,
+      `${canvas.edges} edges for ${chained} chained node(s)`,
+    )
 
     /* ------------------------------------------------- palette adds node */
 
@@ -298,6 +309,150 @@ async function main() {
           check('double-clicking a stage opens its job', onJobRoute, onJobRoute ? '' : `at ${at}`)
         }
       }
+    }
+
+    /* ------------------------------ validations write onto the canvas */
+
+    // The data-quality template carries `validations.report`. Importing it must draw
+    // that report as a standalone DESTINATION box — not hide it in a settings form —
+    // and the job's own destination must survive next to it.
+    await page.goto(`${BASE_URL}/#/templates`, { waitUntil: 'networkidle2' })
+    const opened = await page
+      .waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('article')).some((card) =>
+            /data quality/i.test(card.textContent ?? ''),
+          ),
+        { timeout: 15_000 },
+      )
+      .then(() =>
+        page.evaluate(() => {
+          const card = Array.from(document.querySelectorAll('article')).find((candidate) =>
+            /data quality/i.test(candidate.textContent ?? ''),
+          )
+          const use = Array.from(card?.querySelectorAll('button') ?? []).find((button) =>
+            /^use template$/i.test(button.textContent?.trim() ?? ''),
+          )
+          if (!(use instanceof HTMLElement)) return false
+          use.click()
+          return true
+        }),
+      )
+      .catch(() => false)
+
+    const createdFromTemplate = !opened
+      ? false
+      : await page
+          .waitForFunction(
+            () =>
+              Array.from(document.querySelectorAll('button')).some(
+                (button) =>
+                  /^create job$/i.test(button.textContent?.trim() ?? '') &&
+                  !button.hasAttribute('disabled'),
+              ),
+            { timeout: 10_000 },
+          )
+          .then(() =>
+            page.evaluate(() => {
+              const confirm = Array.from(document.querySelectorAll('button')).find((button) =>
+                /^create job$/i.test(button.textContent?.trim() ?? ''),
+              )
+              if (!(confirm instanceof HTMLElement)) return false
+              confirm.click()
+              return true
+            }),
+          )
+          .catch(() => false)
+
+    const onTemplateJob = !createdFromTemplate
+      ? false
+      : await page
+          .waitForFunction(() => location.hash.includes('/jobs/'), { timeout: 15_000 })
+          .then(() => true)
+          .catch(() => false)
+
+    if (!onTemplateJob) {
+      check('data-quality template opens as a job', false, 'template flow did not reach a job')
+    } else {
+      await page.waitForSelector('.react-flow__node', { timeout: 15_000 }).catch(() => null)
+      const drawn = await page
+        .waitForFunction(
+          () => {
+            const nodes = Array.from(document.querySelectorAll('.react-flow__node'))
+            const text = (node) => node.textContent ?? ''
+            // The sink's own subtitle is what marks a quality destination now.
+            const side = nodes.filter((node) => /quality destination/i.test(text(node)))
+            if (side.length === 0) return false
+            return {
+              side: side.length,
+              nodes: nodes.length,
+              // A declaration, not a chain member: it renders no handle at all, so
+              // nothing can be wired into it and nothing can leave it.
+              handles: side.reduce(
+                (total, node) => total + node.querySelectorAll('.react-flow__handle').length,
+                0,
+              ),
+              // The job's own destination has to still be there, beside the report.
+              mainOutput: nodes.some((node) => text(node).includes('/data/curated/customers')),
+              reportOutput: side.some((node) => text(node).includes('customers_report')),
+            }
+          },
+          { timeout: 15_000 },
+        )
+        .then((handle) => handle.jsonValue())
+        .catch(() => null)
+
+      check(
+        'the quality report is drawn as a standalone destination box',
+        Boolean(drawn && drawn.side === 1),
+        drawn ? `${drawn.side} quality box(es) among ${drawn.nodes} nodes` : 'none found',
+      )
+      check(
+        'the quality destination takes no connection',
+        Boolean(drawn && drawn.handles === 0),
+        drawn ? `${drawn.handles} handle(s) on it` : 'nothing drawn',
+      )
+
+      // The report is drawn BESIDE the job's own destination, never in place of it.
+      check(
+        'the main destination survives next to the quality destination',
+        Boolean(drawn && drawn.mainOutput && drawn.reportOutput),
+        drawn ? `main=${drawn.mainOutput} report=${drawn.reportOutput}` : 'nothing drawn',
+      )
+
+      // The three datasets come from the Quality section of the palette now, added
+      // by a click like every other node.
+      const beforeQuality = drawn ? drawn.nodes : 0
+      const addedFromPalette = await page.evaluate(() => {
+        const button = Array.from(document.querySelectorAll('button[data-palette-item]')).find(
+          (element) => /quarantine.*invalid/i.test(element.textContent ?? ''),
+        )
+        if (!(button instanceof HTMLElement)) return false
+        button.click()
+        return true
+      })
+      const qualityBoxes = !addedFromPalette
+        ? 0
+        : await page
+            .waitForFunction(
+              (count) =>
+                document.querySelectorAll('.react-flow__node').length > count &&
+                Array.from(document.querySelectorAll('.react-flow__node')).filter((node) =>
+                  /quality destination/i.test(node.textContent ?? ''),
+                ).length,
+              { timeout: 8000 },
+              beforeQuality,
+            )
+            .then((handle) => handle.jsonValue())
+            .catch(() => 0)
+
+      check(
+        'the Quality palette section adds a quarantine destination',
+        qualityBoxes === 2,
+        addedFromPalette
+          ? `${qualityBoxes} quality box(es) after the click`
+          : 'no palette entry matched',
+      )
     }
 
     /* ------------------------------------------------------- routes */

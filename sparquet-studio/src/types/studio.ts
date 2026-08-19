@@ -8,7 +8,7 @@
 
 import type { Edge, Node } from '@xyflow/react'
 
-import type { OnFailureMode, OutputSpec, SparkSettings, WriteMode } from './pipeline'
+import type { OnFailureMode, SparkSettings, WriteMode } from './pipeline'
 
 /* ------------------------------------------------------------------ nodes */
 
@@ -58,7 +58,10 @@ export type ValidationNodeData = {
   comment?: string
 }
 
-/** One entry of `outputs` (or the single `output`). */
+/**
+ * One entry of `outputs` (or the single `output`) — unless `dqRole` is set, which
+ * makes it one of the datasets the `validations` block writes instead.
+ */
 export type SinkNodeData = {
   kind: 'sink'
   label?: string
@@ -69,6 +72,16 @@ export type SinkNodeData = {
   /** `null` means "write every column". */
   columns: string[] | null
   options: Record<string, unknown>
+  /**
+   * Set on a QUALITY destination: the node compiles into `validations.report` or
+   * `validations.outputs.{valid,invalid}` instead of `outputs[]`.
+   *
+   * The role lives on the NODE, never on an incoming edge, because the `validations`
+   * block is JOB-scoped — a job has exactly one — so these datasets belong to the
+   * job, not to any particular rule. They are declarations: the canvas gives them
+   * no input and no output handle, and they sit wherever the author drops them.
+   */
+  dqRole?: ValidationSinkRole
   comment?: string
 }
 
@@ -101,6 +114,32 @@ export const HANDLE = {
   out: 'out',
 } as const
 
+/**
+ * The three datasets the validation step writes BESIDES the job's own outputs.
+ *
+ * They are SIDE outputs, not a fork. `Pipeline.run()` calls
+ * `_write_validation_outputs(df)` and then `_write_outputs(df)` with the same,
+ * complete DataFrame — so a quarantine sink copies rows out, it never removes them
+ * from the main chain. Every destination on the trunk still receives every row,
+ * invalid ones included.
+ *
+ * A destination declares which one it is in `SinkNodeData.dqRole`. Nothing about
+ * the role is read off an edge: these nodes take no connection at all.
+ */
+export type ValidationSinkRole = 'report' | 'valid' | 'invalid'
+
+/** Declaration order — also the order these are written, laid out and numbered. */
+export const VALIDATION_SINK_ROLES = ['report', 'valid', 'invalid'] as const satisfies
+  readonly ValidationSinkRole[]
+
+/**
+ * Narrows a value that crossed a boundary — a drag payload, a stored record — to a
+ * role. Anything else is an ordinary destination.
+ */
+export function isValidationSinkRole(value: unknown): value is ValidationSinkRole {
+  return (VALIDATION_SINK_ROLES as readonly string[]).includes(value as string)
+}
+
 export type StudioEdge = Edge
 
 export interface StudioGraph {
@@ -122,18 +161,16 @@ export interface ParamDefinition {
 }
 
 /**
- * Block-level `validations` configuration.
+ * Block-level `validations` RUN POLICY.
  *
- * `on_failure`, the quality `report` and the quarantine `outputs` describe what the
- * job does with the verdict of ALL its rules, so they belong to the job rather than
- * to any single rule node — putting them on one node would make that node special.
+ * Only `on_failure` lives here: it decides what happens to the run when a rule is
+ * broken, which is a job-wide setting like the Spark configs — not a dataset. The
+ * three datasets the block writes (`report`, `outputs.valid`, `outputs.invalid`)
+ * are standalone destination NODES on the canvas, added from the Quality section of
+ * the palette; see `ValidationSinkRole`.
  */
 export interface ValidationPolicy {
   onFailure: OnFailureMode
-  /** Optional data-quality report sink (`validations.report`). */
-  report?: OutputSpec | null
-  /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
-  outputs?: Record<string, OutputSpec> | null
 }
 
 export interface JobSettings {

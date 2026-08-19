@@ -189,56 +189,160 @@ describe('lintJob', () => {
       expect(idsOf(issues)).toContain('field:v:columns')
     })
 
-    it('flags a quality report that has no format', () => {
-      const { nodes, edges } = cleanGraph()
-      const issues = lint(nodes, edges, [], {
-        ...SETTINGS,
-        validations: { onFailure: 'fail', report: { format: '', path: '/dq/report' } },
-      })
-      const issue = issues.find((entry) => entry.id === 'settings:report-format')
+    it('flags a quality report node that has no format', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: '', path: '/dq/report', dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      // A quality destination is a real write: same node-scoped rules as any sink.
+      const issue = issues.find((entry) => entry.id === 'field:dq:format')
       expect(issue?.severity).toBe('error')
-      expect(issue?.nodeId).toBeUndefined()
-      expect(idsOf(issues)).not.toContain('settings:report-path')
+      expect(issue?.nodeId).toBe('dq')
     })
 
-    it('accepts a complete quality report and quarantine outputs', () => {
-      const { nodes, edges } = cleanGraph()
-      const issues = lint(nodes, edges, [], {
-        ...SETTINGS,
-        validations: {
-          onFailure: 'warn',
-          report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
-          outputs: {
-            valid: { format: 'delta', path: 'silver.ok', mode: 'overwrite' },
-            invalid: { format: 'delta', path: 'silver.bad', mode: 'overwrite' },
-          },
-        },
-      })
-      expect(idsOf(issues).filter((id) => id.startsWith('settings:'))).toEqual([])
+    it('accepts a complete report and quarantine beside a row-level rule', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq/report', dqRole: 'report' }),
+          sink('ok', { format: 'delta', path: 'silver.ok', dqRole: 'valid' }),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      expect(idsOf(issues).filter((id) => id.startsWith('dq-'))).toEqual([])
     })
 
-    it('flags a quarantine output without a path', () => {
-      const { nodes, edges } = cleanGraph()
-      const issues = lint(nodes, edges, [], {
-        ...SETTINGS,
-        validations: {
-          onFailure: 'fail',
-          outputs: { invalid: { format: 'delta', path: '' } },
-        },
-      })
-      expect(idsOf(issues)).toContain('settings:outputs.invalid-path')
+    it('never reports an unconnected quality destination as an orphan', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq/report', dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      // It is a declaration, not a chain member: having no incoming link is correct.
+      expect(idsOf(issues)).not.toContain('orphan:dq')
     })
 
-    it('warns when validation destinations are configured but no rule exists', () => {
+    it('warns about a quarantine sink with only aggregate rules on the chain', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v', 'row_count', { min: 1 }),
+          sink('out'),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-no-row-rule:bad')
+      expect(issue?.severity).toBe('warning')
+      expect(issue?.nodeId).toBe('bad')
+    })
+
+    it('accepts a quarantine sink behind a row-level check metric', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v', 'check', {
+            metric: 'missing_percent',
+            column: 'cpf',
+            must_be: '< 1%',
+          }),
+          sink('out'),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      expect(idsOf(issues)).not.toContain('dq-sink-no-row-rule:bad')
+    })
+
+    it('warns that a quality report ignores a column projection', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq', columns: ['passed'], dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      expect(idsOf(issues)).toContain('dq-report-columns:dq')
+    })
+
+    it('flags a quality destination in a job whose only rule is muted', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v', 'not_null', { columns: ['id'] }, { disabled: true }),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq', dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-no-rules:dq')
+      expect(issue?.severity).toBe('error')
+    })
+
+    it('flags a quality destination in a job with no rule at all', () => {
+      const issues = lint(
+        [source('src'), sink('out'), sink('dq', { format: 'csv', path: '/dq', dqRole: 'report' })],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-no-rules:dq')
+      expect(issue?.severity).toBe('error')
+    })
+
+    it('flags a second destination claiming the same dataset', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          sink('out'),
+          sink('dq', { format: 'csv', path: '/dq/a', dqRole: 'report' }),
+          sink('dq2', { format: 'csv', path: '/dq/b', dqRole: 'report' }),
+        ],
+        [link('src', 'v'), link('v', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'dq-sink-duplicate:dq2')
+      expect(issue?.severity).toBe('error')
+      // The first one keeps the role, so it is not flagged as well.
+      expect(idsOf(issues)).not.toContain('dq-sink-duplicate:dq')
+    })
+
+    it('keeps the main chain intact around a quality destination', () => {
+      const issues = lint(
+        [
+          source('src'),
+          validation('v'),
+          transform('t', 'filter', { condition: 'a > 1' }),
+          sink('out'),
+          sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
+        ],
+        [link('src', 'v'), link('v', 't'), link('t', 'out')],
+      )
+      // The transform after the rule stays on the trunk: an unconnected quality
+      // destination is not a second sink chain, so it must not shorten the prefix.
+      expect(idsOf(issues)).not.toContain('orphan:t')
+      expect(idsOf(issues)).not.toContain('validations-branch:v')
+    })
+
+    it('reports that "on failure" applies to no rule', () => {
       const issues = lint([source('src'), sink('out')], [link('src', 'out')], [], {
         ...SETTINGS,
-        validations: {
-          onFailure: 'warn',
-          report: { format: 'csv', path: '/dq/report', mode: 'overwrite' },
-        },
+        validations: { onFailure: 'warn' },
       })
-      const issue = issues.find((entry) => entry.id === 'settings:validations-unused')
-      expect(issue?.severity).toBe('warning')
+      const issue = issues.find((entry) => entry.id === 'settings:on-failure-unused')
+      expect(issue?.severity).toBe('info')
     })
 
     it('accepts filled catalog fields', () => {

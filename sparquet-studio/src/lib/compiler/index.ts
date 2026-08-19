@@ -9,6 +9,7 @@ export {
   isSourceNode,
   isTransformNode,
   isValidationNode,
+  isValidationSinkNode,
   longestCommonPrefix,
   makeEdge,
   newNodeId,
@@ -17,6 +18,7 @@ export {
   primaryParent,
   primaryParents,
   sideParent,
+  validationSinkRoleOf,
 } from '@/lib/compiler/graph'
 export type { ChainProblem, ChainProblemCode, ChainResult } from '@/lib/compiler/graph'
 

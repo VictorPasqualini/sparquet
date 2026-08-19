@@ -4,6 +4,7 @@ import type { DragEvent, ReactNode } from 'react'
 import type { NodeAccent } from '@/catalog'
 import { Tooltip } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
+import type { ValidationSinkRole } from '@/types/studio'
 
 /** Drag MIME type shared with the canvas drop handler. */
 export const PALETTE_DRAG_TYPE = 'application/sparquet-node'
@@ -12,7 +13,8 @@ export const PALETTE_DRAG_TYPE = 'application/sparquet-node'
 export type PaletteDragPayload =
   | { kind: 'transform'; type: string }
   | { kind: 'source'; format: string }
-  | { kind: 'sink'; format: string }
+  /** `dqRole` makes it one of the datasets the `validations` block writes. */
+  | { kind: 'sink'; format: string; dqRole?: ValidationSinkRole }
   | { kind: 'validation'; type: string }
   | { kind: 'note' }
 

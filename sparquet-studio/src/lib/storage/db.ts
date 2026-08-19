@@ -60,7 +60,7 @@ const IDB_STORE = 'records'
 export const APP_ID = 'sparquet-studio'
 
 /** Bumped whenever the persisted record shape changes; drives `migrate()`. */
-export const STORAGE_VERSION = 3
+export const STORAGE_VERSION = 5
 
 /* --------------------------------------------------------------- backends */
 
@@ -255,6 +255,15 @@ export async function migrate(): Promise<number> {
   }
 }
 
+/** Rewrites every stored job that `upgradeJob` actually changes. */
+async function upgradeStoredJobs(store: StorageBackend): Promise<void> {
+  const jobs = await readJobs(store)
+  for (const job of jobs) {
+    const upgraded = upgradeJob(job)
+    if (upgraded !== job) await store.set(KEY.workflow(job.id), upgraded)
+  }
+}
+
 /** One version hop. Add a `case` here whenever `STORAGE_VERSION` is bumped. */
 async function migrateStep(store: StorageBackend, version: number): Promise<number> {
   switch (version) {
@@ -268,12 +277,22 @@ async function migrateStep(store: StorageBackend, version: number): Promise<numb
       // v3 turns the single `validations` node into one node per rule and moves the
       // block-level policy (on_failure, report, quarantine outputs) into the job
       // settings. Jobs that never had a validations node are left byte-identical.
-      const jobs = await readJobs(store)
-      for (const job of jobs) {
-        const upgraded = upgradeJob(job)
-        if (upgraded !== job) await store.set(KEY.workflow(job.id), upgraded)
-      }
+      await upgradeStoredJobs(store)
       return 3
+    }
+    case 3: {
+      // v4 takes the three DATASETS back out of the settings — the quality report
+      // and the two quarantine outputs become destination nodes on the canvas,
+      // wired to the last rule. Only `on_failure` stays in the settings.
+      await upgradeStoredJobs(store)
+      return 4
+    }
+    case 4: {
+      // v5 moves the role of those destinations off the EDGE and onto the node, and
+      // drops the links: the validations block is job-scoped, so they belong to the
+      // job rather than to whichever rule happened to be last.
+      await upgradeStoredJobs(store)
+      return 5
     }
     default:
       throw new Error(
