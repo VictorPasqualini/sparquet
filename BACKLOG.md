@@ -157,6 +157,20 @@ separação ao evoluir.
 - [ ] **Testes unitários com dados mock** — cobrir transformações (`struct`,
       `collect`/`{{var}}`, `stop_if_empty`, `group_by`, outputs com `transformations`)
       e validators, com SparkSession local — base para CI.
+- [ ] **Testes unitários estilo dbt** (`unit_tests` do dbt 1.8+) — declarar *dados de
+      entrada fictícios* e a *saída esperada* de um Job e rodar a asserção sem tocar em
+      fonte real: `given` (linhas mock por input) + `expect` (linhas esperadas). Cobre o
+      que o item acima não cobre — hoje o teste é do framework, não **do pipeline que o
+      usuário escreveu**. Valor: o autor de um Job testa a própria lógica (o `filter`
+      certo, o `join` que não duplica, o `struct` com o payload esperado) em segundos e
+      no CI, sem cluster nem dado de produção.
+      Decisão a tomar: **depender do dbt** (traz o ecossistema, mas acopla o sparquet a
+      outra ferramenta e ao modelo dele de *model/ref*) ou **replicar o conceito** em
+      JSON/YAML próprio, como já foi feito com o SODA Core (o `check`/`thresholds` do
+      `sparquet_cola` é a ideia do SODA sem a dependência). O precedente sugere replicar,
+      mas medir antes o esforço de um runner de asserção com `assertDataFrameEqual`
+      (PySpark 3.5+) e comparação sem ordem.
+
 - [ ] **`$include` aninhado** — hoje não suportado (um nível só).
 - [ ] **Catálogo de erros** — mensagens de erro padronizadas e acionáveis
       (transformação desconhecida, coluna inexistente, etc.).
