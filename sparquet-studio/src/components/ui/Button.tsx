@@ -7,8 +7,10 @@ export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'dan
 export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg'
 
 const VARIANTS: Record<ButtonVariant, string> = {
+  // The brand blue is dark, so a solid brand button is labelled white in
+  // both themes (7.9:1) rather than black (2.7:1).
   primary:
-    'bg-brand-500 text-black hover:bg-brand-400 active:bg-brand-600 shadow-sm font-semibold',
+    'bg-brand-500 text-white hover:bg-brand-600 active:bg-brand-700 shadow-sm font-semibold',
   secondary:
     'bg-surface-raised text-content border border-line hover:border-line-strong hover:bg-surface-sunken',
   outline:

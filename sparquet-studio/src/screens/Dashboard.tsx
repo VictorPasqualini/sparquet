@@ -49,9 +49,9 @@ const RECENT_LIMIT = 8
 /** Workflow accents mapped onto the semantic palette — no raw colors anywhere. */
 const ACCENT: Record<WorkflowAccent, { dot: string; tile: string; surface: string }> = {
   amber: {
-    dot: 'bg-brand-500',
-    tile: 'bg-brand-500/15 text-brand-600 dark:text-brand-400',
-    surface: 'border-brand-500/25 bg-brand-500/5 hover:border-brand-500/50',
+    dot: 'bg-gold',
+    tile: 'bg-gold/15 text-gold',
+    surface: 'border-gold/25 bg-gold/5 hover:border-gold/50',
   },
   sky: {
     dot: 'bg-node-input',

@@ -57,7 +57,7 @@ type SortKey = 'updated' | 'name'
 
 /** Workflow accents mapped onto the semantic palette — no raw colors anywhere. */
 const ACCENT_DOT: Record<WorkflowAccent, string> = {
-  amber: 'bg-brand-500',
+  amber: 'bg-gold',
   sky: 'bg-node-input',
   violet: 'bg-node-combine',
   emerald: 'bg-node-output',

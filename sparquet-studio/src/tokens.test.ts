@@ -86,8 +86,8 @@ describe.each(THEMES)('%s theme', (_name, tokens) => {
     expect(contrast(tokens['content-inverted'], tokens.success)).toBeGreaterThanOrEqual(4.5)
   })
 
-  it('puts black on the brand button', () => {
-    expect(contrast([0, 0, 0], tokens['brand-500'])).toBeGreaterThanOrEqual(4.5)
+  it('puts white on the brand button', () => {
+    expect(contrast([255, 255, 255], tokens['brand-500'])).toBeGreaterThanOrEqual(4.5)
   })
 })
 

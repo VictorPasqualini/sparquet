@@ -34,6 +34,7 @@ import {
   Textarea,
   Tooltip,
 } from '@/components/ui'
+import logoMark from '@/assets/logo.png'
 import { cn } from '@/lib/utils/cn'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
@@ -65,7 +66,7 @@ const NAV: NavEntry[] = [
 
 /** Workflow accents mapped onto the semantic token set — no raw palette colors. */
 const ACCENT_DOT: Record<WorkflowAccent, string> = {
-  amber: 'bg-brand-500',
+  amber: 'bg-gold',
   sky: 'bg-node-input',
   violet: 'bg-node-combine',
   emerald: 'bg-node-output',
@@ -75,7 +76,7 @@ const ACCENT_DOT: Record<WorkflowAccent, string> = {
 
 /** Same accents, tinted — carries workflow identity into the collapsed rail. */
 const ACCENT_SOFT: Record<WorkflowAccent, string> = {
-  amber: 'bg-brand-500/15',
+  amber: 'bg-gold/15',
   sky: 'bg-node-input/15',
   violet: 'bg-node-combine/15',
   emerald: 'bg-node-output/15',
@@ -176,11 +177,7 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }:
           aria-label="Sparquet Studio — overview"
           className="flex items-center gap-2.5 rounded-lg py-1 no-drag"
         >
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-500 text-content dark:text-content-inverted">
-            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor" aria-hidden>
-              <path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" />
-            </svg>
-          </span>
+          <img src={logoMark} alt="" width={28} height={28} className="shrink-0" />
           {!collapsed && (
             <span className="flex min-w-0 flex-col leading-tight">
               <span className="truncate text-sm font-semibold text-content">
