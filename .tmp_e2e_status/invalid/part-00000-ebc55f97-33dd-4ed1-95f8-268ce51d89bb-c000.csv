@@ -1,3 +1,0 @@
-id,name,email,age,country,status,created_at,ingestion_ts,age_band
-6,Felipe Nunes,,37,BR,active,2026-01-07T16:40:00.000-03:00,2026-08-20T22:27:51.737-03:00,other
-7,Gabriela Reis,gabriela.reis@example.com,200,BR,active,2026-01-08T12:00:00.000-03:00,2026-08-20T22:27:51.737-03:00,other
