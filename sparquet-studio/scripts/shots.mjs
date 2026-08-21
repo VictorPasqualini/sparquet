@@ -73,6 +73,8 @@ async function main() {
   )
   const target = jobs[0]
 
+  // Light is the app default now, so the dark series has to ask for it.
+  await setTheme('dark')
   await shot('01-dashboard-dark')
 
   await page.goto(`${BASE_URL}/${target}`, { waitUntil: 'networkidle2' })

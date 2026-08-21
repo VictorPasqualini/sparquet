@@ -34,7 +34,9 @@ import {
   Textarea,
   Tooltip,
 } from '@/components/ui'
+import lockupLight from '@/assets/lockup-light.png'
 import logoMark from '@/assets/logo.png'
+import lockup from '@/assets/lockup.png'
 import { cn } from '@/lib/utils/cn'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
@@ -162,13 +164,13 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }:
     <aside
       aria-label="Sidebar"
       className={cn(
-        'flex h-full shrink-0 flex-col border-r border-line bg-surface transition-[width] duration-200',
+        'flex h-full shrink-0 flex-col border-r border-line bg-rail transition-[width] duration-200',
         collapsed ? 'w-16' : 'w-60',
       )}
     >
       <div
         className={cn(
-          'flex h-14 shrink-0 items-center border-b border-line',
+          'flex h-16 shrink-0 items-center border-b border-line',
           collapsed ? 'justify-center px-2' : 'px-3',
         )}
       >
@@ -177,13 +179,16 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }:
           aria-label="Sparquet Studio — overview"
           className="flex items-center gap-2.5 rounded-lg py-1 no-drag"
         >
-          <img src={logoMark} alt="" width={28} height={28} className="shrink-0" />
-          {!collapsed && (
-            <span className="flex min-w-0 flex-col leading-tight">
-              <span className="truncate text-sm font-semibold text-content">
-                Sparquet Studio
+          {collapsed ? (
+            <img src={logoMark} alt="" width={28} height={28} className="shrink-0" />
+          ) : (
+            <span className="flex min-w-0 flex-col gap-1">
+              {/* The delivered wordmark is brand blue; the dark rail needs the white cut. */}
+              <img src={lockupLight} alt="" className="hidden h-[22px] w-auto dark:block" />
+              <img src={lockup} alt="" className="h-[22px] w-auto dark:hidden" />
+              <span className="text-2xs font-medium uppercase tracking-[0.22em] text-content-subtle">
+                Studio
               </span>
-              <span className="truncate text-2xs text-content-subtle">Pipeline editor</span>
             </span>
           )}
         </Link>
@@ -201,7 +206,7 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }:
             type="button"
             onClick={onOpenPalette}
             className={cn(
-              'flex w-full items-center gap-2 rounded-lg border border-line bg-surface-sunken px-2.5 py-1.5',
+              'flex w-full items-center gap-2 rounded-lg border border-line bg-rail-sunken px-2.5 py-1.5',
               'text-xs text-content-subtle transition-colors hover:border-line-strong hover:text-content',
             )}
           >
@@ -305,7 +310,7 @@ function SidebarLink({ to, label, icon: Icon, collapsed, end }: SidebarLinkProps
             collapsed ? 'h-8 w-8 justify-center' : 'gap-2.5 px-2.5 py-2',
             isActive
               ? 'bg-brand-500/12 text-brand-600 dark:text-brand-400'
-              : 'text-content-muted hover:bg-surface-sunken hover:text-content',
+              : 'text-content-muted hover:bg-rail-sunken hover:text-content',
           )
         }
       >
@@ -336,7 +341,7 @@ function WorkflowLink({ workflow, count, collapsed }: WorkflowLinkProps) {
             collapsed ? 'h-8 w-8 justify-center' : 'gap-2.5 px-2.5 py-1.5',
             isActive
               ? 'bg-brand-500/12 text-content'
-              : 'text-content-muted hover:bg-surface-sunken hover:text-content',
+              : 'text-content-muted hover:bg-rail-sunken hover:text-content',
           )
         }
       >
@@ -395,7 +400,7 @@ function SidebarFooter({
           target="_blank"
           rel="noreferrer noopener"
           aria-label="Source on GitHub"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-content-muted transition-colors hover:bg-surface-sunken hover:text-content"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-content-muted transition-colors hover:bg-rail-sunken hover:text-content"
         >
           <Github className="h-3.5 w-3.5" aria-hidden />
         </a>

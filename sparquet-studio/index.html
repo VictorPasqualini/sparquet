@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
@@ -9,24 +9,20 @@
       name="description"
       content="Sparquet Studio — visual, AI-assisted editor for Sparquet JSON data pipelines. Design, validate and run data engineering workflows in your browser."
     />
-    <meta name="color-scheme" content="dark light" />
-    <meta name="theme-color" content="#030f28" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- Light is the app default, so the browser chrome matches it. -->
+    <meta name="theme-color" content="#ffffff" />
     <title>Sparquet Studio</title>
     <script>
       // Apply the persisted theme before first paint to avoid a flash.
       ;(() => {
         try {
+          // Light is the default; the OS preference does not override it, only
+          // an explicit choice the user made in Settings does.
           const stored = localStorage.getItem('sparquet-studio:theme')
-          const theme =
-            stored === 'light' || stored === 'dark'
-              ? stored
-              : window.matchMedia('(prefers-color-scheme: light)').matches
-                ? 'light'
-                : 'dark'
-          document.documentElement.dataset.theme = theme
+          document.documentElement.dataset.theme = stored === 'dark' ? 'dark' : 'light'
         } catch {
-          document.documentElement.dataset.theme = 'dark'
+          document.documentElement.dataset.theme = 'light'
         }
       })()
     </script>

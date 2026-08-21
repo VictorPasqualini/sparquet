@@ -28,6 +28,10 @@ export default {
         },
         gold: 'rgb(var(--gold) / <alpha-value>)',
         canvas: 'rgb(var(--canvas) / <alpha-value>)',
+        rail: {
+          DEFAULT: 'rgb(var(--rail) / <alpha-value>)',
+          sunken: 'rgb(var(--rail-sunken) / <alpha-value>)',
+        },
         surface: {
           DEFAULT: 'rgb(var(--surface) / <alpha-value>)',
           raised: 'rgb(var(--surface-raised) / <alpha-value>)',

@@ -55,7 +55,15 @@ function wash(fg: Rgb, bg: Rgb, alpha: number): Rgb {
   ]
 }
 
-const SURFACES = ['canvas', 'surface', 'surface-raised', 'surface-sunken', 'surface-overlay']
+const SURFACES = [
+  'canvas',
+  'surface',
+  'surface-raised',
+  'surface-sunken',
+  'surface-overlay',
+  'rail',
+  'rail-sunken',
+]
 const FOREGROUNDS = ['content', 'content-muted', 'content-subtle']
 const STATES = ['success', 'warning', 'danger', 'info']
 
