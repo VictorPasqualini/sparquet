@@ -10,7 +10,7 @@ import { seedIfEmpty } from '@/lib/storage/seed'
 import { Dashboard } from '@/screens/Dashboard'
 import { NotFound } from '@/screens/NotFound'
 import { useLibraryStore } from '@/store/library'
-import { applyTheme, useSettingsStore } from '@/store/settings'
+import { paintTheme, storedTheme, useSettingsStore } from '@/store/settings'
 
 // Split per screen: the editor pulls React Flow and Monaco, which no other
 // route needs, and the overview must stay instant.
@@ -67,8 +67,18 @@ export default function App() {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    applyTheme(theme)
+    paintTheme(theme)
   }, [theme])
+
+  // With no explicit choice stored, keep following the OS while the app is open.
+  useEffect(() => {
+    if (storedTheme()) return
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = () =>
+      useSettingsStore.setState({ theme: query.matches ? 'dark' : 'light' })
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
