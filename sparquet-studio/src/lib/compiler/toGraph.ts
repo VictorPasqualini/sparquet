@@ -6,7 +6,7 @@
  */
 
 import type { OnFailureMode, SparkSettings } from '@/types/pipeline'
-import { ruleCode } from './ruleCode'
+import { ruleCodes } from './ruleCode'
 import { ON_FAILURE_MODES } from '@/types/pipeline'
 import type {
   IssueSeverity,
@@ -423,16 +423,19 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
       const dqRules = Array.isArray(quarantine?.rules)
         ? quarantine.rules.filter((code): code is string => typeof code === 'string')
         : undefined
-      // A scope drawn as edges is a scope the author can see and change. Each code
-      // is matched back to the rule that produces it; only codes no rule on this
-      // canvas answers to stay on the node, so a hand-written config keeps working
-      // and the linter can point at what does not resolve.
-      const matched = new Map<string, StudioNode>()
-      for (const code of dqRules ?? []) {
-        const owner = ruleNodes.find((candidate) => ruleCode(candidate) === code)
-        if (owner) matched.set(code, owner)
-      }
-      const unmatched = (dqRules ?? []).filter((code) => !matched.has(code))
+      // A scope drawn as edges is a scope the author can see and change. Each rule node
+      // is matched against the scope by ALL the codes it answers to — a `targets` rule
+      // produces one per target, and an edge means the whole node, so a scope naming
+      // only some of its targets is NOT that edge. Those codes stay on the node
+      // verbatim, which keeps the round-trip exact and gives the linter something to
+      // point at; the same holds for codes no rule on this canvas answers to.
+      const scope = new Set(dqRules ?? [])
+      const owners = ruleNodes.filter((candidate) => {
+        const codes = ruleCodes(candidate).filter((code) => code !== '')
+        return codes.length > 0 && codes.every((code) => scope.has(code))
+      })
+      const claimed = new Set(owners.flatMap((owner) => ruleCodes(owner)))
+      const unmatched = (dqRules ?? []).filter((code) => !claimed.has(code))
       const sink = makeSinkNode({
         ...readSinkData(raw, issues, label),
         dqRole: role,
@@ -440,7 +443,19 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
         ...(unmatched.length > 0 ? { dqRules: unmatched } : {}),
       })
       ctx.nodes.push(sink)
-      for (const owner of matched.values()) ctx.edges.push(makeEdge(owner.id, sink.id))
+      if (owners.length > 0) {
+        for (const owner of owners) {
+          ctx.edges.push(makeEdge(owner.id, sink.id, HANDLE.inScope))
+        }
+      } else {
+        // Nothing scopes this dataset, so anchor it to the last rule instead: the box
+        // is written BY the validations, and a canvas that leaves it floating makes it
+        // look like a destination someone forgot to wire. The compiler reads no scope
+        // from the report or the valid side, and on the quarantine this single link
+        // means "every rule", which is exactly what no scope means.
+        const last = ruleNodes[ruleNodes.length - 1]
+        if (last) ctx.edges.push(makeEdge(last.id, sink.id))
+      }
     }
   }
 

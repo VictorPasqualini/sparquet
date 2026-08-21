@@ -249,15 +249,11 @@ describe('lintJob', () => {
       expect(issue?.nodeId).toBe('bad')
     })
 
-    it('accepts a quarantine sink behind a row-level check metric', () => {
+    it('accepts a quarantine sink behind a row-level metric rule', () => {
       const issues = lint(
         [
           source('src'),
-          validation('v', 'check', {
-            metric: 'missing_percent',
-            column: 'cpf',
-            must_be: '< 1%',
-          }),
+          validation('v', 'missing_percent', { column: 'cpf', must_be: '< 1%' }),
           sink('out'),
           sink('bad', { format: 'delta', path: 'silver.bad', dqRole: 'invalid' }),
         ],

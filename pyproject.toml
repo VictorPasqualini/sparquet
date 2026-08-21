@@ -37,7 +37,7 @@ dependencies = [
     # Piso 0.2.0: os códigos de falha por linha (`BaseCheck.code()`) e o
     # `Cola.split(annotate=..., only=...)` que a quarentena escopada usa não
     # existem na 0.1.x.
-    "sparquet-cola>=0.2.0",
+    "sparquet-cola>=0.3.0",
 ]
 
 [project.urls]

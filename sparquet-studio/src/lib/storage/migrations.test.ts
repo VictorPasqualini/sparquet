@@ -6,6 +6,7 @@ import { HANDLE } from '@/types/studio'
 import {
   LEGACY_VALIDATION_SINK_HANDLES,
   upgradeJob,
+  upgradeMetricRuleTypes,
   upgradeValidations,
   upgradeValidationSinkNodes,
   upgradeValidationSinks,
@@ -288,8 +289,12 @@ describe('upgradeJob', () => {
       (item) => item.data.kind === 'sink' && item.data.dqRole === 'report',
     )
     expect(sink?.data.kind === 'sink' && sink.data.path).toBe('/dq')
-    // The role is on the node now, so no link is left pointing at it.
-    expect(upgraded.graph.edges.some((item) => item.target === sink?.id)).toBe(false)
+    // The role lives on the node, so no link CARRIES it any more — but one link is
+    // put back as an anchor, on the plain input handle, so the box does not read as a
+    // destination someone forgot to wire. The compiler reads nothing from that handle.
+    const anchors = upgraded.graph.edges.filter((item) => item.target === sink?.id)
+    expect(anchors).toHaveLength(1)
+    expect(anchors[0]?.targetHandle).toBe(HANDLE.in)
 
     // Running it again is a no-op, so the storage migration can skip the write.
     expect(upgradeJob(upgraded)).toBe(upgraded)
@@ -368,5 +373,70 @@ describe('upgradeValidationSinkNodes', () => {
 
     expect(twice.changed).toBe(false)
     expect(twice.graph).toBe(once.graph)
+  })
+})
+
+describe('upgradeMetricRuleTypes', () => {
+  const rule = (id: string, validator: string, params: Record<string, unknown>): StudioNode =>
+    ({
+      id,
+      type: 'validation',
+      position: { x: 0, y: 0 },
+      data: { kind: 'validation', validator, params },
+    }) as StudioNode
+
+  const paramsOf = (graph: StudioGraph, id: string): Record<string, unknown> =>
+    (graph.nodes.find((item) => item.id === id)?.data as ValidationNodeData).params
+
+  it('rewrites a stored check into the metric it measured', () => {
+    const graph: StudioGraph = {
+      nodes: [rule('c1', 'check', { metric: 'missing_percent', column: 'cpf', must_be: '< 1%' })],
+      edges: [],
+    }
+
+    const { graph: next, changed } = upgradeMetricRuleTypes(graph)
+
+    expect(changed).toBe(true)
+    expect(validatorsOf(next)).toEqual(['missing_percent'])
+    // The metric moved into the type, so leaving it in the params would emit a key the
+    // engine does not read.
+    expect(paramsOf(next, 'c1')).toEqual({ column: 'cpf', must_be: '< 1%' })
+  })
+
+  it('leaves a check with no metric alone, for the linter to report', () => {
+    // There is no metric to promote it to; inventing one would validate something the
+    // author never asked for.
+    const graph: StudioGraph = { nodes: [rule('c1', 'check', { must_be: '> 0' })], edges: [] }
+
+    const { graph: next, changed } = upgradeMetricRuleTypes(graph)
+
+    expect(changed).toBe(false)
+    expect(next).toBe(graph)
+    expect(validatorsOf(next)).toEqual(['check'])
+  })
+
+  it('is identity when no node carries the wrapper', () => {
+    const graph: StudioGraph = {
+      nodes: [rule('r1', 'not_null', { column: 'id' }), node('out', 'sink')],
+      edges: [],
+    }
+
+    const result = upgradeMetricRuleTypes(graph)
+
+    expect(result.changed).toBe(false)
+    expect(result.graph).toBe(graph)
+  })
+
+  it('is idempotent', () => {
+    const graph: StudioGraph = {
+      nodes: [rule('c1', 'check', { metric: 'row_count', must_be: '> 0' })],
+      edges: [],
+    }
+
+    const once = upgradeMetricRuleTypes(graph).graph
+    const twice = upgradeMetricRuleTypes(once)
+
+    expect(twice.changed).toBe(false)
+    expect(twice.graph).toBe(once)
   })
 })

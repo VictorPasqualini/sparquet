@@ -407,9 +407,11 @@ async function main() {
         Boolean(drawn && drawn.side === 1),
         drawn ? `${drawn.side} quality box(es) among ${drawn.nodes} nodes` : 'none found',
       )
+      // It takes a link IN, so the canvas shows which validations write it, and never
+      // one OUT — the block writes the dataset and nothing reads it downstream.
       check(
-        'the quality destination takes no connection',
-        Boolean(drawn && drawn.handles === 0),
+        'the quality destination is anchored to the validations',
+        Boolean(drawn && drawn.handles >= 1),
         drawn ? `${drawn.handles} handle(s) on it` : 'nothing drawn',
       )
 

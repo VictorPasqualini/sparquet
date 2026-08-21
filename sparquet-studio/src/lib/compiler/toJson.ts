@@ -7,7 +7,7 @@
  * `transformations`.
  */
 
-import { ruleCode } from './ruleCode'
+import { ruleCodes } from './ruleCode'
 import { getTransformation } from '@/catalog'
 import type {
   InputSpec,
@@ -33,7 +33,7 @@ import type {
   ValidationSinkRole,
   JobSettings,
 } from '@/types/studio'
-import { DEFAULT_VALIDATION_POLICY, VALIDATION_SINK_ROLES } from '@/types/studio'
+import { DEFAULT_VALIDATION_POLICY, HANDLE, VALIDATION_SINK_ROLES } from '@/types/studio'
 import {
   chainToSink,
   isCompilable,
@@ -287,10 +287,12 @@ function buildValidations(
       // import, so a hand-written config never loses a scope Studio cannot draw.
       const linked = graph
         ? graph.edges
-            .filter((edge) => edge.target === node.id)
+            // Only the scope handle counts. An edge landing on the plain input is the
+            // "comes from these validations" anchor and must not narrow anything.
+            .filter((edge) => edge.target === node.id && edge.targetHandle === HANDLE.inScope)
             .map((edge) => nodes.find((rule) => rule.id === edge.source))
             .filter((rule): rule is ValidationNode => rule !== undefined)
-            .map(ruleCode)
+            .flatMap(ruleCodes)
             .filter((code) => !isBlank(code))
         : []
       const orphaned = (node.data.dqRules ?? []).filter((code) => !isBlank(code))

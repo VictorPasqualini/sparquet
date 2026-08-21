@@ -356,10 +356,91 @@ export function upgradeValidationSinkNodes(graph: StudioGraph): {
 }
 
 /** Brings one stored job up to the current shape. Returns it as-is when already current. */
+/**
+ * Anchors every quality destination to the last validation rule.
+ *
+ * The three datasets the `validations` block writes used to be drawn as standalone
+ * boxes with no handle at all — correct about the JSON (the block is job-scoped and
+ * hangs off no rule) but wrong on screen: they read as destinations someone forgot to
+ * wire. The anchor lands on the plain input handle, which the compiler reads nothing
+ * from, so the emitted JSON is byte-identical before and after this hop. Only the
+ * `scope` handle carries meaning, and this never touches it.
+ *
+ * Pure and idempotent: a box that already has an incoming edge is left alone.
+ */
+export function anchorValidationSinks(graph: StudioGraph): {
+  graph: StudioGraph
+  changed: boolean
+} {
+  const rules = graph.nodes.filter(isValidationNode)
+  const last = rules[rules.length - 1]
+  if (!last) return { graph, changed: false }
+
+  const anchored = new Set(graph.edges.map((edge) => edge.target))
+  const missing = graph.nodes.filter(
+    (node) => isSinkNode(node) && node.data.dqRole !== undefined && !anchored.has(node.id),
+  )
+  if (missing.length === 0) return { graph, changed: false }
+
+  return {
+    graph: {
+      nodes: graph.nodes,
+      edges: [...graph.edges, ...missing.map((sink) => makeEdge(last.id, sink.id))],
+    },
+    changed: true,
+  }
+}
+
+/**
+ * Turns a stored `check` rule node into the metric it measured.
+ *
+ * The `check` wrapper existed only to carry a `metric` field; with metrics promoted to
+ * rule types it was removed from the engine outright. A saved Job still holding
+ * `{ validator: 'check', params: { metric: 'missing_percent', ... } }` would compile a
+ * `type` no registry answers to, and the run would die on an unknown check — so the
+ * node is rewritten here instead.
+ *
+ * A `check` with no metric cannot be rewritten into anything meaningful; it is left as
+ * it is so the linter can point at it rather than this hop inventing a metric.
+ *
+ * Pure and idempotent: a graph with no `check` node comes back unchanged.
+ */
+export function upgradeMetricRuleTypes(graph: StudioGraph): {
+  graph: StudioGraph
+  changed: boolean
+} {
+  let changed = false
+  const nodes = graph.nodes.map((node) => {
+    if (node.data.kind !== 'validation' || node.data.validator !== 'check') return node
+    const params = { ...(node.data.params ?? {}) } as Record<string, unknown>
+    const metric = params.metric
+    if (typeof metric !== 'string' || metric.trim() === '') return node
+    delete params.metric
+    changed = true
+    // The union is widened by the spread, so the node is rebuilt as a StudioNode
+    // explicitly — `kind` is preserved above, which is what makes this sound.
+    return {
+      ...node,
+      data: { ...node.data, validator: metric.trim(), params },
+    } as StudioNode
+  })
+  return changed ? { graph: { nodes, edges: graph.edges }, changed } : { graph, changed }
+}
+
 export function upgradeJob(job: Job): Job {
   const split = upgradeValidations(job.graph, job.settings)
   const sinks = upgradeValidationSinks(split.graph, split.settings)
   const roles = upgradeValidationSinkNodes(sinks.graph)
-  if (!split.changed && !sinks.changed && !roles.changed) return job
-  return { ...job, graph: roles.graph, settings: sinks.settings }
+  const anchors = anchorValidationSinks(roles.graph)
+  const metrics = upgradeMetricRuleTypes(anchors.graph)
+  if (
+    !split.changed &&
+    !sinks.changed &&
+    !roles.changed &&
+    !anchors.changed &&
+    !metrics.changed
+  ) {
+    return job
+  }
+  return { ...job, graph: metrics.graph, settings: sinks.settings }
 }

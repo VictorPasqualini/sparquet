@@ -6,8 +6,8 @@
 
 ## Checklist
 
-- [ ] The unit tests pass — every `tests/**/test_*.py` outside `case-of-success`, run as
-      a script the way CI does: `PYTHONPATH=. python tests/io/test_connectors.py`, etc.
+- [ ] The unit tests pass — every `tests/**/test_*.py`, run as a script the way CI
+      does: `PYTHONPATH=. python tests/io/test_connectors.py`, etc.
 - [ ] Studio, if touched: `npm run typecheck`, `npm run test`, `npm run lint` are
       clean — plus `npm run smoke` for canvas changes.
 - [ ] **JSON schema changed?** Catalog entry added or updated in

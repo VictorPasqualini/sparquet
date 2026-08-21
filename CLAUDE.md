@@ -88,7 +88,7 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `ParquetReader/Writer` | `io/parquet.py` | Implementação Parquet |
 | `IcebergReader/Writer` | `io/iceberg.py` | Implementação Iceberg (com MERGE INTO) |
 | `DeltaReader/Writer` | `io/delta.py` | Implementação Delta Lake (com MERGE, time travel) |
-| `CsvReader/Writer` | `io/csv.py` | Implementação CSV com defaults de header/encoding |
+| `CsvReader/Writer` | `io/csv.py` | Implementação CSV com defaults de header/encoding e dialeto RFC 4180 (aspas dobradas) |
 | `TxtReader/Writer` | `io/txt.py` | Arquivos texto plano (coluna `value`) |
 | `KafkaReader/Writer` | `io/kafka.py` | Leitura e publicação batch em tópico Kafka (MSK via SASL/IAM) |
 | `ViewReader/Writer` | `io/view.py` | Spark temp views (auto-cache) |
@@ -105,7 +105,7 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
 | `ValidationEngine` | `validation/engine.py` | Adaptador fino sobre o `sparquet_cola`; respeita `on_failure` e severidade (warn não aborta); `split(df, config, annotate=, only=)` → valid/invalid (a quarentena pode ser escopada por código de regra e rotulada com os códigos violados) |
-| **`sparquet_cola`** (lib de DQ) | **pacote/repo separado** (`../sparquet-cola`, publicado no PyPI; dependência `sparquet-cola>=0.1.0`) | Motor de qualidade de dados (só depende de pyspark). `Cola` (run/split/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/`check`/`schema`), `thresholds`. O bloco JSON continua `validations`; o branding Cola é interno. Import `sparquet_cola` (não vive mais dentro do repo do sparquet). |
+| **`sparquet_cola`** (lib de DQ) | **pacote/repo separado** (`../sparquet-cola`, publicado no PyPI; dependência `sparquet-cola>=0.3.0`) | Motor de qualidade de dados (só depende de pyspark). `Cola` (run/split/codes/expand/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/schema **+ uma entrada por métrica**: missing_*/duplicate_*/invalid_*/min/max/avg/sum/stddev/distinct_count/freshness), `thresholds`, `expand_targets`. O bloco JSON continua `validations`; o branding Cola é interno. Import `sparquet_cola` (não vive mais dentro do repo do sparquet). |
 | `sparquet.validation.*` | `validation/{base,builtin,checks,thresholds}.py` | Shims de compat que reexportam do `sparquet_cola` com os nomes históricos (`BaseValidator`, `ValidationResult`, `*Validator`) |
 | `apply_template` | `utils/template.py` | Substitui `{chave}` no JSON bruto antes do parse; formata listas/booleanos para SQL |
 | `resolve_includes` | `utils/includes.py` | Expande diretivas `$include` em transformations |
@@ -364,6 +364,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       //   not_null(email) · not_null(id,cpf) · unique(id,dt) · range(age,1,99)
       //   range(valor,0,*)  (* = lado sem limite) · regex(email,^.+@.+$)
       //   missing_percent(cpf) · invalid_count(email) · row_count · schema · sql
+      // regras de coluna aceitam "columns" (lista) OU "column" (singular)
       { "type": "not_null", "columns": ["id"] },
       { "type": "unique", "columns": ["id"] },
       { "type": "range", "column": "age", "min": 0, "max": 150, "code": "AGE_RANGE" },
@@ -377,21 +378,30 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
       { "type": "sql", "failed_rows": "SELECT * FROM _validation_df WHERE valor < 0",
         "output": { "format": "delta", "path": "dq.linhas_ruins", "mode": "overwrite" } },
 
-      // check: estilo SODA Core — uma MÉTRICA comparada a um THRESHOLD, com níveis
-      // warn/fail. must_be é a condição de aprovação; warn (opcional) rebaixa para
-      // aviso (não aborta em on_failure="fail"). Métricas: row_count, distinct_count,
-      // missing_count/percent, duplicate_count/percent, invalid_count/percent,
-      // min, max, avg, sum, stddev, freshness. Threshold: > < >= <= = != , between X and Y,
+      // MÉTRICAS (estilo SODA Core): a métrica É o tipo da regra — não existe wrapper
+      // `check`. must_be é a condição de aprovação; warn (opcional) rebaixa para aviso
+      // (não aborta em on_failure="fail"). Threshold: > < >= <= = != , between X and Y,
       // com sufixo % (percentual) ou duração (1d/2h/30m, para freshness).
-      { "type": "check", "metric": "row_count", "must_be": "> 0" },
-      { "type": "check", "name": "cpf completo", "metric": "missing_percent",
+      // Métricas: row_count, distinct_count, missing_count/percent,
+      // duplicate_count/percent, invalid_count/percent, min, max, avg, mean, sum,
+      // stddev, freshness. As row-level (missing_*/invalid_*) entram na quarentena;
+      // as agregadas descrevem a tabela e não rotulam linha.
+      { "type": "row_count", "must_be": "> 0" },
+      { "type": "missing_percent", "name": "cpf completo",
         "column": "cpf", "must_be": "< 1%", "warn": "= 0" },
-      { "type": "check", "metric": "duplicate_count", "columns": ["id"], "must_be": "= 0" },
+      { "type": "duplicate_count", "columns": ["id"], "must_be": "= 0" },
       // invalid_* usa as configs de validade: valid_values / valid_format (email, uuid,
       // cpf, cnpj, date, …) / valid_regex / valid_min / valid_max / valid_length
-      { "type": "check", "metric": "invalid_percent", "column": "email",
+      { "type": "invalid_percent", "column": "email",
         "valid_format": "email", "must_be": "< 5%" },
-      { "type": "check", "metric": "freshness", "column": "atualizado_em", "must_be": "< 1d" },
+      { "type": "freshness", "column": "atualizado_em", "must_be": "< 1d" },
+
+      // targets: uma entrada vira N regras INDEPENDENTES (um resultado, um código e
+      // uma contribuição à quarentena por alvo). Chaves fora de targets são defaults
+      // compartilhados. Vale para qualquer tipo. Expandido no parse da config.
+      { "type": "regex", "targets": [
+          { "column": "cpf",  "pattern": "^[0-9]{11}$" },
+          { "column": "cnpj", "pattern": "^[0-9]{14}$" } ] },
 
       // schema: colunas obrigatórias/proibidas e tipos (aliases: long→bigint, integer→int)
       { "type": "schema", "required_columns": ["id", "valor"],
@@ -469,7 +479,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 | Formato | Leitura | Escrita | Notas |
 |---------|---------|---------|-------|
 | `parquet` | sim | sim | Parquet nativo Spark |
-| `csv` | sim | sim | Defaults: `header=true`, `inferSchema=true` |
+| `csv` | sim | sim | Defaults: `header=true`, `inferSchema=true`, `escape="` (RFC 4180) |
 | `delta` | sim | sim | Unity Catalog ou path; time travel; MERGE |
 | `iceberg` | sim | sim | MERGE INTO nativo |
 | `txt` | sim | sim | Texto plano; coluna `value` |
@@ -642,30 +652,32 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
   local** (driver e executor na mesma máquina); em cluster a variável é da plataforma, e
   apontar executor remoto para um caminho do driver quebraria o job. `setdefault` nunca
   sobrescreve escolha explícita.
+- **CSV em dialeto RFC 4180**: leitura e escrita usam `escape='"'` por default — aspas
+  dentro de um campo saem **dobradas** (`""`), não escapadas com `\"` como no default do
+  Spark. O Spark relê o dialeto dele, mas o `csv` do Python, o pandas e o Excel não: o
+  `validations.report`, cuja coluna `rule_params` é um JSON cheio de aspas, saía partido
+  no meio do campo justamente na ferramenta em que é analisado. Os dois lados mudam
+  juntos (senão o framework escreveria um CSV que ele mesmo não relê). Para ler arquivos
+  gravados no dialeto antigo, declare `options: {"escape": "\\"}`.
 - **`filter`/`select` primeiro**: comece a cadeia de `transformations` reduzindo linhas (`filter`) e colunas (`select`) antes de joins/structs/group_by pesados — menos dados por todo o resto do pipeline (o Spark empurra parte, mas colocar explícito ajuda o planner e a legibilidade).
 - **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`).
 - **temp view (`view`) global vs sessão**: `options.scope` = `session` (default) ou `global` (`global_temp.<nome>`, visível a toda a aplicação Spark).
-- **sparquet_cola** é um pacote/repo separado (`../sparquet-cola`), publicado no PyPI e declarado em `dependencies` do sparquet como `sparquet-cola>=0.1.0` (sem cap — a lib é mantida sempre retrocompatível). Nome PyPI com hífen (`sparquet-cola`); o import é sempre `sparquet_cola` (underscore — convenção Python). Alterações no motor de DQ são feitas no repo `sparquet-cola` (publique uma nova versão lá antes de o sparquet a consumir).
+- **sparquet_cola** é um pacote/repo separado (`../sparquet-cola`), publicado no PyPI e declarado em `dependencies` do sparquet como `sparquet-cola>=0.3.0` (piso, sem cap: a partir da 0.3.0 as métricas são tipos de regra e `expand_targets` existe — o parse da config depende dele). Nome PyPI com hífen (`sparquet-cola`); o import é sempre `sparquet_cola` (underscore — convenção Python). Alterações no motor de DQ são feitas no repo `sparquet-cola` (publique uma nova versão lá antes de o sparquet a consumir).
 
 ---
 
-## Exemplos e caso de uso
+## Exemplos
 
 | Caminho | Descrição |
 |---------|-----------|
-| `examples/` | Confs ilustrativas das capacidades (ingestão+validações, pushdown runtime, struct/multi-saída, merge). Ver `examples/README.md`. |
-| `tests/case-of-success/` | Caso real completo: migração dos jobs de registro de lastros (base de cessões → registro por fluxo → commit). `job_registro.py` orquestra as confs. |
-| `tests/case-of-success/old/` | Material-fonte: os jobs Spark originais (`.py`) que foram migrados. |
-
-Padrão **staging → commit** do caso de uso: cada conf de registro grava no staging
-genérico `view_registro_staging`; a `conf_commit_registro.json` verifica (via
-`validations`) e grava os 3 destinos. Ver `tests/case-of-success/ROADMAP_CASE_OF_SUCCESS.md`.
+| `examples/` | Confs ilustrativas das capacidades (ingestão+validações, pushdown runtime, struct/multi-saída, merge, quarentena com códigos, `targets` multi-alvo). Os 07 e 08 **rodam localmente** (CSV, sem cluster): `sparquet examples/08_validacao_multi_alvo.json`. Ver `examples/README.md`. |
+| `tests/` | Suíte do framework. Os `test_*.py` rodam com `python tests/<arquivo>.py` (o CI descobre todos); os que precisam de Spark **se pulam sozinhos** sem Java. Ver `docs/TEST_PLAN.md` para a cobertura pretendida e o que falta. |
 
 ---
 
 ## Roadmap
 
-- Caso de uso (migração de registro): `tests/case-of-success/ROADMAP_CASE_OF_SUCCESS.md`
+- Plano de testes (o que está coberto e o que falta, por source/target/transformação/validação/Studio): `docs/TEST_PLAN.md`
 - Melhorias e pendências de desenvolvimento do framework (conectores, data
   quality/governança, dry-run, métricas, perfis): `BACKLOG.md`
 - Deploy como biblioteca no PyPI: `docs/DEPLOY_PYPI.md`

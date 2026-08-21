@@ -13,7 +13,7 @@ Everything else lives outside this folder:
 | The full JSON schema, the public API, the conventions | [CLAUDE.md](../CLAUDE.md), at the repository root — the reference kept in sync with the code |
 | Guides and reference for users, in English, Portuguese and Spanish | <https://sparquet.dev>, built from the separate [sparquet-web](https://github.com/VictorPasqualini/sparquet-web) repository |
 | Working pipelines to copy | [examples/](../examples/) |
-| A real migration, end to end | [tests/case-of-success/](../tests/case-of-success/) |
+| What the test suite covers, and what it does not | [docs/TEST_PLAN.md](TEST_PLAN.md) |
 | Studio: install, first Job, AI, local runner | [sparquet-studio/README.md](../sparquet-studio/README.md) |
 | Data quality: checks, thresholds, the engine itself | [sparquet-cola](https://github.com/VictorPasqualini/sparquet-cola) — a separate package (`pip install sparquet-cola`, import `sparquet_cola`) that the framework depends on |
 | What is planned | [BACKLOG.md](../BACKLOG.md) |

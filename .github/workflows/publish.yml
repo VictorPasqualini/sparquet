@@ -38,10 +38,10 @@ jobs:
         run: |
           # Discovered, not listed: a new tests/**/test_*.py runs automatically, and
           # a deleted one fails loudly instead of silently dropping out of coverage.
-          # `case-of-success` is excluded on purpose — those are pytest tests for a
-          # real migration case and need fixtures this job does not carry.
+          # Files that need a real SparkSession skip themselves when there is no Java,
+          # so this job stays green without provisioning one.
           fail=0
-          for f in $(find tests -name 'test_*.py' -not -path '*case-of-success*' | sort); do
+          for f in $(find tests -name 'test_*.py' | sort); do
             echo "::group::$f"
             python "$f" || fail=1
             echo "::endgroup::"

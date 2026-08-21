@@ -1,0 +1,87 @@
+{
+  "name": "08_validacao_multi_alvo",
+  "description": "Uma entrada de regra, VARIOS alvos, RODAVEL LOCALMENTE (CSV -> CSV + JSON). \"targets\" e acucar de declaracao: tudo fora dele e default compartilhado, cada alvo sobrescreve o que quiser, e o resultado sao N regras INDEPENDENTES - cada uma com seu proprio resultado, sua propria linha no relatorio e seu proprio codigo de falha. Repare no range: min=1 e compartilhado, o max e de cada alvo (range(id,1,1000) e range(age,1,120)). O escopo da quarentena cita UM alvo do range - as violacoes de id ficam fora dela. Rode da raiz do repo: sparquet examples/08_validacao_multi_alvo.json",
+  "input": {
+    "format": "csv",
+    "path": "examples/data/customers.csv"
+  },
+  "transformations": [
+    {
+      "type": "select",
+      "columns": [
+        "id",
+        "name",
+        "email",
+        "age",
+        "country"
+      ]
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "id": "integer",
+        "age": "integer"
+      }
+    },
+    {
+      "type": "checkpoint"
+    }
+  ],
+  "validations": {
+    "on_failure": "warn",
+    "report": {
+      "format": "csv",
+      "path": "examples/output/08_validation_report",
+      "mode": "overwrite"
+    },
+    "outputs": {
+      "invalid": {
+        "format": "json",
+        "path": "examples/output/08_customers_quarentena",
+        "mode": "overwrite",
+        "rules": [
+          "EMAIL_FORMAT",
+          "range(age,1,120)"
+        ],
+        "annotate": "dq_codes"
+      }
+    },
+    "rules": [
+      {
+        "type": "not_null",
+        "targets": [
+          { "column": "id" },
+          { "column": "email" },
+          { "column": "country" }
+        ]
+      },
+      {
+        "type": "regex",
+        "targets": [
+          {
+            "column": "email",
+            "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$",
+            "code": "EMAIL_FORMAT"
+          },
+          {
+            "column": "country",
+            "pattern": "^[A-Z]{2}$"
+          }
+        ]
+      },
+      {
+        "type": "range",
+        "min": 1,
+        "targets": [
+          { "column": "id", "max": 1000 },
+          { "column": "age", "max": 120 }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "format": "csv",
+    "path": "examples/output/08_customers",
+    "mode": "overwrite"
+  }
+}

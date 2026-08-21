@@ -319,7 +319,12 @@ describe('round trip', () => {
       (node) => node.data.kind === 'sink' && node.data.dqRole === 'report',
     )
     expect(reportSink?.data.kind === 'sink' && reportSink.data.path).toBe('/dq/report')
-    expect(graph.edges.some((edge) => edge.target === reportSink?.id)).toBe(false)
+    // The report is anchored to the validations it comes out of — a box left floating
+    // reads as a destination someone forgot to wire — and that anchor lands on the
+    // plain input handle, which compiles to nothing.
+    const anchors = graph.edges.filter((edge) => edge.target === reportSink?.id)
+    expect(anchors).toHaveLength(1)
+    expect(anchors[0]?.targetHandle).toBe(HANDLE.in)
 
     // Only the run policy is left in the settings.
     expect(settings.validations).toEqual({ onFailure: 'warn' })
@@ -356,16 +361,17 @@ describe('round trip', () => {
     expect(pathOfRole('valid')).toBe('silver.ok')
     expect(pathOfRole('invalid')).toBe('silver.quarentena')
 
-    // Neither is wired to anything: the block is job-scoped, so they hang off no rule.
+    // Both are anchored to the validations they come out of, on the plain input
+    // handle — an anchor the compiler reads nothing from, unlike the scope handle.
+    // Neither ever feeds anything, so no edge may LEAVE them.
     const quarantineIds = sinks
       .filter((sink) => sink.data.kind === 'sink' && sink.data.dqRole !== undefined)
       .map((sink) => sink.id)
     expect(quarantineIds).toHaveLength(2)
-    expect(
-      graph.edges.some(
-        (edge) => quarantineIds.includes(edge.target) || quarantineIds.includes(edge.source),
-      ),
-    ).toBe(false)
+    expect(graph.edges.some((edge) => quarantineIds.includes(edge.source))).toBe(false)
+    const anchored = graph.edges.filter((edge) => quarantineIds.includes(edge.target))
+    expect(anchored).toHaveLength(2)
+    expect(anchored.every((edge) => edge.targetHandle === HANDLE.in)).toBe(true)
 
     // The main chain still ends at the job's own destination, untouched.
     expect(compiled.output?.path).toBe('silver.pedidos')
@@ -696,6 +702,103 @@ describe('compileGraph', () => {
     expect(errorsOf(issues)).toContain(
       'A `union` ignores transformations placed on its second input.',
     )
+  })
+})
+
+/* ---------------------------------------------------- one rule, many targets */
+
+describe('targets', () => {
+  const withTargets = (extra: Record<string, unknown> = {}) => ({
+    name: 'docs',
+    input: { format: 'delta', path: 'bronze.clientes' },
+    validations: {
+      on_failure: 'warn',
+      rules: [
+        {
+          type: 'regex',
+          targets: [
+            { column: 'document', pattern: '^[0-9]{11}$' },
+            { column: 'document2', pattern: '^[0-9]{12}$' },
+          ],
+        },
+      ],
+      ...extra,
+    },
+    output: { format: 'delta', path: 'silver.clientes' },
+  })
+
+  it('round-trips a multi-target rule as one node, unchanged', () => {
+    // The library expands it at parse time; Studio keeps the authored shape, so the
+    // file the user reads back is the file they wrote.
+    const compiled = roundTrip(withTargets())
+    expect(compiled.validations?.rules).toEqual([
+      {
+        type: 'regex',
+        targets: [
+          { column: 'document', pattern: '^[0-9]{11}$' },
+          { column: 'document2', pattern: '^[0-9]{12}$' },
+        ],
+      },
+    ])
+  })
+
+  it('draws a scope naming every target as an edge, and re-emits both codes', () => {
+    const spec = withTargets({
+      outputs: {
+        invalid: {
+          format: 'delta',
+          path: 'dq.docs',
+          mode: 'overwrite',
+          annotate: 'dq_codes',
+          rules: ['regex(document,^[0-9]{11}$)', 'regex(document2,^[0-9]{12}$)'],
+        },
+      },
+    })
+
+    const { graph } = pipelineToGraph(spec)
+    const sink = graph.nodes.find((node) => node.data.kind === 'sink' && node.data.dqRole === 'invalid')
+    const rule = graph.nodes.find((node) => node.data.kind === 'validation')
+    // One edge for the node, not one per code — the same node twice would be a
+    // duplicate connection on the canvas.
+    const scoping = graph.edges.filter(
+      (edge) => edge.target === sink?.id && edge.targetHandle === HANDLE.inScope,
+    )
+    expect(scoping).toHaveLength(1)
+    expect(scoping[0]?.source).toBe(rule?.id)
+    expect(sink?.data.kind === 'sink' ? sink.data.dqRules : undefined).toBeUndefined()
+
+    const compiled = roundTrip(spec)
+    expect(compiled.validations?.outputs?.invalid?.rules).toEqual([
+      'regex(document,^[0-9]{11}$)',
+      'regex(document2,^[0-9]{12}$)',
+    ])
+  })
+
+  it('keeps a scope that names only SOME of the targets verbatim', () => {
+    // An edge means the whole node, so drawing one here would silently widen the
+    // scope to the other document on the next save. The code stays on the node.
+    const spec = withTargets({
+      outputs: {
+        invalid: {
+          format: 'delta',
+          path: 'dq.docs',
+          mode: 'overwrite',
+          rules: ['regex(document,^[0-9]{11}$)'],
+        },
+      },
+    })
+
+    const { graph } = pipelineToGraph(spec)
+    const sink = graph.nodes.find((node) => node.data.kind === 'sink' && node.data.dqRole === 'invalid')
+    expect(sink?.data.kind === 'sink' ? sink.data.dqRules : undefined).toEqual([
+      'regex(document,^[0-9]{11}$)',
+    ])
+    expect(
+      graph.edges.filter((edge) => edge.target === sink?.id && edge.targetHandle === HANDLE.inScope),
+    ).toHaveLength(0)
+
+    const compiled = roundTrip(spec)
+    expect(compiled.validations?.outputs?.invalid?.rules).toEqual(['regex(document,^[0-9]{11}$)'])
   })
 })
 

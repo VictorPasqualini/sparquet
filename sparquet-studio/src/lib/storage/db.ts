@@ -60,7 +60,7 @@ const IDB_STORE = 'records'
 export const APP_ID = 'sparquet-studio'
 
 /** Bumped whenever the persisted record shape changes; drives `migrate()`. */
-export const STORAGE_VERSION = 5
+export const STORAGE_VERSION = 7
 
 /* --------------------------------------------------------------- backends */
 
@@ -293,6 +293,22 @@ async function migrateStep(store: StorageBackend, version: number): Promise<numb
       // job rather than to whichever rule happened to be last.
       await upgradeStoredJobs(store)
       return 5
+    }
+    case 5: {
+      // v6 puts a link BACK — but a different one. v5 was right about the JSON and
+      // wrong on screen: with no handle at all, the report and the quarantine read as
+      // destinations someone forgot to wire. The anchor lands on the plain input
+      // handle, which the compiler reads nothing from, so the emitted JSON does not
+      // change; scoping lives on its own `scope` handle and is untouched here.
+      await upgradeStoredJobs(store)
+      return 6
+    }
+    case 6: {
+      // v7 rewrites a stored `check` node into the metric it measured: the wrapper was
+      // removed from the engine, so a Job still holding it would compile a rule type
+      // nothing answers to.
+      await upgradeStoredJobs(store)
+      return 7
     }
     default:
       throw new Error(

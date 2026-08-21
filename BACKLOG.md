@@ -4,7 +4,11 @@ Melhorias e pendências de desenvolvimento **do framework** (não de um caso de 
 específico). Cada item é uma capacidade genérica, ortogonal e sem acoplamento de
 domínio.
 
-Atualizado em 2026-08-15.
+Atualizado em 2026-08-21.
+
+Cobertura de testes (o que está garantido e o que não está, conector por conector,
+transformação por transformação): [docs/TEST_PLAN.md](docs/TEST_PLAN.md). Os itens de
+§8 saem de lá — a ordem é a do plano.
 
 ---
 
@@ -281,3 +285,51 @@ Pendente:
 - [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
       (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
       mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.
+
+---
+
+## 8. Testes e cobertura
+
+Inventário completo, com o porquê de cada lacuna, em
+[docs/TEST_PLAN.md](docs/TEST_PLAN.md). O que está pinado hoje: os 14 conectores de
+banco/warehouse/stream (montagem de opções), o DSL de threshold, a severidade, o parse
+da quarentena, a expansão de `targets`, o dialeto CSV, e o Studio (351 testes + 19
+checagens de smoke em Chrome real).
+
+As duas lacunas que pesam, e por que pesam:
+
+- [ ] **Métricas contra dados reais** — `avg`, `min`, `max`, `sum`, `stddev`,
+      `distinct_count`, `duplicate_*`, `missing_*`, `invalid_*` e `freshness` **nunca
+      rodaram sobre um DataFrame** em teste: a suíte Spark do cola cobre `not_null`,
+      `unique`, `range`, `regex` e `row_count`. Uma expressão de agregação errada passa
+      verde hoje. Um arquivo local-Spark com uma métrica de cada família sobre um CSV
+      fixo fecha isso.
+- [ ] **Nenhuma transformação tem teste de comportamento** — o `test_examples.py`
+      confere que o `type` existe, não o que sai do DataFrame. São 20 transformações;
+      as de maior risco são `select` (expressão com alias), `with_column` (mapa em
+      ordem), `struct` (dot-path aninhando), `join` (`on` como SQL, `broadcast`,
+      `with_transformations`), `group_by` (pivot), `collect` + `{{var}}` (lista vazia →
+      `NULL`) e `skip_if_false` (os três casos).
+
+Restante, na ordem do plano:
+
+- [ ] **Round-trip dos 6 formatos nativos** (`parquet`, `csv`, `json`, `orc`, `txt`,
+      `view`) — escrever e reler, conferindo schema e linhas. Sem dependência extra.
+- [ ] **Semântica de `on_failure`** — que `fail` aborta **antes** de qualquer escrita e
+      antes do relatório é promessa de segurança de dado, e nada verifica.
+- [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
+      CLAUDE.md já é a lista de casos.
+- [ ] **Serviço runner** (`sparquet-studio/server/`) — hoje **sem teste nenhum**: token,
+      allow-list de origem, o `403` no `/run`, a sequência de eventos SSE e o status por
+      estágio do `/run/flow/stream`. É o único componente que executa conf arbitrária,
+      e a postura de segurança dele quebra em silêncio. `TestClient` do FastAPI cobre
+      sem Spark.
+- [ ] **`mode: merge`** (Delta e Iceberg) — precisa do `delta-spark`, então vai num
+      arquivo que se pula quando o jar falta.
+- [ ] **Orquestração do `Pipeline`** — `input_df`, `columns`, `input_view`, projeção por
+      output, `transformations` por output, `PipelineResult` nunca levantando exceção.
+- [ ] **`opensearch`** — conector próprio (opções `opensearch.*`), nunca afirmado, ao
+      lado do caso `elasticsearch` de que foi separado.
+- [ ] **Integração com containers** — Postgres, MySQL, Mongo, Cassandra, Elasticsearch e
+      Kafka têm imagem oficial. Atrás de env var, **nunca** na execução default (que
+      tem de continuar offline e de um segundo).

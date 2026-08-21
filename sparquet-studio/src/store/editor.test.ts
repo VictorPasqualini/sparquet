@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { HANDLE } from '@/types/studio'
 import type { StudioEdge, StudioNode, Job } from '@/types/studio'
 
-import { nodeOrdinals, useEditorStore } from './editor'
+import { nodeOrdinals, useEditorStore, validationNodeIdsInOrder } from './editor'
 import { useSettingsStore } from './settings'
 
 const dbState = vi.hoisted(() => ({
@@ -365,12 +366,16 @@ describe('run step status', () => {
     return { id: `e-${source}-${target}`, source, target, type: 'pipeline' }
   }
 
-  function validationNode(id: string, validator: string): StudioNode {
+  function validationNode(
+    id: string,
+    validator: string,
+    params: Record<string, unknown> = { columns: ['id'] },
+  ): StudioNode {
     return {
       id,
       type: 'validation',
       position: { x: 0, y: 0 },
-      data: { kind: 'validation', validator, params: { columns: ['id'] } },
+      data: { kind: 'validation', validator, params },
     }
   }
 
@@ -436,6 +441,40 @@ describe('run step status', () => {
       const emitted = spec && 'type' in spec ? spec.type : undefined
       expect(node?.data.kind === 'transform' && node.data.transform).toBe(emitted)
     }
+  })
+
+  it('gives a multi-target rule one index per target, so no box shifts', () => {
+    // The runner reports a rule by its index into `validations.rules`, and the
+    // framework expands `targets` when the config is parsed. A node per index would
+    // put the second rule's status on the first rule's box the moment anyone declares
+    // two targets.
+    const editor = useEditorStore.getState()
+    editor.open(
+      makeJob({
+        graph: {
+          nodes: [
+            sourceNode('src', '/in'),
+            validationNode('v1', 'regex', {
+              targets: [
+                { column: 'cpf', pattern: '^[0-9]{11}$' },
+                { column: 'cnpj', pattern: '^[0-9]{14}$' },
+              ],
+            }),
+            validationNode('v2', 'unique'),
+            sinkNode('out1'),
+          ],
+          edges: [link('src', 'v1'), link('v1', 'v2'), link('v2', 'out1')],
+        },
+      }),
+    )
+
+    const ids = validationNodeIdsInOrder(useEditorStore.getState())
+    const { pipeline } = useEditorStore.getState().compile()
+
+    expect(ids).toEqual(['v1', 'v1', 'v2'])
+    // The JSON still carries TWO entries — Studio never expands into the file. The
+    // index space the runner reports in is the expanded one.
+    expect(pipeline?.validations?.rules).toHaveLength(2)
   })
 
   it('sets, replaces and clears node statuses, and forgets them on close', () => {
@@ -531,8 +570,14 @@ describe('opening a job saved before validations became per-rule nodes', () => {
       (node) => node.data.kind === 'sink' && node.data.dqRole === 'report',
     )
     expect(reportSink).toBeDefined()
-    // A declaration, not a chain member: nothing points at it.
-    expect(state.edges.some((edge) => edge.target === reportSink?.id)).toBe(false)
+    // Not a chain member — nothing leaves it — but it IS anchored to the rules that
+    // write it, so the canvas shows where the dataset comes from instead of leaving
+    // the box floating. The anchor sits on the plain input handle and compiles to
+    // nothing; only the `scope` handle carries meaning.
+    expect(state.edges.some((edge) => edge.source === reportSink?.id)).toBe(false)
+    const anchors = state.edges.filter((edge) => edge.target === reportSink?.id)
+    expect(anchors).toHaveLength(1)
+    expect(anchors[0]?.targetHandle).toBe(HANDLE.in)
     // The main destination is untouched: the quality box is drawn beside it.
     expect(state.nodes.filter((node) => node.data.kind === 'sink')).toHaveLength(2)
 

@@ -67,9 +67,10 @@ what it found. WSL2 or Docker avoids the whole problem. More detail in the
 
 ### Framework
 
-The framework tests are plain `unittest` files with no pytest dependency and no Spark:
-they drive fake builders and pure functions, so they run in a second. Every
-`tests/**/test_*.py` outside `tests/case-of-success/` is a standalone script, and
+The framework tests are plain `unittest` files with no pytest dependency. Most drive
+fake builders and pure functions, so they run in a second; the few that need a real
+SparkSession say so in their docstring and **skip themselves** when there is no Java.
+Every `tests/**/test_*.py` is a standalone script, and
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs each of them — so a file
 that only passes under pytest, or only when imported from the repository root without
 `PYTHONPATH`, breaks the gate. Run them the same way CI does before opening a pull
@@ -85,7 +86,7 @@ PYTHONPATH=. python tests/validation/test_soda_checks.py
 All of them at once, the way the CI step does it:
 
 ```bash
-for f in $(find tests -name 'test_*.py' -not -path '*case-of-success*' | sort); do
+for f in $(find tests -name 'test_*.py' | sort); do
   PYTHONPATH=. python "$f" || echo "FAILED: $f"
 done
 ```
@@ -95,7 +96,6 @@ PowerShell:
 ```powershell
 $env:PYTHONPATH = "."
 Get-ChildItem tests -Recurse -Filter test_*.py |
-  Where-Object { $_.FullName -notmatch "case-of-success" } |
   ForEach-Object { python $_.FullName }
 ```
 
@@ -105,15 +105,9 @@ helper for validations goes into `tests/validation/test_soda_checks.py`. A new f
 picked up automatically as long as it is named `test_*.py` and runs as a script
 (`unittest.main()` at the bottom).
 
-`tests/case-of-success/` is different: it is a real migration kept as documentation,
-and `tests/case-of-success/tests_unit/` runs the configs against **real tables** (a
-Databricks catalog), skipping when the source is not reachable. CI excludes it on
-purpose — it needs pytest and fixtures the job does not carry.
-
-```bash
-pip install pytest
-pytest tests/case-of-success/tests_unit -q
-```
+[`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) lists what is covered today and what is
+still missing, connector by connector and transformation by transformation — a good
+place to find a self-contained first contribution.
 
 ### Studio
 

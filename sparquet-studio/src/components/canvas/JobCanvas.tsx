@@ -234,14 +234,12 @@ export function JobCanvas() {
       // from the DataFrame every rule saw, so it has nothing to pass on.
       if (isValidationSinkNode(sourceNode)) return false
       if (isValidationSinkNode(targetNode)) {
-        // One exception, and only one: linking a RULE into the quarantine of
-        // rejected rows scopes the split to that rule. Anything else pointing at a
-        // quality destination would promise a data path that does not exist.
-        return (
-          targetNode.data.kind === 'sink' &&
-          targetNode.data.dqRole === 'invalid' &&
-          sourceNode.data.kind === 'validation'
-        )
+        // Only a RULE may point at a quality destination — anything else would promise
+        // a data path that does not exist. On the quarantine of rejected rows the link
+        // also SCOPES the split to the rules linked in; on the report and the valid
+        // side there is nothing to scope, so it only records where the dataset comes
+        // from, which is what stops those boxes reading as orphans.
+        return sourceNode.data.kind === 'validation'
       }
       return !reaches(edges, target, source)
     },

@@ -9,6 +9,7 @@
 
 import { getFormat, getTransformation, getValidationSink, getValidator } from '@/catalog'
 import type { FieldSpec } from '@/catalog/types'
+import { ROW_LEVEL_METRICS } from '@/catalog/validators'
 import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
 import type {
   IssueSeverity,
@@ -793,31 +794,23 @@ const checkValidationRules = (ctx: LintContext): void => {
 
 /**
  * Row-level rules are the only ones that can label a ROW: they run per row and their
- * verdict is what `ValidationEngine.split()` routes on. An aggregate rule
- * (`row_count`, `schema`, `sql`, and the `check` metrics that reduce the whole
- * frame) answers about the dataset, so it can never mark an individual row.
+ * verdict is what `ValidationEngine.split()` routes on. An aggregate rule (`row_count`,
+ * `schema`, `sql`, and every metric that reduces the whole frame) answers about the
+ * dataset, so it can never mark an individual row.
+ *
+ * The metric half comes from the catalog, which generates those rule types — two lists
+ * would let the linter and the palette disagree about the same rule.
  */
 const ROW_LEVEL_VALIDATORS: ReadonlySet<string> = new Set([
   'not_null',
   'unique',
   'range',
   'regex',
+  ...ROW_LEVEL_METRICS,
 ])
 
-/** `check` is row-level only for the metrics that count rows one by one. */
-const ROW_LEVEL_CHECK_METRICS: ReadonlySet<string> = new Set([
-  'missing_count',
-  'missing_percent',
-  'invalid_count',
-  'invalid_percent',
-])
-
-const isRowLevelRule = (node: ValidationNode): boolean => {
-  if (node.data.validator === 'check') {
-    return ROW_LEVEL_CHECK_METRICS.has(text(node.data.params.metric))
-  }
-  return ROW_LEVEL_VALIDATORS.has(node.data.validator)
-}
+const isRowLevelRule = (node: ValidationNode): boolean =>
+  ROW_LEVEL_VALIDATORS.has(node.data.validator)
 
 /**
  * The three destinations the validation step writes on the side.

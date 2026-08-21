@@ -12,6 +12,8 @@
 
 import type { StudioNode } from '@/types/studio'
 
+import { expandTargets } from './targets'
+
 const args = (...parts: (string | number | null | undefined)[]): string =>
   parts.map((part) => (part === null || part === undefined ? '' : String(part))).join(',')
 
@@ -31,14 +33,10 @@ function num(value: unknown): string | number {
   return typeof value === 'number' ? value : String(value)
 }
 
-/** The rule's declared `code`, or the expression the library would derive. */
-export function ruleCode(node: StudioNode): string {
-  if (node.data.kind !== 'validation') return ''
-  const params = (node.data.params ?? {}) as Record<string, unknown>
+/** The declared `code`, or the expression the library would derive, for ONE rule. */
+function codeOf(type: string, params: Record<string, unknown>): string {
   const declared = params.code
   if (typeof declared === 'string' && declared.trim() !== '') return declared.trim()
-
-  const type = node.data.validator ?? ''
   switch (type) {
     case 'not_null':
       return `not_null(${columnsOf(params)})`
@@ -48,13 +46,46 @@ export function ruleCode(node: StudioNode): string {
       return `range(${args(columnsOf(params), num(params.min), num(params.max))})`
     case 'regex':
       return `regex(${args(columnsOf(params), params.pattern as string)})`
-    case 'check': {
-      const metric = typeof params.metric === 'string' && params.metric ? params.metric : type
+    default: {
+      // Every metric is a rule type of its own, and its code is the metric plus the
+      // column(s) it measured: `missing_percent(cpf)`, `duplicate_count(id)`. An
+      // aggregate that measures no column is just its name — `row_count`. Rules with
+      // no column at all (sql, schema) land here too and answer with their type,
+      // matching the library's `derived_code()` default.
       const columns = columnsOf(params)
-      return columns ? `${metric}(${columns})` : metric
+      return columns ? `${type}(${columns})` : type
     }
-    default:
-      // Aggregate checks never label a row, but they still answer with their type.
-      return type
   }
+}
+
+/**
+ * Every code a rule node answers to — one per target, or a single one when the rule
+ * declares no `targets`.
+ *
+ * A `targets` rule is declaration sugar the library flattens into N independent rules
+ * (`expand_targets` in `sparquet_cola/targets.py`): everything outside `targets` is a
+ * shared default, each target overrides what it wants, and each expanded rule gets its
+ * own result, its own report row and its own code. Studio has to agree on all of them,
+ * because scoping the quarantine to this node means scoping to every code it produces —
+ * emitting just the first would silently drop the other targets from the split.
+ */
+export function ruleCodes(node: StudioNode): string[] {
+  if (node.data.kind !== 'validation') return []
+  const type = node.data.validator ?? ''
+  // `expandTargets` is the one place that mirrors the library's expansion — the same
+  // reason the Python side exposes a single `expand_targets` for its two call sites.
+  // A `code` declared beside `targets` survives into every expanded rule here: the
+  // library refuses that config, the linter reports it, and hiding it would make the
+  // canvas look fine.
+  return expandTargets((node.data.params ?? {}) as Record<string, unknown>).map((params) =>
+    codeOf(type, params),
+  )
+}
+
+/**
+ * The node's first code. A rule with no `targets` has exactly one, which is the common
+ * case; prefer {@link ruleCodes} anywhere the full set matters.
+ */
+export function ruleCode(node: StudioNode): string {
+  return ruleCodes(node)[0] ?? ''
 }

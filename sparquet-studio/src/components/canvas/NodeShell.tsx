@@ -112,7 +112,12 @@ export interface NodeShellProps {
    * `undefined` hides the mute control entirely.
    */
   disabled?: boolean
-  inputs?: 'none' | 'single' | 'dual'
+  /**
+   * `scoped` is the quarantine of rejected rows: two incoming handles, because the
+   * two links mean different things — `from` only records which validations wrote the
+   * dataset, `scope` narrows the split to the rules linked into it.
+   */
+  inputs?: 'none' | 'single' | 'dual' | 'scoped'
   hasOutput?: boolean
   children?: ReactNode
 }
@@ -436,7 +441,7 @@ export function NodeShell({
           type="target"
           position={Position.Left}
           id={HANDLE.in}
-          className={cn(inputs === 'dual' && '!top-[34%]')}
+          className={cn((inputs === 'dual' || inputs === 'scoped') && '!top-[34%]')}
         />
       )}
       {inputs === 'dual' && (
@@ -449,6 +454,22 @@ export function NodeShell({
           />
           <span className="pointer-events-none absolute -left-3 top-[72%] -translate-x-full -translate-y-1/2 text-2xs text-content-subtle">
             right
+          </span>
+        </>
+      )}
+      {inputs === 'scoped' && (
+        <>
+          <span className="pointer-events-none absolute -left-3 top-[34%] -translate-x-full -translate-y-1/2 text-2xs text-content-subtle">
+            from
+          </span>
+          <Handle
+            type="target"
+            position={Position.Left}
+            id={HANDLE.inScope}
+            className="!top-[72%]"
+          />
+          <span className="pointer-events-none absolute -left-3 top-[72%] -translate-x-full -translate-y-1/2 text-2xs text-node-validate">
+            scope
           </span>
         </>
       )}
