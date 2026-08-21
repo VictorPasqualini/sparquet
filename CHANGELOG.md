@@ -20,10 +20,17 @@ Notes on the history below:
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-08-20
+## [0.5.0] — 2026-08-21
 
 ### Added
 
+- **Step markers for the validations and for the datasets they write.** Every rule
+  emits `Validation started`/`finished` (`scope="validation"`, with `index`/`total`),
+  and the report and quarantine writes emit `Validation output started`/`written`
+  (`scope="validation_sink"`, with `role`). Studio lights up each box as the run
+  reaches it and shows the elapsed time per step once it finishes. Unlike a
+  transformation — lazy, so it only builds a plan and reads near zero — a rule is a
+  real action, so the time shown against it is time actually spent.
 - **A quarantine row now says WHICH rule rejected it.** Every rule accepts a `code`
   (`{"type": "range", "column": "age", "min": 1, "max": 99, "code": "AGE_RANGE"}`) and,
   when it is omitted, the code IS the validation expression, rendered compactly and
@@ -38,7 +45,7 @@ Notes on the history below:
   per rule rather than per row. `annotate` anywhere else is a config error that says
   why. The column comes from the same predicates the split already computes, so it
   costs no extra pass over the data.
-- **`validations.outputs.{valid,invalid}.rules`** — a list of rule codes that scopes a
+- **`validations.outputs.invalid.rules`** — a list of rule codes that scopes a
   quarantine sink to those rules alone. Absent means every row-level rule, exactly as
   before. This is what makes a per-severity quarantine possible: route the rows that
   break the critical rules to one table and keep the rest out of it. Sinks that share a
@@ -49,6 +56,17 @@ Notes on the history below:
 
 ### Changed
 
+- **Validations no longer recompute the pipeline once per rule.** Each rule fires its
+  own Spark action (`not_null` one per column, `unique` two), and without a cached
+  DataFrame every one of them re-read the source and re-applied every transformation.
+  The frame is now materialised before the rules run and released after the writes.
+  Measured on 2M rows with 4 rules: **13.0s → 5.2s** for validations plus the write,
+  cache warm-up included. Opt out with `"validations": { "cache": false }` when the
+  frame is too large for the executor's memory and disk.
+- **`rules` is refused on `outputs.valid`.** The scope belongs to the *split*, which is
+  one operation: if `invalid` looked at one rule and `valid` at all of them, the two
+  would stop partitioning the input and a row breaking only some other rule would land
+  in neither. `valid` is the exact complement of the quarantine.
 - **Requires `sparquet-cola>=0.2.0`** (was `>=0.1.0`): `BaseCheck.code()` and
   `Cola.split(annotate=…, only=…)` do not exist in 0.1.x.
 
@@ -66,8 +84,6 @@ Notes on the history below:
   **Breaking for anything that parses the logs** — that is the whole reason this is a
   minor bump and not a patch. Sparquet Studio was updated in the same change.
 
-### Changed
-
 - **The quality report is worth reading now.** It is written as a **single file**
   (`coalesce(1)`) — one rule is one row, so the default parallelism was producing a
   directory of part files that held nothing but a header — and it carries three new
@@ -79,6 +95,11 @@ Notes on the history below:
   `rows_read` is deliberately the **read** count, not the validated one: counting the
   validated DataFrame would add a Spark action to every run, and with a `filter`
   upstream the two differ — hence the explicit name and no derived percentage.
+
+
+- Studio: one node per validation rule, with the quality report and the two
+  quarantine sinks as side outputs of a main chain that keeps every row; naming and
+  interface passes over the canvas, palette and command palette.
 
 ### Fixed
 
@@ -99,6 +120,11 @@ Notes on the history below:
   `sparquet/cli.py`, which is the real entry point (`[project.scripts]` installs it
   as the `sparquet` command; `python -m sparquet.cli` also works).
 
+
+- The `website/` folder. The landing page and the full documentation moved to the
+  separate [sparquet-web](https://github.com/VictorPasqualini/sparquet-web)
+  repository, published at <https://sparquet.dev>.
+
 ### Added
 
 - `tests/test_examples.py` — every `examples/*.json` must parse as a valid
@@ -107,23 +133,10 @@ Notes on the history below:
 - The CI test step now **discovers** `tests/**/test_*.py` instead of naming files, so
   a new test cannot silently stay out of coverage.
 
-### Added
 
 - Community files for the open-source release: `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, `SECURITY.md`, this changelog, issue templates and a pull
   request template.
-
-### Changed
-
-- Studio: one node per validation rule, with the quality report and the two
-  quarantine sinks as side outputs of a main chain that keeps every row; naming and
-  interface passes over the canvas, palette and command palette.
-
-### Removed
-
-- The `website/` folder. The landing page and the full documentation moved to the
-  separate [sparquet-web](https://github.com/VictorPasqualini/sparquet-web)
-  repository, published at <https://sparquet.dev>.
 
 ## [0.3.1] — 2026-08-17
 

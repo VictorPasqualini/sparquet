@@ -182,7 +182,7 @@ def _quarantine_output(key: str, data: Dict[str, Any]) -> "OutputConfig":
         _reject_quarantine_keys(
             data,
             f"`validations.outputs.{key}`",
-            "Uma linha válida não violou nenhuma regra — não há código para rotulá-la "
+            "O escopo vale para o SPLIT inteiro, que é uma operação só: `valid` é o complemento exato da quarentena, senão os dois lados deixariam de particionar a entrada. Uma linha válida não violou nenhuma regra — não há código para rotulá-la "
             "nem violação para escopar.",
         )
     return OutputConfig.from_dict(data)

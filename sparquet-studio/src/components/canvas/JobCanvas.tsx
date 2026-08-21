@@ -230,10 +230,19 @@ export function JobCanvas() {
       // Notes are annotations, and a source reads from storage — neither takes input.
       if (sourceNode.data.kind === 'note' || targetNode.data.kind === 'note') return false
       if (targetNode.data.kind === 'source') return false
-      // A quality destination is a declaration, not a chain member: the validations
-      // block writes it from the DataFrame every rule saw, so it has nothing to
-      // receive and nothing to pass on.
-      if (isValidationSinkNode(sourceNode) || isValidationSinkNode(targetNode)) return false
+      // A quality destination never feeds anything: the validations block writes it
+      // from the DataFrame every rule saw, so it has nothing to pass on.
+      if (isValidationSinkNode(sourceNode)) return false
+      if (isValidationSinkNode(targetNode)) {
+        // One exception, and only one: linking a RULE into the quarantine of
+        // rejected rows scopes the split to that rule. Anything else pointing at a
+        // quality destination would promise a data path that does not exist.
+        return (
+          targetNode.data.kind === 'sink' &&
+          targetNode.data.dqRole === 'invalid' &&
+          sourceNode.data.kind === 'validation'
+        )
+      }
       return !reaches(edges, target, source)
     },
     [edges, nodes],

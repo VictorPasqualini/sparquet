@@ -105,13 +105,38 @@ node:
 | Quarantine — valid rows | `validations.outputs.valid` | A copy of the rows that break no row-level rule. |
 | Quarantine — invalid rows | `validations.outputs.invalid` | A copy of the rows those same rules rejected. |
 
-These boxes take **no connection at all** — no input handle, no output handle — and
-they never enter `outputs[]`. The reason is that the `validations` block is
-**job-scoped**: a job has exactly one, so the report and the quarantine copies belong
-to the job rather than to whichever rule happens to be last. Drop one anywhere and the
-compiler finds it; the linter speaks up only when the job has no rule to fill it, or
-when a second box claims the same dataset. Auto-layout parks them in a row under the
-rules, clear of the line the data flows along.
+These boxes never enter `outputs[]`, and they need no connection: the `validations`
+block is **job-scoped** — a job has exactly one — so the report and the quarantine
+copies belong to the job rather than to whichever rule happens to be last. Drop one
+anywhere and the compiler finds it; the linter speaks up only when the job has no rule
+to fill it, or when a second box claims the same dataset. Auto-layout parks them in a
+row under the rules, clear of the line the data flows along.
+
+### Scoping a quarantine, and saying why a row was rejected
+
+Two fields turn the quarantine from a pile of rejected rows into something you can act
+on:
+
+- **`code` on a rule** (advanced field) — the label written for every row that rule
+  rejects. Omit it and the code is the rule *expression* itself: `range(age,18,120)`,
+  `not_null(email)`, `unique(id)`. Always readable, so declare a code only when you
+  want a stable identifier your downstream owns — renaming a column changes the
+  derived expression, and anything matching the old string stops matching.
+- **`annotate` on the quarantine of rejected rows** — the name of an `array<string>`
+  column listing the codes that rejected each row. It is the whole point: the same
+  rows you had before, now each carrying its reason.
+
+**To scope it, link rules into the box.** The quarantine of rejected rows is the one
+quality destination with an input handle: drag from a validation rule into it and the
+split narrows to that rule. Link two and it considers both; link none and it considers
+every row-level rule, which is what it has always done. Codes from an imported config
+that match no rule on the canvas stay on the box and the linter flags them, so a
+hand-written file never loses its scope silently.
+
+Scoping is refused on the *valid* side, and that is deliberate: the split is one
+operation, so if the rejected side looked at one rule while the valid side looked at
+all of them, the two would stop partitioning the input — a row breaking only some
+other rule would land in neither.
 
 > **Quarantine copies rows out — it does not divert them.** `Pipeline.run()` calls
 > `_write_validation_outputs(df)` and then `_write_outputs(df)` with the **same,

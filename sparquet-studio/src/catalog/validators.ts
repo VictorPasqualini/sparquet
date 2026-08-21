@@ -142,7 +142,34 @@ const requireColumnForMetric = (value: unknown, params: Record<string, unknown>)
   return hasColumn || hasColumns ? null : `Metric "${metric}" needs a column.`
 }
 
-export const VALIDATORS: ValidatorDef[] = [
+/**
+ * Every rule accepts a `code`: the label that lands in the quarantine's annotation
+ * column for each row the rule rejected. Declared once here rather than repeated in
+ * fourteen definitions — it means the same thing everywhere.
+ */
+const codeField: FieldSpec = {
+  key: 'code',
+  label: 'Failure code',
+  type: 'text',
+  placeholder: 'AGE_RANGE',
+  help: 'Written into the quarantine annotation column for every row this rule rejects.',
+  docs: [
+    'Omit it and the code becomes the rule expression itself — `range(age,1,99)`,',
+    '`not_null(email)`, `unique(id)`. That is always readable, so a code is only worth',
+    'declaring when you want a stable identifier your downstream owns: renaming a column',
+    'or moving a bound changes the derived expression, and anything matching on the old',
+    'string stops matching.',
+    '',
+    'It is also what `rules` on a quarantine destination refers to when you scope the',
+    'split to a subset of the rules.',
+  ].join('\n'),
+  group: 'advanced',
+}
+
+const withCode = (validators: ValidatorDef[]): ValidatorDef[] =>
+  validators.map((validator) => ({ ...validator, fields: [...validator.fields, codeField] }))
+
+export const VALIDATORS: ValidatorDef[] = withCode([
   {
     type: 'not_null',
     label: 'Not null',
@@ -692,7 +719,7 @@ export const VALIDATORS: ValidatorDef[] = [
       },
     ],
   },
-]
+])
 
 /**
  * `warn` and `skip` are behaviorally identical: the engine only branches on

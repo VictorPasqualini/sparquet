@@ -1,18 +1,32 @@
 {
   "name": "07_quarentena_codigos",
-  "description": "Quarentena que diz POR QUE cada linha caiu, RODAVEL LOCALMENTE (CSV -> CSV + JSON). Cada regra pode declarar um \"code\"; omitido, o codigo e a propria expressao da validacao (range(age,18,120)). O destino validations.outputs.invalid usa \"rules\" para se limitar aos codigos que importam (as duplicatas de id ficam FORA desta quarentena, mesmo violando a regra unique) e \"annotate\" para gravar em cada linha rejeitada um array<string> com os codigos que a rejeitaram. Rode da raiz do repo: python main.py examples/07_quarentena_codigos.json",
-
+  "description": "Quarentena que diz POR QUE cada linha caiu, RODAVEL LOCALMENTE (CSV -> CSV + JSON). Cada regra pode declarar um \"code\"; omitido, o codigo e a propria expressao da validacao (range(age,18,120)). O destino validations.outputs.invalid usa \"rules\" para se limitar aos codigos que importam (as duplicatas de id ficam FORA desta quarentena, mesmo violando a regra unique) e \"annotate\" para gravar em cada linha rejeitada um array<string> com os codigos que a rejeitaram. Rode da raiz do repo: sparquet examples/07_quarentena_codigos.json",
   "input": {
     "format": "csv",
     "path": "examples/data/customers.csv"
   },
-
   "transformations": [
-    { "type": "select", "columns": ["id", "name", "email", "age", "country", "status"] },
-    { "type": "cast", "columns": { "age": "integer" } },
-    { "type": "checkpoint" }
+    {
+      "type": "select",
+      "columns": [
+        "id",
+        "name",
+        "email",
+        "age",
+        "country",
+        "status"
+      ]
+    },
+    {
+      "type": "cast",
+      "columns": {
+        "age": "integer"
+      }
+    },
+    {
+      "type": "checkpoint"
+    }
   ],
-
   "validations": {
     "on_failure": "warn",
     "report": {
@@ -25,24 +39,44 @@
         "format": "json",
         "path": "examples/output/07_customers_quarentena",
         "mode": "overwrite",
-        "rules": ["EMAIL_FORMAT", "range(age,18,120)"],
+        "rules": [
+          "EMAIL_FORMAT",
+          "range(age,18,120)"
+        ],
         "annotate": "dq_codes"
       }
     },
     "rules": [
-      { "type": "not_null", "columns": ["id"] },
-      { "type": "unique", "columns": ["id"] },
+      {
+        "type": "not_null",
+        "columns": [
+          "id"
+        ]
+      },
+      {
+        "type": "unique",
+        "columns": [
+          "id"
+        ]
+      },
       {
         "type": "regex",
         "column": "email",
         "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$",
         "code": "EMAIL_FORMAT"
       },
-      { "type": "range", "column": "age", "min": 18, "max": 120 },
-      { "type": "row_count", "min": 1 }
+      {
+        "type": "range",
+        "column": "age",
+        "min": 18,
+        "max": 120
+      },
+      {
+        "type": "row_count",
+        "min": 1
+      }
     ]
   },
-
   "output": {
     "format": "csv",
     "path": "examples/output/07_customers",

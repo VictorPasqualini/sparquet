@@ -174,6 +174,16 @@ export interface OutputSpec {
   options?: Record<string, unknown>
   /** Per-destination transformations applied before projection and write. */
   transformations?: TransformationSpec[]
+  /**
+   * Quarantine-only (`validations.outputs.invalid`): name of the `array<string>`
+   * column holding the codes of the rules that rejected each row.
+   */
+  annotate?: string
+  /**
+   * Quarantine-only: rule codes the split is scoped to. Absent means every
+   * row-level rule, which is what a quarantine without scoping has always meant.
+   */
+  rules?: string[]
 }
 
 /**

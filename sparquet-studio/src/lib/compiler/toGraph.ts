@@ -6,6 +6,7 @@
  */
 
 import type { OnFailureMode, SparkSettings } from '@/types/pipeline'
+import { ruleCode } from './ruleCode'
 import { ON_FAILURE_MODES } from '@/types/pipeline'
 import type {
   IssueSeverity,
@@ -390,10 +391,12 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
     const { policy, rules, sideSinks } = importValidations(pipeline.validations, issues)
     if (policy) settings.validations = policy
     let ruleCount = 0
+    const ruleNodes: StudioNode[] = []
     for (const rule of rules) {
       const node = makeValidationNode(rule)
       ctx.nodes.push(node)
       ctx.edges.push(makeEdge(tail.id, node.id))
+      ruleNodes.push(node)
       tail = node
       ruleCount += 1
     }
@@ -412,8 +415,32 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
         issues.warning(`${label} destination has no validation rule and was dropped.`)
         continue
       }
-      const sink = makeSinkNode({ ...readSinkData(raw, issues, label), dqRole: role })
+      // `annotate`/`rules` live only on the rejected side; `readSinkData` knows the
+      // generic destination keys, so these two are read here.
+      const quarantine = isRecord(raw) && role === 'invalid' ? raw : null
+      const annotate =
+        quarantine && typeof quarantine.annotate === 'string' ? quarantine.annotate : undefined
+      const dqRules = Array.isArray(quarantine?.rules)
+        ? quarantine.rules.filter((code): code is string => typeof code === 'string')
+        : undefined
+      // A scope drawn as edges is a scope the author can see and change. Each code
+      // is matched back to the rule that produces it; only codes no rule on this
+      // canvas answers to stay on the node, so a hand-written config keeps working
+      // and the linter can point at what does not resolve.
+      const matched = new Map<string, StudioNode>()
+      for (const code of dqRules ?? []) {
+        const owner = ruleNodes.find((candidate) => ruleCode(candidate) === code)
+        if (owner) matched.set(code, owner)
+      }
+      const unmatched = (dqRules ?? []).filter((code) => !matched.has(code))
+      const sink = makeSinkNode({
+        ...readSinkData(raw, issues, label),
+        dqRole: role,
+        ...(annotate !== undefined ? { annotate } : {}),
+        ...(unmatched.length > 0 ? { dqRules: unmatched } : {}),
+      })
       ctx.nodes.push(sink)
+      for (const owner of matched.values()) ctx.edges.push(makeEdge(owner.id, sink.id))
     }
   }
 

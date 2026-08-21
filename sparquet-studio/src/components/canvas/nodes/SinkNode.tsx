@@ -51,7 +51,11 @@ export const SinkNode = memo(function SinkNodeRenderer({
       // A quality destination is a declaration, not a step: the validations block
       // writes it from the DataFrame every rule saw, so there is nothing to wire in
       // and nothing to pass on.
-      inputs={sideDef ? 'none' : 'single'}
+      // The quarantine of rejected rows takes an OPTIONAL input: linking rules into
+      // it scopes the split to those rules. Unlinked still means "every row-level
+      // rule", so the handle adds a capability without changing the default. The
+      // report and the valid side have nothing to scope, so they stay handle-less.
+      inputs={!sideDef || data.dqRole === 'invalid' ? 'single' : 'none'}
       hasOutput={false}
       badges={
         <>

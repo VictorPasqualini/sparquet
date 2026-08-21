@@ -82,6 +82,19 @@ export type SinkNodeData = {
    * no input and no output handle, and they sit wherever the author drops them.
    */
   dqRole?: ValidationSinkRole
+  /**
+   * `validations.outputs.invalid.annotate` — name of the `array<string>` column that
+   * records, per rejected row, the codes of the rules that rejected it. Only the
+   * `invalid` quarantine carries it: on `valid` it would be empty by definition, and
+   * the framework refuses it anywhere else.
+   */
+  annotate?: string
+  /**
+   * `validations.outputs.invalid.rules` — the rule codes this quarantine is scoped
+   * to; empty/absent means every row-level rule. It scopes the SPLIT, so `valid`
+   * stays its exact complement and the two keep partitioning the input.
+   */
+  dqRules?: string[]
   comment?: string
 }
 

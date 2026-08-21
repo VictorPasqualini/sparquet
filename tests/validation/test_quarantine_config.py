@@ -67,14 +67,22 @@ class TestQuarantineKeys(unittest.TestCase):
         self.assertIsNone(invalid.rules)
         self.assertIsNone(invalid.annotate)
 
-    def test_valid_may_be_scoped_too(self):
-        cfg = config({
-            "rules": RULES,
-            "outputs": {
-                "valid": {"format": "delta", "path": "silver.ok", "rules": ["AGE_RANGE"]}
-            },
-        })
-        self.assertEqual(cfg.validations.outputs["valid"].rules, ["AGE_RANGE"])
+    def test_scoping_valid_is_refused_because_the_split_has_one_scope(self):
+        """`rules` escopa o SPLIT, e o split é uma operação só.
+
+        Se `invalid` olhasse AGE_RANGE e `valid` olhasse todas as regras, os dois
+        deixariam de particionar a entrada: uma linha que viola apenas outra regra
+        não estaria em nenhum dos lados. O escopo é declarado na quarentena e
+        `valid` é o complemento exato dela.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            config({
+                "rules": RULES,
+                "outputs": {
+                    "valid": {"format": "delta", "path": "silver.ok", "rules": ["AGE_RANGE"]}
+                },
+            })
+        self.assertIn("invalid", str(ctx.exception))
 
     def test_codes_are_trimmed(self):
         cfg = config({

@@ -7,6 +7,7 @@
  * `transformations`.
  */
 
+import { ruleCode } from './ruleCode'
 import { getTransformation } from '@/catalog'
 import type {
   InputSpec,
@@ -252,6 +253,7 @@ function buildValidations(
   policy: ValidationPolicy | undefined,
   sideSinks: ReadonlyMap<ValidationSinkRole, SinkNode>,
   issues: Issues,
+  graph?: StudioGraph,
 ): ValidationsSpec | null {
   const rules: ValidationRuleSpec[] = []
   for (const node of nodes) {
@@ -273,7 +275,29 @@ function buildValidations(
   for (const role of VALIDATION_SINK_ROLES) {
     if (role === 'report') continue
     const node = sideSinks.get(role)
-    if (node) quarantine[role] = buildOutput(node, [], issues)
+    if (!node) continue
+    const out = buildOutput(node, [], issues)
+    // Only the rejected side is labelled and scoped: `annotate` names the codes
+    // column, `rules` narrows which rules feed the split. The framework refuses
+    // both on `valid`, so emitting them there would compile an invalid config.
+    if (role === 'invalid') {
+      if (!isBlank(node.data.annotate)) out.annotate = node.data.annotate
+      // The canvas is the source of truth for the scope: a rule linked into this box
+      // scopes the split to it. `dqRules` only carries codes that matched no node on
+      // import, so a hand-written config never loses a scope Studio cannot draw.
+      const linked = graph
+        ? graph.edges
+            .filter((edge) => edge.target === node.id)
+            .map((edge) => nodes.find((rule) => rule.id === edge.source))
+            .filter((rule): rule is ValidationNode => rule !== undefined)
+            .map(ruleCode)
+            .filter((code) => !isBlank(code))
+        : []
+      const orphaned = (node.data.dqRules ?? []).filter((code) => !isBlank(code))
+      const scope = [...new Set([...linked, ...orphaned])]
+      if (scope.length > 0) out.rules = scope
+    }
+    quarantine[role] = out
   }
   if (Object.keys(quarantine).length > 0) spec.outputs = quarantine
 
@@ -610,6 +634,7 @@ export function compileGraph(
     settings.validations,
     sideSinks,
     issues,
+    graph,
   )
 
   for (const node of graph.nodes) {
