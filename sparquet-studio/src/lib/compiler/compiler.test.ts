@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
@@ -1044,20 +1044,27 @@ describe('pipelineToGraph', () => {
 
 /* ----------------------------------------------------------- real configs */
 
+/**
+ * Discovered, not listed: every `examples/*.json` the framework ships is
+ * round-tripped. A hardcoded list rots in both directions — a new example goes
+ * untested, and a deleted one turns into six unreadable ENOENTs instead of one
+ * sentence telling you what happened.
+ */
 describe('the shipped example configs', () => {
-  const EXAMPLES = [
-    '01_ingestao_validacoes.json',
-    '02_join_e_pushdown_runtime.json',
-    '03_payload_struct_multi_saida.json',
-    '04_merge_delta.json',
-    '05_data_quality_soda.json',
-    '06_quarentena_validacoes.json',
-  ]
+  const dir = fileURLToPath(new URL('../../../../examples/', import.meta.url))
+  const examples = readdirSync(dir).filter((name) => name.endsWith('.json')).sort()
 
-  for (const file of EXAMPLES) {
+  it('finds the examples directory', () => {
+    expect(
+      examples.length,
+      `No .json found in ${dir}. The examples are fixtures for these tests — if they ` +
+        'vanished from your working tree, restore them with `git restore examples`.',
+    ).toBeGreaterThan(0)
+  })
+
+  for (const file of examples) {
     it(`round-trips ${file}`, () => {
-      const path = fileURLToPath(new URL(`../../../../examples/${file}`, import.meta.url))
-      const original: unknown = JSON.parse(readFileSync(path, 'utf8'))
+      const original: unknown = JSON.parse(readFileSync(`${dir}${file}`, 'utf8'))
       const compiled = expectRoundTrip(original)
       expect(JSON.parse(serializePipeline(compiled))).toEqual(compiled)
     })

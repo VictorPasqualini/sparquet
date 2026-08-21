@@ -101,7 +101,7 @@ node:
 
 | Palette entry | Compiles into | What lands in it |
 |---|---|---|
-| Quality report | `validations.report` | One row per rule: `pipeline`, `rule_type`, `check_name`, `severity`, `passed`, `failed_count`, `metric_value`, `message`, `validated_at`. |
+| Quality report | `validations.report` | One row per rule, in a single file: `pipeline`, `rule_type`, `check_name`, `target` (the column(s) checked), `rule_params` (what was asserted), `severity`, `passed`, `failed_count`, `rows_read`, `metric_value`, `message`, `validated_at`. |
 | Quarantine — valid rows | `validations.outputs.valid` | A copy of the rows that break no row-level rule. |
 | Quarantine — invalid rows | `validations.outputs.invalid` | A copy of the rows those same rules rejected. |
 
@@ -310,6 +310,7 @@ Endpoints: `GET /health`, `POST /run`, `POST /run/flow/stream` (a whole [Pipelin
 |---|---|---|
 | Run hangs on **Running** forever; the uvicorn terminal prints `O sistema não pode encontrar o caminho especificado` / *The system cannot find the path specified* / `NativeIO$Windows` | Windows Spark can't find `winutils.exe` — `HADOOP_HOME` is unset or points at a folder without `winutils.exe` + `hadoop.dll`. | Point `HADOOP_HOME` at a folder whose `bin\` holds both files, and put `%HADOOP_HOME%\bin` on `PATH`. See [step 4](#4-windows-only-give-spark-its-hadoop-shims). |
 | A run fails immediately, or the JVM won't start (`UnsupportedClassVersionError`, or the launcher can't find `java`) | `JAVA_HOME` points at the wrong JDK. **Spark 4 requires Java 17+** (Java 8 or 11 will not do). | Set `JAVA_HOME` to a JDK 17 and restart the runner: `$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-17.x-hotspot"`. Note that `java -version` on `PATH` can be 17 while `JAVA_HOME` still points at an old 8 — Spark uses `JAVA_HOME`. |
+| A job fails only once it writes a **quality report** (or anything else built on the driver), with `Python worker exited unexpectedly (crashed)` | Spark spawned a Python **worker** from `PATH` that is a different build than the driver. Pure JVM stages (CSV → Parquet) never need a worker, so the job looks fine until a stage does. | The runner now pins `PYSPARK_PYTHON`/`PYSPARK_DRIVER_PYTHON` to its own interpreter, so this should not happen. If you run the framework yourself (outside the runner), export `PYSPARK_PYTHON` to the same Python you start the job with. |
 | Every new run returns **`409 Conflict`** ("a pipeline run is already in progress") | The runner serializes runs behind one global lock, and **there is no server-side cancel** — pressing **Stop** in Studio only stops the browser from waiting; the Spark job keeps running (or stays stuck) and holds the lock until it returns. | **Restart the runner** (`Ctrl+C` the uvicorn process, start it again) to drop the stuck run and clear the lock. Once the environment above is correct, runs finish in seconds and this stops happening. |
 
 > **Why the winutils error never reaches Studio.** That line is written by Spark's JVM to the runner's stderr, not through the framework's Python logger — and only the Python logs are collected into the Run panel. For a *read* Hadoop logs it and carries on, so the job is not interrupted; a *write* (e.g. the Parquet output) is where a missing `winutils.exe` actually bites. Treat the terminal line as the real signal even when Studio shows nothing.

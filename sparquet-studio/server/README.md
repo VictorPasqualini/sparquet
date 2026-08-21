@@ -181,7 +181,7 @@ Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
   "error": null,
   "validations": [{ "type": "not_null", "passed": true, "message": "", "failed_count": 0 }],
   "preview": { "columns": ["id"], "rows": [[1]], "truncated": false },
-  "logs": [{ "timestamp": "...", "level": "INFO", "message": "Pipeline concluido", "context": {} }]
+  "logs": [{ "timestamp": "...", "level": "INFO", "message": "Pipeline finished", "context": {} }]
 }
 ```
 

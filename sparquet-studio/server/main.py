@@ -78,7 +78,25 @@ def _bootstrap_sys_path() -> None:
         sys.path.insert(0, str(root))
 
 
+def _pin_pyspark_python() -> None:
+    """Force Spark's Python workers to be THIS interpreter.
+
+    Without it Spark spawns whatever `python` the PATH resolves to. When that is a
+    different build than the driver — easy to hit here, since the runner is started
+    by absolute path from `.venv` while the PATH still points at the system Python —
+    the worker dies with a bare "Python worker exited unexpectedly (crashed)".
+
+    It only bites when a stage actually needs a worker, so a CSV-to-Parquet job runs
+    fine and the crash shows up the first time a job writes the `validations.report`
+    (built with `createDataFrame` from driver-side rows). That mismatch is a
+    configuration problem, not a pipeline problem, so it should never reach the user.
+    """
+    for var in ("PYSPARK_PYTHON", "PYSPARK_DRIVER_PYTHON"):
+        os.environ.setdefault(var, sys.executable)
+
+
 _bootstrap_sys_path()
+_pin_pyspark_python()
 
 
 # ------------------------------------------------------------------ models

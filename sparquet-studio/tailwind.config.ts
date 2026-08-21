@@ -113,6 +113,12 @@ export default {
           '70%': { boxShadow: '0 0 0 10px rgb(var(--brand-500) / 0)' },
           '100%': { boxShadow: '0 0 0 0 rgb(var(--brand-500) / 0)' },
         },
+        // Sweeps a highlight along a canvas node's status bar while it runs. The
+        // travel is wider than the container so the segment enters and leaves.
+        'status-sweep': {
+          '0%': { transform: 'translateX(-110%)' },
+          '100%': { transform: 'translateX(420%)' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 140ms ease-out',
@@ -120,6 +126,7 @@ export default {
         'slide-left': 'slide-left 160ms cubic-bezier(0.22, 1, 0.36, 1)',
         shimmer: 'shimmer 1.6s infinite',
         'pulse-ring': 'pulse-ring 1.6s ease-out infinite',
+        'status-sweep': 'status-sweep 1.5s ease-in-out infinite',
       },
     },
   },

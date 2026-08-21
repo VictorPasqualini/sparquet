@@ -443,7 +443,7 @@ describe('run step status', () => {
     editor.open(branchedJob())
 
     editor.setStepStatuses({ t1: 'pending', t2: 'pending' })
-    editor.setStepStatus('t1', 'running', 'filter')
+    editor.setStepStatus('t1', 'running')
     expect(useEditorStore.getState().stepStatus).toEqual({ t1: 'running', t2: 'pending' })
 
     editor.clearStepStatus()
@@ -452,6 +452,31 @@ describe('run step status', () => {
     editor.setStepStatus('t1', 'error')
     editor.close()
     expect(useEditorStore.getState().stepStatus).toEqual({})
+  })
+
+  it('keeps a step duration until the next run seeds its statuses', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    editor.setStepStatuses({ t1: 'pending', t2: 'pending' })
+    // Only the closing marker knows how long the step took, so `running` carries
+    // no duration and must not erase one measured earlier.
+    editor.setStepStatus('t1', 'running')
+    expect(useEditorStore.getState().stepDuration).toEqual({})
+
+    editor.setStepStatus('t1', 'success', 412)
+    expect(useEditorStore.getState().stepDuration).toEqual({ t1: 412 })
+
+    editor.setStepStatus('t1', 'running')
+    expect(useEditorStore.getState().stepDuration).toEqual({ t1: 412 })
+
+    // A new run seeds every node again: last run's timings go with it.
+    editor.setStepStatuses({ t1: 'pending' })
+    expect(useEditorStore.getState().stepDuration).toEqual({})
+
+    editor.setStepStatus('t1', 'success', 7)
+    editor.clearStepStatus()
+    expect(useEditorStore.getState().stepDuration).toEqual({})
   })
 })
 

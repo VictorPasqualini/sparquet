@@ -103,6 +103,17 @@ interface EditorState {
   running: boolean
   /** Live status of each node the current run has reached, keyed by node id. */
   stepStatus: Record<string, StepStatus>
+  /**
+   * Wall-clock ms each node's step took, keyed by node id — derived in the Run
+   * panel from the two log lines that bracket the step, so the framework never
+   * has to report a duration.
+   *
+   * It measures the gap between "started" and "finished", nothing more. Spark is
+   * lazy: a transformation only builds a plan, so it lands near 0 ms — the real
+   * time belongs to the read, to each validation rule (every rule is a Spark
+   * action) and to the writes. These numbers do not sum to the run's duration.
+   */
+  stepDuration: Record<string, number>
 
   /** The right-hand panel is a single tabbed surface; null means collapsed. */
   activePanel: PanelId | null
@@ -160,12 +171,15 @@ interface EditorState {
   setRun: (run: RunResult | null) => void
   setRunning: (running: boolean) => void
   /**
-   * Marks one node. `type` is the transformation type the runner reported; it is
-   * accepted so callers can forward the event as-is, but the node already knows
-   * its own type, so nothing is stored.
+   * Marks one node, optionally with the wall-clock ms its step took. The duration
+   * is only known on the closing marker, so `running` never carries one and an
+   * earlier measurement is kept rather than wiped.
    */
-  setStepStatus: (nodeId: string, status: StepStatus, type?: string) => void
-  /** Replaces the whole map — how a run start seeds every node to `pending`. */
+  setStepStatus: (nodeId: string, status: StepStatus, durationMs?: number) => void
+  /**
+   * Replaces the whole map — how a run start seeds every node to `pending`. Any
+   * durations from the previous run go with it: they belong to that run.
+   */
   setStepStatuses: (statuses: Record<string, StepStatus>) => void
   clearStepStatus: () => void
   /** Node ids behind the compiled `transformations`, in the runner's index order. */
@@ -356,6 +370,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     run: null,
     running: false,
     stepStatus: {},
+    stepDuration: {},
 
     activePanel: 'inspector',
     panelWidth: 400,
@@ -395,6 +410,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         run: null,
         running: false,
         stepStatus: {},
+        stepDuration: {},
         lastSavedAt: job.updatedAt,
       })
       get().lint()
@@ -428,6 +444,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         future: [],
         run: null,
         stepStatus: {},
+        stepDuration: {},
       })
     },
 
@@ -747,10 +764,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setRun: (run) => set({ run }),
     setRunning: (running) => set({ running }),
 
-    setStepStatus: (nodeId, status) =>
-      set((state) => ({ stepStatus: { ...state.stepStatus, [nodeId]: status } })),
-    setStepStatuses: (stepStatus) => set({ stepStatus }),
-    clearStepStatus: () => set({ stepStatus: {} }),
+    setStepStatus: (nodeId, status, durationMs) =>
+      set((state) => ({
+        stepStatus: { ...state.stepStatus, [nodeId]: status },
+        stepDuration:
+          durationMs === undefined
+            ? state.stepDuration
+            : { ...state.stepDuration, [nodeId]: durationMs },
+      })),
+    setStepStatuses: (stepStatus) => set({ stepStatus, stepDuration: {} }),
+    clearStepStatus: () => set({ stepStatus: {}, stepDuration: {} }),
     transformNodeIdsInOrder: () => mainChainTransformNodeIds(get()),
 
     togglePanel: (panel, open) =>
@@ -799,6 +822,35 @@ export function mainChainTransformNodeIds(state: StudioGraph): string[] {
   const prefix = longestCommonPrefix(middles, (a, b) => a.id === b.id)
   return sharedChainOf(prefix)
     .filter(isTransformNode)
+    .map((node) => node.id)
+}
+
+/**
+ * The validation rule nodes, in the order the compiler writes `validations.rules`.
+ *
+ * Same walk as `mainChainTransformNodeIds` on purpose: the runner reports a rule by
+ * its index into that array, so any divergence would light up the wrong box. Unlike
+ * transformations, each rule is a real Spark action, so these statuses track work
+ * actually being done rather than a plan being built.
+ */
+export function validationNodeIdsInOrder(state: StudioGraph): string[] {
+  const graph: StudioGraph = { nodes: state.nodes, edges: state.edges }
+  const middles: StudioNode[][] = []
+
+  for (const sink of mainSinksOf(graph)) {
+    const walk = chainToSink(graph, sink.id)
+    if (walk.problem) continue
+    const chain = walk.nodes.filter(isCompilable)
+    const head = chain[0]
+    if (!head || !isSourceNode(head)) continue
+    if (chain.slice(1).some(isSourceNode)) continue
+    middles.push(chain.slice(1, chain.length - 1))
+  }
+
+  if (middles.length === 0) return []
+  const prefix = longestCommonPrefix(middles, (a, b) => a.id === b.id)
+  return sharedChainOf(prefix)
+    .filter(isValidationNode)
     .map((node) => node.id)
 }
 
@@ -856,6 +908,32 @@ export function runtimeEndpointNodeIds(state: StudioGraph): {
   }
 
   return { sourceId, sinkIds }
+}
+
+/**
+ * The quality destinations, keyed by the ROLE they declare rather than by a
+ * position — which is exactly how the runner reports them (`scope:
+ * 'validation_sink'`, `role: 'report' | 'valid' | 'invalid'`).
+ *
+ * There is no index to map here and there never can be: these nodes take no
+ * connection, so they sit in no chain and have no order to count in. The
+ * framework writes them from the DataFrame every rule saw, one per role.
+ *
+ * Muted nodes are left out, like everywhere else — the compiler would not emit
+ * them, so no marker will ever arrive for them.
+ */
+export function validationSinkNodeIds(
+  state: StudioGraph,
+): Partial<Record<ValidationSinkRole, string>> {
+  const byRole: Partial<Record<ValidationSinkRole, string>> = {}
+  for (const node of state.nodes) {
+    if (isDisabled(node)) continue
+    const role = validationSinkRoleOf(node)
+    // First declaration wins: two boxes claiming one role is a lint error, and
+    // the compiler emits a single dataset either way.
+    if (role !== null && byRole[role] === undefined) byRole[role] = node.id
+  }
+  return byRole
 }
 
 /**

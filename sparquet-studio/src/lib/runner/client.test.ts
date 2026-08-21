@@ -1,19 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  createStepTimer,
   DEFAULT_RUNNER_URL,
   RunnerError,
   checkRunnerHealth,
   fetchCapabilities,
   isRunnerError,
   RUNNER_TOKEN_HEADER,
+  runJobStream,
   runPipelineStream,
   runJob,
   validateJob,
+  type JobStreamHandlers,
   type PipelineStreamHandlers,
+  type RunStepEvent,
 } from '@/lib/runner/client'
 import type { PipelineSpec } from '@/types/pipeline'
-import type { PipelineRunResult, PipelineStageResult, RunLogLine } from '@/types/studio'
+import type {
+  PipelineRunResult,
+  PipelineStageResult,
+  RunLogLine,
+  RunResult,
+} from '@/types/studio'
 
 const fetchMock = vi.fn()
 
@@ -158,8 +167,8 @@ describe('runJob', () => {
           {
             timestamp: '2026-08-13T14:03:11.482913+00:00',
             level: 'INFO',
-            message: 'Pipeline concluido',
-            context: { pipeline: 'demo', linhas_escritas: 118 },
+            message: 'Pipeline finished',
+            context: { pipeline: 'demo', rows_written: 118 },
           },
           { timestamp: 'not-a-date', level: 'WARNING', message: 'deferred', context: {} },
         ],
@@ -190,8 +199,8 @@ describe('runJob', () => {
     expect(result.logs[0]).toEqual({
       ts: Date.parse('2026-08-13T14:03:11.482913+00:00'),
       level: 'info',
-      message: 'Pipeline concluido',
-      context: { pipeline: 'demo', linhas_escritas: 118 },
+      message: 'Pipeline finished',
+      context: { pipeline: 'demo', rows_written: 118 },
     })
     expect(result.logs[1].level).toBe('warning')
     expect(Number.isNaN(result.logs[1].ts)).toBe(false)
@@ -250,6 +259,240 @@ describe('runJob', () => {
     expect((error as RunnerError).message).toBe(
       'Cannot import sparquet: No module named pyspark',
     )
+  })
+})
+
+describe('runJobStream', () => {
+  /**
+   * A pipeline log line exactly as the runner forwards it: the framework's
+   * structured record, `context` and all. `step: true` is what makes it a marker.
+   */
+  const stepFrame = (
+    timestamp: string,
+    message: string,
+    context: Record<string, unknown>,
+  ): string =>
+    frame('log', {
+      timestamp,
+      level: 'INFO',
+      message,
+      context: { pipeline: 'demo', step: true, ...context },
+    })
+
+  /** Collects every callback so a test can assert the whole conversation. */
+  function recorder() {
+    const steps: RunStepEvent[] = []
+    const logs: RunLogLine[] = []
+    let result: RunResult | undefined
+
+    const handlers: JobStreamHandlers = {
+      onLog: (line) => logs.push(line),
+      onStep: (step) => steps.push(step),
+      onResult: (value) => {
+        result = value
+      },
+    }
+
+    return {
+      handlers,
+      steps,
+      logs,
+      get result() {
+        return result
+      },
+    }
+  }
+
+  const at = (seconds: number, ms = 0): string =>
+    `2026-08-20T10:00:${String(seconds).padStart(2, '0')}.${String(ms).padStart(3, '0')}000+00:00`
+
+  it('maps each marker onto its lane, and the quality datasets onto their role', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        frame('start', { pipeline_name: 'demo' }),
+        stepFrame(at(0), 'Input started', { scope: 'input', index: 0, total: 1 }),
+        stepFrame(at(1, 500), 'Input read', { scope: 'input', index: 0, total: 1, rows: 12 }),
+        stepFrame(at(2), 'Transformation started', { index: 0, total: 2, type: 'filter' }),
+        stepFrame(at(2, 3), 'Transformation applied', { index: 0, total: 2, type: 'filter' }),
+        // A guarded transformation reports once, and never opens a pair.
+        stepFrame(at(2, 4), 'Transformation skipped', { index: 1, total: 2, type: 'join' }),
+        stepFrame(at(3), 'Validation started', {
+          scope: 'validation',
+          index: 0,
+          total: 1,
+          rule: 'not_null',
+        }),
+        stepFrame(at(3, 800), 'Validation finished', {
+          scope: 'validation',
+          index: 0,
+          total: 1,
+          rule: 'not_null',
+          passed: false,
+        }),
+        // The three datasets the validations block writes: keyed by role, with no
+        // index at all, because on the canvas they sit in no chain.
+        stepFrame(at(4), 'Validation output started', {
+          scope: 'validation_sink',
+          role: 'report',
+        }),
+        stepFrame(at(4, 600), 'Validation output written', {
+          scope: 'validation_sink',
+          role: 'report',
+          rows: 1,
+        }),
+        stepFrame(at(5), 'Validation output started', {
+          scope: 'validation_sink',
+          role: 'invalid',
+        }),
+        stepFrame(at(5, 250), 'Validation output written', {
+          scope: 'validation_sink',
+          role: 'invalid',
+        }),
+        stepFrame(at(6), 'Output started', { scope: 'output', index: 0, total: 1 }),
+        stepFrame(at(7, 100), 'Output written', { scope: 'output', index: 0, total: 1 }),
+        frame('result', { success: true, rows_read: 12, rows_written: 12, logs: [] }),
+      ]),
+    )
+
+    const collected = recorder()
+    await runJobStream(DEFAULT_RUNNER_URL, { pipeline: PIPELINE }, collected.handlers)
+
+    expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/run/stream`)
+    expect(collected.result?.status).toBe('success')
+    expect(collected.steps.map((step) => [step.scope, step.index, step.role, step.status])).toEqual(
+      [
+        ['input', 0, undefined, 'running'],
+        ['input', 0, undefined, 'success'],
+        ['transformation', 0, undefined, 'running'],
+        ['transformation', 0, undefined, 'success'],
+        ['transformation', 1, undefined, 'skipped'],
+        ['validation', 0, undefined, 'running'],
+        ['validation', 0, undefined, 'success'],
+        ['validation_sink', undefined, 'report', 'running'],
+        ['validation_sink', undefined, 'report', 'success'],
+        ['validation_sink', undefined, 'invalid', 'running'],
+        ['validation_sink', undefined, 'invalid', 'success'],
+        ['output', 0, undefined, 'running'],
+        ['output', 0, undefined, 'success'],
+      ],
+    )
+    // The marker's own timestamp travels with it: that pair is the only duration
+    // source, since the framework reports none.
+    expect(collected.steps[0]?.ts).toBe(Date.parse(at(0)))
+    expect(collected.steps[1]?.ts).toBe(Date.parse(at(1, 500)))
+    expect(collected.steps[2]?.type).toBe('filter')
+    // Markers are ordinary log lines too, so the log windows still see them all.
+    expect(collected.logs).toHaveLength(13)
+  })
+
+  it('ignores markers no node can be pinned to, and lines that are not markers', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        // Neither an index nor a role: nothing to look up.
+        stepFrame(at(0), 'Output started', { scope: 'output' }),
+        // A marker message the client does not know maps to no status.
+        stepFrame(at(1), 'Output rewritten sideways', { scope: 'output', index: 0 }),
+        // An index that is not a number is not an index.
+        stepFrame(at(2), 'Output started', { scope: 'output', index: '0' }),
+        // A plain log line: same message, but no `step` flag.
+        frame('log', {
+          timestamp: at(3),
+          level: 'INFO',
+          message: 'Output started',
+          context: { pipeline: 'demo', scope: 'output', index: 0 },
+        }),
+        frame('result', { success: true, logs: [] }),
+      ]),
+    )
+
+    const collected = recorder()
+    await runJobStream(DEFAULT_RUNNER_URL, { pipeline: PIPELINE }, collected.handlers)
+
+    expect(collected.steps).toEqual([])
+    expect(collected.logs).toHaveLength(4)
+  })
+
+  it('derives a duration per step from the two markers that bracket it', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        stepFrame(at(0), 'Input started', { scope: 'input', index: 0 }),
+        stepFrame(at(1, 500), 'Input read', { scope: 'input', index: 0 }),
+        stepFrame(at(2), 'Transformation started', { index: 0, type: 'filter' }),
+        stepFrame(at(2, 2), 'Transformation applied', { index: 0, type: 'filter' }),
+        stepFrame(at(3), 'Transformation skipped', { index: 1, type: 'join' }),
+        stepFrame(at(4), 'Validation output started', {
+          scope: 'validation_sink',
+          role: 'invalid',
+        }),
+        stepFrame(at(4, 250), 'Validation output written', {
+          scope: 'validation_sink',
+          role: 'invalid',
+        }),
+        frame('result', { success: true, logs: [] }),
+      ]),
+    )
+
+    // The same keying the Run panel uses: the lane plus its index, or the role.
+    const keyOf = (step: RunStepEvent): string =>
+      step.role !== undefined ? `${step.scope}:${step.role}` : `${step.scope}:${step.index}`
+
+    const timer = createStepTimer()
+    const durations: Record<string, number | undefined> = {}
+    const collected = recorder()
+    const handlers: JobStreamHandlers = {
+      ...collected.handlers,
+      onStep: (step) => {
+        const key = keyOf(step)
+        if (step.status === 'running') timer.start(key, step.ts)
+        else durations[key] = timer.finish(key, step.ts)
+      },
+    }
+
+    await runJobStream(DEFAULT_RUNNER_URL, { pipeline: PIPELINE }, handlers)
+
+    expect(durations).toEqual({
+      // The read is a real Spark action, so it costs real time.
+      'input:0': 1500,
+      // A lazy transformation only builds the plan: ~0 ms is the correct answer.
+      'transformation:0': 2,
+      // Skipped: one marker, no pair, so there is nothing to measure.
+      'transformation:1': undefined,
+      'validation_sink:invalid': 250,
+    })
+  })
+})
+
+describe('createStepTimer', () => {
+  it('measures the gap between a start and a finish', () => {
+    const timer = createStepTimer()
+    timer.start('a', 1_000)
+    expect(timer.finish('a', 1_420)).toBe(420)
+  })
+
+  it('reports nothing for a step that never started', () => {
+    const timer = createStepTimer()
+    expect(timer.finish('a', 1_000)).toBeUndefined()
+  })
+
+  it('times a step once: a second finish has no pair left', () => {
+    const timer = createStepTimer()
+    timer.start('a', 1_000)
+    expect(timer.finish('a', 1_100)).toBe(100)
+    expect(timer.finish('a', 1_200)).toBeUndefined()
+  })
+
+  it('never reports a negative duration', () => {
+    const timer = createStepTimer()
+    timer.start('a', 2_000)
+    // A clock that steps backwards between two lines must not read as -500 ms.
+    expect(timer.finish('a', 1_500)).toBe(0)
+  })
+
+  it('forgets everything on reset, so one run never times another', () => {
+    const timer = createStepTimer()
+    timer.start('a', 1_000)
+    timer.reset()
+    expect(timer.finish('a', 1_600)).toBeUndefined()
   })
 })
 
@@ -317,8 +560,8 @@ describe('runPipelineStream', () => {
       frame('log', {
         timestamp: '2026-08-17T10:00:00.000000+00:00',
         level: 'INFO',
-        message: 'Leitura concluida',
-        context: { linhas: 100 },
+        message: 'Input read',
+        context: { rows: 100 },
         source: 'pipeline',
         stage_id: 's1',
       }),
@@ -374,9 +617,9 @@ describe('runPipelineStream', () => {
       {
         ts: Date.parse('2026-08-17T10:00:00.000000+00:00'),
         level: 'info',
-        message: 'Leitura concluida',
+        message: 'Input read',
         source: 'pipeline',
-        context: { linhas: 100 },
+        context: { rows: 100 },
         stageId: 's1',
       },
     ])

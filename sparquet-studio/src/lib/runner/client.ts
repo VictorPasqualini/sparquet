@@ -293,12 +293,40 @@ export async function runJob(
 
 /* ---------------------------------------------------------------- streaming */
 
+/**
+ * One step marker from the runner, already interpreted.
+ *
+ * A step is addressed in ONE of two ways, never both:
+ *
+ * - by `index` inside its `scope`'s lane — `input`, `transformation`, `output`,
+ *   `validation`: the runner counts these in the order the compiler emitted them;
+ * - by `role` — the datasets the `validations` block writes (`report`, `valid`,
+ *   `invalid`). Those have no order to count in: on the canvas they are standalone
+ *   declarations with no incoming link, so an index would point at nothing.
+ *
+ * `ts` is the marker's own timestamp, taken from the log line. Two markers bracket
+ * every step, so the pair is all a caller needs to time it — see `createStepTimer`.
+ */
+export interface RunStepEvent {
+  status: StepStatus
+  /** `input` | `transformation` | `output` | `validation` | `validation_sink`. */
+  scope: string
+  /** 0-based position inside the scope's lane; absent on a role-keyed step. */
+  index?: number
+  /** Quality dataset this marker belongs to; absent on an index-keyed step. */
+  role?: string
+  /** Transformation / rule type, when the runner named one. */
+  type?: string
+  /** Epoch ms of the log line that carried the marker. */
+  ts: number
+}
+
 export interface JobStreamHandlers {
   /** The runner accepted the run and started the worker thread. */
   onStart?: (pipelineName?: string) => void
   onLog?: (line: RunLogLine) => void
-  /** Progress of a single transformation, by its 0-based index in the pipeline. */
-  onStep?: (index: number, status: StepStatus, type?: string, scope?: string) => void
+  /** Progress of one step of the pipeline. */
+  onStep?: (step: RunStepEvent) => void
   onResult: (result: RunResult) => void
   /** The runner emitted an `error` event (the stream still ends normally). */
   onError?: (message: string) => void
@@ -311,13 +339,53 @@ export interface JobStreamHandlers {
 const STEP_STATUS_BY_MESSAGE: Record<string, StepStatus> = {
   'Transformation started': 'running',
   'Transformation applied': 'success',
-  'Transformacao pulada': 'skipped',
+  'Transformation skipped': 'skipped',
   // The read and the writes are the steps that really touch data, so they carry
   // their own markers (scope 'input' / 'output') alongside the transformations.
   'Input started': 'running',
-  'Leitura concluida': 'success',
+  'Input read': 'success',
   'Output started': 'running',
   'Output written': 'success',
+  // Validation rules are real actions, not lazy plan-building, so these two
+  // genuinely bracket work being done.
+  'Validation started': 'running',
+  'Validation finished': 'success',
+  // The datasets the `validations` block writes: the quality report and the
+  // valid/invalid quarantine. Keyed by `context.role`, not by an index.
+  'Validation output started': 'running',
+  'Validation output written': 'success',
+}
+
+/**
+ * Times steps from the marker pair the runner already emits, so no framework
+ * field has to carry a duration.
+ *
+ * What the number means: wall-clock between a step's `started` and `finished` log
+ * lines. Spark is lazy, so a *transformation* only builds a plan and reads ~0 ms —
+ * correct, not a bug. Real time lands on the read, on every validation rule (each
+ * one is a Spark action) and on the writes. The per-step numbers therefore do NOT
+ * add up to the run's duration, and must never be presented as if they did.
+ */
+export function createStepTimer(): {
+  start: (key: string, ts: number) => void
+  finish: (key: string, ts: number) => number | undefined
+  reset: () => void
+} {
+  const startedAt = new Map<string, number>()
+  return {
+    start: (key, ts) => {
+      startedAt.set(key, ts)
+    },
+    finish: (key, ts) => {
+      const started = startedAt.get(key)
+      if (started === undefined) return undefined
+      startedAt.delete(key)
+      // A clock that ticks backwards between two lines (or a coarse timestamp)
+      // must not surface as a negative duration.
+      return Math.max(0, ts - started)
+    },
+    reset: () => startedAt.clear(),
+  }
 }
 
 interface SseFrame {
@@ -353,12 +421,26 @@ function dispatchStep(line: RunLogLine, handlers: JobStreamHandlers): void {
   if (!handlers.onStep || !context || context.step !== true) return
   const status = STEP_STATUS_BY_MESSAGE[line.message]
   if (!status) return
-  const index = context.index
-  if (typeof index !== 'number' || !Number.isFinite(index)) return
-  // `scope` tells the panel which lane the index counts in: the main
-  // transformation chain (default), the source node, or the outputs.
+
+  // `scope` tells the panel which lane the marker belongs to: the main
+  // transformation chain (default), the source node, the outputs, the rules, or
+  // the datasets the validations block writes.
   const scope = optionalString(context.scope) ?? 'transformation'
-  handlers.onStep(index, status, optionalString(context.type), scope)
+  const role = optionalString(context.role)
+  const rawIndex = context.index
+  const index =
+    typeof rawIndex === 'number' && Number.isFinite(rawIndex) ? rawIndex : undefined
+  // A marker addressed by neither an index nor a role points at no node at all.
+  if (index === undefined && role === undefined) return
+
+  handlers.onStep({
+    status,
+    scope,
+    ...(index !== undefined ? { index } : {}),
+    ...(role !== undefined ? { role } : {}),
+    ...(optionalString(context.type) ? { type: optionalString(context.type) } : {}),
+    ts: line.ts,
+  })
 }
 
 function dispatchSseFrame(frame: SseFrame, handlers: JobStreamHandlers): void {

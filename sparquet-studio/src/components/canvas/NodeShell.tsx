@@ -22,6 +22,7 @@ import type { LucideIcon } from 'lucide-react'
 
 import { IconButton, Tooltip } from '@/components/ui'
 import { cn } from '@/lib/utils/cn'
+import { formatDuration } from '@/lib/utils/format'
 import type { NodeAccent } from '@/catalog'
 import { nodeOrdinals, useEditorStore } from '@/store/editor'
 import { HANDLE, type StepStatus, type ValidationIssue } from '@/types/studio'
@@ -146,8 +147,20 @@ export function NodeShell({
   const IssueIcon = errorCount > 0 ? CircleX : TriangleAlert
 
   const ordinal = useNodeOrdinal(nodeId)
-  const step = stepLook(useNodeStepStatus(nodeId))
+  const stepStatus = useNodeStepStatus(nodeId)
+  const step = stepLook(stepStatus)
   const StepIcon = step?.icon
+  const stepMs = useNodeStepDuration(nodeId)
+  // No time while it runs: only the closing marker fixes the end of the step.
+  const stepDurationLabel =
+    step && stepStatus !== 'running' && stepMs !== undefined ? formatDuration(stepMs) : null
+  const stepTooltip = step
+    ? stepDurationLabel
+      ? `${step.label} · ${stepDurationLabel} of wall clock between this step's start and end. Spark is lazy, so a transformation only builds the plan and reads near zero — the time lands on the read, the rules and the writes.`
+      : step.label
+    : null
+  /** Queued: the run has this node in its plan but has not arrived yet. */
+  const waiting = stepStatus === 'pending'
 
   const connectSource = useConnectSource()
   const isConnectSource = connectSource === nodeId
@@ -181,11 +194,15 @@ export function NodeShell({
         selected ? 'border-brand-500 ring-2 ring-brand-500/40' : 'border-line',
         !selected && errorCount > 0 && 'ring-2 ring-state-danger/45',
         !selected && errorCount === 0 && warningCount > 0 && 'ring-2 ring-state-warning/40',
-        // Ring precedence: selection and issues first — a broken node stays flagged
-        // even mid-run — so the run ring only paints a node nothing else claims.
-        // The status badge always shows, so no run state is ever lost.
-        !selected && flagged === 0 && step && step.ring,
+        // Ring AND border precedence: selection and issues first — a broken node
+        // stays flagged even mid-run — so the run status only paints a node nothing
+        // else claims. The status bar and the status band below ignore this rule and
+        // always show, so no run state is ever lost on a node that also has issues.
+        !selected && flagged === 0 && step && cn(step.ring, step.border),
         isConnectSource && 'ring-2 ring-brand-500',
+        // Not reached yet: dimmed rather than badged, so a run in flight reads as a
+        // bright wavefront crossing a quiet graph. Muted keeps its own dimming.
+        !disabled && waiting && 'opacity-60',
         disabled && 'border-dashed opacity-55',
       )}
     >
@@ -286,6 +303,23 @@ export function NodeShell({
         aria-hidden
       />
 
+      {/* Status bar along the top edge — the one channel still legible when the
+          whole graph is zoomed out to fit and no label can be read. It starts
+          after the accent stripe so the two never fight over the corner. */}
+      {step && (
+        <span
+          className={cn(
+            'pointer-events-none absolute left-1 right-0 top-0 overflow-hidden rounded-tr-xl',
+            step.bar,
+          )}
+          aria-hidden
+        >
+          {step.live && (
+            <span className="block h-full w-1/4 animate-status-sweep bg-state-info motion-reduce:hidden" />
+          )}
+        </span>
+      )}
+
       <div className="flex items-start gap-2.5 py-2.5 pl-4 pr-3">
         <span
           className={cn(
@@ -319,20 +353,6 @@ export function NodeShell({
                   className="h-1.5 w-1.5 rounded-full bg-content-subtle"
                   title="Muted — left out of the compiled JSON"
                 />
-              )}
-              {step && StepIcon && (
-                <span
-                  role="img"
-                  aria-label={step.label}
-                  title={step.label}
-                  className={cn(
-                    'inline-flex h-4 w-4 items-center justify-center rounded-full',
-                    step.chip,
-                    step.spin,
-                  )}
-                >
-                  <StepIcon className="h-3 w-3" aria-hidden />
-                </span>
               )}
               {flagged > 0 && (
                 <Tooltip
@@ -388,6 +408,29 @@ export function NodeShell({
         </div>
       )}
 
+      {/* The status in words, with its icon and the time it took. role="img" plus an
+          aria-label is what makes the band announce as one thing; the pieces inside
+          are decorative once the label carries them. */}
+      {step && StepIcon && (
+        <div
+          role="img"
+          aria-label={stepTooltip ?? step.label}
+          title={stepTooltip ?? step.label}
+          className={cn(
+            'flex items-center gap-1.5 rounded-b-[11px] border-t px-3 py-1 text-2xs font-semibold',
+            step.footer,
+          )}
+        >
+          <StepIcon className={cn('h-3 w-3 shrink-0', step.spin)} aria-hidden />
+          <span className="uppercase tracking-wide">{step.short}</span>
+          {stepDurationLabel && (
+            <span className="ml-auto font-medium tabular-nums opacity-80">
+              {stepDurationLabel}
+            </span>
+          )}
+        </div>
+      )}
+
       {inputs !== 'none' && (
         <Handle
           type="target"
@@ -427,6 +470,19 @@ export function useNodeIssues(nodeId: string): ValidationIssue[] {
  */
 export function useNodeStepStatus(nodeId: string): StepStatus | undefined {
   return useEditorStore((state) => state.stepStatus[nodeId])
+}
+
+/**
+ * Wall-clock ms this node's step took, or `undefined` before it finished one.
+ *
+ * Derived by the Run panel from the two log lines that bracket the step, so no
+ * framework field has to carry it. It is wall clock and nothing more: a lazy
+ * transformation reads near 0 ms because building a plan really is that cheap.
+ * The time shows up on the read, on every validation rule (each one is a Spark
+ * action) and on the writes — the steps that actually touch data.
+ */
+export function useNodeStepDuration(nodeId: string): number | undefined {
+  return useEditorStore((state) => state.stepDuration[nodeId])
 }
 
 /**

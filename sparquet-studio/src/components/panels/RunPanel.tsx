@@ -36,8 +36,11 @@ import {
   Toggle,
   Tooltip,
 } from '@/components/ui'
+import { getTransformation, getValidationSink, getValidator } from '@/catalog'
+import { stepLook } from '@/components/canvas/stepLook'
 import {
   checkRunnerHealth,
+  createStepTimer,
   DEFAULT_RUNNER_URL,
   isRunnerError,
   runJobStream,
@@ -45,12 +48,28 @@ import {
   RUNNER_START_COMMAND,
   validateJob,
   type RunnerHealth,
+  type RunStepEvent,
 } from '@/lib/runner/client'
 import { cn } from '@/lib/utils/cn'
 import { formatClockTime, formatCount, formatDuration } from '@/lib/utils/format'
-import { runtimeEndpointNodeIds, useEditorStore } from '@/store/editor'
+import {
+  nodeOrdinals,
+  runtimeEndpointNodeIds,
+  useEditorStore,
+  validationNodeIdsInOrder,
+  validationSinkNodeIds,
+} from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
-import type { ParamDefinition, RunLogLine, RunResult, RunStatus } from '@/types/studio'
+import { isValidationSinkRole } from '@/types/studio'
+import type {
+  ParamDefinition,
+  RunLogLine,
+  RunResult,
+  RunStatus,
+  StepStatus,
+  StudioNode,
+  ValidationSinkRole,
+} from '@/types/studio'
 
 import { RunResultTable } from './RunResultTable'
 
@@ -199,23 +218,46 @@ export function RunPanel() {
         // array; this is the same order the compiler emits, so index → node id.
         const state = useEditorStore.getState()
         const transformNodeIds = state.transformNodeIdsInOrder()
+        const validationNodeIds = validationNodeIdsInOrder(state)
         const { sourceId, sinkIds } = runtimeEndpointNodeIds(state)
+        // The datasets the `validations` block writes are only written when the job
+        // compiles that block at all — which needs at least one rule on the chain.
+        const dqSinkIds: Partial<Record<ValidationSinkRole, string>> =
+          validationNodeIds.length > 0 ? validationSinkNodeIds(state) : {}
         setStepStatuses(
           Object.fromEntries(
-            [...(sourceId ? [sourceId] : []), ...transformNodeIds, ...sinkIds].map((id) => [
-              id,
-              'pending' as const,
-            ]),
+            [
+              ...(sourceId ? [sourceId] : []),
+              ...transformNodeIds,
+              ...validationNodeIds,
+              ...Object.values(dqSinkIds),
+              ...sinkIds,
+            ].map((id) => [id, 'pending' as const]),
           ),
         )
 
-        // Each scope counts in its own lane, so an index means different things.
-        const nodeForStep = (index: number, scope?: string): string | undefined =>
-          scope === 'input'
-            ? (sourceId ?? undefined)
-            : scope === 'output'
-              ? sinkIds[index]
-              : transformNodeIds[index]
+        /**
+         * Which box a marker belongs to. Each index-keyed scope counts in its own
+         * lane, so the same index means a different node in each of them; the
+         * quality datasets are keyed by ROLE instead, because they sit in no lane
+         * — they are standalone declarations with no incoming link, so there is
+         * no position for an index to refer to.
+         */
+        const nodeForStep = (step: RunStepEvent): string | undefined => {
+          if (step.scope === 'validation_sink') {
+            return isValidationSinkRole(step.role) ? dqSinkIds[step.role] : undefined
+          }
+          if (step.index === undefined) return undefined
+          if (step.scope === 'input') return sourceId ?? undefined
+          if (step.scope === 'output') return sinkIds[step.index]
+          if (step.scope === 'validation') return validationNodeIds[step.index]
+          return transformNodeIds[step.index]
+        }
+
+        // Two timestamped log lines bracket every step, so the panel times each one
+        // itself and the framework reports no duration at all. What the number does
+        // and does not mean is spelled out on `createStepTimer`.
+        const timer = createStepTimer()
 
         await runJobStream(
           runnerUrl,
@@ -229,12 +271,19 @@ export function RunPanel() {
                 logs: [...streamed],
               })
             },
-            onStep: (index, status, type, scope) => {
-              const nodeId = nodeForStep(index, scope)
-              if (nodeId) {
-                setStepStatus(nodeId, status, type)
-                lastStarted = status === 'running' ? nodeId : null
+            onStep: (event) => {
+              const nodeId = nodeForStep(event)
+              if (!nodeId) return
+              if (event.status === 'running') {
+                timer.start(nodeId, event.ts)
+                setStepStatus(nodeId, 'running')
+                lastStarted = nodeId
+                return
               }
+              // Closing marker: the pair is complete, so the step can be timed. A
+              // skipped step never opened one and is left without a duration.
+              setStepStatus(nodeId, event.status, timer.finish(nodeId, event.ts))
+              lastStarted = null
             },
             onResult: (result) => {
               settled = result
@@ -872,6 +921,8 @@ function RunReport({ run, mode }: { run: RunResult; mode: RunMode }) {
         </section>
       )}
 
+      {showMetrics && <StepTimings />}
+
       {run.validations && run.validations.length > 0 && (
         <section className="space-y-2">
           <SectionTitle>Validations</SectionTitle>
@@ -928,6 +979,121 @@ function RunReport({ run, mode }: { run: RunResult; mode: RunMode }) {
 
       {run.logs.length > 0 && <LogStream logs={run.logs} />}
     </div>
+  )
+}
+
+/* -------------------------------------------------------------- step times */
+
+/** How a step is named in the timing list — the box's own label, or its type. */
+function stepLabel(node: StudioNode): string {
+  const data = node.data
+  switch (data.kind) {
+    case 'source':
+      return data.label ?? `read ${data.format || 'source'}`
+    case 'transform':
+      return data.label ?? getTransformation(data.transform)?.label ?? data.transform
+    case 'validation':
+      return data.label ?? getValidator(data.validator)?.label ?? data.validator
+    case 'sink':
+      return data.dqRole
+        ? (data.label ?? getValidationSink(data.dqRole)?.label ?? data.dqRole)
+        : (data.label ?? `write ${data.format || 'output'}`)
+    default:
+      return data.label ?? data.kind
+  }
+}
+
+/**
+ * How long each step took, in execution order, once the run has settled.
+ *
+ * The durations are DERIVED: the panel subtracts the timestamps of the two log
+ * lines that bracket each step (see `createStepTimer`). They are wall clock per
+ * step and nothing else — deliberately not totalled, because they do not add up
+ * to the run's duration and pretending otherwise would be a lie: Spark is lazy,
+ * so a transformation only builds a plan and reads near zero.
+ */
+function StepTimings() {
+  const nodes = useEditorStore((state) => state.nodes)
+  const edges = useEditorStore((state) => state.edges)
+  const stepStatus = useEditorStore((state) => state.stepStatus)
+  const stepDuration = useEditorStore((state) => state.stepDuration)
+
+  const rows = useMemo(() => {
+    const ordinals = nodeOrdinals({ nodes, edges })
+    // A node with no ordinal still ran (a quality dataset in a job with no rule on
+    // the shared chain, say): keep it, at the end, rather than dropping the row.
+    const last = Number.MAX_SAFE_INTEGER
+    return nodes
+      .filter((node) => stepStatus[node.id] !== undefined)
+      .map((node) => ({
+        id: node.id,
+        ordinal: ordinals[node.id],
+        label: stepLabel(node),
+        status: stepStatus[node.id],
+        durationMs: stepDuration[node.id],
+      }))
+      .sort((a, b) => (a.ordinal ?? last) - (b.ordinal ?? last))
+  }, [nodes, edges, stepStatus, stepDuration])
+
+  if (rows.length === 0) return null
+
+  return (
+    <section className="space-y-2">
+      <SectionTitle>Step timings</SectionTitle>
+      <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface">
+        {rows.map((row) => (
+          <StepTimingRow key={row.id} {...row} />
+        ))}
+      </ul>
+      <p className="text-2xs leading-relaxed text-content-subtle">
+        Wall clock measured between each step&apos;s start and end log line. Spark is lazy,
+        so a transformation only builds the plan and reads near zero — the time lands on
+        the read, on each validation rule (every rule is a Spark action) and on the writes.
+        The rows are per step and do not add up to the run duration.
+      </p>
+    </section>
+  )
+}
+
+function StepTimingRow({
+  ordinal,
+  label,
+  status,
+  durationMs,
+}: {
+  ordinal: number | undefined
+  label: string
+  status: StepStatus | undefined
+  durationMs: number | undefined
+}) {
+  const look = stepLook(status)
+  const Icon = look?.icon ?? Clock3
+  const waiting = status === undefined || status === 'pending'
+  const statusLabel = waiting ? 'Never reached by the run' : look!.label
+
+  return (
+    <li className="flex items-center gap-2 px-2.5 py-1.5">
+      <span
+        role="img"
+        aria-label={statusLabel}
+        title={statusLabel}
+        className={cn(
+          'inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full',
+          look?.chip ?? 'bg-surface-sunken text-content-subtle',
+        )}
+      >
+        <Icon className={cn('h-3 w-3', look?.spin)} aria-hidden />
+      </span>
+      <span className="w-4 shrink-0 text-right text-2xs tabular-nums text-content-subtle">
+        {ordinal ?? '–'}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-xs text-content" title={label}>
+        {label}
+      </span>
+      <span className="shrink-0 text-2xs tabular-nums text-content-muted">
+        {durationMs === undefined ? '—' : formatDuration(durationMs)}
+      </span>
+    </li>
   )
 }
 
