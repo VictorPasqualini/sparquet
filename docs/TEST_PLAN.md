@@ -61,7 +61,7 @@ with the same two layers: `tests/test_cola_lib.py` (25 pure) and
 |---|---:|---:|
 | Readers | 27 | 14 (option building only) |
 | Writers | 26 | 14 (option building only) |
-| Transformations | 20 | **0** |
+| Transformations | 19 | **0** |
 | Validation rule types | 21 | 6 against real data |
 | Pipeline orchestration | — | **0** |
 | Studio | — | 351 tests + 19 smoke checks |
@@ -71,7 +71,7 @@ Two findings worth stating plainly, because they are the reason this document ex
 1. **No transformation has a behavioral test.** `tests/test_examples.py` asserts that
    every `type` in the shipped examples is a *known* type — nothing asserts that
    `struct` nests a dot-path, that `group_by` applies a pivot, or that `checkpoint`
-   truncates the lineage. Twenty transformations, zero assertions on the DataFrame
+   truncates the lineage. Nineteen transformations, zero assertions on the DataFrame
    that comes out.
 2. **Fifteen metric rules have never run against a DataFrame.** `avg`, `min`, `max`,
    `sum`, `stddev`, `distinct_count`, `duplicate_*`, `missing_*`, `invalid_*` and
@@ -139,7 +139,7 @@ must stay a second long and offline.
 
 ## 4. Transformations
 
-None of the twenty has a behavioral test. The unit to test is small and pure enough
+None of the nineteen has a behavioral test. The unit to test is small and pure enough
 that one Spark session serves the whole file: build a DataFrame with
 `createDataFrame`, run the transformation through `TransformationEngine`, assert on
 `collect()` and on `df.columns`.
