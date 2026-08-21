@@ -55,7 +55,15 @@ function wash(fg: Rgb, bg: Rgb, alpha: number): Rgb {
   ]
 }
 
-const SURFACES = ['canvas', 'surface', 'surface-raised', 'surface-sunken', 'surface-overlay']
+const SURFACES = [
+  'canvas',
+  'surface',
+  'surface-raised',
+  'surface-sunken',
+  'surface-overlay',
+  'rail',
+  'rail-sunken',
+]
 const FOREGROUNDS = ['content', 'content-muted', 'content-subtle']
 const STATES = ['success', 'warning', 'danger', 'info']
 
@@ -86,8 +94,8 @@ describe.each(THEMES)('%s theme', (_name, tokens) => {
     expect(contrast(tokens['content-inverted'], tokens.success)).toBeGreaterThanOrEqual(4.5)
   })
 
-  it('puts black on the brand button', () => {
-    expect(contrast([0, 0, 0], tokens['brand-500'])).toBeGreaterThanOrEqual(4.5)
+  it('puts white on the brand button', () => {
+    expect(contrast([255, 255, 255], tokens['brand-500'])).toBeGreaterThanOrEqual(4.5)
   })
 })
 

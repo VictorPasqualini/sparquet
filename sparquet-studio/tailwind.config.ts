@@ -3,7 +3,8 @@ import type { Config } from 'tailwindcss'
 /**
  * Sparquet Studio design system.
  *
- * Brand: amber/yellow on near-black (dark) or on white (light).
+ * Brand: the official Sparquet blue (#004FA3) on deep navy (dark) or on
+ * white (light), with the identity's gold as a third accent.
  * Every color is a CSS variable so both themes share one token set —
  * see src/index.css for the concrete values.
  */
@@ -25,7 +26,12 @@ export default {
           800: 'rgb(var(--brand-800) / <alpha-value>)',
           900: 'rgb(var(--brand-900) / <alpha-value>)',
         },
+        gold: 'rgb(var(--gold) / <alpha-value>)',
         canvas: 'rgb(var(--canvas) / <alpha-value>)',
+        rail: {
+          DEFAULT: 'rgb(var(--rail) / <alpha-value>)',
+          sunken: 'rgb(var(--rail-sunken) / <alpha-value>)',
+        },
         surface: {
           DEFAULT: 'rgb(var(--surface) / <alpha-value>)',
           raised: 'rgb(var(--surface-raised) / <alpha-value>)',

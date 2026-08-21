@@ -2,6 +2,8 @@ import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { createHashRouter, RouterProvider } from 'react-router-dom'
 import { Toaster } from 'sonner'
 
+import logoMark from '@/assets/logo.png'
+
 import { AppShell } from '@/components/layout/AppShell'
 import { Spinner, TooltipProvider } from '@/components/ui'
 import { seedIfEmpty } from '@/lib/storage/seed'
@@ -97,11 +99,7 @@ export default function App() {
 function BootScreen() {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 bg-canvas">
-      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-500 text-black">
-        <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden>
-          <path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" />
-        </svg>
-      </div>
+      <img src={logoMark} alt="" width={48} height={48} />
       <p className="text-xs text-content-subtle">Loading Sparquet Studio…</p>
     </div>
   )

@@ -57,7 +57,7 @@ const DEFAULT_CANVAS: CanvasPreferences = {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
-      theme: 'dark',
+      theme: 'light',
       ai: DEFAULT_AI_SETTINGS,
       persistApiKey: false,
       runnerUrl: 'http://127.0.0.1:8787',
