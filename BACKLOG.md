@@ -305,7 +305,7 @@ As duas lacunas que pesam, e por que pesam:
       verde hoje. Um arquivo local-Spark com uma métrica de cada família sobre um CSV
       fixo fecha isso.
 - [ ] **Nenhuma transformação tem teste de comportamento** — o `test_examples.py`
-      confere que o `type` existe, não o que sai do DataFrame. São 20 transformações;
+      confere que o `type` existe, não o que sai do DataFrame. São 19 transformações;
       as de maior risco são `select` (expressão com alias), `with_column` (mapa em
       ordem), `struct` (dot-path aninhando), `join` (`on` como SQL, `broadcast`,
       `with_transformations`), `group_by` (pivot), `collect` + `{{var}}` (lista vazia →
