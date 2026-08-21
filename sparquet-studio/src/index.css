@@ -36,9 +36,8 @@
     --surface-overlay: 255 255 255;
 
     /*
-     * The sidebar is the one surface that carries the brand navy in dark theme;
-     * everything else stays neutral so a canvas full of coloured nodes has a
-     * quiet background. In light theme the rail is just the surface again.
+     * The sidebar gets its own tokens so it can differ from the cards without
+     * every panel following along: it reads as chrome, not as content.
      */
     --rail: 255 255 255;
     --rail-sunken: 244 245 247;
@@ -80,8 +79,9 @@
     --surface-sunken: 11 12 14;
     --surface-overlay: 35 38 44;
 
-    --rail: 8 27 65;
-    --rail-sunken: 3 15 40;
+    /* Neutral like the rest of the workspace; the blue stays an accent. */
+    --rail: 16 17 20;
+    --rail-sunken: 26 28 33;
 
     --content: 242 243 245;
     --content-muted: 163 168 179;
