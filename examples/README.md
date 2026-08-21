@@ -20,5 +20,6 @@ fw.stop()
 | [04_merge_delta.json](04_merge_delta.json) | `group_by` com expressões SQL + escrita `mode: merge` (MERGE INTO no Delta) |
 | [05_data_quality_soda.json](05_data_quality_soda.json) | `broadcast` join (map-side) + validações estilo **SODA** (`check` com métrica/threshold warn/fail, `valid_format`, `freshness`) e `schema`; relatório com `severity`/`metric_value` |
 | [06_quarentena_validacoes.json](06_quarentena_validacoes.json) | `validations.outputs` (quarentena por linha: `valid`/`invalid`) + `validations.report`. As saídas de validação são **laterais**: `_write_validation_outputs(df)` e `_write_outputs(df)` recebem o **mesmo df completo**, então o `output` principal continua gravando **todas** as linhas |
+| [07_quarentena_codigos.json](07_quarentena_codigos.json) | **Códigos de falha por linha**: `code` na regra (e o código derivado da expressão quando ele é omitido), `validations.outputs.invalid.rules` para escopar a quarentena a alguns códigos e `annotate` para gravar em cada linha rejeitada o `array<string>` com os códigos que a rejeitaram |
 
 Referência completa do schema das confs: [CLAUDE.md](../CLAUDE.md).

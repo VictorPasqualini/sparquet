@@ -1,0 +1,11 @@
+id,name,email,age,country,status,created_at,ingestion_ts,age_band
+1,Ana Souza,ana.souza@example.com,34,BR,active,2026-01-05T09:12:00.000-03:00,2026-08-20T22:30:26.297-03:00,other
+2,Bruno Lima,bruno.lima@example.com,28,BR,active,2026-01-05T10:30:00.000-03:00,2026-08-20T22:30:26.297-03:00,young
+3,Carla Dias,carla.dias@example.com,41,PT,active,2026-01-06T11:45:00.000-03:00,2026-08-20T22:30:26.297-03:00,other
+4,Diego Rocha,diego.rocha@example.com,52,ES,active,2026-01-06T14:05:00.000-03:00,2026-08-20T22:30:26.297-03:00,other
+5,Elena Marques,elena.marques@example.com,23,PT,inactive,2026-01-07T08:20:00.000-03:00,2026-08-20T22:30:26.297-03:00,young
+8,Hugo Pereira,hugo.pereira#example,45,ES,active,2026-01-08T13:15:00.000-03:00,2026-08-20T22:30:26.297-03:00,other
+9,Isabel Costa,isabel.costa@example.com,31,US,active,2026-01-09T09:55:00.000-03:00,2026-08-20T22:30:26.297-03:00,other
+10,João Almeida,joao.almeida@example.com,29,BR,inactive,2026-01-09T18:30:00.000-03:00,2026-08-20T22:30:26.297-03:00,young
+11,Karina Melo,karina.melo@example.com,38,US,active,2026-01-10T07:45:00.000-03:00,2026-08-20T22:30:26.297-03:00,other
+12,Lucas Barros,lucas.barros@example.com,26,BR,active,2026-01-10T20:10:00.000-03:00,2026-08-20T22:30:26.297-03:00,young

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from pyspark.sql import SparkSession
 
@@ -22,6 +23,32 @@ def _detect_environment() -> str:
     if os.environ.get("SYNAPSE_WORKSPACE_NAME") or os.environ.get("AZURE_DATABRICKS_ORG_ID"):
         return "synapse"
     return "local"
+
+
+def _pin_local_worker_python(env: str, master: str) -> None:
+    """Aponta os workers Python do Spark para o MESMO interpretador do driver.
+
+    Sem isso, o Spark lança o worker com o `python` que estiver no PATH. Se for um
+    build diferente do driver — cenário comum quando o job roda a partir de um venv
+    invocado por caminho absoluto, com o PATH ainda apontando para o Python do
+    sistema — o worker morre com um `Python worker exited unexpectedly (crashed)`,
+    que não diz nada sobre a causa real.
+
+    O sintoma engana: leitura/escrita puramente JVM (CSV → Parquet) não cria worker
+    nenhum, então o pipeline roda normalmente até a primeira etapa que precisa de um
+    — tipicamente o `validations.report`, montado no driver com `createDataFrame`.
+
+    **Só se aplica a master local**, onde driver e executores são a mesma máquina e
+    o caminho do interpretador é garantidamente válido. Num cluster (yarn, k8s,
+    EMR…) o executor roda em outro host e apontá-lo para um caminho do driver
+    quebraria o job — lá a variável é responsabilidade da plataforma.
+
+    Usa `setdefault`: uma escolha explícita do usuário nunca é sobrescrita.
+    """
+    if env != "local" or not str(master).startswith("local"):
+        return
+    for var in ("PYSPARK_PYTHON", "PYSPARK_DRIVER_PYTHON"):
+        os.environ.setdefault(var, sys.executable)
 
 
 class SparkContextManager:
@@ -55,6 +82,8 @@ class SparkContextManager:
 
             for key, value in config.configs.items():
                 builder = builder.config(key, value)
+
+            _pin_local_worker_python(env, config.master)
 
             cls._session = builder.getOrCreate()
             cls._session.sparkContext.setLogLevel("WARN")

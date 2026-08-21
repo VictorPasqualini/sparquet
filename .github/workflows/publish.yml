@@ -36,9 +36,17 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          python tests/io/test_connectors.py
-          python tests/io/test_delta_path.py
-          python tests/validation/test_soda_checks.py
+          # Discovered, not listed: a new tests/**/test_*.py runs automatically, and
+          # a deleted one fails loudly instead of silently dropping out of coverage.
+          # `case-of-success` is excluded on purpose — those are pytest tests for a
+          # real migration case and need fixtures this job does not carry.
+          fail=0
+          for f in $(find tests -name 'test_*.py' -not -path '*case-of-success*' | sort); do
+            echo "::group::$f"
+            python "$f" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
 
   # 2) Build do sdist + wheel e checagem de metadados (twine check).
   build:

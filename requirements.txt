@@ -1,2 +1,2 @@
 pyspark>=3.4.0
-sparquet-cola>=0.1.0
+sparquet-cola>=0.2.0

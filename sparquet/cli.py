@@ -1,4 +1,4 @@
-"""CLI entry point para o Sparquet (sparquet <config.json>)."""
+"""CLI entry point for Sparquet (sparquet <config.json>)."""
 
 import argparse
 import sys
@@ -9,20 +9,19 @@ from sparquet import Sparquet
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sparquet",
-        description="Sparquet — Motor de pipelines Spark orientado a JSON",
+        description="Sparquet - JSON-driven Spark pipeline engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Exemplos:
-  sparquet examples/basic_parquet.json
-  sparquet examples/iceberg_upsert.json --stop-spark
-  sparquet tests/ingestion_csv_to_parquet.json
+Examples:
+  sparquet examples/01_ingestao_validacoes.json
+  sparquet examples/04_merge_delta.json --stop-spark
         """,
     )
-    parser.add_argument("config", help="Caminho para o arquivo JSON de configuracao")
+    parser.add_argument("config", help="Path to the pipeline JSON config")
     parser.add_argument(
         "--stop-spark",
         action="store_true",
-        help="Encerra a SparkSession ao final",
+        help="Stop the SparkSession when the run finishes",
     )
     return parser
 

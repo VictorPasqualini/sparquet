@@ -99,11 +99,12 @@ JSON/dict → apply_template(params) → resolve_includes → PipelineConfig →
 | `MongoReader/Writer` | `io/mongodb.py` | MongoDB e Amazon DocumentDB (mongo-spark) |
 | `DynamoDbReader/Writer` | `io/dynamodb.py` | Amazon DynamoDB (spark-dynamodb) |
 | `CassandraReader/Writer` | `io/cassandra.py` | Cassandra/ScyllaDB (spark-cassandra-connector) |
-| `ElasticsearchReader/Writer` | `io/elasticsearch.py` | Elasticsearch/OpenSearch (es-hadoop) |
+| `ElasticsearchReader/Writer` | `io/elasticsearch.py` | Elasticsearch (es-hadoop, opções `es.*`) |
+| `OpenSearchReader/Writer` | `io/opensearch.py` | OpenSearch (opensearch-hadoop, opções `opensearch.*`) — conector próprio, separado do ES |
 | `ReaderFactory/WriterFactory` | `io/factory.py` | Registry de formatos; extensível |
 | `TransformationEngine` | `transform/engine.py` | Aplica transformações em sequência |
 | Transformações nativas | `transform/builtin.py` | Ver lista abaixo |
-| `ValidationEngine` | `validation/engine.py` | Adaptador fino sobre o `sparquet_cola`; respeita `on_failure` e severidade (warn não aborta); `split(df, config)` → valid/invalid |
+| `ValidationEngine` | `validation/engine.py` | Adaptador fino sobre o `sparquet_cola`; respeita `on_failure` e severidade (warn não aborta); `split(df, config, annotate=, only=)` → valid/invalid (a quarentena pode ser escopada por código de regra e rotulada com os códigos violados) |
 | **`sparquet_cola`** (lib de DQ) | **pacote/repo separado** (`../sparquet-cola`, publicado no PyPI; dependência `sparquet-cola>=0.1.0`) | Motor de qualidade de dados (só depende de pyspark). `Cola` (run/split/register), checks (`BaseCheck` + not_null/unique/range/regex/row_count/sql/`check`/`schema`), `thresholds`. O bloco JSON continua `validations`; o branding Cola é interno. Import `sparquet_cola` (não vive mais dentro do repo do sparquet). |
 | `sparquet.validation.*` | `validation/{base,builtin,checks,thresholds}.py` | Shims de compat que reexportam do `sparquet_cola` com os nomes históricos (`BaseValidator`, `ValidationResult`, `*Validator`) |
 | `apply_template` | `utils/template.py` | Substitui `{chave}` no JSON bruto antes do parse; formata listas/booleanos para SQL |
@@ -346,15 +347,26 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 
   "validations": {                      // opcional
     "on_failure": "fail|warn|skip",
-    // report: opcional — grava 1 linha por regra (pipeline, rule_type, passed,
-    // failed_count, message, validated_at) para análise de qualidade. Aceita
+    // report: opcional — grava 1 linha por regra, num arquivo único (coalesce(1)):
+    // pipeline, rule_type, check_name, target (coluna[s] da regra), rule_params
+    // (JSON do que foi afirmado: min/max, pattern, metric, must_be…), severity,
+    // passed, failed_count, rows_read (denominador — é a contagem da LEITURA, não
+    // do df validado), metric_value, message, validated_at. Aceita
     // qualquer formato de saída. Gerado nos modos que não abortam (warn/skip)
     // ou quando todas as regras passam (em "fail" com violação, aborta antes).
     "report": { "format": "csv", "path": "/dq/validation_report", "mode": "overwrite" },
     "rules": [
+      // "code" (opcional, em QUALQUER regra): o identificador da regra usado para
+      // escopar (`outputs.*.rules`) e para rotular a linha (`outputs.invalid.annotate`).
+      // Omitido, o código é a PRÓPRIA EXPRESSÃO da validação, renderizada de forma
+      // compacta e determinística — ele vai para dentro dos dados, então a mesma regra
+      // sempre rende a mesma string:
+      //   not_null(email) · not_null(id,cpf) · unique(id,dt) · range(age,1,99)
+      //   range(valor,0,*)  (* = lado sem limite) · regex(email,^.+@.+$)
+      //   missing_percent(cpf) · invalid_count(email) · row_count · schema · sql
       { "type": "not_null", "columns": ["id"] },
       { "type": "unique", "columns": ["id"] },
-      { "type": "range", "column": "age", "min": 0, "max": 150 },
+      { "type": "range", "column": "age", "min": 0, "max": 150, "code": "AGE_RANGE" },
       { "type": "regex", "column": "email", "pattern": ".*@.*" },
       { "type": "row_count", "min": 1, "max": 1000000 },
       // sql: dois modos. "query" = invariante pass-when-true (retorna booleano).
@@ -390,9 +402,19 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     // outputs (quarentena): roteia LINHAS apartado da(s) saída(s) principal(is). Uma
     // linha é "invalid" quando viola qualquer check row-level (not_null, range, regex,
     // unique, e o `check` de missing/invalid). Ex: bronze → silver_ok + silver_quarentena.
+    // Duas chaves só existem aqui (em qualquer outro destino são erro de config):
+    //   • "rules"    – lista de CÓDIGOS: só essas regras alimentam este destino.
+    //                  Ausente = todas as row-level. Permite quarentena por
+    //                  severidade (as regras críticas numa tabela, o resto fora dela).
+    //   • "annotate" – SÓ no "invalid": nome da coluna array<string> com os códigos das
+    //                  regras que rejeitaram cada linha, na ordem das regras. Não
+    //                  aparece nas saídas principais, nem no "valid" (seria vazia por
+    //                  definição), nem no report (que tem 1 linha por REGRA).
+    //                  Se o destino tiver "columns", inclua a coluna de códigos nela.
     "outputs": {
       "valid":   { "format": "delta", "path": "silver.ok",         "mode": "overwrite" },
-      "invalid": { "format": "delta", "path": "silver.quarentena", "mode": "overwrite" }
+      "invalid": { "format": "delta", "path": "silver.quarentena", "mode": "overwrite",
+                   "rules": ["AGE_RANGE", "regex(email,.*@.*)"], "annotate": "dq_codes" }
     }
   },
 
@@ -496,6 +518,11 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
 
 Transformações **mudam** os dados. Validações **reportam** sobre eles sem modificá-los.  
 O `PipelineResult.validation_results` expõe `failed_count` e mensagem por regra — útil para dashboards de qualidade.
+
+Para saber **quais linhas** e **por quê**, o agregado não serve: use a quarentena com
+`annotate` (`validations.outputs.invalid`), que grava numa coluna `array<string>` o
+código de cada regra que rejeitou a linha (o `code` declarado ou a expressão da regra).
+Ver o bloco `validations` do schema acima.
 
 ---
 
@@ -606,6 +633,15 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
 - `PipelineResult` nunca lança exceção — erros ficam em `result.error`.
 - Logger sempre JSON estruturado (`utils/logger.py`).
 - `SparkContextManager` detecta o ambiente automaticamente (Databricks reusa sessão ativa; outros criam via builder).
+- **Workers Python em master local**: com `master=local*`, o `SparkContextManager` faz
+  `os.environ.setdefault("PYSPARK_PYTHON", sys.executable)` (idem `PYSPARK_DRIVER_PYTHON`).
+  Sem isso o Spark lança o worker com o `python` do PATH; se for outro build que o driver,
+  o worker morre com `Python worker exited unexpectedly (crashed)`. O sintoma engana:
+  etapas puramente JVM (CSV → Parquet) não criam worker, então só quebra na primeira que
+  cria — tipicamente o `validations.report`, montado com `createDataFrame`. **Só em master
+  local** (driver e executor na mesma máquina); em cluster a variável é da plataforma, e
+  apontar executor remoto para um caminho do driver quebraria o job. `setdefault` nunca
+  sobrescreve escolha explícita.
 - **`filter`/`select` primeiro**: comece a cadeia de `transformations` reduzindo linhas (`filter`) e colunas (`select`) antes de joins/structs/group_by pesados — menos dados por todo o resto do pipeline (o Spark empurra parte, mas colocar explícito ajuda o planner e a legibilidade).
 - **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`).
 - **temp view (`view`) global vs sessão**: `options.scope` = `session` (default) ou `global` (`global_temp.<nome>`, visível a toda a aplicação Spark).

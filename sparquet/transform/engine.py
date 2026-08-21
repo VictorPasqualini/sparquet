@@ -121,7 +121,7 @@ class TransformationEngine:
         for index, config in enumerate(configs):
             if self._should_skip(config.skip_if_false, df):
                 logger.info(
-                    "Transformacao pulada",
+                    "Transformation skipped",
                     type=config.type,
                     skip_if_false=config.skip_if_false,
                     **({"index": index, "total": total, "step": True} if top_level else {}),

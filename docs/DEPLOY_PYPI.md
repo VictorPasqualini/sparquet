@@ -7,8 +7,11 @@ O empacotamento já está configurado em [`pyproject.toml`](../pyproject.toml):
 - nome de distribuição: **`sparquet`** (import: `sparquet`);
 - **versão é fonte única** em `sparquet/__init__.py` (`__version__`), lida
   dinamicamente pelo setuptools (`[tool.setuptools.dynamic]`);
-- `tests*`, `examples*`, `docs*` são excluídos do pacote;
-- dependência base: `pyspark>=3.4.0`; extra opcional: `sparquet[delta]`.
+- só o pacote `sparquet` entra no wheel/sdist (`packages.find` usa lista de
+  **inclusão**, então `tests/`, `examples/`, `docs/` e o `sparquet-studio/` nunca
+  entram por acidente);
+- dependências: `pyspark>=3.4.0` e `sparquet-cola>=0.1.0` (motor de qualidade de
+  dados, pacote separado); extra opcional: `sparquet[delta]`.
 
 ---
 
@@ -120,7 +123,8 @@ Também há o entrypoint de CLI `sparquet` (definido em `[project.scripts]`).
 ## 7. Checklist de release
 
 - [ ] `__version__` atualizado e commitado (SemVer).
-- [ ] `CHANGELOG`/notas de release atualizados (se houver).
+- [ ] [`CHANGELOG.md`](../CHANGELOG.md) atualizado: mover o que está em
+      `## [Unreleased]` para uma seção da nova versão, com a data.
 - [ ] `rm -rf dist build *.egg-info && python -m build`.
 - [ ] `twine check dist/*` sem erros.
 - [ ] Publicado e testado no **TestPyPI**.

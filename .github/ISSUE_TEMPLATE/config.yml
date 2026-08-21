@@ -1,0 +1,28 @@
+# Issue template chooser. The two templates in this folder cover bugs and feature
+# requests; the links below catch the things that are not issues.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Documentation
+    url: https://sparquet.dev
+    about: Full reference and guides in English, Portuguese and Spanish. Check here before filing — most "how do I" questions are answered in the reference.
+
+  - name: JSON schema reference (in this repository)
+    url: https://github.com/VictorPasqualini/sparquet/blob/main/CLAUDE.md
+    about: Every field of the pipeline JSON, the public API and the project conventions, kept next to the code.
+
+  - name: Roadmap and known gaps
+    url: https://github.com/VictorPasqualini/sparquet/blob/main/BACKLOG.md
+    about: What is planned, what was deliberately left out, and the decisions already taken. Read before asking for a feature.
+
+  - name: Data-quality engine (sparquet-cola)
+    url: https://github.com/VictorPasqualini/sparquet-cola/issues
+    about: Bugs and requests about validation checks and thresholds belong in that repository — the engine is a separate package.
+
+  - name: Documentation site source (sparquet-web)
+    url: https://github.com/VictorPasqualini/sparquet-web/issues
+    about: Typos, wrong examples or missing pages on sparquet.dev are tracked in the docs repository.
+
+  - name: Report a security vulnerability
+    url: https://github.com/VictorPasqualini/sparquet/security/policy
+    about: Never in a public issue. Use private vulnerability reporting or the contact in SECURITY.md.

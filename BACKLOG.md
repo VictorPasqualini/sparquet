@@ -141,6 +141,54 @@ Evolução ainda proposta:
 4. **Otimização de métricas** — hoje cada `check` roda sua própria action; batelar as
    agregações de vários checks numa passada só.
 
+### Validações candidatas no `sparquet_cola`
+
+Hoje: `not_null`, `unique`, `range`, `regex`, `row_count`, `sql`, `schema` e o `check`
+(métricas `row_count`, `distinct_count`, `missing_*`, `duplicate_*`, `invalid_*`,
+`min`/`max`/`avg`/`sum`/`stddev`, `freshness`). Cada nova regra precisa de entrada no
+catálogo do Studio (`src/catalog/`), senão o editor não a oferece.
+
+**A. Já é possível com `sql`, mas merece ser declarativo.** O `sql` cobre tudo — e é
+exatamente por isso que essas viram SQL copiado entre pipelines, sem nome nem
+semântica no relatório:
+
+- [ ] `column_comparison` — `col_a <= col_b` (`data_inicio` ≤ `data_fim`,
+      `valor_liquido` ≤ `valor_bruto`). A checagem cross-column mais comum que existe.
+- [ ] `conditional_not_null` — coluna obrigatória **quando** outra tem valor
+      (`cnpj` obrigatório se `tipo = 'PJ'`). Row-level, entra na quarentena.
+- [ ] `accepted_values` — hoje só via `check` + `valid_values`; verboso para o caso
+      mais frequente de todos.
+- [ ] `mutually_exclusive` — no máximo uma de N colunas preenchida.
+
+**B. Cross-dataset.** Complementa o `reference`/reconciliação já proposto acima:
+
+- [ ] `foreign_key` — todo valor de `col` existe em outra fonte. Hoje exige um join
+      manual no pipeline, o que mistura validação com transformação.
+
+**C. Estatística / outliers.** Thresholds sobre a *forma* do dado, não só extremos:
+
+- [ ] `quantile` como métrica do `check` — p50/p95/p99 (`must_be: "< 1000"` no p95
+      diz mais sobre latência/valor que `max`, que um único outlier distorce).
+- [ ] `outliers` — contagem fora de N desvios (z-score) ou do IQR.
+- [ ] `cardinality` por grupo — `distinct_count` particionado (distinct país por cliente).
+
+**D. Completude segmentada:**
+
+- [ ] `missing_percent` com `group_by` — hoje é global; responder "qual país tem 30%
+      de cpf vazio" exige uma regra por país.
+
+**E. Depende de histórico de execuções** (ver §7 — sem persistir execuções não há
+linha de base para comparar):
+
+- [ ] `volume_anomaly` — `row_count` contra a média móvel das últimas N execuções.
+      Pega o caso clássico de "a fonte veio pela metade e ninguém percebeu".
+- [ ] `distribution_shift` — desvio da distribuição de uma coluna vs. a execução
+      anterior.
+- [ ] `freshness` por partição, não só o máximo global da coluna.
+
+Diretriz: manter cada check como uma classe `BaseCheck` com `run()` e, quando a regra
+sabe apontar linhas, `violation()` — é o `violation()` que a coloca na quarentena.
+
 Princípio de DQ: **validações reportam, transformações mudam** — manter essa
 separação ao evoluir.
 

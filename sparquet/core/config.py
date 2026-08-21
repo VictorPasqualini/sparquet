@@ -69,6 +69,60 @@ class ValidationRule:
         )
 
 
+# Chaves que só existem numa quarentena (`validations.outputs`). Fora dela não há
+# linha rejeitada para escopar nem para rotular, então valem como erro de config em
+# vez de virarem chave morta no JSON.
+_QUARANTINE_ONLY_KEYS = ("rules", "annotate")
+
+
+def _quarantine_rules(value: Any) -> Optional[List[str]]:
+    """`rules` de uma quarentena: lista de códigos de regra."""
+    if value is None:
+        return None
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ValueError(
+            "validations.outputs.invalid.rules precisa ser uma LISTA de códigos de regra "
+            "(ex: ['AGE_RANGE', 'not_null(email)']), não "
+            f"{type(value).__name__}."
+        )
+    codes = [str(code).strip() for code in value]
+    if any(not code for code in codes):
+        raise ValueError(
+            "validations.outputs.invalid.rules tem um código vazio. Cada item é o `code` "
+            "de uma regra, ou a expressão dela quando o `code` é omitido."
+        )
+    return codes
+
+
+def _annotate_column(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "validations.outputs.invalid.annotate precisa ser o NOME da coluna de "
+            "códigos (string não vazia)."
+        )
+    return value.strip()
+
+
+def _reject_quarantine_keys(data: Dict[str, Any], where: str, reason: str) -> None:
+    """Recusa `rules`/`annotate` num destino que não é quarentena.
+
+    Deixar a chave passar em silêncio é pior do que falhar: o usuário fica com um JSON
+    que promete rastreabilidade e um destino que nunca a recebe.
+    """
+    for key in _QUARANTINE_ONLY_KEYS:
+        if not isinstance(data, dict) or data.get(key) is None:
+            continue
+        raise ValueError(
+            f"'{key}' só existe na quarentena `validations.outputs.invalid`, e "
+            f"apareceu em {where}. {reason} "
+            "`annotate` nomeia a coluna array<string> com os códigos das regras que "
+            "rejeitaram a linha e `rules` restringe o split a alguns códigos — as duas "
+            "só existem onde há linha rejeitada."
+        )
+
+
 @dataclass
 class ValidationConfig:
     on_failure: str = "fail"  # fail | warn | skip
@@ -80,22 +134,58 @@ class ValidationConfig:
     # Roteamento de LINHAS (quarentena) — apartado da(s) saída(s) principal(is). Chaves
     # reconhecidas: "valid" e "invalid" (uma linha é inválida quando viola qualquer
     # check row-level: not_null, range, regex, unique, e o `check` de missing/invalid).
-    # Cada valor é um destino de escrita completo (format/path/mode/columns/options).
+    # Cada valor é um destino de escrita completo (format/path/mode/columns/options),
+    # mais duas chaves exclusivas do lado `invalid`:
+    #   • `rules`    – lista de CÓDIGOS de regra: só elas alimentam esta quarentena
+    #                  (ausente = todas as row-level, o comportamento histórico);
+    #   • `annotate` – nome da coluna array<string> com os códigos das regras que
+    #                  rejeitaram cada linha.
     outputs: Dict[str, "OutputConfig"] = field(default_factory=dict)
+    # Materializa o df antes de validar. Cada regra dispara a própria action e, sem
+    # cache, todas recomputam a linhagem desde a fonte. Default True porque quase
+    # sempre é o certo; desligue se o df for grande demais para caber em memória +
+    # disco do executor e você preferir pagar as releituras.
+    cache: bool = True
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ValidationConfig:
         return cls(
             on_failure=data.get("on_failure", "fail"),
+            cache=bool(data.get("cache", True)),
             rules=[ValidationRule.from_dict(r) for r in data.get("rules", [])],
             report=(
-                OutputConfig.from_dict(data["report"]) if data.get("report") else None
+                _validation_report(data["report"]) if data.get("report") else None
             ),
             outputs={
-                key: OutputConfig.from_dict(out)
+                key: _quarantine_output(key, out)
                 for key, out in data.get("outputs", {}).items()
             },
         )
+
+
+def _validation_report(data: Dict[str, Any]) -> "OutputConfig":
+    _reject_quarantine_keys(
+        data,
+        "validations.report",
+        "O relatório tem schema fixo — uma linha por REGRA, nunca uma linha de dados.",
+    )
+    return OutputConfig.from_dict(data)
+
+
+def _quarantine_output(key: str, data: Dict[str, Any]) -> "OutputConfig":
+    """Um destino de `validations.outputs` — só o `invalid` escopa e rotula.
+
+    O lado válido é definido por exclusão (não violou NADA), então nem código para
+    rotular nem escopo para restringir fazem sentido nele.
+    """
+    if key != "invalid":
+        _reject_quarantine_keys(
+            data,
+            f"`validations.outputs.{key}`",
+            "Uma linha válida não violou nenhuma regra — não há código para rotulá-la "
+            "nem violação para escopar.",
+        )
+    return OutputConfig.from_dict(data)
 
 
 @dataclass
@@ -111,6 +201,9 @@ class OutputConfig:
     afetar as demais saídas. Permite gravar formas diferentes (ex: explode,
     to_json, join, colunas extras) a partir do mesmo df. Aceita todos os tipos
     de transformação do TransformationEngine (inclusive {{var}} de runtime).
+
+    `rules` e `annotate` só valem na quarentena `validations.outputs.invalid` — ver
+    `ValidationConfig`, que recusa os dois em qualquer outro destino.
     """
 
     format: str
@@ -120,6 +213,13 @@ class OutputConfig:
     columns: Optional[List[str]] = None
     options: Dict[str, Any] = field(default_factory=dict)
     transformations: List["TransformationConfig"] = field(default_factory=list)
+    # Quarentena `invalid`: restringe o destino às regras cujos CÓDIGOS estão na lista
+    # (`code` da regra, ou a expressão dela quando o `code` é omitido — ver
+    # `BaseCheck.code()` no sparquet_cola). None = todas as regras row-level.
+    rules: Optional[List[str]] = None
+    # Quarentena `invalid`: nome da coluna `array<string>` com os códigos das regras
+    # que rejeitaram cada linha. Só faz sentido no lado inválido.
+    annotate: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> OutputConfig:
@@ -134,6 +234,8 @@ class OutputConfig:
                 TransformationConfig.from_dict(t)
                 for t in data.get("transformations", [])
             ],
+            rules=_quarantine_rules(data.get("rules")),
+            annotate=_annotate_column(data.get("annotate")),
         )
 
 
@@ -158,9 +260,16 @@ class PipelineConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PipelineConfig:
         # Aceita "output" (objeto único) ou "outputs" (lista)
+        main_reason = (
+            "As saídas principais recebem o df COMPLETO — válidas e inválidas juntas — "
+            "então não há linha rejeitada para rotular nem para escopar nelas."
+        )
         if "outputs" in data:
+            for index, out in enumerate(data["outputs"]):
+                _reject_quarantine_keys(out, f"outputs[{index}]", main_reason)
             outputs = [OutputConfig.from_dict(o) for o in data["outputs"]]
         elif "output" in data:
+            _reject_quarantine_keys(data["output"], "output", main_reason)
             outputs = [OutputConfig.from_dict(data["output"])]
         else:
             raise ValueError(
