@@ -121,7 +121,7 @@ See [CLAUDE.md](CLAUDE.md) for the complete schema reference.
 | [sparquet-studio/README.md](sparquet-studio/README.md) | Studio: install, first Job, AI setup, local runner, architecture |
 | [sparquet-studio/server/README.md](sparquet-studio/server/README.md) | The local execution service, and why it must stay on `127.0.0.1` |
 | [examples/](examples/) | Example pipelines, one per capability |
-| [tests/case-of-success/ROADMAP_CASE_OF_SUCCESS.md](tests/case-of-success/ROADMAP_CASE_OF_SUCCESS.md) | A real migration: Spark jobs rewritten as declarative configs |
+| [docs/TEST_PLAN.md](docs/TEST_PLAN.md) | What the test suite covers, connector by connector, and what is still missing |
 | [BACKLOG.md](BACKLOG.md) | Roadmap: what is planned, and what was deliberately left out |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, conventions, how to propose a change |

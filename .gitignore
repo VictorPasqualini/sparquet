@@ -43,3 +43,8 @@ sparquet-studio/dist/
 # Saidas de verificacao end-to-end (Spark grava part files + _SUCCESS + .crc)
 .tmp_*/
 examples/output/
+
+# Scripts descartaveis de depuracao na raiz (_rep.py, _bench.py...). Escopado com "/"
+# para nao pegar modulos internos legitimos como sparquet/io/_formats.py.
+/_*.py
+/_*.mjs

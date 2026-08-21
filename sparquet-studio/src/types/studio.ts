@@ -125,6 +125,17 @@ export const HANDLE = {
   inRight: 'in-right',
   /** Single outgoing handle. */
   out: 'out',
+  /**
+   * Incoming handle of a quality destination that SCOPES it: the rules linked here
+   * are the ones whose violations feed that quarantine.
+   *
+   * Separate from `in` on purpose. `in` on a quality box only records that the
+   * dataset comes out of the validations — drawn automatically so the box does not
+   * float like a forgotten destination — and must compile to nothing. If both
+   * meanings shared one handle, anchoring an unscoped quarantine to the rules would
+   * silently scope it to whichever rule the line happened to start from.
+   */
+  inScope: 'in-scope',
 } as const
 
 /**

@@ -2,6 +2,7 @@ import type { NodeProps } from '@xyflow/react'
 import { memo } from 'react'
 
 import { getValidator } from '@/catalog'
+import { targetsOf } from '@/lib/compiler/targets'
 import { Badge } from '@/components/ui'
 import type { ValidationNode as ValidationNodeType, ValidationNodeData } from '@/types/studio'
 
@@ -51,8 +52,15 @@ export const ValidationNode = memo(function ValidationNodeRenderer({
 /** The one thing worth knowing about a rule at a glance: what it measures. */
 export function describeRule(data: ValidationNodeData): string | null {
   const params = data.params
+  const type = data.validator
 
-  switch (data.validator) {
+  // A multi-target rule runs once per target, so what it measures is the list of
+  // targets — showing only the shared defaults would describe a rule that never runs
+  // on its own.
+  const targets = describeTargets(params)
+  if (targets) return targets
+
+  switch (type) {
     case 'not_null':
     case 'unique': {
       const columns = list(params.columns)
@@ -88,15 +96,6 @@ export function describeRule(data: ValidationNodeData): string | null {
       return (query.split('\n').find((row) => row.trim() !== '') ?? query).trim()
     }
 
-    case 'check': {
-      const metric = read(params.metric)
-      const column = read(params.column) || list(params.columns).join(', ')
-      const threshold = read(params.must_be)
-      if (!metric) return threshold || null
-      const scope = column ? `${metric}(${column})` : metric
-      return threshold ? `${scope} ${threshold}` : scope
-    }
-
     case 'schema': {
       const required = list(params.required_columns).length
       const forbidden = list(params.forbidden_columns).length
@@ -109,9 +108,27 @@ export function describeRule(data: ValidationNodeData): string | null {
       return parts.length > 0 ? parts.join(' · ') : null
     }
 
-    default:
-      return null
+    default: {
+      // Every metric is a rule type of its own, so this renders them all —
+      // `missing_percent(cpf) < 1%` — and an unknown type imported from a
+      // hand-written config the same way, instead of showing nothing.
+      const column = read(params.column) || list(params.columns).join(', ')
+      const threshold = read(params.must_be)
+      const scope = column ? `${type}(${column})` : type
+      return threshold ? `${scope} ${threshold}` : scope || null
+    }
   }
+}
+
+/** `2 targets · cpf, cnpj` — the count first, since the columns are truncated. */
+function describeTargets(params: Record<string, unknown>): string | null {
+  const targets = targetsOf(params)
+  if (!targets) return null
+  const columns = targets
+    .map((target) => read(target.column) || list(target.columns).join(', '))
+    .filter((column) => column !== '')
+  const label = `${targets.length} target${targets.length === 1 ? '' : 's'}`
+  return columns.length > 0 ? `${label} · ${columns.join(', ')}` : label
 }
 
 function read(value: unknown): string {

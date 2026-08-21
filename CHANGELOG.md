@@ -20,6 +20,74 @@ Notes on the history below:
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-21
+
+### Changed
+
+- **Metrics are rule types; the `check` wrapper is gone.** `{"type": "missing_percent",
+  "column": "cpf", "must_be": "< 1%"}` instead of `{"type": "check", "metric": ...}`.
+  The wrapper's only job was to hold a `metric` field that is now the `type` itself, and
+  a validation report row now names the metric instead of saying `check`. Removed
+  outright, with no compatibility alias — migrating is mechanical: drop
+  `"type": "check"` and promote `metric` to `type`.
+
+  `not_null`, `unique`, `range`, `regex`, `sql` and `schema` stay, because their
+  semantics are not the metrics': `regex` counts NULL as a violation while `invalid_*`
+  treats NULL as *missing*, and `range` labels the ROW outside the interval while
+  `min`/`max` describe the column and cannot point at a row. Folding either one in
+  would have changed results silently.
+
+- Requires **`sparquet-cola>=0.3.0`**.
+
+### Added
+
+- **`targets` on any rule: one entry, many independent rules.** Each target becomes a
+  rule of its own — its own result, its own code, its own contribution to the
+  quarantine — so a report says which column broke instead of giving one aggregate
+  verdict:
+
+  ```json
+  { "type": "regex", "targets": [
+      { "column": "cpf",  "pattern": "^[0-9]{11}$" },
+      { "column": "cnpj", "pattern": "^[0-9]{14}$" } ] }
+  ```
+
+  Keys outside `targets` are shared defaults. Expansion happens at **config parse**,
+  using the library's `expand_targets`, because the validation report pairs
+  `validations.rules[i]` with `results[i]` by position — expanding later, or twice with
+  two implementations, would attribute one rule's result to another rule's target.
+
+- `examples/08_validacao_multi_alvo.json` — `targets` end to end, **runnable locally**
+  (CSV in, CSV + JSON out, no cluster): three rule entries become seven report rows,
+  the `range` shares `min` and lets each target set its own `max`, and the quarantine
+  scope names a single target so the other one's violations stay out of it.
+
+- `tests/test_examples.py` now checks the validation `type` of every shipped example,
+  not just the transformations. That gap is exactly why a removed `check` survived in
+  `examples/05_data_quality_soda.json` until it was looked for by hand. It also checks
+  that every code in a `validations.outputs.*.rules` scope is one some rule actually
+  produces: a typo there scopes the quarantine to **nothing**, and an empty dataset
+  looks exactly like "no row violated".
+
+### Fixed
+
+- **CSV is written in the RFC 4180 dialect** (`escape='"'` by default, both ways):
+  quotes inside a field come out **doubled** (`""`) instead of backslash-escaped
+  (`\"`). Spark reads its own dialect back, but Python's `csv`, pandas and Excel do
+  not — so the `validations.report`, whose `rule_params` column is quote-heavy JSON,
+  arrived split mid-field in the very tools it is analysed in. Reader and writer
+  changed together: fixing only the writer would leave the framework unable to read
+  what it wrote. Files in the old dialect are still readable with
+  `options: {"escape": "\\"}`, and `tests/test_csv_dialect_spark.py` pins all four
+  directions.
+
+- `not_null` and `unique` accept `column` (singular), not only `columns`. With
+  `targets`, `{"column": "id"}` is the natural way to write a target — it is what
+  `range` and `regex` use — and the derived code already rendered `not_null(id)` from
+  it; only the execution read `params["columns"]` raw, so the pipeline died with a
+  bare `KeyError: 'columns'` that named neither the rule nor the fix. Fixed in
+  `sparquet-cola` 0.3.0.
+
 ## [0.5.0] — 2026-08-21
 
 ### Added

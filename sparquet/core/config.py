@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from sparquet_cola import expand_targets
+
 
 @dataclass
 class SparkConfig:
@@ -152,7 +154,15 @@ class ValidationConfig:
         return cls(
             on_failure=data.get("on_failure", "fail"),
             cache=bool(data.get("cache", True)),
-            rules=[ValidationRule.from_dict(r) for r in data.get("rules", [])],
+            # `targets` é expandido AQUI, no parse, e não no motor: o relatório casa
+            # `config.validations.rules[i]` com `results[i]` por posição, então a lista
+            # de regras já tem de estar achatada quando chega lá. A expansão vem do
+            # sparquet_cola — uma implementação só, senão as duas divergiriam e o
+            # relatório atribuiria o resultado de uma regra ao alvo de outra.
+            rules=[
+                ValidationRule.from_dict(r)
+                for r in expand_targets(data.get("rules", []))
+            ],
             report=(
                 _validation_report(data["report"]) if data.get("report") else None
             ),

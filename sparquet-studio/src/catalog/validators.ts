@@ -166,10 +166,268 @@ const codeField: FieldSpec = {
   group: 'advanced',
 }
 
-const withCode = (validators: ValidatorDef[]): ValidatorDef[] =>
-  validators.map((validator) => ({ ...validator, fields: [...validator.fields, codeField] }))
+/**
+ * `targets` — one rule entry, many columns.
+ *
+ * The library flattens it into N independent rules (`expand_targets` in
+ * `sparquet_cola/targets.py`): everything outside `targets` is a shared default, each
+ * target overrides what it wants, and each expanded rule gets its own result, its own
+ * report row and its own failure code. The widget is a JSON box because the keys a
+ * target fills are the keys of its own rule type — `column` and `pattern` for a regex,
+ * `min`/`max` for a range — so there is no one sub-form that fits every validator.
+ *
+ * `validate` mirrors the library's refusals so an ambiguous shape is reported in the
+ * inspector instead of at run time.
+ */
+const targetsField: FieldSpec = {
+  key: 'targets',
+  label: 'Targets',
+  type: 'json',
+  rows: 5,
+  placeholder: '[ { "column": "cpf", "pattern": "^[0-9]{11}$" }, { "column": "cnpj" } ]',
+  help: 'Runs this rule once per target. Each one gets its own result and failure code.',
+  docs: [
+    'A list of objects. Fields declared outside `targets` are shared defaults; each',
+    'target overrides what it needs:',
+    '',
+    '```json',
+    '{ "type": "regex", "targets": [',
+    '    { "column": "cpf",  "pattern": "^[0-9]{11}$" },',
+    '    { "column": "cnpj", "pattern": "^[0-9]{14}$" } ] }',
+    '```',
+    '',
+    'That is two rules — two report rows, two codes — not one rule over two columns.',
+    'Scoping a quarantine destination to this node scopes it to every target.',
+    '',
+    'A target cannot carry `type` (one entry is one rule type) or its own `targets`,',
+    'and `code` belongs inside each target rather than beside the list, since every',
+    'expanded rule would otherwise share the same identifier.',
+  ].join('\n'),
+  group: 'advanced',
+  validate: (value, params) => {
+    if (value === undefined || value === null || value === '') return null
+    if (!Array.isArray(value)) return 'targets must be a list of objects.'
+    if (value.length === 0) {
+      return 'An empty targets list would erase the validation silently. Remove the field or declare a target.'
+    }
+    for (const forbidden of ['code', 'output'] as const) {
+      if (params[forbidden] !== undefined && !isBlank(params[forbidden])) {
+        return `${forbidden} cannot sit beside targets — every expanded rule would inherit it. Declare it inside each target.`
+      }
+    }
+    for (const [index, target] of value.entries()) {
+      const where = `targets[${index}]`
+      if (typeof target !== 'object' || target === null || Array.isArray(target)) {
+        return `${where} must be an object, so it is clear which field it fills.`
+      }
+      const keys = Object.keys(target as Record<string, unknown>)
+      if (keys.length === 0) {
+        return `${where} is empty — it would duplicate the shared defaults, with the same derived code.`
+      }
+      if (keys.includes('type')) return `${where}: type is not allowed inside a target.`
+      if (keys.includes('targets')) return `${where}: nested targets are not supported.`
+    }
+    return null
+  },
+}
 
-export const VALIDATORS: ValidatorDef[] = withCode([
+/** Fields every validator carries, appended once so no entry can forget them. */
+const withSharedFields = (validators: ValidatorDef[]): ValidatorDef[] =>
+  validators.map((validator) => ({
+    ...validator,
+    fields: [...validator.fields, codeField, targetsField],
+  }))
+
+/**
+ * Every metric is its own rule type — there is no `check` wrapper any more. The fields
+ * are declared once here: what differs between `missing_percent` and `avg` is the
+ * metric name, which IS the type, so fourteen near-identical definitions would only
+ * create fourteen places for them to drift apart.
+ *
+ * `row_count` is not generated: it keeps its own entry, because it also accepts the
+ * friendlier `min`/`max` instead of a threshold string.
+ */
+const METRIC_FIELDS: FieldSpec[] = [
+      {
+        key: 'must_be',
+        label: 'Must be (threshold)',
+        type: 'text',
+        required: true,
+        placeholder: '< 5%',
+        help: 'Pass condition: > < >= <= = != , or "between X and Y". Accepts % and durations (1d, 2h, 30m).',
+        validate: validateRequiredText('Set a threshold, e.g. "> 0" or "< 5%".'),
+      },
+      {
+        key: 'column',
+        label: 'Column',
+        type: 'text',
+        placeholder: 'valor',
+        help: 'Required for column metrics. Omit for row_count.',
+        validate: requireColumnForMetric,
+      },
+      {
+        key: 'columns',
+        label: 'Columns',
+        type: 'string-list',
+        placeholder: 'id',
+        help: 'For duplicate_count / distinct_count over a composite key.',
+        group: 'advanced',
+      },
+      {
+        key: 'warn',
+        label: 'Warn threshold',
+        type: 'text',
+        placeholder: '= 0',
+        help: 'Optional softer level: a metric that passes must_be but fails warn is reported as a warning.',
+        group: 'advanced',
+      },
+      {
+        key: 'name',
+        label: 'Check name',
+        type: 'text',
+        placeholder: 'cpf completeness',
+        help: 'Shown in the result and report — makes a failing check readable.',
+        group: 'advanced',
+      },
+      {
+        key: 'missing_values',
+        label: 'Missing values',
+        type: 'string-list',
+        placeholder: 'N/A',
+        help: 'Extra values treated as missing besides NULL (for missing_* metrics).',
+        group: 'advanced',
+      },
+      {
+        key: 'valid_format',
+        label: 'Valid format',
+        type: 'select',
+        options: VALID_FORMATS,
+        help: 'Named format for invalid_* metrics (email, uuid, cpf, cnpj, date…).',
+        group: 'advanced',
+      },
+      {
+        key: 'valid_values',
+        label: 'Valid values',
+        type: 'string-list',
+        help: 'Accepted values for invalid_* metrics.',
+        group: 'advanced',
+      },
+      {
+        key: 'valid_regex',
+        label: 'Valid regex',
+        type: 'text',
+        placeholder: '^[A-Z]{2}\\\\d{4}$',
+        help: 'Custom regex for invalid_* metrics (overrides valid_format if both are set alongside it).',
+        group: 'advanced',
+      },
+      { key: 'valid_min', label: 'Valid min', type: 'number', group: 'advanced' },
+      { key: 'valid_max', label: 'Valid max', type: 'number', group: 'advanced' },
+]
+
+const METRIC_DOCS: Record<string, string> = {
+  distinct_count: 'Distinct rows over the DataFrame, or over `columns` when given.',
+  missing_count: 'NULLs in the column, plus anything listed in `missing_values`.',
+  missing_percent: 'NULLs in the column as a share of the row count.',
+  duplicate_count: 'Rows whose `columns` tuple appears more than once.',
+  duplicate_percent: 'Duplicate rows as a share of the row count.',
+  invalid_count:
+    'Values that are PRESENT and fail the valid_* configuration. A NULL is missing, not invalid — that is what missing_count measures.',
+  invalid_percent: 'Invalid values as a share of the row count.',
+  min: 'Smallest value in the column. It describes the column, so it cannot point at a row — use `range` when the offending rows must reach the quarantine.',
+  max: 'Largest value in the column. Same caveat as min.',
+  avg: 'Mean of the column.',
+  mean: 'Alias of avg.',
+  sum: 'Sum of the column.',
+  stddev: 'Standard deviation of the column.',
+  freshness: 'Seconds since the newest value in the column. Compare with a duration: `< 1d`, `<= 2h`.',
+}
+
+/** Metrics that can label a row, so they feed the valid/invalid quarantine split. */
+/**
+ * The metrics that count rows one by one, so a row-level verdict exists and the
+ * quarantine split can route on it. Every other metric reduces the whole frame and can
+ * only answer about the dataset. Exported because the linter decides the same thing.
+ */
+export const ROW_LEVEL_METRICS: ReadonlySet<string> = new Set([
+  'missing_count',
+  'missing_percent',
+  'invalid_count',
+  'invalid_percent',
+])
+
+const metricValidators = (): ValidatorDef[] =>
+  CHECK_METRICS.filter((option) => option.value !== 'row_count').map((option) => {
+    const metric = String(option.value)
+    return {
+      type: metric,
+      label: metric,
+      icon: 'Sigma',
+      summary: METRIC_DOCS[metric] ?? 'A metric compared to a warn/fail threshold.',
+      description: [
+        METRIC_DOCS[metric] ?? '',
+        '',
+        'The metric IS the rule type, compared to a threshold with `must_be` — the pass',
+        'condition. A `warn` threshold downgrades a metric that passes `must_be` to a',
+        'warning instead of a hard failure: severity "warn" does not abort under',
+        'on_failure=fail.',
+        '',
+        ROW_LEVEL_METRICS.has(metric)
+          ? 'Row-level: it can name the offending row, so it feeds the valid/invalid quarantine split.'
+          : 'Aggregate: it describes the table, so it never labels a row and never reaches the quarantine.',
+      ]
+        .join(String.fromCharCode(10))
+        .trim(),
+      fields: METRIC_FIELDS,
+      keywords: [
+        'soda',
+        'quality',
+        'metric',
+        'threshold',
+        'warn',
+        metric,
+        ...(ROW_LEVEL_METRICS.has(metric) ? ['quarantine', 'row-level'] : ['aggregate']),
+      ],
+      gotchas: [
+        'must_be is the PASS condition — "< 5%" passes when the metric is BELOW 5%.',
+        'warn is optional; a metric passing must_be but failing warn has severity "warn" and does NOT abort under on_failure=fail.',
+        ...(metric.startsWith('invalid')
+          ? [
+              'invalid_* counts values that are PRESENT and violate the valid_* config — a NULL is missing, not invalid.',
+            ]
+          : []),
+        ...(metric === 'freshness'
+          ? [
+              'freshness is seconds since max(column); with no rows the age is infinite, so any "< X" fails.',
+            ]
+          : []),
+        ...(metric.endsWith('percent')
+          ? ['Percent metrics are 0-100 over the row count; the "%" in the threshold is cosmetic.']
+          : []),
+        ...(ROW_LEVEL_METRICS.has(metric)
+          ? []
+          : ['Aggregate: it cannot name a row, so it never feeds the quarantine.']),
+      ],
+      examples: [
+        {
+          title: `${metric} against a threshold`,
+          json: JSON.stringify(
+            {
+              type: metric,
+              ...(metric === 'distinct_count' || metric.startsWith('duplicate')
+                ? { columns: ['id'] }
+                : { column: 'cpf' }),
+              ...(metric === 'freshness' ? { must_be: '< 1d' } : { must_be: '= 0' }),
+            },
+            null,
+            0,
+          ),
+        },
+      ],
+    }
+  })
+
+export const VALIDATORS: ValidatorDef[] = withSharedFields([
+  ...metricValidators(),
   {
     type: 'not_null',
     label: 'Not null',
@@ -518,151 +776,6 @@ export const VALIDATORS: ValidatorDef[] = withCode([
       {
         title: 'Every contract belongs to a known assignment',
         json: `{ "type": "sql", "query": "SELECT COUNT(*) = 0 FROM ${VALIDATION_VIEW} WHERE id_cessao IS NULL OR trim(id_cessao) = ''" }`,
-      },
-    ],
-  },
-  {
-    type: 'check',
-    label: 'Check (SODA)',
-    icon: 'Sigma',
-    summary: 'A metric compared to a warn/fail threshold — the big-data take on a SODA Core check.',
-    description: [
-      'Measures a metric over the DataFrame (or a column) and compares it to a threshold,',
-      'with optional warn and fail levels — the framework equivalent of a SODA Core check.',
-      '',
-      '`must_be` is the PASS condition: `> 0`, `= 0`, `< 5%`, `between 10 and 100`, `< 1d`',
-      '(freshness). A `warn` threshold downgrades a metric that passes `must_be` to a warning',
-      'instead of a hard failure (severity "warn" does not abort under on_failure=fail).',
-      '',
-      'Metrics: row_count, distinct_count, missing_count/percent, duplicate_count/percent,',
-      'invalid_count/percent, min, max, avg, sum, stddev, freshness. The invalid_* metrics',
-      'read the valid_* configuration (valid_values, valid_format, valid_regex, valid_min/max).',
-    ].join('\n'),
-    fields: [
-      {
-        key: 'metric',
-        label: 'Metric',
-        type: 'select',
-        required: true,
-        options: CHECK_METRICS,
-        help: 'What to measure. Column metrics (missing/invalid/min/max/avg/sum/stddev/freshness) need a column.',
-        validate: (value) =>
-          typeof value === 'string' && value.trim() !== '' ? null : 'Pick a metric to measure.',
-      },
-      {
-        key: 'must_be',
-        label: 'Must be (threshold)',
-        type: 'text',
-        required: true,
-        placeholder: '< 5%',
-        help: 'Pass condition: > < >= <= = != , or "between X and Y". Accepts % and durations (1d, 2h, 30m).',
-        validate: validateRequiredText('Set a threshold, e.g. "> 0" or "< 5%".'),
-      },
-      {
-        key: 'column',
-        label: 'Column',
-        type: 'text',
-        placeholder: 'valor',
-        help: 'Required for column metrics. Omit for row_count.',
-        validate: requireColumnForMetric,
-      },
-      {
-        key: 'columns',
-        label: 'Columns',
-        type: 'string-list',
-        placeholder: 'id',
-        help: 'For duplicate_count / distinct_count over a composite key.',
-        group: 'advanced',
-      },
-      {
-        key: 'warn',
-        label: 'Warn threshold',
-        type: 'text',
-        placeholder: '= 0',
-        help: 'Optional softer level: a metric that passes must_be but fails warn is reported as a warning.',
-        group: 'advanced',
-      },
-      {
-        key: 'name',
-        label: 'Check name',
-        type: 'text',
-        placeholder: 'cpf completeness',
-        help: 'Shown in the result and report — makes a failing check readable.',
-        group: 'advanced',
-      },
-      {
-        key: 'missing_values',
-        label: 'Missing values',
-        type: 'string-list',
-        placeholder: 'N/A',
-        help: 'Extra values treated as missing besides NULL (for missing_* metrics).',
-        group: 'advanced',
-      },
-      {
-        key: 'valid_format',
-        label: 'Valid format',
-        type: 'select',
-        options: VALID_FORMATS,
-        help: 'Named format for invalid_* metrics (email, uuid, cpf, cnpj, date…).',
-        group: 'advanced',
-      },
-      {
-        key: 'valid_values',
-        label: 'Valid values',
-        type: 'string-list',
-        help: 'Accepted values for invalid_* metrics.',
-        group: 'advanced',
-      },
-      {
-        key: 'valid_regex',
-        label: 'Valid regex',
-        type: 'text',
-        placeholder: '^[A-Z]{2}\\\\d{4}$',
-        help: 'Custom regex for invalid_* metrics (overrides valid_format if both are set alongside it).',
-        group: 'advanced',
-      },
-      { key: 'valid_min', label: 'Valid min', type: 'number', group: 'advanced' },
-      { key: 'valid_max', label: 'Valid max', type: 'number', group: 'advanced' },
-    ],
-    keywords: [
-      'soda',
-      'check',
-      'quality',
-      'metric',
-      'threshold',
-      'missing',
-      'duplicate',
-      'invalid',
-      'freshness',
-      'warn',
-      'completeness',
-      'validity',
-    ],
-    gotchas: [
-      'must_be is the PASS condition — "missing_percent < 5%" passes when the metric is below 5%.',
-      'warn is optional; a metric passing must_be but failing warn is severity "warn" and does NOT abort under on_failure=fail.',
-      'Column metrics need `column`; duplicate/distinct use the whole df or `columns`.',
-      'invalid_* count present values that violate the valid_* config — a NULL is missing, not invalid.',
-      'freshness is seconds since max(column); with no rows the age is infinite, so any "< X" fails.',
-      'Percent metrics are 0–100 over the row count; the "%" in the threshold is cosmetic.',
-    ],
-    examples: [
-      { title: 'Non-empty load', json: '{ "type": "check", "metric": "row_count", "must_be": "> 0" }' },
-      {
-        title: 'CPF completeness with a warn level',
-        json: '{ "type": "check", "name": "cpf completeness", "metric": "missing_percent", "column": "cpf", "must_be": "< 1%", "warn": "= 0" }',
-      },
-      {
-        title: 'No duplicate business keys',
-        json: '{ "type": "check", "metric": "duplicate_count", "columns": ["id_cessao", "numero_contrato"], "must_be": "= 0" }',
-      },
-      {
-        title: 'Valid e-mails',
-        json: '{ "type": "check", "metric": "invalid_percent", "column": "email", "valid_format": "email", "must_be": "< 5%" }',
-      },
-      {
-        title: 'Freshness under a day',
-        json: '{ "type": "check", "metric": "freshness", "column": "atualizado_em", "must_be": "< 1d" }',
       },
     ],
   },

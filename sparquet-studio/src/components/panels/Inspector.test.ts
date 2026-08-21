@@ -139,7 +139,7 @@ describe('resolveIssueField', () => {
       nodeId: 'v1',
       key: 'columns',
     })
-    expect(resolveIssueField('v1', validation('check', { metric: 'row_count' }), 'must_be')).toEqual(
+    expect(resolveIssueField('v1', validation('missing_percent', { column: 'cpf' }), 'must_be')).toEqual(
       { nodeId: 'v1', key: 'must_be' },
     )
     expect(resolveIssueField('v1', validation('not_null'), 'columns[0]')).toEqual({

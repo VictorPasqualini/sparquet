@@ -28,5 +28,7 @@ export type { CompileResult } from '@/lib/compiler/toJson'
 export { pipelineToGraph } from '@/lib/compiler/toGraph'
 export type { DecompileResult } from '@/lib/compiler/toGraph'
 
+export { expandTargets, targetsOf, TARGETS_KEY } from '@/lib/compiler/targets'
+
 export { autoLayout, NODE_RENDER_SIZE, NOTE_RENDER_SIZE } from '@/lib/compiler/layout'
 export type { LayoutOptions } from '@/lib/compiler/layout'

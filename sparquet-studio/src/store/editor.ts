@@ -21,6 +21,7 @@ import {
   autoLayout,
   chainToSink,
   compileGraph,
+  expandTargets,
   isCompilable,
   isDisabled,
   isSinkNode,
@@ -502,10 +503,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       if (!target || !source) return
       if (target.data.kind === 'note' || source.data.kind === 'note') return
       if (target.data.kind === 'source') return
-      // A quality destination is a declaration, not a chain member: the validations
-      // block writes it from the DataFrame every rule saw, so it has nothing to
-      // receive and nothing to pass on.
-      if (isValidationSinkNode(target) || isValidationSinkNode(source)) return
+      // A quality destination never feeds anything — the validations block writes it
+      // from the DataFrame every rule saw — but it DOES take a link from a rule, so
+      // the canvas can show which validations produce it. On the quarantine of
+      // rejected rows a link on the `scope` handle also narrows the split.
+      if (isValidationSinkNode(source)) return
+      if (isValidationSinkNode(target) && source.data.kind !== 'validation') return
       if (createsCycle(edges, connection.source, connection.target)) return
 
       // One connection per input handle: a new link replaces the old one.
@@ -826,12 +829,16 @@ export function mainChainTransformNodeIds(state: StudioGraph): string[] {
 }
 
 /**
- * The validation rule nodes, in the order the compiler writes `validations.rules`.
+ * One entry per rule the framework will RUN, in order — the node id repeated once for
+ * each of its `targets`.
  *
  * Same walk as `mainChainTransformNodeIds` on purpose: the runner reports a rule by
- * its index into that array, so any divergence would light up the wrong box. Unlike
- * transformations, each rule is a real Spark action, so these statuses track work
- * actually being done rather than a plan being built.
+ * its index into `validations.rules`, so any divergence would light up the wrong box.
+ * A `targets` entry is expanded when the config is parsed, so one node can account for
+ * several indices — three rule nodes with three, two and two targets report indices
+ * 0..6. Returning ids per NODE would shift every index after the first multi-target
+ * rule onto the wrong box. Unlike transformations, each rule is a real Spark action,
+ * so these statuses track work actually being done rather than a plan being built.
  */
 export function validationNodeIdsInOrder(state: StudioGraph): string[] {
   const graph: StudioGraph = { nodes: state.nodes, edges: state.edges }
@@ -851,7 +858,9 @@ export function validationNodeIdsInOrder(state: StudioGraph): string[] {
   const prefix = longestCommonPrefix(middles, (a, b) => a.id === b.id)
   return sharedChainOf(prefix)
     .filter(isValidationNode)
-    .map((node) => node.id)
+    .flatMap((node) =>
+      expandTargets((node.data.params ?? {}) as Record<string, unknown>).map(() => node.id),
+    )
 }
 
 /**

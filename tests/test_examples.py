@@ -49,6 +49,59 @@ class TestExamplesParse(unittest.TestCase):
                     len(config.outputs), 0, "example declares no output"
                 )
 
+    def test_declared_validations_are_known(self):
+        """Um `type` de validação inexistente só falharia ao rodar o pipeline.
+
+        Foi essa a lacuna que deixou o wrapper `check` sobreviver num exemplo depois
+        de removido do registry: o teste cobria transformações e não validações.
+        """
+        from sparquet_cola import Cola
+
+        known = set(Cola().available)
+        for path in discover():
+            with self.subTest(example=path.name):
+                config = PipelineConfig.from_dict(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+                for rule in config.validations.rules:
+                    self.assertIn(
+                        rule.type, known, f"validação desconhecida em {path.name}"
+                    )
+
+    def test_quarantine_scopes_name_codes_that_exist(self):
+        """Um codigo escrito errado em `outputs.*.rules` escopa a quarentena a NADA.
+
+        E silencioso por natureza: a regra roda, o dataset e escrito, e sai vazio —
+        indistinguivel de "nenhuma linha violou". O pipeline avisa em tempo de
+        execucao (`_check_quarantine_scope`), o que so ajuda quem ja rodou; aqui os
+        exemplos, que sao o que as pessoas copiam, sao conferidos antes disso.
+        """
+        from sparquet_cola import Cola
+
+        cola = Cola()
+        for path in discover():
+            with self.subTest(example=path.name):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                validations = data.get("validations") or {}
+                outputs = validations.get("outputs") or {}
+                scoped = [
+                    code
+                    for dataset in outputs.values()
+                    if isinstance(dataset, dict)
+                    for code in (dataset.get("rules") or [])
+                ]
+                if not scoped:
+                    continue
+                produced = set(cola.codes(validations.get("rules", [])))
+                for code in scoped:
+                    self.assertIn(
+                        code,
+                        produced,
+                        f"{path.name}: nenhuma regra produz o codigo {code!r} — a "
+                        f"quarentena escopada por ele sairia vazia. Produzidos: "
+                        f"{sorted(produced)}",
+                    )
+
     def test_declared_transformations_are_known(self):
         """A typo in an example would teach the wrong keyword to whoever copies it."""
         from sparquet.transform.engine import TransformationEngine

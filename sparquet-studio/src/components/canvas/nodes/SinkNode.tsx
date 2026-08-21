@@ -42,20 +42,22 @@ export const SinkNode = memo(function SinkNodeRenderer({
   return (
     <NodeShell
       nodeId={id}
-      accent="output"
+      // A quality destination wears the VALIDATION accent, not the output one. Before,
+      // both were `output` and the two read as the same kind of box — but one is the
+      // job's own result and the other is a by-product of the rules, written from the
+      // same rows. Same colour was a lie about what they are.
+      accent={sideDef ? 'validate' : 'output'}
       icon={catalogIcon(sideDef?.icon ?? format?.icon ?? 'Database')}
       title={data.label ?? sideDef?.label ?? 'Output'}
       subtitle={sideDef?.subtitle}
       selected={selected}
       issues={issues}
-      // A quality destination is a declaration, not a step: the validations block
-      // writes it from the DataFrame every rule saw, so there is nothing to wire in
-      // and nothing to pass on.
-      // The quarantine of rejected rows takes an OPTIONAL input: linking rules into
-      // it scopes the split to those rules. Unlinked still means "every row-level
-      // rule", so the handle adds a capability without changing the default. The
-      // report and the valid side have nothing to scope, so they stay handle-less.
-      inputs={!sideDef || data.dqRole === 'invalid' ? 'single' : 'none'}
+      // Every quality destination takes an input, so the canvas can SHOW that it comes
+      // out of the validations instead of leaving it floating like an orphan. On the
+      // quarantine of rejected rows the link also carries meaning — the rules linked
+      // into it scope the split; on the report and the valid side there is nothing to
+      // scope, so the link is there to say "this belongs to those rules".
+      inputs={sideDef?.role === 'invalid' || data.dqRole === 'invalid' ? 'scoped' : 'single'}
       hasOutput={false}
       badges={
         <>
