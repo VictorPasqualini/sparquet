@@ -305,7 +305,7 @@ function AppearanceSection() {
 
   return (
     <Section meta={SECTIONS[0]}>
-      <Field label="Theme" help="Dark is the default. The choice is remembered on this device.">
+      <Field label="Theme" help="Light is the default. The choice is remembered on this device.">
         <Segmented value={theme} onChange={setTheme} options={THEME_OPTIONS} />
       </Field>
 
@@ -874,11 +874,17 @@ function DataSection() {
         description="Restore an export on this machine or another one. You choose whether to merge or replace."
         action={
           <>
+            {/*
+              `hidden`, not `sr-only`: sr-only is position:absolute, and with no
+              positioned ancestor this input anchored to the document and stretched
+              it to its own offset, which made every in-page jump scroll the page
+              behind the app. A display:none input still opens on .click().
+            */}
             <input
               ref={fileRef}
               type="file"
               accept="application/json,.json"
-              className="sr-only"
+              className="hidden"
               aria-hidden
               tabIndex={-1}
               onChange={(event) => void pickFile(event)}

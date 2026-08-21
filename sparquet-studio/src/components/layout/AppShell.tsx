@@ -129,7 +129,9 @@ export function AppShell() {
         onNewWorkflow={() => setNewWorkflowOpen(true)}
       />
 
-      <main className="scroll-area min-h-0 min-w-0 flex-1">
+      {/* relative so an absolutely positioned descendant anchors to the scroller
+          rather than to the document, which would make the page itself scroll. */}
+      <main className="scroll-area relative min-h-0 min-w-0 flex-1">
         <Outlet />
       </main>
 
