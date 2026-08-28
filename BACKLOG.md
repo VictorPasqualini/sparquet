@@ -365,6 +365,50 @@ Pendente:
       Toda rota passou a declarar a ação que exige; `run as` deixou de ser texto livre
       quando há usuário — quem executou é fato, não rótulo. No cliente: `store/auth.ts`,
       tela de login e a seção **Access** em Settings.
+- ✅ **Studio — recuperação de senha** — código de uso único em vez de e-mail, porque
+      o runner não tem servidor de e-mail e não deveria ganhar um. Um administrador
+      (`iam:ManageUsers`, em **Settings → Access → Recovery code**) ou quem opera a
+      máquina (`python server/auth.py recovery-code <user>`) emite o código; a pessoa o
+      gasta na tela de login em *I have a recovery code* e escolhe a própria senha. Isso
+      não cria autoridade nova — quem roda a CLI já é dono do host —, só evita que a
+      senha seja ditada por chat. Tabela `recovery` no SQLite de identidade guardando
+      apenas o SHA-256 do código; emitir invalida o anterior não usado; vale uma vez e
+      expira em `SPARQUET_STUDIO_RECOVERY_MINUTES` (padrão 30); resgatar derruba todas as
+      sessões da conta; a senha nova é validada **antes** de o código ser queimado (senha
+      curta não gasta o código); conta desabilitada não é recuperável; e toda recusa tem
+      a mesma mensagem — o endpoint não diz se o código era desconhecido, expirado ou já
+      usado. Rotas `POST /auth/users/{id}/recovery` e `POST /auth/recover` (esta exige o
+      token compartilhado e **nenhuma** sessão, já que vem da tela de login).
+- ✅ **Studio — créditos de execução** — uma moeda por Job, cobrada **só quando o Job
+      não roda na máquina do runner** (`sparquet-studio/server/credits.py`, SQLite
+      próprio em `SPARQUET_STUDIO_CREDITS_DB`). A localidade sai da configuração do Job,
+      nunca de um campo da requisição, senão bastaria o cliente declarar-se local:
+      `spark.master` (ou `spark.configs["spark.master"]`) começando com `local` é grátis;
+      `spark.remote` cobra mesmo com master local ao lado; `yarn`/`spark://`/`k8s://`
+      cobram; e runner rodando em Databricks/EMR/Dataproc/Synapse cobra todo Job,
+      qualquer que seja o master. **Medir e cobrar são coisas separadas**: por padrão o
+      livro-razão registra e não bloqueia nada, e só `SPARQUET_STUDIO_CREDITS=on` faz o
+      saldo barrar execução (**HTTP 402** antes de começar) — por isso a conta tem
+      `balance`, que só se move sob cobrança, e `spent`, que sempre sobe: ligar a
+      cobrança parte do que foi concedido, não da dívida acumulada. Cobrança na admissão
+      e **sem estorno**: run recusado antes de começar não paga, run que começou e falhou
+      paga. Flow cobra por etapa conforme cada uma começa, então flow que acaba o saldo na
+      quarta rodou três de verdade e o razão diz isso. Conta = usuário, ou a conta
+      literal `token` em modo sem usuários. Ações `credits:Read` e `credits:Manage`,
+      rotas `/credits/me`, `/credits`, `/credits/{id}/ledger`, `/credits/{id}/grant`,
+      `credits_enforced` no `/health`, painel em **Settings → Access**.
+- [ ] **Créditos — o que ficou pendente** — o que existe cobra e registra; falta o que
+      uma cobrança de verdade pede depois: **cota por período** (hoje o saldo é um
+      estoque, não "N execuções por mês" com recarga automática), **preço por tamanho**
+      (todo Job remoto custa igual, independentemente de rodar dois minutos ou seis
+      horas — o caminho natural é cobrar por duração ou por linha processada, dados que
+      o histórico já tem), **reserva antes de executar em vez de débito** (com estorno
+      quando o run é recusado pelo cluster, não pelo runner), **conta por equipe/
+      Workflow** e não só por pessoa, **aviso de saldo baixo** antes do 402, e
+      **conciliação com o custo real** do cluster (o crédito hoje é uma unidade interna,
+      não tem relação com o que a nuvem cobrou). Também falta cobrar execução que não
+      passa pelo runner do Studio (`sparquet.cli`, job agendado) — hoje ela é invisível
+      para o razão.
 - [ ] **IAM — o que ficou pendente** — o que existe cobre autenticar e autorizar; falta
       o que uma instalação com várias pessoas cobra depois: **papéis customizados pela
       interface** (o modelo já aceita, só o `admin` por CLI/SQL cria), **escopo por
@@ -372,11 +416,10 @@ Pendente:
       sabem o alvo pelo corpo da requisição, que a dependência de permissão não lê —
       hoje autorizam `run:Execute` em `*`), **log de auditoria** (quem mudou o quê e
       quando; o histórico registra execução, não alteração), **SSO/OIDC** e senha
-      gerenciada fora do runner, **recuperação de senha** sem administrador,
-      **expiração/rotação de sessão configurável por política** (hoje só
-      `SPARQUET_STUDIO_SESSION_HOURS`), e **UI ciente de permissão em toda a tela** (o
-      painel de Access esconde o que não é permitido; o resto do Studio ainda oferece
-      botões que voltam 403).
+      gerenciada fora do runner, **expiração/rotação de sessão configurável por
+      política** (hoje só `SPARQUET_STUDIO_SESSION_HOURS`), e **UI ciente de permissão em
+      toda a tela** (os painéis de Access e de créditos escondem o que não é permitido; o
+      resto do Studio ainda oferece botões que voltam 403).
 - [ ] **Monitoramento e observabilidade** — revisar e implementar. Hoje existe a matéria
       prima e não o produto: log estruturado em JSON (`sparquet/utils/logger.py`),
       `PipelineResult` com o resultado de cada validação, e o histórico do Studio

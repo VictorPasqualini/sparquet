@@ -125,12 +125,87 @@ exposed:
 - An unknown username costs the same time as a wrong password, so the endpoint
   does not answer "does this person exist?".
 
+### Password recovery
+
+There is no "email me a reset link", because the runner has no mail server and
+should not grow one. Recovery is a **single-use code**, minted by somebody who
+already has access to the machine or to `iam:ManageUsers`, and handed over out of
+band:
+
+```bash
+python server/auth.py recovery-code ana   # prints a code, valid for 30 minutes
+python server/auth.py reset-password ana  # or just set one directly
+```
+
+From Studio: **Settings → Access → Recovery code** on the person's row. The code
+is shown once — the runner stores only its SHA-256 hash — and the person spends
+it on the login screen under *I have a recovery code*.
+
+This adds no authority that did not already exist: whoever can run the CLI owns
+the host and could edit the database anyway. What it buys is that the person
+chooses their own password instead of being told one over chat.
+
+The rules the store enforces:
+
+- Issuing a code invalidates any earlier unused one for that user, so a lost code
+  is fixed by minting another.
+- A code works **once** and expires after `SPARQUET_STUDIO_RECOVERY_MINUTES`.
+- Redeeming ends every session the account has open.
+- The new password is validated *before* the code is burned — too short and you
+  still have your code.
+- A disabled account cannot be recovered into, and every refusal reads the same:
+  the endpoint does not say whether the code was unknown, expired or already
+  used.
+
 Identity lives in its own SQLite file (`SPARQUET_STUDIO_AUTH_DB`), separate from
 the execution history: they have different lifetimes, and a history database is
 something you might copy around.
 
 None of this makes the runner safe to expose. It is still bound to `127.0.0.1`,
 and the token is still required on every call.
+
+## Execution credits
+
+One credit per Job, charged **only when the Job does not run on this machine**.
+Running Spark locally costs nothing; sending work to a cluster, to Spark Connect
+or to a hosted runtime costs one credit per Job (`SPARQUET_STUDIO_CREDITS_PER_JOB`
+if you want it to be more).
+
+Locality is read from the Job's own configuration, never from anything the caller
+sends, so nobody can declare their own run free:
+
+| In the Job | Counts as |
+|---|---|
+| `spark.master` (or `spark.configs["spark.master"]`) starting with `local` | local — free |
+| `spark.remote` set to anything | remote — charged, even if a local master is also set |
+| `yarn`, `spark://…`, `k8s://…`, or no master at all on a hosted runtime | remote — charged |
+| the runner itself running on Databricks / EMR / Dataproc / Synapse | remote — every Job is charged |
+
+**Metering and enforcement are separate.** By default the ledger records every
+remote Job and blocks nothing, so turning a runner into a metered one never
+suddenly stops anybody's work. Set `SPARQUET_STUDIO_CREDITS=on` and a balance
+starts gating execution: a Job that cannot be paid for is refused with **HTTP
+402** before it starts, and Studio shows the runner's message. That is why an
+account carries two numbers — `balance` moves only under enforcement, `spent`
+always climbs — so switching enforcement on starts from what was granted, not
+from accumulated debt.
+
+Charging happens at admission and there is **no refund**: a run refused before
+starting is never charged, and a run that started and then failed is. A flow is
+charged stage by stage as each stage starts, so a flow that runs out at stage
+four has genuinely run three, and the ledger says so.
+
+The account is the user (`credits:Read` to see other people's, `credits:Manage`
+to grant), or the literal account `token` on a runner with no users. The ledger
+is append-only and lives in its own SQLite file.
+
+```bash
+# Give somebody credits without the UI:
+curl -X POST http://127.0.0.1:8787/credits/u1/grant \
+  -H "x-sparquet-token: $SPARQUET_STUDIO_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"amount": 100, "note": "quarter budget"}'
+```
 
 ## Install
 
@@ -195,6 +270,11 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_HISTORY_DB` | `server/data/execution_history.sqlite3` | SQLite file holding the execution history — the runs, their steps and their logs. |
 | `SPARQUET_STUDIO_AUTH_DB` | `server/data/auth.sqlite3` | SQLite file holding users, roles and sessions. Absent users means the runner stays in token-only mode. |
 | `SPARQUET_STUDIO_SESSION_HOURS` | `12` | How long a session lasts before it has to be renewed by signing in again. |
+| `SPARQUET_STUDIO_RECOVERY_MINUTES` | `30` | How long a password recovery code stays usable. |
+| `SPARQUET_STUDIO_CREDITS` | unset (metering only) | `on`/`1`/`true`/`yes`/`enforce` makes balances actually gate execution. Anything else records without blocking. |
+| `SPARQUET_STUDIO_CREDITS_PER_JOB` | `1` | Credits one non-local Job costs. |
+| `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
+| `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
 | `SPARQUET_STUDIO_WORKSPACE` | `sparquet-workspace/` at the repo root | Directory the Studio library is stored in, as real JSON files. This is what you commit. |
 
 ## Endpoints
@@ -208,7 +288,8 @@ and deferred-warning buffer.
   "spark_available": true,
   "framework_version": "0.2.3",
   "auth_required": true,
-  "login_required": false
+  "login_required": false,
+  "credits_enforced": false
 }
 ```
 
@@ -218,6 +299,8 @@ how Studio discovers the runner before it has one. `auth_required` is absent on
 runners older than 0.2.0, which accepted unauthenticated `/run` calls.
 `login_required` says whether this runner has users: `false` means the shared
 token is the identity, `true` means a session is needed on top of it.
+`credits_enforced` says whether a balance can refuse a run; `false` means credits
+are being counted but nothing is blocked.
 
 ### `POST /run`
 
@@ -478,6 +561,42 @@ when it would leave the runner with no enabled administrator.
 `{ "password": "...", "current_password": "..." }`. Changing your own password
 requires `current_password`; an administrator resetting somebody else's does not.
 Either way every session that password had opened stops working.
+
+### `POST /auth/users/{id}/recovery`
+
+Mints a single-use recovery code for that user and returns it once:
+
+```json
+{ "user_id": "u1", "username": "ana", "code": "…", "expires_at": "2026-08-28T12:30:00Z" }
+```
+
+Needs `iam:ManageUsers`. Issuing invalidates any earlier unused code for the same
+user. The runner keeps only the hash, so this response is the only copy.
+
+### `POST /auth/recover`
+
+`{ "code": "...", "password": "..." }`. Needs the shared token but **no session**
+— it is called from the login screen. Sets the password, burns the code and ends
+every session that account had open. Every refusal returns the same message.
+
+### `GET /credits/me`
+
+```json
+{ "account": { "id": "u1", "username": "ana", "balance": 7, "spent": 3 },
+  "enforced": false, "credits_per_job": 1 }
+```
+
+No permission needed — it is your own balance.
+
+### `GET /credits` · `GET /credits/{account_id}/ledger` · `POST /credits/{account_id}/grant`
+
+Every account (`credits:Read`); one account's entries, newest first (your own
+always, anybody else's with `credits:Read`); and adding credits, or taking them
+back with a negative amount (`credits:Manage`). A ledger entry carries `applied:
+false` when it was recorded on a runner that meters without enforcing.
+
+A run refused for lack of credits answers **402** with the message naming the
+grant endpoint. Nothing is written to the history for it — it never started.
 
 ### `GET /capabilities`
 
