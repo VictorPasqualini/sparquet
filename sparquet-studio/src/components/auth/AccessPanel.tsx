@@ -11,13 +11,13 @@
  * on each request, so a hidden button is a courtesy, not a lock.
  */
 
-import { ShieldCheck, Trash2, UserPlus } from 'lucide-react'
+import { KeyRound, ShieldCheck, Trash2, UserPlus } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
 import { Badge, Button, Field, Input, Modal, Select, Spinner, Toggle } from '@/components/ui'
 import { useAuthStore } from '@/store/auth'
-import type { AuthRole, AuthUser } from '@/types/auth'
+import type { AuthRole, AuthUser, RecoveryCode } from '@/types/auth'
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -35,6 +35,7 @@ export function AccessPanel() {
   const editUser = useAuthStore((state) => state.editUser)
   const removeUser = useAuthStore((state) => state.removeUser)
   const changePassword = useAuthStore((state) => state.changePassword)
+  const issueRecovery = useAuthStore((state) => state.issueRecovery)
 
   const [users, setUsers] = useState<AuthUser[] | null>(null)
   const [roles, setRoles] = useState<AuthRole[]>([])
@@ -139,6 +140,7 @@ export function AccessPanel() {
                   onPassword={async (password, currentPassword) => {
                     await changePassword(user.id, password, currentPassword)
                   }}
+                  onRecovery={() => issueRecovery(user.id)}
                 />
               ))}
             </ul>
@@ -169,6 +171,7 @@ function UserRow({
   onChange,
   onDelete,
   onPassword,
+  onRecovery,
 }: {
   user: AuthUser
   roles: AuthRole[]
@@ -177,9 +180,11 @@ function UserRow({
   onChange: (changes: { roles?: string[]; disabled?: boolean }) => Promise<void>
   onDelete: () => Promise<void>
   onPassword: (password: string, currentPassword?: string) => Promise<void>
+  onRecovery: () => Promise<RecoveryCode>
 }) {
   const [busy, setBusy] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [recovery, setRecovery] = useState<RecoveryCode | null>(null)
 
   const guard = (action: () => Promise<void>) => () => {
     setBusy(true)
@@ -224,6 +229,17 @@ function UserRow({
           <Button
             size="sm"
             variant="ghost"
+            icon={<KeyRound className="h-3.5 w-3.5" />}
+            disabled={busy}
+            onClick={guard(async () => {
+              setRecovery(await onRecovery())
+            })}
+          >
+            Recovery code
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
             icon={<Trash2 className="h-3.5 w-3.5" />}
             disabled={busy}
             onClick={guard(onDelete)}
@@ -240,7 +256,54 @@ function UserRow({
         onOpenChange={setPasswordOpen}
         onSubmit={onPassword}
       />
+
+      <RecoveryDialog recovery={recovery} onClose={() => setRecovery(null)} />
     </li>
+  )
+}
+
+/**
+ * Shows a freshly minted recovery code — once.
+ *
+ * The runner keeps only its hash, so closing this dialog is the last time anyone
+ * can read it. Issuing another one invalidates this, which is the way out if it
+ * is lost.
+ */
+function RecoveryDialog({
+  recovery,
+  onClose,
+}: {
+  recovery: RecoveryCode | null
+  onClose: () => void
+}) {
+  return (
+    <Modal
+      open={recovery !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+      title={recovery ? `Recovery code for ${recovery.username}` : 'Recovery code'}
+      description="Hand it over out of band. It works once, and it lets the person choose their own password without knowing the old one."
+      size="sm"
+      footer={
+        <Button size="sm" onClick={onClose}>
+          Done
+        </Button>
+      }
+    >
+      {recovery ? (
+        <div className="space-y-2">
+          <code className="block break-all rounded-lg border border-line bg-surface-sunken px-3 py-2 text-2xs text-content">
+            {recovery.code}
+          </code>
+          <p className="text-2xs leading-relaxed text-content-subtle">
+            Valid until {recovery.expiresAt.slice(0, 16).replace('T', ' ')}. It is not stored in
+            readable form — this is the only time it is shown. Redeeming it ends every session that
+            account has open.
+          </p>
+        </div>
+      ) : null}
+    </Modal>
   )
 }
 

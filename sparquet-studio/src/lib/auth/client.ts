@@ -12,7 +12,15 @@
  */
 
 import { authHeaders, DEFAULT_RUNNER_URL, RunnerError, RUNNER_UNREACHABLE_MESSAGE } from '@/lib/runner/client'
-import type { AuthRole, AuthSession, AuthStatus, AuthUser, Principal, PolicyStatement } from '@/types/auth'
+import type {
+  AuthRole,
+  AuthSession,
+  AuthStatus,
+  AuthUser,
+  Principal,
+  PolicyStatement,
+  RecoveryCode,
+} from '@/types/auth'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -283,4 +291,45 @@ export async function deleteUser(
     token,
     signal,
   )
+}
+
+/**
+ * Mints a single-use recovery code for somebody who cannot log in.
+ *
+ * The code comes back once and is never readable again — the runner keeps only
+ * its hash — so whoever calls this has to hand it over immediately.
+ */
+export async function issueRecovery(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  userId: string,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<RecoveryCode> {
+  const payload = await request(
+    baseUrl,
+    `/auth/users/${encodeURIComponent(userId)}/recovery`,
+    { method: 'POST' },
+    token,
+    signal,
+  )
+  const record = isRecord(payload) ? payload : {}
+  return {
+    userId: asString(record.user_id),
+    username: asString(record.username),
+    code: asString(record.code),
+    expiresAt: asString(record.expires_at),
+  }
+}
+
+/**
+ * Trades a recovery code for a new password. Called from the login screen, so it
+ * carries no session — the whole point is that the caller has none.
+ */
+export async function recoverPassword(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: { code: string; password: string },
+  token?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await request(baseUrl, '/auth/recover', { method: 'POST', body: JSON.stringify(body) }, token, signal)
 }

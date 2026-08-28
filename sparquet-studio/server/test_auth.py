@@ -257,6 +257,89 @@ class StoreTest(unittest.TestCase):
         self.store.delete_user(ana.id)
         self.assertIsNone(self.store.resolve_session(session.token))
 
+    # ---- password recovery
+
+    def test_a_recovery_code_sets_a_new_password(self) -> None:
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        code, _ = self.store.issue_recovery(ana.id, issued_by="root")
+        self.store.redeem_recovery(code, "outra-senha-boa")
+        self.assertIsNone(self.store.login("ana", PASSWORD))
+        self.assertIsNotNone(self.store.login("ana", "outra-senha-boa"))
+
+    def test_a_recovery_code_works_once(self) -> None:
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        code, _ = self.store.issue_recovery(ana.id)
+        self.store.redeem_recovery(code, "outra-senha-boa")
+        with self.assertRaises(auth.AuthError):
+            self.store.redeem_recovery(code, "terceira-senha")
+
+    def test_issuing_a_code_kills_the_previous_one(self) -> None:
+        """Two live codes mean two chances for a leaked one to still work."""
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        first, _ = self.store.issue_recovery(ana.id)
+        second, _ = self.store.issue_recovery(ana.id)
+        with self.assertRaises(auth.AuthError):
+            self.store.redeem_recovery(first, "outra-senha-boa")
+        self.store.redeem_recovery(second, "outra-senha-boa")
+
+    def test_an_expired_code_is_refused(self) -> None:
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        code, _ = self.store.issue_recovery(ana.id)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("UPDATE recovery SET expires_at = '2000-01-01T00:00:00Z'")
+            conn.commit()
+        finally:
+            conn.close()
+        with self.assertRaises(auth.AuthError):
+            self.store.redeem_recovery(code, "outra-senha-boa")
+        self.assertIsNotNone(self.store.login("ana", PASSWORD))
+
+    def test_an_unknown_code_is_refused(self) -> None:
+        self.store.create_user("ana", PASSWORD, roles=["editor"])
+        with self.assertRaises(auth.AuthError):
+            self.store.redeem_recovery("nao-existe", "outra-senha-boa")
+
+    def test_a_disabled_account_cannot_be_recovered_into(self) -> None:
+        """Recovery repairs a forgotten password, not a revoked account."""
+        self._admin()
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        code, _ = self.store.issue_recovery(ana.id)
+        self.store.set_disabled(ana.id, True)
+        with self.assertRaises(auth.AuthError):
+            self.store.redeem_recovery(code, "outra-senha-boa")
+
+    def test_the_code_is_not_stored_as_itself(self) -> None:
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        code, _ = self.store.issue_recovery(ana.id)
+        raw = self.path.read_bytes()
+        self.assertNotIn(code.encode("utf-8"), raw)
+
+    def test_a_recovery_ends_the_sessions_the_old_password_opened(self) -> None:
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        session = self.store.login("ana", PASSWORD)
+        code, _ = self.store.issue_recovery(ana.id)
+        self.store.redeem_recovery(code, "outra-senha-boa")
+        self.assertIsNone(self.store.resolve_session(session.token))
+
+    def test_a_short_password_does_not_burn_the_code(self) -> None:
+        """The refusal is about the new password, so the person keeps their one try."""
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        code, _ = self.store.issue_recovery(ana.id)
+        with self.assertRaises(auth.AuthError):
+            self.store.redeem_recovery(code, "curta")
+        self.store.redeem_recovery(code, "outra-senha-boa")
+        self.assertIsNotNone(self.store.login("ana", "outra-senha-boa"))
+
+    def test_a_code_cannot_be_issued_for_someone_who_does_not_exist(self) -> None:
+        with self.assertRaises(auth.AuthError):
+            self.store.issue_recovery("nao-existe")
+
+    def test_a_user_is_findable_by_name_for_the_operator_commands(self) -> None:
+        ana = self.store.create_user("ana", PASSWORD, roles=["editor"])
+        self.assertEqual(self.store.find_user("ANA").id, ana.id)
+        self.assertIsNone(self.store.find_user("bruno"))
+
     # ---- roles
 
     def test_the_builtin_roles_are_there_on_a_fresh_database(self) -> None:

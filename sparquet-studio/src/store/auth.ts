@@ -21,16 +21,18 @@ import {
   deleteUser as apiDeleteUser,
   getAuthStatus,
   getMe,
+  issueRecovery as apiIssueRecovery,
   listRoles,
   listUsers,
   login as apiLogin,
   logout as apiLogout,
+  recoverPassword as apiRecoverPassword,
   setPassword as apiSetPassword,
   updateUser as apiUpdateUser,
 } from '@/lib/auth/client'
 import { can as evaluate } from '@/lib/auth/permissions'
 import { RunnerError, setRunnerSession } from '@/lib/runner/client'
-import type { AuthRole, AuthUser, Principal } from '@/types/auth'
+import type { AuthRole, AuthUser, Principal, RecoveryCode } from '@/types/auth'
 import { useSettingsStore } from '@/store/settings'
 
 interface AuthState {
@@ -66,6 +68,10 @@ interface AuthState {
   editUser: (userId: string, changes: { roles?: string[]; disabled?: boolean }) => Promise<void>
   changePassword: (userId: string, password: string, currentPassword?: string) => Promise<void>
   removeUser: (userId: string) => Promise<void>
+  /** Mints a single-use code for someone who cannot log in. Needs `iam:ManageUsers`. */
+  issueRecovery: (userId: string) => Promise<RecoveryCode>
+  /** Spends such a code. Called from the login screen, where there is no session. */
+  recoverPassword: (code: string, password: string) => Promise<void>
 }
 
 /** The runner address and shared token, read at call time so both stay current. */
@@ -217,6 +223,20 @@ export const useAuthStore = create<AuthState>()(
       removeUser: async (userId) => {
         const { url, token } = runner()
         await apiDeleteUser(url, userId, token)
+      },
+
+      issueRecovery: async (userId) => {
+        const { url, token } = runner()
+        return apiIssueRecovery(url, userId, token)
+      },
+
+      recoverPassword: async (code, password) => {
+        const { url, token } = runner()
+        await apiRecoverPassword(url, { code, password }, token)
+        // The code ended every session the old password had opened; ours, if we
+        // somehow had one, is among them.
+        setRunnerSession('')
+        set({ session: '', expiresAt: '', principal: null })
       },
     }),
     {

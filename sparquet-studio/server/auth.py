@@ -32,10 +32,22 @@ Passwords are stored as scrypt hashes (PBKDF2 where the interpreter has no
 scrypt), never in plain text, and session tokens are stored hashed too — a stolen
 copy of this file must not hand over live sessions.
 
+**Password recovery is a code, not an email.** The runner has no mail server and
+should not grow one, so a forgotten password is repaired by whoever can already
+reach the machine or already administers it: `recovery-code` mints a single-use
+code with a short life, and `POST /auth/recover` trades that code for a new
+password. The code is stored hashed like everything else here, expires, dies when
+used, and replaces any earlier unused code for the same person. Handing it over
+is out of band on purpose — the person doing that already has enough power to
+reset the password outright, so the code adds no new authority, only a way to let
+somebody choose their own secret.
+
 Run standalone for the operator commands:
 
     python server/auth.py create-admin
     python server/auth.py list-users
+    python server/auth.py reset-password <username>
+    python server/auth.py recovery-code <username>
 """
 from __future__ import annotations
 
@@ -140,6 +152,8 @@ ACTIONS: Dict[str, str] = {
     "history:Read": "Read past executions, their steps, logs and configuration.",
     "iam:ReadUsers": "See who has access and with which roles.",
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
+    "credits:Read": "See every account's execution credits and what they were spent on.",
+    "credits:Manage": "Grant execution credits, or take them back.",
 }
 
 #: The roles the runner ships with. Rewritten on every start, so fixing a policy
@@ -156,7 +170,7 @@ BUILTIN_ROLES: Dict[str, Role] = {
         statements=[
             {
                 "effect": "allow",
-                "actions": ["workspace:*", "run:*", "history:Read"],
+                "actions": ["workspace:*", "run:*", "history:Read", "credits:Read"],
                 "resources": ["*"],
             }
         ],
@@ -343,6 +357,16 @@ CREATE TABLE IF NOT EXISTS session (
   last_seen_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_session_user ON session(user_id);
+
+CREATE TABLE IF NOT EXISTS recovery (
+  code_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  issued_by TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_user ON recovery(user_id);
 """
 
 
@@ -377,6 +401,15 @@ def session_hours() -> int:
         return max(1, int(os.getenv("SPARQUET_STUDIO_SESSION_HOURS", "12")))
     except ValueError:
         return 12
+
+
+def recovery_minutes() -> int:
+    """How long a recovery code stays good. Short: it is a password in transit,
+    usually pasted into a chat window, and it only has to survive that trip."""
+    try:
+        return max(1, int(os.getenv("SPARQUET_STUDIO_RECOVERY_MINUTES", "30")))
+    except ValueError:
+        return 30
 
 
 class AuthStore:
@@ -588,6 +621,85 @@ class AuthStore:
             conn.execute("DELETE FROM session WHERE token_hash = ?", (_hash_token(token),))
             conn.commit()
 
+    # ---- recovery --------------------------------------------------------
+
+    def issue_recovery(
+        self, user_id: str, *, issued_by: Optional[str] = None
+    ) -> tuple[str, str]:
+        """A single-use code this person can trade for a new password.
+
+        Returns `(code, expires_at)`; only the hash is kept, so the code shown to
+        the operator is the only copy that will ever exist. Any earlier unused
+        code for the same person stops working: two live codes would mean two
+        chances for a leaked one to be the one that still works.
+        """
+        code = secrets.token_urlsafe(24)
+        now = _now()
+        expires = now + timedelta(minutes=recovery_minutes())
+        with self._lock, closing(self._connect()) as conn:
+            self._require_user(conn, user_id)
+            conn.execute("DELETE FROM recovery WHERE user_id = ? AND used_at IS NULL", (user_id,))
+            conn.execute(
+                "INSERT INTO recovery (code_hash, user_id, issued_by, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (_hash_token(code), user_id, issued_by, _iso(now), _iso(expires)),
+            )
+            conn.execute("DELETE FROM recovery WHERE expires_at < ?", (_iso(now),))
+            conn.commit()
+        return code, _iso(expires)
+
+    def redeem_recovery(self, code: str, password: str) -> User:
+        """Set a new password with a recovery code, or refuse.
+
+        Every refusal reads the same — unknown, expired, already used, or the
+        account since disabled — because the caller here is not logged in, and a
+        specific answer would turn this into an oracle. The new password is
+        validated before the code is burned, so a password that is too short
+        costs the person their typing, not their one code.
+        """
+        digest = _hash_token(code or "")
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT r.code_hash, r.expires_at, r.used_at, u.* FROM recovery r "
+                "JOIN user u ON u.id = r.user_id WHERE r.code_hash = ?",
+                (digest,),
+            ).fetchone()
+            expires = _parse(row["expires_at"]) if row else None
+            usable = bool(
+                row
+                and not row["used_at"]
+                and not row["disabled_at"]
+                and expires is not None
+                and expires > _now()
+            )
+            if not usable:
+                raise AuthError(
+                    "That recovery code is not usable — it is unknown, it expired, or "
+                    "it has already been used. Ask for a new one."
+                )
+            password_hash = hash_password(password)
+            conn.execute(
+                "UPDATE user SET password_hash = ? WHERE id = ?", (password_hash, row["id"])
+            )
+            conn.execute(
+                "UPDATE recovery SET used_at = ? WHERE code_hash = ?", (_iso(_now()), digest)
+            )
+            # Same reasoning as `set_password`: whoever held a session opened with
+            # the old password should not keep it through a recovery.
+            conn.execute("DELETE FROM session WHERE user_id = ?", (row["id"],))
+            conn.commit()
+            return self._user_of(conn, row)
+
+    def find_user(self, username: str) -> Optional[User]:
+        """By name, for the operator commands — a person at a terminal knows the
+        username, not the id."""
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM user WHERE username = ? COLLATE NOCASE",
+                ((username or "").strip(),),
+            ).fetchone()
+            return self._user_of(conn, row) if row else None
+
     # ---- roles -----------------------------------------------------------
 
     def list_roles(self) -> List[Role]:
@@ -721,17 +833,71 @@ def _list_users(store: AuthStore) -> int:
     return 0
 
 
+def _resolve(store: AuthStore, username: Optional[str]) -> Optional[User]:
+    if not username:
+        print("Which user? Pass a username.")
+        return None
+    user = store.find_user(username)
+    if user is None:
+        print(f"No user called '{username}'.")
+    return user
+
+
+def _reset_password(store: AuthStore, username: Optional[str]) -> int:
+    """The way back in when the only administrator forgot their password.
+
+    Whoever can run this already has the runner's files and its shared token, so
+    it grants no authority they did not have; what it saves is a hand-edited
+    SQLite file.
+    """
+    import getpass
+
+    user = _resolve(store, username)
+    if user is None:
+        return 1
+    password = getpass.getpass(f"New password for {user.username}: ")
+    if password != getpass.getpass("Repeat password: "):
+        print("The passwords do not match.")
+        return 1
+    try:
+        store.set_password(user.id, password)
+    except AuthError as error:
+        print(str(error))
+        return 1
+    print(f"Password changed for '{user.username}'. Their open sessions were ended.")
+    return 0
+
+
+def _recovery_code(store: AuthStore, username: Optional[str]) -> int:
+    user = _resolve(store, username)
+    if user is None:
+        return 1
+    code, expires = store.issue_recovery(user.id, issued_by="cli")
+    print(f"Recovery code for '{user.username}': {code}")
+    print(f"Good until {expires}, once. Any earlier code for them no longer works.")
+    print("They redeem it in Studio, on the login screen, under 'Forgot password'.")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Users and roles for the Studio runner.")
-    parser.add_argument("command", choices=["create-admin", "list-users"])
+    parser.add_argument(
+        "command",
+        choices=["create-admin", "list-users", "reset-password", "recovery-code"],
+    )
+    parser.add_argument("username", nargs="?", default=None)
     parser.add_argument("--db", default=None, help="Path to the auth database.")
     args = parser.parse_args(argv)
 
     store = AuthStore(Path(args.db) if args.db else None)
     if args.command == "create-admin":
         return _create_admin(store)
+    if args.command == "reset-password":
+        return _reset_password(store, args.username)
+    if args.command == "recovery-code":
+        return _recovery_code(store, args.username)
     return _list_users(store)
 
 

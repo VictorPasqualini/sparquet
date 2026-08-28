@@ -47,6 +47,7 @@ import {
 } from '@/components/ui'
 import { sendAiRequest } from '@/lib/ai/client'
 import { AccessPanel } from '@/components/auth/AccessPanel'
+import { CreditsPanel } from '@/components/credits/CreditsPanel'
 import { AI_PROVIDER_INFO } from '@/lib/ai/providers'
 import {
   checkRunnerHealth,
@@ -803,6 +804,7 @@ function AccessSection() {
   return (
     <Section meta={SECTION.access}>
       <AccessPanel />
+      <CreditsPanel />
     </Section>
   )
 }

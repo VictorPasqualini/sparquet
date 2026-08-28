@@ -58,3 +58,15 @@ export interface AuthRole {
   /** False for the roles the runner ships and keeps up to date. */
   custom: boolean
 }
+
+/**
+ * A single-use password recovery code, as `POST /auth/users/{id}/recovery`
+ * returns it. Shown once: the runner stores only its hash, so this object is the
+ * only copy that will ever exist, and it has to be handed over out of band.
+ */
+export interface RecoveryCode {
+  userId: string
+  username: string
+  code: string
+  expiresAt: string
+}

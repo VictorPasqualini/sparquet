@@ -124,6 +124,7 @@ def _load_sibling_module(name: str) -> Any:
 history = _load_sibling_module("history")
 workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
+credits = _load_sibling_module("credits")
 
 
 # ------------------------------------------------------------------ models
@@ -241,6 +242,9 @@ class HealthResponse(BaseModel):
     # the shared token is the whole of the authentication; true means Studio has
     # to log in before anything else will answer.
     login_required: bool = False
+    # Whether a balance actually gates execution. False still meters: the ledger
+    # records every remote Job either way. See `credits.py`.
+    credits_enforced: bool = False
 
 
 class CapabilitiesResponse(BaseModel):
@@ -978,6 +982,36 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
     return dependency
 
 
+# --------------------------------------------------------------------- credits
+
+_credits = credits.CreditStore()
+
+NO_CREDITS_STATUS = 402
+
+
+def _charge_execution(
+    principal: Any, pipeline: Dict[str, Any], *, job_name: Optional[str] = None,
+    job_run_id: Optional[str] = None, pipeline_run_id: Optional[str] = None,
+) -> Any:
+    """Take the credit this Job costs, or refuse the run.
+
+    Local work is free and writes nothing; a Job pointed at a cluster costs a
+    coin. The cost is read from the configuration rather than from the request,
+    so a caller cannot declare their own run free — see `credits.py`.
+    """
+    account_id, username = credits.account_for(principal)
+    target = credits.target_of(pipeline)
+    try:
+        return _credits.charge(
+            account_id, target, username=username, job_run_id=job_run_id,
+            pipeline_run_id=pipeline_run_id, job_name=job_name,
+        )
+    except credits.InsufficientCredits as error:
+        raise HTTPException(status_code=NO_CREDITS_STATUS, detail=str(error)) from error
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 def _workspace_resource(request: Request) -> str:
     """`job/j1` — what a workspace call is actually touching, so a role can be
     scoped to one record without the endpoints changing."""
@@ -1014,6 +1048,7 @@ def health() -> HealthResponse:
         spark_available=available,
         framework_version=version,
         login_required=_auth.has_users(),
+        credits_enforced=credits.enforced(),
     )
 
 
@@ -1086,6 +1121,14 @@ def run(body: RunRequest, principal: Any = Depends(requires("run:Execute"))) -> 
             status_code=409,
             detail="A pipeline run is already in progress on this runner.",
         )
+
+    # Before anything is recorded: a run that cannot be paid for did not happen,
+    # and the lock has to go back or the runner stays busy over a refusal.
+    try:
+        _charge_execution(principal, body.pipeline, job_name=body.job_name or name)
+    except HTTPException:
+        _RUN_LOCK.release()
+        raise
 
     _ensure_catalog(
         workflow_id=body.workflow_id, job_id=body.job_id, name=body.job_name or name,
@@ -1205,6 +1248,12 @@ def run_stream(
             status_code=409,
             detail="A pipeline run is already in progress on this runner.",
         )
+
+    try:
+        _charge_execution(principal, body.pipeline, job_name=body.job_name or name)
+    except HTTPException:
+        _RUN_LOCK.release()
+        raise
 
     _ensure_catalog(
         workflow_id=body.workflow_id, job_id=body.job_id, name=body.job_name or name,
@@ -1394,6 +1443,28 @@ def run_flow_stream(
                 if _ACTIVE_RUN.cancelled:
                     box["error"] = CANCELLED_ERROR
                     _cancel_remaining(index)
+                    break
+                # One coin per stage, charged as the stage starts rather than
+                # all of them up front: a flow that runs out of credit at stage
+                # four has really run three, and the ledger should say so.
+                account_id, username = credits.account_for(principal)
+                try:
+                    _credits.charge(
+                        account_id, credits.target_of(stage.pipeline), username=username,
+                        pipeline_run_id=pipeline_run_id, job_name=stage.name,
+                    )
+                except credits.CreditError as error:
+                    box["error"] = str(error)
+                    _history.skip_job_run(
+                        pipeline_run_id, job_id=stage.job_id, name=stage.name,
+                        stage_index=index, status=history.FAILED,
+                    )
+                    for pending_index in range(index + 1, len(body.stages)):
+                        pending = body.stages[pending_index]
+                        _history.skip_job_run(
+                            pipeline_run_id, job_id=pending.job_id, name=pending.name,
+                            stage_index=pending_index, status=history.SKIPPED,
+                        )
                     break
                 stage_hash, stage_config = _config_version(stage.pipeline, stage.params)
                 job_run_id = _history.create_job_run(
@@ -2023,6 +2094,58 @@ class PasswordRequest(BaseModel):
     current_password: Optional[str] = None
 
 
+class RecoveryIssuedOut(BaseModel):
+    """A recovery code, shown once. The runner keeps only its hash, so this
+    response is the only copy that will ever exist."""
+
+    user_id: str
+    username: str
+    code: str
+    expires_at: str
+
+
+class RecoverRequest(BaseModel):
+    code: str
+    password: str
+
+
+class AccountOut(BaseModel):
+    id: str
+    username: str
+    balance: int
+    #: Every credit a remote Job ever cost this account, whether or not a balance
+    #: was actually taken. See the metering-versus-enforcement split in credits.py.
+    spent: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CreditsOut(BaseModel):
+    account: AccountOut
+    enforced: bool
+    credits_per_job: int
+
+
+class LedgerEntryOut(BaseModel):
+    id: str
+    account_id: str
+    amount: int
+    reason: str
+    applied: bool
+    balance_after: int
+    created_at: str
+    job_run_id: Optional[str] = None
+    pipeline_run_id: Optional[str] = None
+    target: Optional[str] = None
+    job_name: Optional[str] = None
+    note: Optional[str] = None
+
+
+class GrantRequest(BaseModel):
+    amount: int
+    note: Optional[str] = None
+
+
 class RoleOut(BaseModel):
     name: str
     description: str
@@ -2043,6 +2166,24 @@ def _user_out(user: Any) -> UserOut:
         id=user.id, username=user.username, display_name=user.display_name,
         roles=list(user.roles), disabled=user.disabled, created_at=user.created_at,
         last_login_at=user.last_login_at,
+    )
+
+
+def _account_out(account: Any) -> AccountOut:
+    return AccountOut(
+        id=account.id, username=account.username, balance=account.balance,
+        spent=account.spent, created_at=account.created_at,
+        updated_at=account.updated_at,
+    )
+
+
+def _entry_out(entry: Any) -> LedgerEntryOut:
+    return LedgerEntryOut(
+        id=entry.id, account_id=entry.account_id, amount=entry.amount,
+        reason=entry.reason, applied=entry.applied, balance_after=entry.balance_after,
+        created_at=entry.created_at, job_run_id=entry.job_run_id,
+        pipeline_run_id=entry.pipeline_run_id, target=entry.target,
+        job_name=entry.job_name, note=entry.note,
     )
 
 
@@ -2193,6 +2334,47 @@ def set_password(
     return {"changed": True}
 
 
+@app.post(
+    "/auth/users/{user_id}/recovery",
+    response_model=RecoveryIssuedOut,
+    dependencies=[Depends(requires("iam:ManageUsers"))],
+)
+def issue_recovery(user_id: str, principal: Any = Depends(current_principal)) -> RecoveryIssuedOut:
+    """Mints a single-use code the person can trade for a password of their own.
+
+    An administrator could simply set the password instead; this exists so they
+    do not have to know it. The code is handed over out of band — chat, phone,
+    in person — and it is short-lived because that trip is all it has to survive.
+    """
+    user = _auth.get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="No such user.")
+    try:
+        code, expires_at = _auth.issue_recovery(user_id, issued_by=principal.username)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return RecoveryIssuedOut(
+        user_id=user.id, username=user.username, code=code, expires_at=expires_at
+    )
+
+
+@app.post("/auth/recover", dependencies=[Depends(require_token)])
+def recover_password(body: RecoverRequest) -> Dict[str, bool]:
+    """Trades a recovery code for a new password. No session required — the
+    caller is by definition locked out — but the shared token still is, because
+    this endpoint is on the same runner as everything else.
+
+    Every failure reads the same, deliberately: unknown code, expired code, code
+    already used, account disabled. A specific answer would make this an oracle
+    for someone holding the token and guessing.
+    """
+    try:
+        _auth.redeem_recovery(body.code, body.password)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"changed": True}
+
+
 @app.delete(
     "/auth/users/{user_id}",
     dependencies=[Depends(requires("iam:ManageUsers"))],
@@ -2205,6 +2387,64 @@ def delete_user(user_id: str) -> Dict[str, bool]:
     except auth.AuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"deleted": True}
+
+
+# --------------------------------------------------------------------- credits
+
+
+@app.get("/credits/me", response_model=CreditsOut)
+def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
+    """Your own balance. No permission needed: knowing what you may spend is part
+    of being able to spend it, and refusing to say would only produce runs that
+    fail at admission for a reason nobody could look up."""
+    account_id, username = credits.account_for(principal)
+    return CreditsOut(
+        account=_account_out(_credits.account(account_id, username)),
+        enforced=credits.enforced(),
+        credits_per_job=credits.credits_per_job(),
+    )
+
+
+@app.get(
+    "/credits",
+    response_model=List[AccountOut],
+    dependencies=[Depends(requires("credits:Read"))],
+)
+def list_credit_accounts() -> List[AccountOut]:
+    return [_account_out(account) for account in _credits.list_accounts()]
+
+
+@app.get(
+    "/credits/{account_id}/ledger",
+    response_model=List[LedgerEntryOut],
+)
+def credit_ledger(
+    account_id: str, limit: int = 100, principal: Any = Depends(current_principal)
+) -> List[LedgerEntryOut]:
+    """What an account was charged, newest first. Your own is always readable;
+    anyone else's needs `credits:Read`."""
+    own, _ = credits.account_for(principal)
+    if account_id != own and not principal.allows("credits:Read"):
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's credit ledger needs credits:Read.",
+        )
+    return [_entry_out(entry) for entry in _credits.ledger(account_id, limit=limit)]
+
+
+@app.post(
+    "/credits/{account_id}/grant",
+    response_model=AccountOut,
+    dependencies=[Depends(requires("credits:Manage"))],
+)
+def grant_credits(account_id: str, body: GrantRequest) -> AccountOut:
+    """Adds credits, or takes them back with a negative amount. Both are the same
+    operation on purpose: every movement of an account is then one table to read."""
+    try:
+        account = _credits.grant(account_id, body.amount, note=body.note)
+    except credits.CreditError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _account_out(account)
 
 
 @app.post(
