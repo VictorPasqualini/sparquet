@@ -4,7 +4,7 @@ Melhorias e pendências de desenvolvimento **do framework** (não de um caso de 
 específico). Cada item é uma capacidade genérica, ortogonal e sem acoplamento de
 domínio.
 
-Atualizado em 2026-08-21.
+Atualizado em 2026-08-27.
 
 Cobertura de testes (o que está garantido e o que não está, conector por conector,
 transformação por transformação): [docs/TEST_PLAN.md](docs/TEST_PLAN.md). Os itens de
@@ -272,15 +272,133 @@ Pendente:
       `dependencies` (`sparquet-cola>=0.1.0`, sem cap — mantido retrocompatível) e é
       validado contra o pacote do PyPI;
       os shims `sparquet.validation.*` seguem reexportando dele.
-- [ ] **Studio — histórico de execuções** — guardar cada execução de um Job/Pipeline
-      (quando, quanto durou, sucesso/erro, linhas lidas/escritas, validações) em vez de
-      só o último run em memória. Base para comparar execuções e investigar regressões.
-- [ ] **Studio — histórico de status por etapa** — persistir o status de cada etapa do
-      Job (input, transformações, validações, outputs) junto da execução, para responder
-      "onde quebrou da última vez?" sem reexecutar.
+- ✅ **Studio — histórico de execuções** — `PipelineRun`/`JobRun`/`StepRun` persistidos
+      em SQLite (`server/history.py`, `ExecutionRepository`), sobrevivem a reiniciar o
+      app. `GET /runs` (lista) e `GET /runs/{id}` (detalhe) servem o novo
+      `ExecutionHistoryPanel` no Studio, decoupled do estado efêmero de
+      `useEditorStore`/`usePipelineEditorStore`.
+- ✅ **Studio — histórico de status por etapa** — `StepTracker` grava cada etapa
+      (input/transformação/validação/output) como `StepRun` durante a execução; num Job
+      com falha o step que quebrou fica `FAILED` com a mensagem de erro persistida, os
+      demais Jobs de um Pipeline ficam `SKIPPED` — responde "onde quebrou da última vez"
+      sem reexecutar.
+- ✅ **Studio — estado de cada caixa ao abrir uma execução** — abrir um Job pinta cada
+      caixa com o status da última execução (ou da execução exata que o usuário
+      escolheu no histórico), com uma tarja dizendo *qual* run está na tela; o
+      Inspector mostra duração, linhas e erro daquela caixa naquele run. Num Pipeline o
+      mesmo vale para os stages, e abrir um stage cai no Job **fixado na execução que
+      aquele stage rodou** — o drill-down estilo Databricks. Mapeamento em
+      `lib/runner/stepNodes.ts` (step → caixa, `validation_sink` por `role`),
+      `lib/runner/stageRuns.ts` (stage → `job_run`, casado por `job_id`, nunca por
+      posição) e `lib/runner/runView.ts` (qual execução carregar).
+- ✅ **Studio — cancelar a execução de verdade** — o Stop agora chama
+      `POST /runs/{id}/cancel`: uma flag interrompe o fluxo na próxima fronteira de
+      estágio e `cancelAllJobs()` aborta o que o Spark estiver computando (sem isso uma
+      escrita longa terminava mesmo depois do Stop). `cancelled` virou status de
+      primeira classe — servidor, histórico, canvas e painéis o tratam como
+      encerramento a pedido, nunca como falha.
+- ✅ **Studio — histórico de logs por execução** — cada linha que a execução imprimiu
+      (framework, JVM, `stdout`) é persistida em `run_log` a partir da mesma fila que
+      alimenta o SSE, então o histórico guarda exatamente o que o usuário viu ao vivo.
+      `GET /job-runs/{id}/logs` pagina por `seq` (não por offset, que reliria linhas de
+      um run ainda em andamento); teto de 3000 linhas por execução, com uma linha
+      `WARNING` dizendo quantas ficaram de fora.
+- ✅ **Studio — nova apresentação do histórico** — o painel virou lista de execuções
+      com faixa de status das últimas 14 (altura proporcional à duração) e uma ação de
+      canvas por linha; o detalhe saiu do acordeão apertado da lateral e virou um
+      diálogo com os estágios, os passos e os logs completos, com filtro por nível e
+      por origem, busca e paginação. Erros longos passam a viver em cartão rolável
+      (`ErrorCard`), na lateral e nas caixas do canvas.
+- ✅ **Studio — fluxo e histórico lado a lado, estilo Databricks** — abrir um Job ou um
+      Pipeline não pinta mais a última execução por cima do canvas: o centro da tela virou
+      uma área de trabalho com abas (`Flow | JSON | Runs` no Job, `Flow | Runs` no
+      Pipeline). A aba **Runs** é a tabela de execuções — status, *run id*, início,
+      duração, *run as*, *launched* — e o *run id* é o link do drill-down
+      (`Job/Pipeline → run id`), que abre o detalhe da execução e, de lá, pinta o canvas.
+      O JSON deixou de existir só na lateral estreita: a mesma superfície (preview/edição
+      Monaco) roda no centro. Detalhes de execução ganharam *job id*, *job run id*,
+      *run as*, *launched*, início, fim, duração, status e **lineage** (o que a execução
+      leria e escreveria, lido do JSON submetido — logo, existe mesmo em run que morreu
+      antes de escrever). No servidor: `pipeline_run.run_as`/`launched`,
+      `job_run.lineage` e `history.lineage_of()`.
 - [ ] **Studio — consumo de tokens por execução** — contabilizar uso na régua
       **1 token = 1 Job executado** (um Pipeline de N Jobs consome N tokens), com o
       total por execução visível no histórico.
+- [x] **Storage dos JSONs — padronização e versionamento em git** — feito. A biblioteca
+      do Studio passou a morar em arquivos reais, servidos pelo runner
+      (`sparquet-studio/server/workspace.py`, endpoints `GET /workspace`,
+      `PUT`/`DELETE /workspace/{kind}/{id}` e `PUT`/`DELETE /workspace/meta/{key}`).
+      Cada registro vira dois arquivos: o revisável — `<workflow>/workflow.json`,
+      `<workflow>/jobs/<slug>.json` (o **JSON compilado**, que `sparquet run` executa
+      sem tradução) e `<workflow>/pipelines/<slug>.json` — e um sidecar em
+      `.studio/<kind>/<id>.json` com o registro completo do editor (posições de
+      canvas, parâmetros). Diretório padrão `sparquet-workspace/` na raiz, configurável
+      por `SPARQUET_STUDIO_WORKSPACE`; renomear move o arquivo em vez de deixar cópia
+      velha, e renomear um Workflow move tudo que está sob ele. O cliente escolhe o
+      backend em cadeia — workspace, depois IndexedDB, depois `localStorage`, depois
+      memória (`src/lib/storage/db.ts` + `remote.ts`) — e uma biblioteca que só existia
+      no navegador é empurrada uma única vez para um workspace vazio. Fonte da verdade:
+      o arquivo; o navegador virou cache de quando o runner não está no ar.
+- ✅ **Studio — histórico aponta para a versão do JSON, não só para o Job** — cada
+      execução grava a impressão digital do que rodou de verdade: `job_run.config_hash`
+      (`sha256:<hex>` do JSON canônico — chaves ordenadas, sem espaços — já com
+      `{param}` resolvido, pela mesma razão que o lineage resolve) e `job_run.config`
+      com o JSON íntegro até 512 KB (`history.config_version()`,
+      `MAX_STORED_CONFIG_BYTES`). Acima disso guarda-se só o hash, que continua
+      respondendo "estas duas execuções rodaram o mesmo JSON?". O detalhe da execução
+      mostra a versão abreviada e busca o JSON sob demanda em
+      `GET /job-runs/{id}/config` — a config não entra na listagem porque é maior que a
+      linha que descreve o run. Migração acrescenta as colunas em base existente; run
+      anterior à mudança aparece como versão desconhecida, não como versão errada.
+- ✅ **Studio — usuários, login e permissionamento estilo IAM** — o runner ganhou
+      identidade (`sparquet-studio/server/auth.py`, SQLite próprio em
+      `SPARQUET_STUDIO_AUTH_DB`). Dois modos, decididos por existir usuário ou não: sem
+      usuário nada muda — o token compartilhado é a identidade e ninguém fica trancado
+      do lado de fora ao atualizar; criado o primeiro usuário, o runner passa a exigir
+      sessão **além** do token. Política no formato `{effect, actions, resources}` com
+      ação `service:Verb` (`workspace:Write`, `run:Execute`, `iam:ManageUsers`) e
+      recurso `kind/id`, `*` em qualquer posição, **deny explícito vence** e o padrão é
+      negar; papéis nativos `admin`/`editor`/`operator`/`viewer`. Senha em scrypt (com
+      PBKDF2 de reserva), sessão guardada como hash — cópia do arquivo não é um conjunto
+      de logins vivos. Desabilitar conta e trocar senha derrubam as sessões abertas, e o
+      último administrador ativo não pode ser rebaixado, desabilitado nem removido.
+      Toda rota passou a declarar a ação que exige; `run as` deixou de ser texto livre
+      quando há usuário — quem executou é fato, não rótulo. No cliente: `store/auth.ts`,
+      tela de login e a seção **Access** em Settings.
+- [ ] **IAM — o que ficou pendente** — o que existe cobre autenticar e autorizar; falta
+      o que uma instalação com várias pessoas cobra depois: **papéis customizados pela
+      interface** (o modelo já aceita, só o `admin` por CLI/SQL cria), **escopo por
+      Workflow nas rotas de execução** (`/run`, `/run/stream`, `/run/flow/stream` só
+      sabem o alvo pelo corpo da requisição, que a dependência de permissão não lê —
+      hoje autorizam `run:Execute` em `*`), **log de auditoria** (quem mudou o quê e
+      quando; o histórico registra execução, não alteração), **SSO/OIDC** e senha
+      gerenciada fora do runner, **recuperação de senha** sem administrador,
+      **expiração/rotação de sessão configurável por política** (hoje só
+      `SPARQUET_STUDIO_SESSION_HOURS`), e **UI ciente de permissão em toda a tela** (o
+      painel de Access esconde o que não é permitido; o resto do Studio ainda oferece
+      botões que voltam 403).
+- [ ] **Monitoramento e observabilidade** — revisar e implementar. Hoje existe a matéria
+      prima e não o produto: log estruturado em JSON (`sparquet/utils/logger.py`),
+      `PipelineResult` com o resultado de cada validação, e o histórico do Studio
+      (`pipeline_run`/`job_run`/`step_run`/`run_log`) com duração e status por etapa. Não
+      existe nada disso *fora* de uma execução isolada. A cobrir: métricas exportáveis
+      (OpenTelemetry/Prometheus — duração, linhas lidas/escritas, taxa de falha, por
+      Job/etapa), traço distribuído por execução, alerta (run falhou, run não rodou,
+      duração fora da faixa, queda de volume), painel de saúde do conjunto de Jobs
+      (não de um por vez), retenção/rotação do SQLite de histórico, e o mesmo caminho
+      valendo para execução fora do Studio (`sparquet.cli`, Databricks, EMR) — hoje o
+      histórico só existe quando o runner do Studio é quem executa. Ver §3 (lineage) e §4
+      (métricas por etapa), que são pré-requisitos parciais.
+- [ ] **Catálogo de dados** — revisar e implementar. Cada Job já declara o que lê e o que
+      escreve, e desde o item de histórico acima isso é persistido por execução
+      (`job_run.lineage`). Falta transformar essas arestas num catálogo: inventário de
+      datasets (endereço, formato, schema observado, dono, Jobs que produzem e que
+      consomem), grafo de lineage cruzando Jobs e Pipelines, última atualização e
+      frescor, e o resultado das validações do `sparquet_cola` anexado ao dataset — a
+      resposta para "de onde veio isto, quem depende disto, e dá para confiar". Decidir
+      se é catálogo próprio (servido pelo runner, consumível pelo Studio e pela IA como
+      contexto) ou integração com um existente (Unity Catalog, DataHub, OpenMetadata) —
+      e, se próprio, se ele também alimenta a paleta do Studio com fontes já conhecidas.
 
 - [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
       (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
@@ -293,8 +411,9 @@ Pendente:
 Inventário completo, com o porquê de cada lacuna, em
 [docs/TEST_PLAN.md](docs/TEST_PLAN.md). O que está pinado hoje: os 14 conectores de
 banco/warehouse/stream (montagem de opções), o DSL de threshold, a severidade, o parse
-da quarentena, a expansão de `targets`, o dialeto CSV, e o Studio (351 testes + 19
-checagens de smoke em Chrome real).
+da quarentena, a expansão de `targets`, o dialeto CSV, o round-trip dos seis formatos
+nativos, o runner (91 testes: histórico, identidade, workspace) e o Studio (440 testes +
+19 checagens de smoke em Chrome real).
 
 As duas lacunas que pesam, e por que pesam:
 
@@ -313,17 +432,30 @@ As duas lacunas que pesam, e por que pesam:
 
 Restante, na ordem do plano:
 
-- [ ] **Round-trip dos 6 formatos nativos** (`parquet`, `csv`, `json`, `orc`, `txt`,
-      `view`) — escrever e reler, conferindo schema e linhas. Sem dependência extra.
+- ✅ **Round-trip dos 6 formatos nativos** (`parquet`, `csv`, `json`, `orc`, `txt`,
+      `view`) — `tests/test_formats_roundtrip_spark.py`, 11 casos: escreve pelo
+      `WriterFactory` e relê pelo `ReaderFactory`, conferindo schema e linhas em parquet
+      e orc, valores em json e csv (inclusive nulo que continua nulo e campo com aspas e
+      vírgula inteiro), ordem das linhas em txt, e a view nos dois escopos — a `global`
+      alcançável com e sem o prefixo `global_temp.`. O fixture é montado com
+      `spark.sql(... VALUES ...)`, não com `createDataFrame`: o segundo sobe um Python
+      worker, e num master local com `PYSPARK_PYTHON` divergente o arquivo inteiro
+      falharia por um motivo que nada tem a ver com formato. Fica pendente do que a
+      tabela do plano lista para esses formatos: os modos de escrita
+      `append`/`error`/`ignore`, `multiLine` no json, `sep`/`encoding` no csv e o
+      auto-cache da view.
 - [ ] **Semântica de `on_failure`** — que `fail` aborta **antes** de qualquer escrita e
       antes do relatório é promessa de segurança de dado, e nada verifica.
 - [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
       CLAUDE.md já é a lista de casos.
-- [ ] **Serviço runner** (`sparquet-studio/server/`) — hoje **sem teste nenhum**: token,
-      allow-list de origem, o `403` no `/run`, a sequência de eventos SSE e o status por
-      estágio do `/run/flow/stream`. É o único componente que executa conf arbitrária,
-      e a postura de segurança dele quebra em silêncio. `TestClient` do FastAPI cobre
-      sem Spark.
+- [ ] **Serviço runner** (`sparquet-studio/server/main.py`) — os módulos de apoio já têm
+      teste (`history.py`, `auth.py`, `workspace.py`); a **camada HTTP não tem nenhum**:
+      token, allow-list de origem, o `403` no `/run`, a sequência de eventos SSE, o
+      status por estágio do `/run/flow/stream` e a dependência `requires(...)` que liga
+      cada rota à ação que ela exige — o avaliador de política está pinado, mas nada
+      afirma que é o `PUT /workspace` que cobra `workspace:Write`. É o único componente
+      que executa conf arbitrária, e a postura de segurança dele quebra em silêncio.
+      `TestClient` do FastAPI cobre sem Spark.
 - [ ] **`mode: merge`** (Delta e Iceberg) — precisa do `delta-spark`, então vai num
       arquivo que se pula quando o jar falta.
 - [ ] **Orquestração do `Pipeline`** — `input_df`, `columns`, `input_view`, projeção por

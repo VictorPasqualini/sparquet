@@ -327,7 +327,19 @@ Set `SPARQUET_STUDIO_TOKEN` before starting the runner to pin a token that survi
 
 > **Security.** The runner executes arbitrary Spark work — arbitrary SQL, arbitrary reads and writes on whatever this machine can reach. Without the token, any web page you visit while it is up could drive Spark on your machine: a cross-origin `POST` still executes even when the browser withholds the response. Treat the token as a password, keep the runner on `127.0.0.1` (the default), and never expose it to a network.
 
-Endpoints: `GET /health`, `POST /run`, `POST /run/flow/stream` (a whole [Pipeline](#pipelines)), `POST /validate`, `GET /capabilities` (the live registries, so custom transformations registered at runtime show up). See [`server/README.md`](server/README.md).
+Endpoints: `GET /health`, `POST /run`, `POST /run/stream`, `POST /run/flow/stream` (a whole [Pipeline](#pipelines)), `POST /validate`, `GET /capabilities` (the live registries, so custom transformations registered at runtime show up), `GET /runs`/`GET /runs/{id}` (execution history, below). See [`server/README.md`](server/README.md).
+
+### Execution history
+
+Every run — a single Job or a whole Pipeline — is persisted as it happens: a `PipelineRun`, one `JobRun` per Job it executed (or skipped, after an earlier one failed), and one `StepRun` per input/transformation/validation/output step, each with its status, timing and — on failure — the error. It lives in a local SQLite file (`server/data/history.sqlite3`, gitignored), behind an `ExecutionRepository` abstraction (`server/history.py`) so a future cloud runner can swap in `PostgresExecutionRepository`/`CloudExecutionRepository` without touching the execution code.
+
+This is what makes a past run inspectable after you close and reopen Studio, not just while its own stream is live: the **History** panel under a Job's or Pipeline's **Run** tab lists past executions (✓/✗, when, how long) and opening one shows the Job/step tree with the failed step's error — even for a run from before the app was last closed.
+
+#### On the canvas
+
+The same rows paint the graph, so the boxes are never blank. Opening a Job replays its most recent execution: every box carries the status and duration its step ended with, the Inspector adds that step's rows, path and error, and a caption over the canvas says *which* run is on screen — without it a red box would read as a problem with the graph as it stands rather than the outcome of a run from an hour ago. Pick another execution in the History list and the whole canvas switches to it; that one is pinned until you close it with the caption's ✕.
+
+A Pipeline works the same way one level up — each stage box carries the outcome of its `JobRun` — and it is where the drill-down pays off: **open a stage and the Job canvas comes up pinned to the very execution that stage ran**, not to whatever that Job did most recently on its own. Stages are matched to job runs by job id rather than by position, so a Pipeline whose stages were reordered after the run still reports honestly, and anything the canvas cannot place (a step or stage that no longer exists on it) is counted in the caption instead of being silently dropped.
 
 ### Troubleshooting
 
