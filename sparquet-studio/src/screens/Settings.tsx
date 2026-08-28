@@ -12,6 +12,7 @@ import {
   Bot,
   CircleCheck,
   Copy,
+  Coins,
   Database,
   Download,
   ExternalLink,
@@ -47,6 +48,8 @@ import {
 } from '@/components/ui'
 import { sendAiRequest } from '@/lib/ai/client'
 import { AccessPanel } from '@/components/auth/AccessPanel'
+import { RolesPanel } from '@/components/auth/RolesPanel'
+import { TeamsPanel } from '@/components/auth/TeamsPanel'
 import { CreditsPanel } from '@/components/credits/CreditsPanel'
 import { AI_PROVIDER_INFO } from '@/lib/ai/providers'
 import {
@@ -73,7 +76,7 @@ const PROBE_TIMEOUT_MS = 20_000
 const INSTALL_COMMAND = RUNNER_INSTALL_COMMAND
 const START_COMMAND = RUNNER_START_COMMAND
 
-type SectionId = 'appearance' | 'ai' | 'runner' | 'access' | 'data' | 'about'
+type SectionId = 'appearance' | 'ai' | 'runner' | 'access' | 'billing' | 'data' | 'about'
 
 interface SectionMeta {
   id: SectionId
@@ -107,10 +110,18 @@ const SECTIONS: SectionMeta[] = [
   },
   {
     id: 'access',
-    label: 'Access',
-    title: 'Access',
-    description: 'Who can sign in to this runner, and what each of them may do.',
+    label: 'Access & IAM',
+    title: 'Access & IAM',
+    description:
+      'Who can sign in to this runner, which team they belong to, and what each role permits.',
     icon: ShieldCheck,
+  },
+  {
+    id: 'billing',
+    label: 'Billing',
+    title: 'Billing',
+    description: 'Execution credits: what this team has, what it has spent, and on what.',
+    icon: Coins,
   },
   {
     id: 'data',
@@ -203,6 +214,7 @@ export function Settings() {
           <AiSection />
           <RunnerSection />
           <AccessSection />
+          <BillingSection />
           <DataSection />
           <AboutSection />
         </div>
@@ -804,6 +816,15 @@ function AccessSection() {
   return (
     <Section meta={SECTION.access}>
       <AccessPanel />
+      <TeamsPanel />
+      <RolesPanel />
+    </Section>
+  )
+}
+
+function BillingSection() {
+  return (
+    <Section meta={SECTION.billing}>
       <CreditsPanel />
     </Section>
   )

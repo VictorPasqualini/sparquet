@@ -18,6 +18,8 @@ import type {
   StepRunRecord,
 } from '@/types/history'
 
+import { toRunCharge } from './credits'
+
 import {
   authHeaders,
   DEFAULT_RUNNER_URL,
@@ -196,6 +198,7 @@ function toJobRun(value: unknown): JobRunRecord | null {
     rowsWritten: asNullableNumber(value.rows_written),
     lineage: toLineage(value.lineage),
     configHash: asNullableString(value.config_hash),
+    credits: toRunCharge(value.credits),
     steps,
   }
 }

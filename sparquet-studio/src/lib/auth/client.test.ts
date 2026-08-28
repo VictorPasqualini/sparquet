@@ -38,7 +38,7 @@ describe('issueRecovery', () => {
       }),
     )
 
-    const recovery = await issueRecovery(DEFAULT_RUNNER_URL, 'u1', 'secret')
+    const recovery = await issueRecovery(DEFAULT_RUNNER_URL, 'u1', 'my-own-password', 'secret')
 
     expect(recovery).toEqual({
       userId: 'u1',
@@ -50,6 +50,16 @@ describe('issueRecovery', () => {
     expect(url).toBe(`${DEFAULT_RUNNER_URL}/auth/users/u1/recovery`)
     expect(init.method).toBe('POST')
     expect((init.headers as Record<string, string>)[RUNNER_TOKEN_HEADER]).toBe('secret')
+  })
+
+  it("sends the caller's own password as the step-up, not the target user's", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ user_id: 'u1', username: 'ana', code: 'x', expires_at: '2026-08-20T11:30:00Z' }),
+    )
+
+    await issueRecovery(DEFAULT_RUNNER_URL, 'u1', 'my-own-password', 'secret')
+
+    expect(JSON.parse(String(lastCall()[1].body))).toEqual({ password: 'my-own-password' })
   })
 })
 

@@ -16,9 +16,12 @@ import type {
   AuthRole,
   AuthSession,
   AuthStatus,
+  AuthTeam,
   AuthUser,
   Principal,
+  PolicyAction,
   PolicyStatement,
+  PolicyVocabulary,
   RecoveryCode,
 } from '@/types/auth'
 
@@ -32,6 +35,10 @@ function asString(value: unknown, fallback = ''): string {
 
 function asNullableString(value: unknown): string | null {
   return typeof value === 'string' ? value : null
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
 function asStringList(value: unknown): string[] {
@@ -60,6 +67,9 @@ export function toPrincipal(value: unknown): Principal | null {
     roles: asStringList(value.roles),
     statements: toStatements(value.statements),
     tokenOnly: value.token_only === true,
+    teamId: asNullableString(value.team_id),
+    teamName: asNullableString(value.team_name),
+    teamRoles: asStringList(value.team_roles),
   }
 }
 
@@ -73,6 +83,38 @@ function toUser(value: unknown): AuthUser | null {
     disabled: value.disabled === true,
     createdAt: asNullableString(value.created_at),
     lastLoginAt: asNullableString(value.last_login_at),
+    teamId: asNullableString(value.team_id),
+    teamName: asNullableString(value.team_name),
+  }
+}
+
+function toRole(value: unknown): AuthRole {
+  const record = isRecord(value) ? value : {}
+  return {
+    name: asString(record.name),
+    description: asString(record.description),
+    statements: toStatements(record.statements),
+    custom: record.custom === true,
+  }
+}
+
+function toTeam(value: unknown): AuthTeam {
+  const record = isRecord(value) ? value : {}
+  return {
+    id: asString(record.id),
+    name: asString(record.name),
+    roles: asStringList(record.roles),
+    members: asNumber(record.members),
+    createdAt: asNullableString(record.created_at),
+  }
+}
+
+function toAction(value: unknown): PolicyAction {
+  const record = isRecord(value) ? value : {}
+  return {
+    name: asString(record.name),
+    description: asString(record.description),
+    service: asString(record.service),
   }
 }
 
@@ -200,18 +242,127 @@ export async function listRoles(
   signal?: AbortSignal,
 ): Promise<AuthRole[]> {
   const payload = await request(baseUrl, '/auth/roles', { method: 'GET' }, token, signal)
-  if (!Array.isArray(payload)) return []
-  return payload.filter(isRecord).map((role) => ({
-    name: asString(role.name),
-    description: asString(role.description),
-    statements: toStatements(role.statements),
-    custom: role.custom === true,
-  }))
+  return Array.isArray(payload) ? payload.map(toRole) : []
+}
+
+/**
+ * Everything a policy statement may name, as the runner itself lists it.
+ *
+ * The role editor is built from this rather than from a copy kept in the client,
+ * so an action added to the runner appears in the UI without a second change —
+ * and the editor can never offer one the server would reject.
+ */
+export async function getPolicyVocabulary(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<PolicyVocabulary> {
+  const payload = await request(baseUrl, '/auth/policy', { method: 'GET' }, token, signal)
+  const record = isRecord(payload) ? payload : {}
+  return {
+    actions: Array.isArray(record.actions) ? record.actions.map(toAction) : [],
+    resourceKinds: Array.isArray(record.resource_kinds)
+      ? record.resource_kinds.map(toAction)
+      : [],
+  }
+}
+
+/** Creates a role. Built-in names are refused by the runner. Needs `iam:ManageRoles`. */
+export async function createRole(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: { name: string; description: string; statements: PolicyStatement[] },
+  token?: string,
+  signal?: AbortSignal,
+): Promise<AuthRole> {
+  return toRole(
+    await request(baseUrl, '/auth/roles', { method: 'POST', body: JSON.stringify(body) }, token, signal),
+  )
+}
+
+export async function updateRole(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  name: string,
+  changes: { description?: string; statements?: PolicyStatement[] },
+  token?: string,
+  signal?: AbortSignal,
+): Promise<AuthRole> {
+  return toRole(
+    await request(
+      baseUrl,
+      `/auth/roles/${encodeURIComponent(name)}`,
+      { method: 'PATCH', body: JSON.stringify(changes) },
+      token,
+      signal,
+    ),
+  )
+}
+
+export async function deleteRole(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  name: string,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await request(baseUrl, `/auth/roles/${encodeURIComponent(name)}`, { method: 'DELETE' }, token, signal)
+}
+
+export async function listTeams(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<AuthTeam[]> {
+  const payload = await request(baseUrl, '/auth/teams', { method: 'GET' }, token, signal)
+  return Array.isArray(payload) ? payload.map(toTeam) : []
+}
+
+export async function createTeam(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: { name: string; roles: string[] },
+  token?: string,
+  signal?: AbortSignal,
+): Promise<AuthTeam> {
+  return toTeam(
+    await request(baseUrl, '/auth/teams', { method: 'POST', body: JSON.stringify(body) }, token, signal),
+  )
+}
+
+export async function updateTeam(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  teamId: string,
+  changes: { name?: string; roles?: string[] },
+  token?: string,
+  signal?: AbortSignal,
+): Promise<AuthTeam> {
+  return toTeam(
+    await request(
+      baseUrl,
+      `/auth/teams/${encodeURIComponent(teamId)}`,
+      { method: 'PATCH', body: JSON.stringify(changes) },
+      token,
+      signal,
+    ),
+  )
+}
+
+export async function deleteTeam(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  teamId: string,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  await request(baseUrl, `/auth/teams/${encodeURIComponent(teamId)}`, { method: 'DELETE' }, token, signal)
 }
 
 export async function createUser(
   baseUrl: string = DEFAULT_RUNNER_URL,
-  body: { username: string; password: string; roles: string[]; displayName?: string },
+  body: {
+    username: string
+    password: string
+    roles: string[]
+    displayName?: string
+    /** Team id or name. Omitted puts them in the default team. */
+    team?: string
+  },
   token?: string,
   signal?: AbortSignal,
 ): Promise<AuthUser | null> {
@@ -226,6 +377,7 @@ export async function createUser(
           password: body.password,
           roles: body.roles,
           display_name: body.displayName ?? null,
+          team: body.team ?? null,
         }),
       },
       token,
@@ -237,7 +389,7 @@ export async function createUser(
 export async function updateUser(
   baseUrl: string = DEFAULT_RUNNER_URL,
   userId: string,
-  changes: { roles?: string[]; disabled?: boolean },
+  changes: { roles?: string[]; disabled?: boolean; team?: string },
   token?: string,
   signal?: AbortSignal,
 ): Promise<AuthUser | null> {
@@ -298,17 +450,23 @@ export async function deleteUser(
  *
  * The code comes back once and is never readable again — the runner keeps only
  * its hash — so whoever calls this has to hand it over immediately.
+ *
+ * `password` is the **caller's own**, re-entered: minting a code is a way to take
+ * over an account, and an unattended session should not be enough on its own. It
+ * cannot be the password of the person being recovered — they are the one who
+ * cannot supply it.
  */
 export async function issueRecovery(
   baseUrl: string = DEFAULT_RUNNER_URL,
   userId: string,
+  password: string,
   token?: string,
   signal?: AbortSignal,
 ): Promise<RecoveryCode> {
   const payload = await request(
     baseUrl,
     `/auth/users/${encodeURIComponent(userId)}/recovery`,
-    { method: 'POST' },
+    { method: 'POST', body: JSON.stringify({ password }) },
     token,
     signal,
   )

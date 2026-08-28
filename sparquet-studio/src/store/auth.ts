@@ -17,22 +17,38 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
 import {
+  createRole as apiCreateRole,
+  createTeam as apiCreateTeam,
   createUser as apiCreateUser,
+  deleteRole as apiDeleteRole,
+  deleteTeam as apiDeleteTeam,
   deleteUser as apiDeleteUser,
   getAuthStatus,
   getMe,
+  getPolicyVocabulary,
   issueRecovery as apiIssueRecovery,
   listRoles,
+  listTeams,
   listUsers,
   login as apiLogin,
   logout as apiLogout,
   recoverPassword as apiRecoverPassword,
   setPassword as apiSetPassword,
+  updateRole as apiUpdateRole,
+  updateTeam as apiUpdateTeam,
   updateUser as apiUpdateUser,
 } from '@/lib/auth/client'
 import { can as evaluate } from '@/lib/auth/permissions'
 import { RunnerError, setRunnerSession } from '@/lib/runner/client'
-import type { AuthRole, AuthUser, Principal, RecoveryCode } from '@/types/auth'
+import type {
+  AuthRole,
+  AuthTeam,
+  AuthUser,
+  PolicyStatement,
+  PolicyVocabulary,
+  Principal,
+  RecoveryCode,
+} from '@/types/auth'
 import { useSettingsStore } from '@/store/settings'
 
 interface AuthState {
@@ -59,17 +75,40 @@ interface AuthState {
 
   fetchUsers: () => Promise<AuthUser[]>
   fetchRoles: () => Promise<AuthRole[]>
+  fetchTeams: () => Promise<AuthTeam[]>
+  /** The actions and resource kinds the runner itself knows, for the role editor. */
+  fetchPolicy: () => Promise<PolicyVocabulary>
   addUser: (body: {
     username: string
     password: string
     roles: string[]
     displayName?: string
+    team?: string
   }) => Promise<void>
-  editUser: (userId: string, changes: { roles?: string[]; disabled?: boolean }) => Promise<void>
+  editUser: (
+    userId: string,
+    changes: { roles?: string[]; disabled?: boolean; team?: string },
+  ) => Promise<void>
+  addRole: (body: {
+    name: string
+    description: string
+    statements: PolicyStatement[]
+  }) => Promise<void>
+  editRole: (
+    name: string,
+    changes: { description?: string; statements?: PolicyStatement[] },
+  ) => Promise<void>
+  removeRole: (name: string) => Promise<void>
+  addTeam: (body: { name: string; roles: string[] }) => Promise<void>
+  editTeam: (teamId: string, changes: { name?: string; roles?: string[] }) => Promise<void>
+  removeTeam: (teamId: string) => Promise<void>
   changePassword: (userId: string, password: string, currentPassword?: string) => Promise<void>
   removeUser: (userId: string) => Promise<void>
-  /** Mints a single-use code for someone who cannot log in. Needs `iam:ManageUsers`. */
-  issueRecovery: (userId: string) => Promise<RecoveryCode>
+  /**
+   * Mints a single-use code for someone who cannot log in. Needs `iam:ManageUsers`
+   * and the caller's OWN password, re-entered — see `lib/auth/client.ts`.
+   */
+  issueRecovery: (userId: string, password: string) => Promise<RecoveryCode>
   /** Spends such a code. Called from the login screen, where there is no session. */
   recoverPassword: (code: string, password: string) => Promise<void>
 }
@@ -198,6 +237,16 @@ export const useAuthStore = create<AuthState>()(
         return listRoles(url, token)
       },
 
+      fetchTeams: async () => {
+        const { url, token } = runner()
+        return listTeams(url, token)
+      },
+
+      fetchPolicy: async () => {
+        const { url, token } = runner()
+        return getPolicyVocabulary(url, token)
+      },
+
       addUser: async (body) => {
         const { url, token } = runner()
         await apiCreateUser(url, body, token)
@@ -208,6 +257,42 @@ export const useAuthStore = create<AuthState>()(
       editUser: async (userId, changes) => {
         const { url, token } = runner()
         await apiUpdateUser(url, userId, changes, token)
+        // Our own roles or team may have just changed under us.
+        if (get().principal?.userId === userId) await refreshPrincipal()
+      },
+
+      addRole: async (body) => {
+        const { url, token } = runner()
+        await apiCreateRole(url, body, token)
+      },
+
+      editRole: async (name, changes) => {
+        const { url, token } = runner()
+        await apiUpdateRole(url, name, changes, token)
+        // Editing a role we hold changes what this session may do, right now.
+        await refreshPrincipal()
+      },
+
+      removeRole: async (name) => {
+        const { url, token } = runner()
+        await apiDeleteRole(url, name, token)
+      },
+
+      addTeam: async (body) => {
+        const { url, token } = runner()
+        await apiCreateTeam(url, body, token)
+      },
+
+      editTeam: async (teamId, changes) => {
+        const { url, token } = runner()
+        await apiUpdateTeam(url, teamId, changes, token)
+        if (get().principal?.teamId === teamId) await refreshPrincipal()
+      },
+
+      removeTeam: async (teamId) => {
+        const { url, token } = runner()
+        await apiDeleteTeam(url, teamId, token)
+        if (get().principal?.teamId === teamId) await refreshPrincipal()
       },
 
       changePassword: async (userId, password, currentPassword) => {
@@ -225,9 +310,9 @@ export const useAuthStore = create<AuthState>()(
         await apiDeleteUser(url, userId, token)
       },
 
-      issueRecovery: async (userId) => {
+      issueRecovery: async (userId, password) => {
         const { url, token } = runner()
-        return apiIssueRecovery(url, userId, token)
+        return apiIssueRecovery(url, userId, password, token)
       },
 
       recoverPassword: async (code, password) => {

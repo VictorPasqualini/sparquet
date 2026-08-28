@@ -17,7 +17,7 @@ import { toast } from 'sonner'
 
 import { Badge, Button, Field, Input, Modal, Select, Spinner, Toggle } from '@/components/ui'
 import { useAuthStore } from '@/store/auth'
-import type { AuthRole, AuthUser, RecoveryCode } from '@/types/auth'
+import type { AuthRole, AuthTeam, AuthUser, RecoveryCode } from '@/types/auth'
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -31,6 +31,7 @@ export function AccessPanel() {
   const can = useAuthStore((state) => state.can)
   const fetchUsers = useAuthStore((state) => state.fetchUsers)
   const fetchRoles = useAuthStore((state) => state.fetchRoles)
+  const fetchTeams = useAuthStore((state) => state.fetchTeams)
   const addUser = useAuthStore((state) => state.addUser)
   const editUser = useAuthStore((state) => state.editUser)
   const removeUser = useAuthStore((state) => state.removeUser)
@@ -39,6 +40,7 @@ export function AccessPanel() {
 
   const [users, setUsers] = useState<AuthUser[] | null>(null)
   const [roles, setRoles] = useState<AuthRole[]>([])
+  const [teams, setTeams] = useState<AuthTeam[]>([])
   const [loading, setLoading] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
 
@@ -49,15 +51,20 @@ export function AccessPanel() {
     if (!mayRead) return
     setLoading(true)
     try {
-      const [people, available] = await Promise.all([fetchUsers(), fetchRoles()])
+      const [people, available, groups] = await Promise.all([
+        fetchUsers(),
+        fetchRoles(),
+        fetchTeams(),
+      ])
       setUsers(people)
       setRoles(available)
+      setTeams(groups)
     } catch (error) {
       toast.error(messageOf(error))
     } finally {
       setLoading(false)
     }
-  }, [fetchRoles, fetchUsers, mayRead])
+  }, [fetchRoles, fetchTeams, fetchUsers, mayRead])
 
   useEffect(() => {
     void reload()
@@ -74,11 +81,24 @@ export function AccessPanel() {
               </p>
               <p className="mt-0.5 flex flex-wrap items-center gap-1 text-2xs text-content-subtle">
                 Signed in as <code>{principal.username}</code>
+                {principal.teamName ? (
+                  <>
+                    <span>in</span>
+                    <Badge tone="info">{principal.teamName}</Badge>
+                  </>
+                ) : null}
                 {principal.roles.map((role) => (
                   <Badge key={role} tone="neutral">
                     {role}
                   </Badge>
                 ))}
+                {principal.teamRoles
+                  .filter((role) => !principal.roles.includes(role))
+                  .map((role) => (
+                    <Badge key={role} tone="neutral">
+                      {role} (team)
+                    </Badge>
+                  ))}
               </p>
             </div>
             <Button size="sm" variant="secondary" onClick={() => void signOut()} disabled={!session}>
@@ -127,6 +147,7 @@ export function AccessPanel() {
                   key={user.id}
                   user={user}
                   roles={roles}
+                  teams={teams}
                   editable={mayManage}
                   self={principal?.userId === user.id}
                   onChange={async (changes) => {
@@ -140,7 +161,7 @@ export function AccessPanel() {
                   onPassword={async (password, currentPassword) => {
                     await changePassword(user.id, password, currentPassword)
                   }}
-                  onRecovery={() => issueRecovery(user.id)}
+                  onRecovery={(password) => issueRecovery(user.id, password)}
                 />
               ))}
             </ul>
@@ -153,6 +174,7 @@ export function AccessPanel() {
       <CreateUserDialog
         open={createOpen}
         roles={roles}
+        teams={teams}
         onOpenChange={setCreateOpen}
         onCreate={async (body) => {
           await addUser(body)
@@ -166,6 +188,7 @@ export function AccessPanel() {
 function UserRow({
   user,
   roles,
+  teams,
   editable,
   self,
   onChange,
@@ -175,15 +198,17 @@ function UserRow({
 }: {
   user: AuthUser
   roles: AuthRole[]
+  teams: AuthTeam[]
   editable: boolean
   self: boolean
-  onChange: (changes: { roles?: string[]; disabled?: boolean }) => Promise<void>
+  onChange: (changes: { roles?: string[]; disabled?: boolean; team?: string }) => Promise<void>
   onDelete: () => Promise<void>
   onPassword: (password: string, currentPassword?: string) => Promise<void>
-  onRecovery: () => Promise<RecoveryCode>
+  onRecovery: (password: string) => Promise<RecoveryCode>
 }) {
   const [busy, setBusy] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [recoveryOpen, setRecoveryOpen] = useState(false)
   const [recovery, setRecovery] = useState<RecoveryCode | null>(null)
 
   const guard = (action: () => Promise<void>) => () => {
@@ -214,6 +239,15 @@ function UserRow({
         onValueChange={(value) => guard(() => onChange({ roles: [value] }))()}
       />
 
+      <Select
+        ariaLabel={`Team for ${user.username}`}
+        className="w-32"
+        disabled={!editable || busy || teams.length === 0}
+        value={user.teamId ?? ''}
+        options={teams.map((team) => ({ value: team.id, label: team.name }))}
+        onValueChange={(value) => guard(() => onChange({ team: value }))()}
+      />
+
       <Toggle
         label="Enabled"
         checked={!user.disabled}
@@ -231,9 +265,7 @@ function UserRow({
             variant="ghost"
             icon={<KeyRound className="h-3.5 w-3.5" />}
             disabled={busy}
-            onClick={guard(async () => {
-              setRecovery(await onRecovery())
-            })}
+            onClick={() => setRecoveryOpen(true)}
           >
             Recovery code
           </Button>
@@ -257,8 +289,87 @@ function UserRow({
         onSubmit={onPassword}
       />
 
+      <IssueRecoveryDialog
+        open={recoveryOpen}
+        username={user.username}
+        onOpenChange={setRecoveryOpen}
+        onIssue={async (password) => {
+          setRecovery(await onRecovery(password))
+        }}
+      />
+
       <RecoveryDialog recovery={recovery} onClose={() => setRecovery(null)} />
     </li>
+  )
+}
+
+/**
+ * Asks for the administrator's OWN password before minting a recovery code.
+ *
+ * Minting one is a way to take over an account: whoever holds the code chooses
+ * that person's next password. An unattended session with Studio open should not
+ * be enough to do it, so the runner asks for the password again and this dialog
+ * is where it is typed. It is never the password of the person being recovered —
+ * they are by definition the one who cannot supply it.
+ */
+function IssueRecoveryDialog({
+  open,
+  username,
+  onOpenChange,
+  onIssue,
+}: {
+  open: boolean
+  username: string
+  onOpenChange: (open: boolean) => void
+  onIssue: (password: string) => Promise<void>
+}) {
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const close = (next: boolean) => {
+    if (!next) setPassword('')
+    onOpenChange(next)
+  }
+
+  const submit = () => {
+    setBusy(true)
+    void onIssue(password)
+      .then(() => close(false))
+      .catch((error: unknown) => toast.error(messageOf(error)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <Modal
+      open={open}
+      onOpenChange={close}
+      title={`Issue a recovery code for ${username}`}
+      description="Confirm with your own password. The code lets whoever holds it set that account's password, so it is worth as much as the account itself."
+      size="sm"
+      footer={
+        <Button
+          size="sm"
+          icon={<KeyRound className="h-3.5 w-3.5" />}
+          loading={busy}
+          disabled={password.length === 0}
+          onClick={submit}
+        >
+          Issue
+        </Button>
+      }
+    >
+      <Field label="Your password" help="Not theirs — yours, the one you signed in with.">
+        <Input
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && password.length > 0) submit()
+          }}
+        />
+      </Field>
+    </Modal>
   )
 }
 
@@ -310,17 +421,25 @@ function RecoveryDialog({
 function CreateUserDialog({
   open,
   roles,
+  teams,
   onOpenChange,
   onCreate,
 }: {
   open: boolean
   roles: AuthRole[]
+  teams: AuthTeam[]
   onOpenChange: (open: boolean) => void
-  onCreate: (body: { username: string; password: string; roles: string[] }) => Promise<void>
+  onCreate: (body: {
+    username: string
+    password: string
+    roles: string[]
+    team?: string
+  }) => Promise<void>
 }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('admin')
+  const [team, setTeam] = useState('')
   const [busy, setBusy] = useState(false)
 
   const close = (next: boolean) => {
@@ -333,7 +452,12 @@ function CreateUserDialog({
 
   const submit = () => {
     setBusy(true)
-    void onCreate({ username: username.trim(), password, roles: [role] })
+    void onCreate({
+      username: username.trim(),
+      password,
+      roles: [role],
+      team: team || undefined,
+    })
       .then(() => {
         toast.success(`${username.trim()} can now sign in`)
         close(false)
@@ -385,6 +509,17 @@ function CreateUserDialog({
                   }))
                 : [{ value: 'admin', label: 'admin' }]
             }
+          />
+        </Field>
+        <Field
+          label="Team"
+          help="Whose credit account pays for their runs. Left empty, they join the default team."
+        >
+          <Select
+            value={team}
+            placeholder="Default team"
+            onValueChange={setTeam}
+            options={teams.map((item) => ({ value: item.id, label: item.name }))}
           />
         </Field>
       </div>

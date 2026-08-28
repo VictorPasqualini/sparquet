@@ -7,6 +7,8 @@
  * errors — and the log lines, each labelled with the stage that emitted it.
  */
 
+import { usePermissionReason } from '@/lib/auth/usePermission'
+
 import {
   ChevronRight,
   CircleCheck,
@@ -119,11 +121,24 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
     return labels
   }, [resolved.stages])
 
+  // The runner authorizes the run again against the Workflow, the Pipeline and
+  // each Job; this only spares the round trip that would come back 403.
+  const runDenied = usePermissionReason(
+    'run:Execute',
+    pipeline ? `pipeline/${pipeline.id}` : '*',
+  )
+  const cancelDenied = usePermissionReason(
+    'run:Cancel',
+    pipeline ? `pipeline/${pipeline.id}` : '*',
+  )
+
   const disabledReason = running
     ? 'A run is already in progress'
     : plan.blockers.length > 0
       ? plan.blockers[0].message
       : null
+
+  const runReason = runDenied ?? disabledReason
 
   const execute = async () => {
     if (plan.stages.length === 0) return
@@ -249,7 +264,7 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
 
         <div className="flex items-center gap-2">
           <Tooltip
-            content={disabledReason ?? 'Run every stage, in the order drawn on the canvas'}
+            content={runReason ?? 'Run every stage, in the order drawn on the canvas'}
           >
             <span className="min-w-0 flex-1">
               <Button
@@ -258,7 +273,7 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
                 fullWidth
                 icon={<Play className="h-4 w-4" />}
                 loading={running}
-                disabled={disabledReason !== null}
+                disabled={runReason !== null}
                 onClick={() => void execute()}
               >
                 {running ? 'Running…' : `Run ${plural(plan.stages.length, 'stage')}`}
@@ -266,13 +281,17 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
             </span>
           </Tooltip>
           {running && (
-            <Tooltip content="Cancels the execution on the runner, not just this window">
+            <Tooltip
+              content={
+                cancelDenied ?? 'Cancels the execution on the runner, not just this window'
+              }
+            >
               <span>
                 <Button
                   variant="danger"
                   size="lg"
                   icon={<Square className="h-3.5 w-3.5" />}
-                  disabled={stopping}
+                  disabled={stopping || cancelDenied !== null}
                   onClick={() => void stopRun()}
                 >
                   {stopping ? 'Stopping…' : 'Stop'}

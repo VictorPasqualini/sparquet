@@ -54,6 +54,7 @@ function jobRun(steps: StepRunRecord[], status: ExecutionStatus = 'success'): Jo
     rowsWritten: 10,
     lineage: null,
     configHash: null,
+    credits: null,
     steps,
   }
 }

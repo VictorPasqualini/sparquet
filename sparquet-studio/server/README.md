@@ -95,9 +95,9 @@ python server/auth.py create-admin      # prompts for a username and password
 python server/auth.py list-users
 ```
 
-The same thing can be done from Studio (**Settings → Access → Add user**) while
-the runner still has no users, because the token is the identity until the first
-one exists.
+The same thing can be done from Studio (**Settings → Access & IAM → Add user**)
+while the runner still has no users, because the token is the identity until the
+first one exists.
 
 Permissions follow the IAM shape: a statement is `{effect, actions, resources}`,
 an action is `service:Verb` (`workspace:Write`, `run:Execute`, `iam:ManageUsers`),
@@ -112,6 +112,29 @@ roles ship with the runner:
 | `operator` | Run what already exists and read the results. Cannot edit. |
 | `viewer` | Read the library and the history. Changes nothing. |
 
+Those four are rewritten on every start, so fixing a policy in code fixes it in
+every installation — which is also why they cannot be edited. **Custom roles** are
+written in the interface (**Settings → Access & IAM → Roles**) and are never
+touched by an upgrade. A role still held by a user or a team cannot be deleted:
+the holders would silently lose permissions and nothing on their screen would say
+why. `GET /auth/policy` publishes the vocabulary of actions so the UI never
+carries a stale copy of it.
+
+### Teams
+
+Everybody belongs to a **team**, and a team is two things at once:
+
+- **Who pays.** Execution credits are charged to the team, not to the person, so a
+  squad has one budget instead of one each. Moving somebody to another team changes
+  who pays *from then on*; ledger entries already written stay with the team that
+  paid at the time.
+- **A second source of roles.** A team's roles are *added* to the ones its members
+  hold personally. A team grants, it never takes away — and an explicit `deny` on
+  either side still wins, because that is where restriction belongs.
+
+Managed in **Settings → Access & IAM → Teams**. The default team cannot be
+removed, and deleting a team moves its members back into it rather than leaving
+them without one.
 What the store guarantees, because each one is a way to get badly stuck or badly
 exposed:
 
@@ -137,9 +160,14 @@ python server/auth.py recovery-code ana   # prints a code, valid for 30 minutes
 python server/auth.py reset-password ana  # or just set one directly
 ```
 
-From Studio: **Settings → Access → Recovery code** on the person's row. The code
-is shown once — the runner stores only its SHA-256 hash — and the person spends
-it on the login screen under *I have a recovery code*.
+From Studio: **Settings → Access & IAM → Recovery code** on the person's row.
+The code is shown once — the runner stores only its SHA-256 hash — and the person
+spends it on the login screen under *I have a recovery code*.
+
+Minting a code is, in effect, becoming that person, so the endpoint asks for **the
+password of whoever is asking** on top of the session and `iam:ManageUsers`. A
+stolen session or an unattended laptop is not enough. The password checked is the
+caller's own, never the target's.
 
 This adds no authority that did not already exist: whoever can run the CLI owns
 the host and could edit the database anyway. What it buys is that the person
@@ -166,10 +194,16 @@ and the token is still required on every call.
 
 ## Execution credits
 
-One credit per Job, charged **only when the Job does not run on this machine**.
-Running Spark locally costs nothing; sending work to a cluster, to Spark Connect
-or to a hosted runtime costs one credit per Job (`SPARQUET_STUDIO_CREDITS_PER_JOB`
-if you want it to be more).
+**One credit per successful write**, charged **only when the run does not happen on
+this machine**. Running Spark locally costs nothing; sending work to a cluster, to
+Spark Connect or to a hosted runtime costs one credit for every destination the run
+actually finished writing (`SPARQUET_STUDIO_CREDITS_PER_WRITE` if you want a write
+to cost more).
+
+Counting writes rather than Jobs is what makes **a failed run free**: the count
+comes from `PipelineResult.output_metrics`, which gains an entry only once a writer
+returns, so a run that died before writing has nothing to charge. A Job that writes
+three destinations costs three.
 
 Locality is read from the Job's own configuration, never from anything the caller
 sends, so nobody can declare their own run free:
@@ -179,29 +213,40 @@ sends, so nobody can declare their own run free:
 | `spark.master` (or `spark.configs["spark.master"]`) starting with `local` | local — free |
 | `spark.remote` set to anything | remote — charged, even if a local master is also set |
 | `yarn`, `spark://…`, `k8s://…`, or no master at all on a hosted runtime | remote — charged |
-| the runner itself running on Databricks / EMR / Dataproc / Synapse | remote — every Job is charged |
+| the runner itself running on Databricks / EMR / Dataproc / Synapse | remote — every write is charged |
+
+**Forty writes a month are free** (`SPARQUET_STUDIO_CREDITS_FREE_MONTHLY`), per
+`YYYY-MM` period in UTC. The allowance is spent before any granted balance, resets
+by itself when the month turns and does **not** accumulate — it is an allowance, not
+a stock.
 
 **Metering and enforcement are separate.** By default the ledger records every
-remote Job and blocks nothing, so turning a runner into a metered one never
-suddenly stops anybody's work. Set `SPARQUET_STUDIO_CREDITS=on` and a balance
-starts gating execution: a Job that cannot be paid for is refused with **HTTP
-402** before it starts, and Studio shows the runner's message. That is why an
-account carries two numbers — `balance` moves only under enforcement, `spent`
-always climbs — so switching enforcement on starts from what was granted, not
-from accumulated debt.
+remote write and blocks nothing, so turning a runner into a metered one never
+suddenly stops anybody's work. Set `SPARQUET_STUDIO_CREDITS=on` and the balance
+starts gating execution. That is why an account carries two numbers — `balance`
+moves only under enforcement, `spent` always climbs — so switching enforcement on
+starts from what was granted, not from accumulated debt. While only metering, the
+free allowance is not burned either, and the entry says `applied: false`.
 
-Charging happens at admission and there is **no refund**: a run refused before
-starting is never charged, and a run that started and then failed is. A flow is
-charged stage by stage as each stage starts, so a flow that runs out at stage
-four has genuinely run three, and the ledger says so.
+**Charged after the run, admitted before it.** The number of successful writes only
+exists once the run is over, so that is when the debit happens. What can honestly be
+checked up front is the minimum: under enforcement, a team that cannot pay for a
+single write is refused with **HTTP 402** before Spark is started. A run that wrote
+more than the account could cover does not go negative — the gap is recorded as
+`shortfall` on the entry, and it is the *next* run that gets refused.
 
-The account is the user (`credits:Read` to see other people's, `credits:Manage`
-to grant), or the literal account `token` on a runner with no users. The ledger
-is append-only and lives in its own SQLite file.
+In a Pipeline each Job is charged as it finishes, so a flow that breaks at the
+fourth Job has paid for what the first three wrote, and the ledger shows it line by
+line with `job_run_id` and `pipeline_run_id`.
+
+The account is the **team** (`credits:Read` to see other teams', `credits:Manage` to
+grant), or the literal account `token` on a runner with no users. The ledger is
+append-only and lives in its own SQLite file. Studio shows all of it under
+**Settings → Billing**, and what a single run cost in the run detail.
 
 ```bash
 # Give somebody credits without the UI:
-curl -X POST http://127.0.0.1:8787/credits/u1/grant \
+curl -X POST http://127.0.0.1:8787/credits/<team-id>/grant \
   -H "x-sparquet-token: $SPARQUET_STUDIO_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"amount": 100, "note": "quarter budget"}'
@@ -268,11 +313,12 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_PORT` | `8787` | Port when running `python server/main.py`. |
 | `SPARQUET_FRAMEWORK_PATH` | repo root, inferred from this file | Directory containing the `sparquet` package. |
 | `SPARQUET_STUDIO_HISTORY_DB` | `server/data/execution_history.sqlite3` | SQLite file holding the execution history — the runs, their steps and their logs. |
-| `SPARQUET_STUDIO_AUTH_DB` | `server/data/auth.sqlite3` | SQLite file holding users, roles and sessions. Absent users means the runner stays in token-only mode. |
+| `SPARQUET_STUDIO_AUTH_DB` | `server/data/auth.sqlite3` | SQLite file holding users, teams, roles and sessions. Absent users means the runner stays in token-only mode. |
 | `SPARQUET_STUDIO_SESSION_HOURS` | `12` | How long a session lasts before it has to be renewed by signing in again. |
 | `SPARQUET_STUDIO_RECOVERY_MINUTES` | `30` | How long a password recovery code stays usable. |
 | `SPARQUET_STUDIO_CREDITS` | unset (metering only) | `on`/`1`/`true`/`yes`/`enforce` makes balances actually gate execution. Anything else records without blocking. |
-| `SPARQUET_STUDIO_CREDITS_PER_JOB` | `1` | Credits one non-local Job costs. |
+| `SPARQUET_STUDIO_CREDITS_PER_WRITE` | `1` | Credits one successful write to a non-local target costs. |
+| `SPARQUET_STUDIO_CREDITS_FREE_MONTHLY` | `40` | Writes a team gets for free each calendar month (UTC). Does not accumulate. |
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
 | `SPARQUET_STUDIO_WORKSPACE` | `sparquet-workspace/` at the repo root | Directory the Studio library is stored in, as real JSON files. This is what you commit. |
@@ -546,15 +592,37 @@ answer the same way. Send the token back as the `X-Sparquet-Session` header (an
 including the statements its roles grant, so Studio can grey out what would come
 back `403`.
 
-### `GET /auth/users` · `GET /auth/roles`
+### `GET /auth/users` · `GET /auth/roles` · `GET /auth/teams`
 
-Requires `iam:ReadUsers`. Users never include anything derived from the password.
+Requires `iam:ReadUsers`. Users never include anything derived from the password;
+a role says whether it is `custom`; a team carries its inherited roles and how many
+members it has.
+
+### `GET /auth/policy`
+
+The vocabulary the interface builds a role out of: every action the runner
+recognises, grouped by service, with what each one guards. Requires
+`iam:ReadUsers`.
 
 ### `POST /auth/users` · `PATCH /auth/users/{id}` · `DELETE /auth/users/{id}`
 
-Requires `iam:ManageUsers`. `POST` takes `{username, password, roles,
-display_name}`; `PATCH` takes `roles` and/or `disabled`. Each refuses with `400`
-when it would leave the runner with no enabled administrator.
+Requires `iam:ManageUsers`. `POST` takes `{username, password, roles, team,
+display_name}`; `PATCH` takes `roles`, `team` and/or `disabled`. `team` is an id or
+a name; omitted, the person lands in the default team. Each refuses with `400` when
+it would leave the runner with no enabled administrator.
+
+### `POST /auth/roles` · `PATCH /auth/roles/{name}` · `DELETE /auth/roles/{name}`
+
+Requires `iam:ManageRoles`. `POST` takes `{name, description, statements}` with
+statements in the `{effect, actions, resources}` shape. Built-in roles refuse both
+`PATCH` and `DELETE`, and a custom role still held by a user or a team refuses
+`DELETE` with `400`.
+
+### `POST /auth/teams` · `PATCH /auth/teams/{id}` · `DELETE /auth/teams/{id}`
+
+Requires `iam:ManageTeams`. `POST` takes `{name, roles}`; `PATCH` takes `name`
+and/or `roles`. Deleting moves the members into the default team, which itself
+cannot be deleted.
 
 ### `POST /auth/users/{id}/password`
 
@@ -570,8 +638,11 @@ Mints a single-use recovery code for that user and returns it once:
 { "user_id": "u1", "username": "ana", "code": "…", "expires_at": "2026-08-28T12:30:00Z" }
 ```
 
-Needs `iam:ManageUsers`. Issuing invalidates any earlier unused code for the same
-user. The runner keeps only the hash, so this response is the only copy.
+Body: `{ "password": "..." }` — **the caller's own password**, a step-up on top of
+the session and `iam:ManageUsers`, because minting a code is as good as becoming
+that person. A wrong one answers `403`. Issuing invalidates any earlier unused code
+for the same user. The runner keeps only the hash, so this response is the only
+copy.
 
 ### `POST /auth/recover`
 
@@ -582,18 +653,28 @@ every session that account had open. Every refusal returns the same message.
 ### `GET /credits/me`
 
 ```json
-{ "account": { "id": "u1", "username": "ana", "balance": 7, "spent": 3 },
-  "enforced": false, "credits_per_job": 1 }
+{ "account": { "id": "t1", "username": "platform", "balance": 7, "spent": 3,
+               "period": "2026-08", "free_used": 9, "free_monthly": 40,
+               "free_remaining": 31, "available": 38 },
+  "enforced": false, "credits_per_write": 1, "free_monthly": 40,
+  "usage": { "period": "2026-08", "writes": 12, "charged": 3, "waived": 9 } }
 ```
 
-No permission needed — it is your own balance.
+No permission needed — it is your own team's balance. `available` is the free
+allowance left plus the granted balance; `usage` is this month, with `waived`
+counting the writes the allowance covered.
 
 ### `GET /credits` · `GET /credits/{account_id}/ledger` · `POST /credits/{account_id}/grant`
 
 Every account (`credits:Read`); one account's entries, newest first (your own
 always, anybody else's with `credits:Read`); and adding credits, or taking them
 back with a negative amount (`credits:Manage`). A ledger entry carries `applied:
-false` when it was recorded on a runner that meters without enforcing.
+false` when it was recorded on a runner that meters without enforcing, and says how
+many `writes` it paid for, how much came out of the free allowance (`free_amount`)
+and how much went unpaid (`shortfall`).
+
+`GET /runs/{run_id}` returns the same figures per Job under `credits`, which is what
+the run detail in Studio shows.
 
 A run refused for lack of credits answers **402** with the message naming the
 grant endpoint. Nothing is written to the history for it — it never started.

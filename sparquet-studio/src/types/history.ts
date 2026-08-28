@@ -20,6 +20,8 @@ export type ExecutionStatus =
   /** Stopped on request while it was running — not a failure, not a skip. */
   | 'cancelled'
 
+import type { RunCharge } from '@/types/credits'
+
 export interface StepRunRecord {
   id: string
   jobRunId: string
@@ -91,6 +93,12 @@ export interface JobRunRecord {
    * `getJobRunConfig` — it is too large to carry in a listing.
    */
   configHash: string | null
+  /**
+   * What this execution cost its team: one credit per successful write to a
+   * cluster. Null for a local run, which is free, and for a run recorded before
+   * credits existed. Populated only on `getRun`.
+   */
+  credits: RunCharge | null
   /** Populated only on `getRun` — a list row never carries the nested detail. */
   steps: StepRunRecord[]
 }

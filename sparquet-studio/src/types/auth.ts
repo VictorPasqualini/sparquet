@@ -26,6 +26,12 @@ export interface Principal {
   statements: PolicyStatement[]
   /** True when there are no users and the shared token is the identity. */
   tokenOnly: boolean
+  /** The team that pays for this person's runs, and grants roles of its own. */
+  teamId: string | null
+  teamName: string | null
+  /** Roles that come with the team. `roles` above are the personal ones; the
+   *  statements are the union of both. */
+  teamRoles: string[]
 }
 
 export interface AuthStatus {
@@ -49,6 +55,39 @@ export interface AuthUser {
   disabled: boolean
   createdAt: string | null
   lastLoginAt: string | null
+  teamId: string | null
+  teamName: string | null
+}
+
+/**
+ * A group of people that shares one credit account and, optionally, roles.
+ *
+ * Teams answer two questions with one object. Billing needs somebody to charge
+ * who is not an individual — a squad has one budget, not one per person — and
+ * permissions need a way to say "everyone here may run things" without repeating
+ * it on each account.
+ */
+export interface AuthTeam {
+  id: string
+  name: string
+  /** Roles every member gets on top of their own. A team only ever grants. */
+  roles: string[]
+  members: number
+  createdAt: string | null
+}
+
+/** One thing a policy can name, with what it guards. Built from the runner's own
+ *  catalogue so the role editor can never offer an action the server rejects. */
+export interface PolicyAction {
+  name: string
+  description: string
+  /** `run`, `workspace`, `iam`, `credits`, `history` — for grouping the editor. */
+  service: string
+}
+
+export interface PolicyVocabulary {
+  actions: PolicyAction[]
+  resourceKinds: PolicyAction[]
 }
 
 export interface AuthRole {

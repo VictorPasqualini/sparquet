@@ -55,6 +55,7 @@ import {
   type RunStepEvent,
 } from '@/lib/runner/client'
 import { nodeIdForStep, pendingStatuses } from '@/lib/runner/stepNodes'
+import { usePermissionReason } from '@/lib/auth/usePermission'
 import { cn } from '@/lib/utils/cn'
 import { formatClockTime, formatCount, formatDuration } from '@/lib/utils/format'
 import { nodeOrdinals, useEditorStore } from '@/store/editor'
@@ -107,6 +108,12 @@ export function RunPanel() {
   const runnerToken = useSettingsStore((state) => state.runnerToken)
   const runAs = useSettingsStore((state) => state.runAs)
   const setRunnerToken = useSettingsStore((state) => state.setRunnerToken)
+
+  // The runner re-checks all of this; a disabled button only saves a round trip
+  // that would come back 403.
+  const runDenied = usePermissionReason('run:Execute', job ? `job/${job.id}` : '*')
+  const validateDenied = usePermissionReason('run:Validate', job ? `job/${job.id}` : '*')
+  const cancelDenied = usePermissionReason('run:Cancel', job ? `job/${job.id}` : '*')
 
   const [runner, setRunner] = useState<RunnerStatus>('checking')
   const [health, setHealth] = useState<RunnerHealth | null>(null)
@@ -175,6 +182,9 @@ export function RunPanel() {
     : blocking.length > 0
       ? `Fix ${blocking.length} blocking ${blocking.length === 1 ? 'issue' : 'issues'} first`
       : null
+
+  const runReason = runDenied ?? disabledReason
+  const validateReason = validateDenied ?? disabledReason
 
   const execute = async (next: RunMode) => {
     const { pipeline } = compile()
@@ -393,7 +403,7 @@ export function RunPanel() {
         </div>
 
         <div className="flex items-center gap-2">
-          <Tooltip content={disabledReason ?? 'Compile the graph and execute it on the runner'}>
+          <Tooltip content={runReason ?? 'Compile the graph and execute it on the runner'}>
             <span className="min-w-0 flex-1">
               <Button
                 variant="primary"
@@ -401,7 +411,7 @@ export function RunPanel() {
                 fullWidth
                 icon={<Play className="h-4 w-4" />}
                 loading={running}
-                disabled={disabledReason !== null}
+                disabled={runReason !== null}
                 onClick={() => void execute('run')}
               >
                 {running ? 'Running…' : 'Run pipeline'}
@@ -410,13 +420,17 @@ export function RunPanel() {
           </Tooltip>
 
           {running ? (
-            <Tooltip content="Cancels the execution on the runner, not just this window">
+            <Tooltip
+              content={
+                cancelDenied ?? 'Cancels the execution on the runner, not just this window'
+              }
+            >
               <span>
                 <Button
                   variant="danger"
                   size="lg"
                   icon={<Square className="h-3.5 w-3.5" />}
-                  disabled={stopping}
+                  disabled={stopping || cancelDenied !== null}
                   onClick={() => void stopRun()}
                 >
                   {stopping ? 'Stopping…' : 'Stop'}
@@ -424,13 +438,17 @@ export function RunPanel() {
               </span>
             </Tooltip>
           ) : (
-            <Tooltip content="Check the configuration without touching Spark or any sink">
+            <Tooltip
+              content={
+                validateReason ?? 'Check the configuration without touching Spark or any sink'
+              }
+            >
               <span>
                 <Button
                   variant="secondary"
                   size="lg"
                   icon={<ShieldCheck className="h-4 w-4" />}
-                  disabled={disabledReason !== null}
+                  disabled={validateReason !== null}
                   onClick={() => void execute('validate')}
                 >
                   Validate only

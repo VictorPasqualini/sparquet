@@ -8,7 +8,13 @@
  * wants to know when a run has just been refused.
  */
 
-import type { CreditAccount, CreditEntry, CreditStatus } from '@/types/credits'
+import type {
+  CreditAccount,
+  CreditEntry,
+  CreditStatus,
+  CreditUsage,
+  RunCharge,
+} from '@/types/credits'
 
 import {
   authHeaders,
@@ -101,8 +107,37 @@ function toAccount(value: unknown): CreditAccount {
     username: asString(record.username),
     balance: asNumber(record.balance),
     spent: asNumber(record.spent),
+    period: asString(record.period),
+    freeUsed: asNumber(record.free_used),
+    freeMonthly: asNumber(record.free_monthly),
+    freeRemaining: asNumber(record.free_remaining),
+    available: asNumber(record.available),
     createdAt: asNullableString(record.created_at),
     updatedAt: asNullableString(record.updated_at),
+  }
+}
+
+function toUsage(value: unknown): CreditUsage {
+  const record = isRecord(value) ? value : {}
+  return {
+    period: asString(record.period),
+    writes: asNumber(record.writes),
+    charged: asNumber(record.charged),
+    waived: asNumber(record.waived),
+  }
+}
+
+/** What a run cost, as `/run` and the execution history report it. */
+export function toRunCharge(value: unknown): RunCharge | null {
+  if (!isRecord(value)) return null
+  return {
+    amount: asNumber(value.amount),
+    writes: asNumber(value.writes),
+    applied: value.applied === true,
+    freeAmount: asNumber(value.free_amount),
+    shortfall: asNumber(value.shortfall),
+    target: asNullableString(value.target),
+    balanceAfter: typeof value.balance_after === 'number' ? value.balance_after : null,
   }
 }
 
@@ -116,6 +151,10 @@ function toEntry(value: unknown): CreditEntry {
     applied: record.applied === true,
     balanceAfter: asNumber(record.balance_after),
     createdAt: asString(record.created_at),
+    writes: asNumber(record.writes),
+    freeAmount: asNumber(record.free_amount),
+    shortfall: asNumber(record.shortfall),
+    period: asNullableString(record.period),
     jobRunId: asNullableString(record.job_run_id),
     pipelineRunId: asNullableString(record.pipeline_run_id),
     target: asNullableString(record.target),
@@ -135,7 +174,9 @@ export async function getMyCredits(
   return {
     account: toAccount(record.account),
     enforced: record.enforced === true,
-    creditsPerJob: asNumber(record.credits_per_job, 1),
+    creditsPerWrite: asNumber(record.credits_per_write, 1),
+    freeMonthly: asNumber(record.free_monthly),
+    usage: toUsage(record.usage),
   }
 }
 

@@ -86,6 +86,29 @@ class User:
     disabled: bool = False
     created_at: Optional[str] = None
     last_login_at: Optional[str] = None
+    #: Every user belongs to exactly one team. The team is who pays for the
+    #: execution credits, and it can carry roles of its own.
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+
+
+@dataclass
+class Team:
+    """A group of users that shares a billing account and, optionally, roles.
+
+    Teams exist for two reasons that happen to want the same object. Billing
+    needs somebody to charge who is not an individual — a squad has one budget,
+    not one per person. Permissions need somewhere to say "everyone in data
+    engineering may run things" without repeating it on each account. Making
+    those the same group keeps the answer to "who paid for this and who was
+    allowed to start it" in one place.
+    """
+
+    id: str
+    name: str
+    roles: List[str] = field(default_factory=list)
+    members: int = 0
+    created_at: Optional[str] = None
 
 
 @dataclass
@@ -121,9 +144,24 @@ class Principal:
     roles: List[str] = field(default_factory=list)
     statements: List[Dict[str, Any]] = field(default_factory=list)
     token_only: bool = False
+    #: The team this person belongs to: who is charged for what they run, and a
+    #: second source of roles on top of the ones held personally.
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    team_roles: List[str] = field(default_factory=list)
 
     def allows(self, action: str, resource: str = "*") -> bool:
         return authorize(self.statements, action, resource)
+
+    def denies(self, action: str, resource: str = "*") -> bool:
+        """Whether an explicit `deny` covers this — which is not the same question
+        as `not allows(...)`, and the difference matters wherever several
+        resources describe one operation. A run belongs to a Workflow, a Pipeline
+        and a Job at once, so being allowed on any of them is enough; being denied
+        on any of them has to be final, or the deny could be widened away by a
+        broader grant elsewhere.
+        """
+        return denied(self.statements, action, resource)
 
 
 #: The identity of a runner that has no users: the shared token, with the admin
@@ -150,10 +188,23 @@ ACTIONS: Dict[str, str] = {
     "run:Cancel": "Stop a run that is in progress.",
     "run:Validate": "Check a JSON without running it.",
     "history:Read": "Read past executions, their steps, logs and configuration.",
-    "iam:ReadUsers": "See who has access and with which roles.",
+    "iam:ReadUsers": "See who has access, in which teams and with which roles.",
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
-    "credits:Read": "See every account's execution credits and what they were spent on.",
+    "iam:ManageRoles": "Create and edit roles, and choose the actions each one allows.",
+    "iam:ManageTeams": "Create teams, move people between them, give a team roles.",
+    "credits:Read": "See every team's execution credits and what they were spent on.",
     "credits:Manage": "Grant execution credits, or take them back.",
+}
+
+#: What a policy statement may name as a resource, for the role editor. The
+#: runner passes these to `authorize` as `kind/id`, so a role scoped to
+#: `workflow/w1` allows only what happens inside that Workflow.
+RESOURCE_KINDS: Dict[str, str] = {
+    "workflow": "One Workflow and everything the runner attributes to it.",
+    "pipeline": "One Pipeline (an ordered sequence of Jobs).",
+    "job": "One Job.",
+    "team": "One team, for the IAM actions that act on a team.",
+    "user": "One user account.",
 }
 
 #: The roles the runner ships with. Rewritten on every start, so fixing a policy
@@ -207,6 +258,11 @@ BUILTIN_ROLES: Dict[str, Role] = {
 
 DEFAULT_ROLE = "viewer"
 
+#: The team every user lands in when nobody says otherwise. It exists so that
+#: "which account pays for this run?" always has an answer, including on a
+#: runner whose operator never opened the Teams screen.
+DEFAULT_TEAM = "default"
+
 
 def _matches(pattern: str, value: str) -> bool:
     """IAM-style match: `*` anywhere, and nothing else.
@@ -252,6 +308,23 @@ def authorize(
             return False
         allowed = True
     return allowed
+
+
+def denied(
+    statements: Sequence[Dict[str, Any]], action: str, resource: str = "*"
+) -> bool:
+    """Whether an explicit deny covers this action on this resource.
+
+    `authorize` folds "denied" and "never granted" into the same `False`, which is
+    the right answer for one resource and the wrong one when a caller is about to
+    ask about several. See `Principal.denies`.
+    """
+    return any(
+        isinstance(statement, dict)
+        and _statement_hits(statement, action, resource)
+        and str(statement.get("effect", "allow")).lower() == "deny"
+        for statement in statements
+    )
 
 
 # ------------------------------------------------------------------ passwords
@@ -358,6 +431,18 @@ CREATE TABLE IF NOT EXISTS session (
 );
 CREATE INDEX IF NOT EXISTS idx_session_user ON session(user_id);
 
+CREATE TABLE IF NOT EXISTS team (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS team_role (
+  team_id TEXT NOT NULL REFERENCES team(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  PRIMARY KEY (team_id, role)
+);
+
 CREATE TABLE IF NOT EXISTS recovery (
   code_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
@@ -423,7 +508,9 @@ class AuthStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, closing(self._connect()) as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
             self._sync_builtin_roles(conn)
+            self._ensure_default_team(conn)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -432,6 +519,33 @@ class AuthStore:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Columns added after the first release, applied to a database that
+        predates them. Cheap enough to run on every start, and it means an
+        upgrade never asks the operator to do anything."""
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(user)")}
+        if "team_id" not in columns:
+            conn.execute("ALTER TABLE user ADD COLUMN team_id TEXT")
+
+    @staticmethod
+    def _ensure_default_team(conn: sqlite3.Connection) -> str:
+        row = conn.execute(
+            "SELECT id FROM team WHERE name = ? COLLATE NOCASE", (DEFAULT_TEAM,)
+        ).fetchone()
+        if row:
+            team_id = row["id"]
+        else:
+            team_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO team (id, name, created_at) VALUES (?, ?, ?)",
+                (team_id, DEFAULT_TEAM, _iso(_now())),
+            )
+        # Anyone created before teams existed belongs to the default one, so no
+        # account is left without somewhere to charge.
+        conn.execute("UPDATE user SET team_id = ? WHERE team_id IS NULL", (team_id,))
+        return team_id
 
     @staticmethod
     def _sync_builtin_roles(conn: sqlite3.Connection) -> None:
@@ -454,7 +568,7 @@ class AuthStore:
 
     def create_user(
         self, username: str, password: str, *, roles: Optional[Iterable[str]] = None,
-        display_name: Optional[str] = None,
+        display_name: Optional[str] = None, team: Optional[str] = None,
     ) -> User:
         name = (username or "").strip()
         if not name:
@@ -468,17 +582,17 @@ class AuthStore:
             ).fetchone()
             if existing:
                 raise AuthError(f"There is already a user called '{name}'.")
+            team_id = self._resolve_team(conn, team)
             conn.execute(
-                "INSERT INTO user (id, username, display_name, password_hash, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (user_id, name, display_name, password_hash, _iso(_now())),
+                "INSERT INTO user (id, username, display_name, password_hash, created_at, "
+                "team_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, name, display_name, password_hash, _iso(_now()), team_id),
             )
             self._write_roles(conn, user_id, wanted)
             conn.commit()
-        return User(
-            id=user_id, username=name, display_name=display_name, roles=sorted(wanted),
-            created_at=_iso(_now()),
-        )
+            return self._user_of(
+                conn, conn.execute("SELECT * FROM user WHERE id = ?", (user_id,)).fetchone()
+            )
 
     def list_users(self) -> List[User]:
         with self._lock, closing(self._connect()) as conn:
@@ -611,9 +725,15 @@ class AuthStore:
             )
             conn.commit()
             user = self._user_of(conn, row)
+            team_roles = self._team_roles_of(conn, user.team_id)
+            # Personal roles and the team's are simply added together: a team is a
+            # way of granting, never of taking away. A `deny` in either still wins
+            # inside `authorize`, which is where restriction belongs.
+            effective = sorted(set(user.roles) | set(team_roles))
             return Principal(
                 username=user.username, display_name=user.display_name, user_id=user.id,
-                roles=user.roles, statements=self._statements_for(conn, user.roles),
+                roles=user.roles, statements=self._statements_for(conn, effective),
+                team_id=user.team_id, team_name=user.team_name, team_roles=team_roles,
             )
 
     def logout(self, token: str) -> None:
@@ -713,12 +833,198 @@ class AuthStore:
             for row in rows
         ]
 
+    def create_role(
+        self, name: str, description: str, statements: List[Dict[str, Any]]
+    ) -> Role:
+        """A role somebody wrote themselves, stored alongside the built-in ones.
+
+        `custom` is what keeps the two apart: the shipped roles are rewritten on
+        every start so that fixing a policy in code fixes it everywhere, and a
+        role created here is never touched again by an upgrade.
+        """
+        clean = (name or "").strip()
+        if not clean:
+            raise AuthError("A role needs a name.")
+        if clean in BUILTIN_ROLES:
+            raise AuthError(
+                f"'{clean}' is a built-in role. Pick another name — the shipped roles "
+                f"are rewritten on every start and your edits would be lost."
+            )
+        checked = _checked_statements(statements)
+        with self._lock, closing(self._connect()) as conn:
+            if conn.execute("SELECT 1 FROM role WHERE name = ?", (clean,)).fetchone():
+                raise AuthError(f"There is already a role called '{clean}'.")
+            conn.execute(
+                "INSERT INTO role (name, description, statements, custom) VALUES (?, ?, ?, 1)",
+                (clean, (description or "").strip(), json.dumps(checked)),
+            )
+            conn.commit()
+        return Role(name=clean, description=(description or "").strip(), statements=checked,
+                    custom=True)
+
+    def update_role(
+        self, name: str, *, description: Optional[str] = None,
+        statements: Optional[List[Dict[str, Any]]] = None,
+    ) -> Role:
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM role WHERE name = ?", (name,)).fetchone()
+            if not row:
+                raise AuthError("No such role.")
+            if not row["custom"]:
+                raise AuthError(
+                    f"'{name}' is a built-in role and cannot be edited. Copy it into a "
+                    f"new role instead."
+                )
+            if description is not None:
+                conn.execute(
+                    "UPDATE role SET description = ? WHERE name = ?",
+                    (description.strip(), name),
+                )
+            if statements is not None:
+                conn.execute(
+                    "UPDATE role SET statements = ? WHERE name = ?",
+                    (json.dumps(_checked_statements(statements)), name),
+                )
+            conn.commit()
+            row = conn.execute("SELECT * FROM role WHERE name = ?", (name,)).fetchone()
+            return Role(
+                name=row["name"], description=row["description"] or "",
+                statements=json.loads(row["statements"]), custom=True,
+            )
+
+    def delete_role(self, name: str) -> None:
+        """Removes a custom role, refusing while anybody still holds it.
+
+        Deleting a role out from under its holders would silently reduce what
+        they may do, and the reason would be invisible on their screen.
+        """
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM role WHERE name = ?", (name,)).fetchone()
+            if not row:
+                raise AuthError("No such role.")
+            if not row["custom"]:
+                raise AuthError(f"'{name}' is a built-in role and cannot be removed.")
+            users = conn.execute(
+                "SELECT COUNT(*) AS n FROM user_role WHERE role = ?", (name,)
+            ).fetchone()["n"]
+            teams = conn.execute(
+                "SELECT COUNT(*) AS n FROM team_role WHERE role = ?", (name,)
+            ).fetchone()["n"]
+            if users or teams:
+                raise AuthError(
+                    f"'{name}' is still held by {users} user(s) and {teams} team(s). "
+                    f"Move them to another role first."
+                )
+            conn.execute("DELETE FROM role WHERE name = ?", (name,))
+            conn.commit()
+
+    # ---- teams -----------------------------------------------------------
+
+    def list_teams(self) -> List[Team]:
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute("SELECT * FROM team ORDER BY name").fetchall()
+            return [self._team_of(conn, row) for row in rows]
+
+    def get_team(self, team_id: str) -> Optional[Team]:
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM team WHERE id = ?", (team_id,)).fetchone()
+            return self._team_of(conn, row) if row else None
+
+    def create_team(self, name: str, *, roles: Optional[Iterable[str]] = None) -> Team:
+        clean = (name or "").strip()
+        if not clean:
+            raise AuthError("A team needs a name.")
+        wanted = self._checked_roles(roles, allow_empty=True)
+        team_id = uuid.uuid4().hex
+        with self._lock, closing(self._connect()) as conn:
+            if conn.execute(
+                "SELECT 1 FROM team WHERE name = ? COLLATE NOCASE", (clean,)
+            ).fetchone():
+                raise AuthError(f"There is already a team called '{clean}'.")
+            conn.execute(
+                "INSERT INTO team (id, name, created_at) VALUES (?, ?, ?)",
+                (team_id, clean, _iso(_now())),
+            )
+            self._write_team_roles(conn, team_id, wanted)
+            conn.commit()
+            return self._team_of(
+                conn, conn.execute("SELECT * FROM team WHERE id = ?", (team_id,)).fetchone()
+            )
+
+    def update_team(
+        self, team_id: str, *, name: Optional[str] = None,
+        roles: Optional[Iterable[str]] = None,
+    ) -> Team:
+        # Checked before the lock is taken: `_checked_roles` opens the store on its
+        # own, and the lock is not reentrant.
+        wanted = None if roles is None else self._checked_roles(roles, allow_empty=True)
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM team WHERE id = ?", (team_id,)).fetchone()
+            if not row:
+                raise AuthError("No such team.")
+            if name is not None and name.strip() and name.strip() != row["name"]:
+                clash = conn.execute(
+                    "SELECT 1 FROM team WHERE name = ? COLLATE NOCASE AND id != ?",
+                    (name.strip(), team_id),
+                ).fetchone()
+                if clash:
+                    raise AuthError(f"There is already a team called '{name.strip()}'.")
+                conn.execute(
+                    "UPDATE team SET name = ? WHERE id = ?", (name.strip(), team_id)
+                )
+            if wanted is not None:
+                self._write_team_roles(conn, team_id, wanted)
+            conn.commit()
+            return self._team_of(
+                conn, conn.execute("SELECT * FROM team WHERE id = ?", (team_id,)).fetchone()
+            )
+
+    def delete_team(self, team_id: str) -> None:
+        """Removes a team, moving whoever is in it back to the default one.
+
+        Members are moved rather than deleted, and the default team itself cannot
+        go: something has to be left to charge and to belong to.
+        """
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute("SELECT * FROM team WHERE id = ?", (team_id,)).fetchone()
+            if not row:
+                raise AuthError("No such team.")
+            if str(row["name"]).lower() == DEFAULT_TEAM:
+                raise AuthError(
+                    "The default team cannot be removed — every user has to belong "
+                    "to a team, and this is the one they fall back to."
+                )
+            fallback = self._ensure_default_team(conn)
+            conn.execute("UPDATE user SET team_id = ? WHERE team_id = ?", (fallback, team_id))
+            conn.execute("DELETE FROM team WHERE id = ?", (team_id,))
+            conn.commit()
+
+    def set_user_team(self, user_id: str, team: Optional[str]) -> User:
+        """Moves somebody to another team, by id or by name.
+
+        What this changes is who pays for their runs from now on. Ledger entries
+        already written stay with the team that paid at the time, because a past
+        invoice does not move.
+        """
+        with self._lock, closing(self._connect()) as conn:
+            self._require_user(conn, user_id)
+            team_id = self._resolve_team(conn, team)
+            conn.execute("UPDATE user SET team_id = ? WHERE id = ?", (team_id, user_id))
+            conn.commit()
+            return self._user_of(
+                conn, conn.execute("SELECT * FROM user WHERE id = ?", (user_id,)).fetchone()
+            )
+
     # ---- internals -------------------------------------------------------
 
-    def _checked_roles(self, roles: Optional[Iterable[str]]) -> List[str]:
+    def _checked_roles(
+        self, roles: Optional[Iterable[str]], *, allow_empty: bool = False
+    ) -> List[str]:
         wanted = sorted({str(role).strip() for role in (roles or []) if str(role).strip()})
         if not wanted:
-            return [DEFAULT_ROLE]
+            # A user with no role would be unable to do anything and would look
+            # like a bug; a team with none simply grants nothing extra.
+            return [] if allow_empty else [DEFAULT_ROLE]
         with self._lock, closing(self._connect()) as conn:
             known = {row["name"] for row in conn.execute("SELECT name FROM role")}
         unknown = [role for role in wanted if role not in known]
@@ -737,6 +1043,53 @@ class AuthStore:
         )
 
     @staticmethod
+    def _write_team_roles(
+        conn: sqlite3.Connection, team_id: str, roles: Sequence[str]
+    ) -> None:
+        conn.execute("DELETE FROM team_role WHERE team_id = ?", (team_id,))
+        conn.executemany(
+            "INSERT INTO team_role (team_id, role) VALUES (?, ?)",
+            [(team_id, role) for role in roles],
+        )
+
+    @staticmethod
+    def _team_roles_of(conn: sqlite3.Connection, team_id: Optional[str]) -> List[str]:
+        if not team_id:
+            return []
+        return [
+            row["role"]
+            for row in conn.execute(
+                "SELECT role FROM team_role WHERE team_id = ? ORDER BY role", (team_id,)
+            )
+        ]
+
+    def _team_of(self, conn: sqlite3.Connection, row: sqlite3.Row) -> Team:
+        members = conn.execute(
+            "SELECT COUNT(*) AS n FROM user WHERE team_id = ?", (row["id"],)
+        ).fetchone()["n"]
+        return Team(
+            id=row["id"], name=row["name"], roles=self._team_roles_of(conn, row["id"]),
+            members=int(members), created_at=row["created_at"],
+        )
+
+    def _resolve_team(self, conn: sqlite3.Connection, team: Optional[str]) -> str:
+        """A team id, a team name, or nothing at all, turned into an id.
+
+        Nothing at all is the common case — most users are created without anyone
+        thinking about teams — and it lands in the default team rather than in no
+        team, so there is always an account to charge.
+        """
+        wanted = (team or "").strip()
+        if not wanted:
+            return self._ensure_default_team(conn)
+        row = conn.execute(
+            "SELECT id FROM team WHERE id = ? OR name = ? COLLATE NOCASE", (wanted, wanted)
+        ).fetchone()
+        if not row:
+            raise AuthError(f"No such team: '{wanted}'.")
+        return row["id"]
+
+    @staticmethod
     def _require_user(conn: sqlite3.Connection, user_id: str) -> sqlite3.Row:
         row = conn.execute("SELECT * FROM user WHERE id = ?", (user_id,)).fetchone()
         if not row:
@@ -751,8 +1104,11 @@ class AuthStore:
         administer, and the only fix is editing SQLite by hand.
         """
         remaining = conn.execute(
-            "SELECT COUNT(*) AS n FROM user_role ur JOIN user u ON u.id = ur.user_id "
-            "WHERE ur.role = 'admin' AND u.disabled_at IS NULL AND u.id != ?",
+            "SELECT COUNT(*) AS n FROM user u WHERE u.disabled_at IS NULL AND u.id != ? "
+            "AND (EXISTS (SELECT 1 FROM user_role ur WHERE ur.user_id = u.id "
+            "             AND ur.role = 'admin') "
+            "  OR EXISTS (SELECT 1 FROM team_role tr WHERE tr.team_id = u.team_id "
+            "             AND tr.role = 'admin'))",
             (user_id,),
         ).fetchone()["n"]
         if remaining == 0:
@@ -771,10 +1127,16 @@ class AuthStore:
         ]
 
     def _user_of(self, conn: sqlite3.Connection, row: sqlite3.Row) -> User:
+        team_id = row["team_id"] if "team_id" in row.keys() else None
+        team_name = None
+        if team_id:
+            found = conn.execute("SELECT name FROM team WHERE id = ?", (team_id,)).fetchone()
+            team_name = found["name"] if found else None
         return User(
             id=row["id"], username=row["username"], display_name=row["display_name"],
             roles=self._roles_of(conn, row["id"]), disabled=bool(row["disabled_at"]),
             created_at=row["created_at"], last_login_at=row["last_login_at"],
+            team_id=team_id, team_name=team_name,
         )
 
     @staticmethod
@@ -794,6 +1156,41 @@ class AuthStore:
             if isinstance(parsed, list):
                 statements.extend(item for item in parsed if isinstance(item, dict))
         return statements
+
+
+def _checked_statements(statements: Any) -> List[Dict[str, Any]]:
+    """Validates a policy written by a person before it is stored.
+
+    A malformed statement is not a security hole — `authorize` ignores what it
+    cannot read, and the default is deny — but it is a silent one: the role looks
+    saved and grants nothing. Refusing here is the only place the author is still
+    watching.
+    """
+    if not isinstance(statements, list) or not statements:
+        raise AuthError("A role needs at least one statement.")
+    checked: List[Dict[str, Any]] = []
+    for item in statements:
+        if not isinstance(item, dict):
+            raise AuthError("Each statement must be an object.")
+        effect = str(item.get("effect") or "allow").strip().lower()
+        if effect not in {"allow", "deny"}:
+            raise AuthError(f"Unknown effect '{effect}'. Use 'allow' or 'deny'.")
+        actions = [str(a).strip() for a in (item.get("actions") or []) if str(a).strip()]
+        if not actions:
+            raise AuthError("A statement must name at least one action.")
+        for action in actions:
+            if action == "*" or action.endswith(":*"):
+                continue
+            if action not in ACTIONS:
+                raise AuthError(
+                    f"Unknown action '{action}'. Known actions: "
+                    f"{', '.join(sorted(ACTIONS))}."
+                )
+        resources = [str(r).strip() for r in (item.get("resources") or []) if str(r).strip()]
+        checked.append(
+            {"effect": effect, "actions": actions, "resources": resources or ["*"]}
+        )
+    return checked
 
 
 #: Verified against when the username does not exist, so a wrong username and a

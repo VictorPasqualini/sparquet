@@ -18,6 +18,7 @@ import {
   type SegmentedOption,
 } from '@/components/ui'
 import { TEMPLATES } from '@/data/templates'
+import { usePermission } from '@/lib/auth/usePermission'
 import { serializePipeline } from '@/lib/compiler'
 import { cn } from '@/lib/utils/cn'
 import { copyText } from '@/lib/utils/download'
@@ -373,6 +374,9 @@ function CreateJobDialog({ template, onClose }: CreateJobDialogProps) {
   const workflows = useLibraryStore((state) => state.workflows)
   const createWorkflow = useLibraryStore((state) => state.createWorkflow)
   const createJob = useLibraryStore((state) => state.createJob)
+  // A template is only ever a starting point for a new Job, so the whole screen
+  // hangs on one permission.
+  const mayWrite = usePermission('workspace:Write')
 
   const formId = useId()
   const workflowFieldId = `${formId}-workflow`
@@ -455,7 +459,8 @@ function CreateJobDialog({ template, onClose }: CreateJobDialogProps) {
             form={formId}
             variant="primary"
             loading={busy}
-            disabled={!valid}
+            disabled={!valid || !mayWrite}
+            title={mayWrite ? undefined : 'Your role does not allow workspace:Write'}
           >
             {template ? 'Create job' : 'Open canvas'}
           </Button>

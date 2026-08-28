@@ -7,6 +7,7 @@ import {
   grantCredits,
   isOutOfCredits,
   listCreditAccounts,
+  toRunCharge,
 } from '@/lib/runner/credits'
 
 const fetchMock = vi.fn()
@@ -25,22 +26,33 @@ function lastCall(): [string, RequestInit] {
 }
 
 const ACCOUNT = {
-  id: 'u1',
-  username: 'ana',
+  id: 't1',
+  username: 'platform',
   balance: 7,
   spent: 3,
+  period: '2026-08',
+  free_used: 9,
+  free_monthly: 40,
+  free_remaining: 31,
+  available: 38,
   created_at: '2026-08-20T10:00:00Z',
   updated_at: '2026-08-20T11:00:00Z',
 }
 
+const USAGE = { period: '2026-08', writes: 12, charged: 3, waived: 9 }
+
 const ENTRY = {
   id: 'e1',
-  account_id: 'u1',
-  amount: -1,
+  account_id: 't1',
+  amount: -2,
   reason: 'run',
   applied: true,
   balance_after: 7,
   created_at: '2026-08-20T11:00:00Z',
+  writes: 2,
+  free_amount: 1,
+  shortfall: 0,
+  period: '2026-08',
   job_run_id: 'job-1',
   pipeline_run_id: 'run-1',
   target: 'spark://cluster:7077',
@@ -58,47 +70,93 @@ afterEach(() => {
 })
 
 describe('getMyCredits', () => {
-  it('maps the balance and whether it is being enforced', async () => {
+  it('maps the team account, its allowance and whether it is being enforced', async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({ account: ACCOUNT, enforced: true, credits_per_job: 2 }),
+      jsonResponse({
+        account: ACCOUNT,
+        enforced: true,
+        credits_per_write: 2,
+        free_monthly: 40,
+        usage: USAGE,
+      }),
     )
 
     const status = await getMyCredits(DEFAULT_RUNNER_URL, 'secret')
 
     expect(status).toEqual({
       account: {
-        id: 'u1',
-        username: 'ana',
+        id: 't1',
+        username: 'platform',
         balance: 7,
         spent: 3,
+        period: '2026-08',
+        freeUsed: 9,
+        freeMonthly: 40,
+        freeRemaining: 31,
+        available: 38,
         createdAt: '2026-08-20T10:00:00Z',
         updatedAt: '2026-08-20T11:00:00Z',
       },
       enforced: true,
-      creditsPerJob: 2,
+      creditsPerWrite: 2,
+      freeMonthly: 40,
+      usage: { period: '2026-08', writes: 12, charged: 3, waived: 9 },
     })
     const [url, init] = lastCall()
     expect(url).toBe(`${DEFAULT_RUNNER_URL}/credits/me`)
     expect((init.headers as Record<string, string>)[RUNNER_TOKEN_HEADER]).toBe('secret')
   })
 
-  it('reads a metering-only runner as not enforced, one credit per Job', async () => {
+  it('reads a metering-only runner as not enforced, one credit per write', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ account: ACCOUNT }))
 
     const status = await getMyCredits()
 
     expect(status.enforced).toBe(false)
-    expect(status.creditsPerJob).toBe(1)
+    expect(status.creditsPerWrite).toBe(1)
+    // A runner that reports no usage block is a zeroed month, not a crash.
+    expect(status.usage).toEqual({ period: '', writes: 0, charged: 0, waived: 0 })
+  })
+})
+
+describe('toRunCharge', () => {
+  it('maps what a run cost, keeping a metered charge distinguishable', () => {
+    expect(
+      toRunCharge({
+        amount: 3,
+        writes: 3,
+        applied: false,
+        free_amount: 3,
+        shortfall: 0,
+        target: 'spark://cluster:7077',
+        balance_after: null,
+      }),
+    ).toEqual({
+      amount: 3,
+      writes: 3,
+      applied: false,
+      freeAmount: 3,
+      shortfall: 0,
+      target: 'spark://cluster:7077',
+      balanceAfter: null,
+    })
+  })
+
+  it('is null for a run that was never charged — a local run, or an old record', () => {
+    expect(toRunCharge(null)).toBeNull()
+    expect(toRunCharge(undefined)).toBeNull()
   })
 })
 
 describe('listCreditAccounts', () => {
   it('maps every account', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([ACCOUNT, { ...ACCOUNT, id: 'u2', username: 'bo' }]))
+    fetchMock.mockResolvedValue(
+      jsonResponse([ACCOUNT, { ...ACCOUNT, id: 't2', username: 'data' }]),
+    )
 
     const accounts = await listCreditAccounts()
 
-    expect(accounts.map((account) => account.id)).toEqual(['u1', 'u2'])
+    expect(accounts.map((account) => account.id)).toEqual(['t1', 't2'])
   })
 
   it('survives a runner that answers with something that is not a list', async () => {
@@ -112,29 +170,33 @@ describe('getCreditLedger', () => {
   it('maps entries and passes the limit', async () => {
     fetchMock.mockResolvedValue(jsonResponse([ENTRY]))
 
-    const entries = await getCreditLedger(DEFAULT_RUNNER_URL, 'u1', 20)
+    const entries = await getCreditLedger(DEFAULT_RUNNER_URL, 't1', 20)
 
     expect(entries[0]).toEqual({
       id: 'e1',
-      accountId: 'u1',
-      amount: -1,
+      accountId: 't1',
+      amount: -2,
       reason: 'run',
       applied: true,
       balanceAfter: 7,
       createdAt: '2026-08-20T11:00:00Z',
+      writes: 2,
+      freeAmount: 1,
+      shortfall: 0,
+      period: '2026-08',
       jobRunId: 'job-1',
       pipelineRunId: 'run-1',
       target: 'spark://cluster:7077',
       jobName: 'orders',
       note: null,
     })
-    expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/credits/u1/ledger?limit=20`)
+    expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/credits/t1/ledger?limit=20`)
   })
 
   it('keeps a metered row distinguishable from a charged one', async () => {
     fetchMock.mockResolvedValue(jsonResponse([{ ...ENTRY, applied: false }]))
 
-    const entries = await getCreditLedger(DEFAULT_RUNNER_URL, 'u1')
+    const entries = await getCreditLedger(DEFAULT_RUNNER_URL, 't1')
 
     expect(entries[0].applied).toBe(false)
   })
@@ -144,11 +206,11 @@ describe('grantCredits', () => {
   it('posts the amount and the note', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ ...ACCOUNT, balance: 17 }))
 
-    const account = await grantCredits(DEFAULT_RUNNER_URL, 'u1', 10, 'quarter budget')
+    const account = await grantCredits(DEFAULT_RUNNER_URL, 't1', 10, 'quarter budget')
 
     expect(account.balance).toBe(17)
     const [url, init] = lastCall()
-    expect(url).toBe(`${DEFAULT_RUNNER_URL}/credits/u1/grant`)
+    expect(url).toBe(`${DEFAULT_RUNNER_URL}/credits/t1/grant`)
     expect(init.method).toBe('POST')
     expect(JSON.parse(String(init.body))).toEqual({ amount: 10, note: 'quarter budget' })
   })
@@ -156,7 +218,7 @@ describe('grantCredits', () => {
   it('sends a null note rather than omitting it', async () => {
     fetchMock.mockResolvedValue(jsonResponse(ACCOUNT))
 
-    await grantCredits(DEFAULT_RUNNER_URL, 'u1', -5)
+    await grantCredits(DEFAULT_RUNNER_URL, 't1', -5)
 
     expect(JSON.parse(String(lastCall()[1].body))).toEqual({ amount: -5, note: null })
   })

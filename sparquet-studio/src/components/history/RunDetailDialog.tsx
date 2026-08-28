@@ -19,6 +19,7 @@ import { getJobRunConfig, getRun } from '@/lib/runner/history'
 import { normalizeStepScope, stepDetails, stepLabel } from '@/lib/runner/stepNodes'
 import { cn } from '@/lib/utils/cn'
 import { formatCount, formatDuration, plural } from '@/lib/utils/format'
+import type { RunCharge } from '@/types/credits'
 import type {
   JobRunRecord,
   LineageDataset,
@@ -383,6 +384,7 @@ function JobDetails({
         <Detail label="Config version" mono>
           {job.configHash ? shortHash(job.configHash) : '—'}
         </Detail>
+        <Detail label="Credits">{describeCharge(job.credits)}</Detail>
       </dl>
 
       <ConfigVersion job={job} runnerUrl={runnerUrl} runnerToken={runnerToken} />
@@ -489,6 +491,24 @@ function ConfigVersion({
       )}
     </div>
   )
+}
+
+/**
+ * What this execution cost, in one line.
+ *
+ * The unit is a successful write to a cluster, so a run that failed before
+ * writing shows as free rather than as unknown, and so does a local run — the
+ * runner never charges for either. `applied: false` means the runner is metering
+ * without enforcing: the count is real, the deduction did not happen.
+ */
+function describeCharge(charge: RunCharge | null): string {
+  if (!charge || charge.writes === 0) return 'Free — nothing was written off this machine'
+  const writes = `${charge.writes} ${charge.writes === 1 ? 'write' : 'writes'}`
+  const parts = [`${charge.amount} for ${writes}`]
+  if (charge.freeAmount > 0) parts.push(`${charge.freeAmount} from the free allowance`)
+  if (charge.shortfall > 0) parts.push(`${charge.shortfall} unpaid`)
+  if (!charge.applied) parts.push('metered only')
+  return parts.join(' · ')
 }
 
 function Detail({

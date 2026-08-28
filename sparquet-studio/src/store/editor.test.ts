@@ -556,6 +556,7 @@ describe('run step status', () => {
       rowsWritten: 0,
       lineage: null,
       configHash: null,
+      credits: null,
       steps,
       ...overrides,
     }

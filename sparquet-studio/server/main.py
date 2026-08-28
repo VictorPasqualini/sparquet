@@ -208,6 +208,27 @@ class LogOut(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
+class RunChargeOut(BaseModel):
+    """What one execution cost its team.
+
+    Sent back with the run and stored against the job execution, so the price
+    appears where the work does instead of only in a billing screen: `writes` is
+    what was actually written, `amount` what that cost, `free_amount` how much of
+    it the monthly allowance covered, and `applied` whether a balance really moved
+    (false on a runner that meters without enforcing).
+    """
+
+    amount: int
+    writes: int
+    applied: bool
+    free_amount: int = 0
+    #: Non-zero only when a run wrote more than its team could pay for. The work
+    #: is done and recorded; the next run is the one that gets refused.
+    shortfall: int = 0
+    target: Optional[str] = None
+    balance_after: Optional[int] = None
+
+
 class RunResponse(BaseModel):
     success: bool
     skipped: bool = False
@@ -224,6 +245,9 @@ class RunResponse(BaseModel):
     logs: List[LogOut] = Field(default_factory=list)
     pipeline_run_id: Optional[str] = None
     job_run_id: Optional[str] = None
+    #: What this run cost. Null for a local run, which is free, and for a run on a
+    #: runner where crediting failed — never a reason to fail a run that worked.
+    credits: Optional[RunChargeOut] = None
 
 
 class ValidateResponse(BaseModel):
@@ -960,9 +984,9 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
     """Dependency for one action, optionally on one resource.
 
     `resource` may be a callable taking the request, for the endpoints whose
-    target is in the path (`workspace/job/j1`). The run endpoints pass `*`: their
-    target is in the body, which a dependency cannot read without consuming it —
-    scoping those to a Workflow is noted in the backlog.
+    target is in the path (`workspace/job/j1`). The run endpoints do not use this
+    dependency at all: their target is in the body, which a dependency cannot read
+    without consuming it, so they call `_authorize_run` once the body is parsed.
     """
 
     def dependency(request: Request) -> Any:
@@ -989,27 +1013,121 @@ _credits = credits.CreditStore()
 NO_CREDITS_STATUS = 402
 
 
-def _charge_execution(
-    principal: Any, pipeline: Dict[str, Any], *, job_name: Optional[str] = None,
-    job_run_id: Optional[str] = None, pipeline_run_id: Optional[str] = None,
-) -> Any:
-    """Take the credit this Job costs, or refuse the run.
+def _admit_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
+    """Refuse, before Spark is started, a team that cannot pay for a single write.
 
-    Local work is free and writes nothing; a Job pointed at a cluster costs a
-    coin. The cost is read from the configuration rather than from the request,
-    so a caller cannot declare their own run free — see `credits.py`.
+    This is all that can honestly be checked up front: nobody knows yet how many
+    destinations the run will manage to write. What it does buy is that a team
+    with nothing left never starts a cluster it cannot pay for. Whether the target
+    is local — and therefore free — is read from the configuration rather than
+    from the request, so a caller cannot declare their own run free.
     """
     account_id, username = credits.account_for(principal)
-    target = credits.target_of(pipeline)
     try:
-        return _credits.charge(
-            account_id, target, username=username, job_run_id=job_run_id,
-            pipeline_run_id=pipeline_run_id, job_name=job_name,
-        )
+        _credits.precheck(account_id, credits.target_of(pipeline), username=username)
     except credits.InsufficientCredits as error:
         raise HTTPException(status_code=NO_CREDITS_STATUS, detail=str(error)) from error
     except credits.CreditError as error:  # pragma: no cover - defensive
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _charge_execution(
+    principal: Any, pipeline: Dict[str, Any], writes: int, *,
+    job_name: Optional[str] = None, job_run_id: Optional[str] = None,
+    pipeline_run_id: Optional[str] = None,
+) -> Any:
+    """Charge one credit per destination the run actually wrote.
+
+    Called **after** the execution, which is the only moment the number of
+    successful writes exists: `RunResponse.output_metrics` carries one entry per
+    completed write, because the framework appends to `PipelineResult.outputs`
+    only once the writer returns. A run that failed before writing anything has
+    none of them and therefore costs nothing — that is the whole of "errors do not
+    spend a token", and it needs no cooperation from the framework.
+
+    This never raises for lack of credit: the writes already happened. An account
+    that could not cover them goes to zero with the gap recorded on the ledger
+    entry, and it is the next `_admit_execution` that refuses.
+    """
+    account_id, username = credits.account_for(principal)
+    try:
+        return _credits.charge(
+            account_id, credits.target_of(pipeline), writes, username=username,
+            job_run_id=job_run_id, pipeline_run_id=pipeline_run_id, job_name=job_name,
+        )
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        _log.warning("Could not charge execution credits: %s", error)
+        return None
+
+
+def _charge_out(charge: Any) -> Optional[RunChargeOut]:
+    """A `credits.Charge` as the API shape, or nothing when the run was free."""
+    if charge is None or not getattr(charge, "charged", False):
+        return None
+    return RunChargeOut(
+        amount=charge.amount, writes=charge.writes, applied=charge.applied,
+        free_amount=charge.free_amount, shortfall=charge.shortfall,
+        target=charge.target, balance_after=charge.balance_after,
+    )
+
+
+def _entry_charge_out(entry: Any) -> RunChargeOut:
+    """A ledger row as the same shape, for a past run read back from history.
+
+    The ledger stores what a charge did to the account, so the amount is negative
+    there and positive here: this says what the run cost, not which way the
+    balance moved.
+    """
+    return RunChargeOut(
+        amount=-entry.amount, writes=entry.writes, applied=entry.applied,
+        free_amount=entry.free_amount, shortfall=entry.shortfall,
+        target=entry.target, balance_after=entry.balance_after,
+    )
+
+
+def _run_targets(
+    workflow_id: Optional[str], pipeline_id: Optional[str], job_id: Optional[str]
+) -> List[str]:
+    """The resources a run can be authorized against: `workflow/w1`, `pipeline/p1`,
+    `job/j1` — whichever of them the request actually named.
+
+    A run belongs to all three at once, so a role may reasonably be written against
+    any of them: "may run anything in this Workflow" and "may run this one Job" are
+    both sensible grants. An unsaved Job from the editor names none of them and
+    falls back to `*`, which is what every role scoped to everything already
+    matches.
+    """
+    named = [
+        f"{kind}/{value}" for kind, value in
+        (("workflow", workflow_id), ("pipeline", pipeline_id), ("job", job_id))
+        if value
+    ]
+    return named or ["*"]
+
+
+def _authorize_run(
+    principal: Any, action: str, *, workflow_id: Optional[str] = None,
+    pipeline_id: Optional[str] = None, job_id: Optional[str] = None,
+) -> None:
+    """Authorize an execution once the body is parsed and the target is known.
+
+    One allow among the run's identifiers is enough, but an explicit deny on any
+    of them settles it — otherwise "may not run job/j1" could be walked around by
+    also holding "may run everything in workflow/w1", and a deny that can be
+    widened away is not a deny.
+    """
+    targets = _run_targets(workflow_id, pipeline_id, job_id)
+    denied = next((target for target in targets if principal.denies(action, target)), None)
+    if denied is None and any(principal.allows(action, target) for target in targets):
+        return
+    target = denied or ", ".join(targets)
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"'{principal.username}' is not allowed to {action} on '{target}'. "
+            f"Roles held: {', '.join(principal.roles) or 'none'}."
+        ),
+    )
 
 
 def _workspace_resource(request: Request) -> str:
@@ -1092,7 +1210,13 @@ def capabilities() -> CapabilitiesResponse:
 
 
 @app.post("/run", response_model=RunResponse)
-def run(body: RunRequest, principal: Any = Depends(requires("run:Execute"))) -> RunResponse:
+def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunResponse:
+    # Authorized here rather than through `Depends(requires(...))`: the Job being
+    # run is in the body, so this is the first point where the permission can be
+    # about *this* Job instead of about running in general.
+    _authorize_run(
+        principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
+    )
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -1122,10 +1246,11 @@ def run(body: RunRequest, principal: Any = Depends(requires("run:Execute"))) -> 
             detail="A pipeline run is already in progress on this runner.",
         )
 
-    # Before anything is recorded: a run that cannot be paid for did not happen,
-    # and the lock has to go back or the runner stays busy over a refusal.
+    # Before anything is recorded: a run that cannot pay for even one write did
+    # not happen, and the lock has to go back or the runner stays busy over a
+    # refusal. What it will actually cost is only known once it has run.
     try:
-        _charge_execution(principal, body.pipeline, job_name=body.job_name or name)
+        _admit_execution(principal, body.pipeline)
     except HTTPException:
         _RUN_LOCK.release()
         raise
@@ -1180,6 +1305,11 @@ def run(body: RunRequest, principal: Any = Depends(requires("run:Execute"))) -> 
     )
     response.pipeline_run_id = pipeline_run_id
     response.job_run_id = job_run_id
+    response.credits = _charge_out(_charge_execution(
+        principal, body.pipeline, len(response.output_metrics),
+        job_name=body.job_name or name, job_run_id=job_run_id,
+        pipeline_run_id=pipeline_run_id,
+    ))
     return response
 
 
@@ -1226,7 +1356,7 @@ def _execute_run(
 
 @app.post("/run/stream")
 def run_stream(
-    body: RunRequest, principal: Any = Depends(requires("run:Execute"))
+    body: RunRequest, principal: Any = Depends(current_principal)
 ) -> StreamingResponse:
     """Same execution as `/run`, but as Server-Sent Events, so Studio can paint
     per-step status and stream logs while Spark works.
@@ -1239,6 +1369,9 @@ def run_stream(
     almost instantly; the wall-clock time shows up on the read, the validations and
     the write — the actions that really touch data.
     """
+    _authorize_run(
+        principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
+    )
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -1250,7 +1383,7 @@ def run_stream(
         )
 
     try:
-        _charge_execution(principal, body.pipeline, job_name=body.job_name or name)
+        _admit_execution(principal, body.pipeline)
     except HTTPException:
         _RUN_LOCK.release()
         raise
@@ -1336,6 +1469,11 @@ def run_stream(
                 response.cancelled = cancelled
                 if cancelled:
                     response.error = error
+                response.credits = _charge_out(_charge_execution(
+                    principal, body.pipeline, len(response.output_metrics),
+                    job_name=body.job_name or name, job_run_id=job_run_id,
+                    pipeline_run_id=pipeline_run_id,
+                ))
                 yield _sse("result", response.model_dump())
             else:
                 error_message = (
@@ -1378,7 +1516,7 @@ def run_stream(
 
 @app.post("/run/flow/stream")
 def run_flow_stream(
-    body: RunFlowRequest, principal: Any = Depends(requires("run:Execute"))
+    body: RunFlowRequest, principal: Any = Depends(current_principal)
 ) -> StreamingResponse:
     """Runs several pipelines in sequence — a composed flow, where each JSON is one
     stage — streaming per-stage progress as Server-Sent Events.
@@ -1394,10 +1532,19 @@ def run_flow_stream(
     Stage markers travel through the same queue as the logs, so a stage's lines can
     never be attributed to its neighbour: the queue is FIFO.
     """
+    _authorize_run(
+        principal, "run:Execute", workflow_id=body.workflow_id,
+        pipeline_id=body.pipeline_id,
+    )
     started = time.perf_counter()
 
     if not body.stages:
         raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
+
+    # One admission for the flow, against its first stage: a Pipeline whose team
+    # has nothing left should not start at all. Each stage is charged for its own
+    # writes as it finishes.
+    _admit_execution(principal, body.stages[0].pipeline)
 
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
@@ -1444,17 +1591,15 @@ def run_flow_stream(
                     box["error"] = CANCELLED_ERROR
                     _cancel_remaining(index)
                     break
-                # One coin per stage, charged as the stage starts rather than
-                # all of them up front: a flow that runs out of credit at stage
-                # four has really run three, and the ledger should say so.
-                account_id, username = credits.account_for(principal)
+                # A flow is charged stage by stage, each for the destinations it
+                # actually wrote (below, once the stage is done). A stage that
+                # cannot be paid for is not started: the flow stops here and the
+                # rest are recorded as SKIPPED, so a flow that runs out of credit
+                # at stage four has really run three and the ledger says so.
                 try:
-                    _credits.charge(
-                        account_id, credits.target_of(stage.pipeline), username=username,
-                        pipeline_run_id=pipeline_run_id, job_name=stage.name,
-                    )
-                except credits.CreditError as error:
-                    box["error"] = str(error)
+                    _admit_execution(principal, stage.pipeline)
+                except HTTPException as refusal:
+                    box["error"] = str(refusal.detail)
                     _history.skip_job_run(
                         pipeline_run_id, job_id=stage.job_id, name=stage.name,
                         stage_index=index, status=history.FAILED,
@@ -1520,11 +1665,17 @@ def run_flow_stream(
                     rows_written=response.rows_written,
                 )
 
+                charge = _charge_out(_charge_execution(
+                    principal, stage.pipeline, len(response.output_metrics),
+                    job_name=stage.name, job_run_id=job_run_id,
+                    pipeline_run_id=pipeline_run_id,
+                ))
                 payload = {
                     "index": index,
                     "id": stage.id,
                     "name": stage.name,
                     "job_run_id": job_run_id,
+                    "credits": charge.model_dump() if charge else None,
                     "success": response.success,
                     "skipped": response.skipped,
                     "cancelled": stage_cancelled,
@@ -1687,6 +1838,9 @@ class JobRunOut(BaseModel):
     # be told apart after the Job has been edited. The JSON itself is read with
     # `GET /job-runs/{id}/config`; it is too large to ship with every listing.
     config_hash: Optional[str] = None
+    #: What this execution was charged, so the price is visible in the history
+    #: next to the work it paid for. Null for a local run, which is free.
+    credits: Optional[RunChargeOut] = None
     steps: List[StepRunOut] = Field(default_factory=list)
 
 
@@ -1712,14 +1866,20 @@ def _step_run_out(step: Any) -> StepRunOut:
     return StepRunOut(**vars(step))
 
 
-def _job_run_out(job: Any) -> JobRunOut:
+def _job_run_out(job: Any, charges: Optional[Dict[str, Any]] = None) -> JobRunOut:
     data = {key: value for key, value in vars(job).items() if key != "steps"}
-    return JobRunOut(**data, steps=[_step_run_out(step) for step in job.steps])
+    entry = (charges or {}).get(job.id)
+    return JobRunOut(
+        **data, credits=_entry_charge_out(entry) if entry else None,
+        steps=[_step_run_out(step) for step in job.steps],
+    )
 
 
-def _pipeline_run_out(run: Any) -> PipelineRunOut:
+def _pipeline_run_out(run: Any, charges: Optional[Dict[str, Any]] = None) -> PipelineRunOut:
     data = {key: value for key, value in vars(run).items() if key != "jobs"}
-    return PipelineRunOut(**data, jobs=[_job_run_out(job) for job in run.jobs])
+    return PipelineRunOut(
+        **data, jobs=[_job_run_out(job, charges) for job in run.jobs]
+    )
 
 
 @app.get(
@@ -1753,7 +1913,10 @@ def get_run(run_id: str) -> PipelineRunOut:
     run = _history.get_pipeline_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Execution not found.")
-    return _pipeline_run_out(run)
+    # One lookup for the whole run rather than one per stage: a Pipeline with
+    # twenty Jobs would otherwise be twenty queries for twenty small rows.
+    charges = _credits.entries_for_job_runs([job.id for job in run.jobs])
+    return _pipeline_run_out(run, charges)
 
 
 _log = logging.getLogger("sparquet_studio.server")
@@ -2050,6 +2213,12 @@ class PrincipalOut(BaseModel):
     statements: List[Dict[str, Any]] = Field(default_factory=list)
     # True on a runner with no users: the shared token is the identity.
     token_only: bool = False
+    # The team, which is both who pays for this person's runs and a second source
+    # of roles: `roles` above are the ones held personally, `team_roles` the ones
+    # that come with the team, and the statements are the union of both.
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    team_roles: List[str] = Field(default_factory=list)
 
 
 class SessionOut(BaseModel):
@@ -2073,6 +2242,59 @@ class UserOut(BaseModel):
     disabled: bool = False
     created_at: Optional[str] = None
     last_login_at: Optional[str] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+
+
+class TeamOut(BaseModel):
+    """A group of people that shares one credit account and, optionally, roles."""
+
+    id: str
+    name: str
+    roles: List[str] = Field(default_factory=list)
+    members: int = 0
+    created_at: Optional[str] = None
+
+
+class CreateTeamRequest(BaseModel):
+    name: str
+    roles: List[str] = Field(default_factory=list)
+
+
+class UpdateTeamRequest(BaseModel):
+    name: Optional[str] = None
+    roles: Optional[List[str]] = None
+
+
+class MoveUserRequest(BaseModel):
+    #: Id or name. Empty moves the person back to the default team.
+    team: Optional[str] = None
+
+
+class CreateRoleRequest(BaseModel):
+    name: str
+    description: str = ""
+    statements: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class UpdateRoleRequest(BaseModel):
+    description: Optional[str] = None
+    statements: Optional[List[Dict[str, Any]]] = None
+
+
+class ActionOut(BaseModel):
+    """One thing a policy can allow, with what it guards, for the role editor."""
+
+    name: str
+    description: str
+    #: `run`, `workspace`, `iam`, `credits`, `history` — the half before the colon,
+    #: so the editor can group by service instead of showing a flat list.
+    service: str
+
+
+class PolicyVocabularyOut(BaseModel):
+    actions: List[ActionOut] = Field(default_factory=list)
+    resource_kinds: List[ActionOut] = Field(default_factory=list)
 
 
 class CreateUserRequest(BaseModel):
@@ -2080,11 +2302,14 @@ class CreateUserRequest(BaseModel):
     password: str
     roles: List[str] = Field(default_factory=list)
     display_name: Optional[str] = None
+    #: Id or name of the team to put them in. Omitted means the default team.
+    team: Optional[str] = None
 
 
 class UpdateUserRequest(BaseModel):
     roles: Optional[List[str]] = None
     disabled: Optional[bool] = None
+    team: Optional[str] = None
 
 
 class PasswordRequest(BaseModel):
@@ -2109,21 +2334,59 @@ class RecoverRequest(BaseModel):
     password: str
 
 
+class IssueRecoveryRequest(BaseModel):
+    """The administrator's **own** password, re-entered to mint a code.
+
+    Not the password of the person being recovered — they are by definition the
+    one who cannot supply it. This is a step-up: a session left open on an
+    unlocked laptop should not be enough to take over another account, and minting
+    a recovery code is exactly that if nobody has to prove who is holding the
+    keyboard.
+    """
+
+    password: str
+
+
 class AccountOut(BaseModel):
+    """One team's standing. The account id is the team id; `username` is its name.
+    """
+
     id: str
     username: str
     balance: int
-    #: Every credit a remote Job ever cost this account, whether or not a balance
-    #: was actually taken. See the metering-versus-enforcement split in credits.py.
+    #: Every credit a remote write ever cost this account, whether or not a
+    #: balance was actually taken. See the metering-versus-enforcement split in
+    #: credits.py.
     spent: int
+    #: `YYYY-MM`. The free allowance below is scoped to it and refills on its own
+    #: when the month turns.
+    period: str = ""
+    free_used: int = 0
+    free_monthly: int = 0
+    free_remaining: int = 0
+    #: What could be spent right now: the rest of this month's allowance plus the
+    #: granted balance.
+    available: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+class UsageOut(BaseModel):
+    """One month in three numbers. `waived` is what the free allowance covered —
+    "you used 40 of your 40 free" and "you owe 40" are not the same sentence."""
+
+    period: str
+    writes: int
+    charged: int
+    waived: int
 
 
 class CreditsOut(BaseModel):
     account: AccountOut
     enforced: bool
-    credits_per_job: int
+    credits_per_write: int
+    free_monthly: int
+    usage: UsageOut
 
 
 class LedgerEntryOut(BaseModel):
@@ -2134,6 +2397,11 @@ class LedgerEntryOut(BaseModel):
     applied: bool
     balance_after: int
     created_at: str
+    #: Successful writes this entry paid for. Zero on a grant.
+    writes: int = 0
+    free_amount: int = 0
+    shortfall: int = 0
+    period: Optional[str] = None
     job_run_id: Optional[str] = None
     pipeline_run_id: Optional[str] = None
     target: Optional[str] = None
@@ -2158,6 +2426,8 @@ def _principal_out(principal: Any) -> PrincipalOut:
         username=principal.username, display_name=principal.display_name,
         user_id=principal.user_id, roles=list(principal.roles),
         statements=list(principal.statements), token_only=principal.token_only,
+        team_id=principal.team_id, team_name=principal.team_name,
+        team_roles=list(principal.team_roles),
     )
 
 
@@ -2165,14 +2435,31 @@ def _user_out(user: Any) -> UserOut:
     return UserOut(
         id=user.id, username=user.username, display_name=user.display_name,
         roles=list(user.roles), disabled=user.disabled, created_at=user.created_at,
-        last_login_at=user.last_login_at,
+        last_login_at=user.last_login_at, team_id=user.team_id,
+        team_name=user.team_name,
+    )
+
+
+def _team_out(team: Any) -> TeamOut:
+    return TeamOut(
+        id=team.id, name=team.name, roles=list(team.roles), members=team.members,
+        created_at=team.created_at,
+    )
+
+
+def _role_out(role: Any) -> RoleOut:
+    return RoleOut(
+        name=role.name, description=role.description, statements=role.statements,
+        custom=role.custom,
     )
 
 
 def _account_out(account: Any) -> AccountOut:
     return AccountOut(
         id=account.id, username=account.username, balance=account.balance,
-        spent=account.spent, created_at=account.created_at,
+        spent=account.spent, period=account.period, free_used=account.free_used,
+        free_monthly=account.free_monthly, free_remaining=account.free_remaining,
+        available=account.available, created_at=account.created_at,
         updated_at=account.updated_at,
     )
 
@@ -2181,9 +2468,10 @@ def _entry_out(entry: Any) -> LedgerEntryOut:
     return LedgerEntryOut(
         id=entry.id, account_id=entry.account_id, amount=entry.amount,
         reason=entry.reason, applied=entry.applied, balance_after=entry.balance_after,
-        created_at=entry.created_at, job_run_id=entry.job_run_id,
-        pipeline_run_id=entry.pipeline_run_id, target=entry.target,
-        job_name=entry.job_name, note=entry.note,
+        created_at=entry.created_at, writes=entry.writes,
+        free_amount=entry.free_amount, shortfall=entry.shortfall, period=entry.period,
+        job_run_id=entry.job_run_id, pipeline_run_id=entry.pipeline_run_id,
+        target=entry.target, job_name=entry.job_name, note=entry.note,
     )
 
 
@@ -2247,13 +2535,135 @@ def auth_me(principal: Any = Depends(current_principal)) -> PrincipalOut:
     dependencies=[Depends(requires("iam:ReadUsers"))],
 )
 def list_roles() -> List[RoleOut]:
-    return [
-        RoleOut(
-            name=role.name, description=role.description,
-            statements=role.statements, custom=role.custom,
+    return [_role_out(role) for role in _auth.list_roles()]
+
+
+@app.get(
+    "/auth/policy",
+    response_model=PolicyVocabularyOut,
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def policy_vocabulary() -> PolicyVocabularyOut:
+    """Everything a policy statement may name: the actions and the resource kinds.
+
+    The role editor is built from this rather than from a list copied into the
+    client, so an action added to the runner shows up in the UI without a second
+    change — and a client can never offer an action the server would reject.
+    """
+    return PolicyVocabularyOut(
+        actions=[
+            ActionOut(name=name, description=description, service=name.split(":")[0])
+            for name, description in sorted(auth.ACTIONS.items())
+        ],
+        resource_kinds=[
+            ActionOut(name=name, description=description, service=name)
+            for name, description in sorted(auth.RESOURCE_KINDS.items())
+        ],
+    )
+
+
+@app.post(
+    "/auth/roles",
+    response_model=RoleOut,
+    dependencies=[Depends(requires("iam:ManageRoles"))],
+)
+def create_role(body: CreateRoleRequest) -> RoleOut:
+    """A role written here, rather than shipped with the runner.
+
+    The built-in names are refused: the shipped roles are rewritten on every start
+    so that fixing a policy in code fixes it on every installation, and an edit
+    made here would be silently lost on the next restart.
+    """
+    try:
+        role = _auth.create_role(body.name, body.description, body.statements)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _role_out(role)
+
+
+@app.patch(
+    "/auth/roles/{name}",
+    response_model=RoleOut,
+    dependencies=[Depends(requires("iam:ManageRoles"))],
+)
+def update_role(name: str, body: UpdateRoleRequest) -> RoleOut:
+    try:
+        role = _auth.update_role(
+            name, description=body.description, statements=body.statements
         )
-        for role in _auth.list_roles()
-    ]
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _role_out(role)
+
+
+@app.delete(
+    "/auth/roles/{name}",
+    dependencies=[Depends(requires("iam:ManageRoles"))],
+)
+def delete_role(name: str) -> Dict[str, bool]:
+    """Removes a custom role. Refused while anyone still holds it: deleting a role
+    out from under a user would quietly change what they can do, and the operator
+    should decide what those people get instead."""
+    try:
+        _auth.delete_role(name)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"deleted": True}
+
+
+@app.get(
+    "/auth/teams",
+    response_model=List[TeamOut],
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def list_teams() -> List[TeamOut]:
+    return [_team_out(team) for team in _auth.list_teams()]
+
+
+@app.post(
+    "/auth/teams",
+    response_model=TeamOut,
+    dependencies=[Depends(requires("iam:ManageTeams"))],
+)
+def create_team(body: CreateTeamRequest) -> TeamOut:
+    """A team is a billing account and a way of granting roles to a group at once.
+
+    Roles given here are added to whatever each member holds personally; a team
+    never takes anything away, because a grant that can also revoke makes "why can
+    this person not do X" an unanswerable question.
+    """
+    try:
+        team = _auth.create_team(body.name, roles=body.roles)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _team_out(team)
+
+
+@app.patch(
+    "/auth/teams/{team_id}",
+    response_model=TeamOut,
+    dependencies=[Depends(requires("iam:ManageTeams"))],
+)
+def update_team(team_id: str, body: UpdateTeamRequest) -> TeamOut:
+    try:
+        team = _auth.update_team(team_id, name=body.name, roles=body.roles)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _team_out(team)
+
+
+@app.delete(
+    "/auth/teams/{team_id}",
+    dependencies=[Depends(requires("iam:ManageTeams"))],
+)
+def delete_team(team_id: str) -> Dict[str, bool]:
+    """Removes a team; its members move to the default one rather than being left
+    without an account to charge. The default team itself cannot go."""
+    try:
+        _auth.delete_team(team_id)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"deleted": True}
 
 
 @app.get(
@@ -2281,7 +2691,7 @@ def create_user(body: CreateUserRequest) -> UserOut:
     try:
         user = _auth.create_user(
             body.username, body.password, roles=body.roles,
-            display_name=body.display_name,
+            display_name=body.display_name, team=body.team,
         )
     except auth.AuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -2299,6 +2709,8 @@ def update_user(user_id: str, body: UpdateUserRequest) -> UserOut:
             _auth.set_roles(user_id, body.roles)
         if body.disabled is not None:
             _auth.set_disabled(user_id, body.disabled)
+        if body.team is not None:
+            _auth.set_user_team(user_id, body.team)
     except auth.AuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     user = _auth.get_user(user_id)
@@ -2339,13 +2751,27 @@ def set_password(
     response_model=RecoveryIssuedOut,
     dependencies=[Depends(requires("iam:ManageUsers"))],
 )
-def issue_recovery(user_id: str, principal: Any = Depends(current_principal)) -> RecoveryIssuedOut:
+def issue_recovery(
+    user_id: str, body: IssueRecoveryRequest,
+    principal: Any = Depends(current_principal),
+) -> RecoveryIssuedOut:
     """Mints a single-use code the person can trade for a password of their own.
 
     An administrator could simply set the password instead; this exists so they
     do not have to know it. The code is handed over out of band — chat, phone,
     in person — and it is short-lived because that trip is all it has to survive.
+
+    The administrator re-enters **their own** password to do it. Not the password
+    of the person being recovered: that person is by definition the one who cannot
+    supply it. This is a step-up, and it is here because minting a recovery code
+    is a way to take over an account — an unattended session with an open Studio
+    should not be enough. A runner with no users has no password to ask for; there
+    the shared token is the identity, and whoever holds it owns the host anyway.
     """
+    if principal.user_id is not None and not _auth.verify_credentials(
+        principal.username, body.password
+    ):
+        raise HTTPException(status_code=403, detail="Your password is wrong.")
     user = _auth.get_user(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="No such user.")
@@ -2401,7 +2827,9 @@ def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
     return CreditsOut(
         account=_account_out(_credits.account(account_id, username)),
         enforced=credits.enforced(),
-        credits_per_job=credits.credits_per_job(),
+        credits_per_write=credits.credits_per_write(),
+        free_monthly=credits.free_monthly(),
+        usage=UsageOut(**_credits.usage(account_id)),
     )
 
 

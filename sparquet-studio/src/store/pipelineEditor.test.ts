@@ -29,6 +29,7 @@ function jobRun(overrides: Partial<JobRunRecord> = {}): JobRunRecord {
     rowsWritten: 118,
     lineage: null,
     configHash: null,
+    credits: null,
     steps: [],
     ...overrides,
   }

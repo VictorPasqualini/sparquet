@@ -354,5 +354,171 @@ class StoreTest(unittest.TestCase):
         self.assertIsNotNone(reopened.login("ana", PASSWORD))
 
 
+class CustomRoleTest(unittest.TestCase):
+    """Roles written through the interface, next to the ones the module ships."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "auth.sqlite3"
+        self.store = auth.AuthStore(self.path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    READ_ONLY = [{"effect": "allow", "actions": ["workspace:Read"], "resources": ["*"]}]
+
+    def test_a_custom_role_grants_what_its_statements_say(self) -> None:
+        self.store.create_role("auditor", "Looks, never touches", self.READ_ONLY)
+        user = self.store.create_user("ana", PASSWORD, roles=["auditor"])
+        session = self.store.login("ana", PASSWORD)
+        principal = self.store.resolve_session(session.token)
+        self.assertTrue(principal.allows("workspace:Read"))
+        self.assertFalse(principal.allows("workspace:Write"))
+        self.assertEqual(user.roles, ["auditor"])
+
+    def test_a_builtin_name_cannot_be_taken_over(self) -> None:
+        # The shipped roles are rewritten on every start, so an edit here would
+        # silently disappear on the next restart.
+        with self.assertRaises(auth.AuthError):
+            self.store.create_role("admin", "mine now", self.READ_ONLY)
+
+    def test_a_builtin_role_can_be_neither_edited_nor_removed(self) -> None:
+        with self.assertRaises(auth.AuthError):
+            self.store.update_role("viewer", statements=self.READ_ONLY)
+        with self.assertRaises(auth.AuthError):
+            self.store.delete_role("viewer")
+
+    def test_two_roles_cannot_share_a_name(self) -> None:
+        self.store.create_role("auditor", "", self.READ_ONLY)
+        with self.assertRaises(auth.AuthError):
+            self.store.create_role("auditor", "", self.READ_ONLY)
+
+    def test_editing_a_role_changes_what_its_holders_may_do(self) -> None:
+        self.store.create_role("auditor", "", self.READ_ONLY)
+        self.store.create_user("ana", PASSWORD, roles=["auditor"])
+        session = self.store.login("ana", PASSWORD)
+        self.store.update_role(
+            "auditor",
+            statements=[{"effect": "allow", "actions": ["workspace:*"], "resources": ["*"]}],
+        )
+        # The policy is read per request, so a session already open sees the change.
+        self.assertTrue(self.store.resolve_session(session.token).allows("workspace:Write"))
+
+    def test_a_role_still_held_cannot_be_deleted(self) -> None:
+        self.store.create_role("auditor", "", self.READ_ONLY)
+        self.store.create_user("root", PASSWORD, roles=["admin"])
+        self.store.create_user("ana", PASSWORD, roles=["auditor"])
+        with self.assertRaises(auth.AuthError):
+            self.store.delete_role("auditor")
+        self.store.set_roles(self.store.find_user("ana").id, ["viewer"])
+        self.store.delete_role("auditor")
+        self.assertNotIn("auditor", [role.name for role in self.store.list_roles()])
+
+    def test_a_role_held_by_a_team_cannot_be_deleted_either(self) -> None:
+        self.store.create_role("auditor", "", self.READ_ONLY)
+        self.store.create_team("data", roles=["auditor"])
+        with self.assertRaises(auth.AuthError):
+            self.store.delete_role("auditor")
+
+    def test_a_statement_that_makes_no_sense_is_refused_at_the_door(self) -> None:
+        with self.assertRaises(auth.AuthError):
+            self.store.create_role("broken", "", [{"effect": "maybe", "actions": ["*"]}])
+
+    def test_a_custom_role_survives_a_restart_and_is_not_rewritten(self) -> None:
+        self.store.create_role("auditor", "Looks", self.READ_ONLY)
+        reopened = auth.AuthStore(self.path)
+        role = next(r for r in reopened.list_roles() if r.name == "auditor")
+        self.assertTrue(role.custom)
+        self.assertEqual(role.statements, self.READ_ONLY)
+
+
+class TeamTest(unittest.TestCase):
+    """Teams: who is charged for a run, and a second place roles come from."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "auth.sqlite3"
+        self.store = auth.AuthStore(self.path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    RUNNER = [{"effect": "allow", "actions": ["run:Execute"], "resources": ["*"]}]
+
+    def test_everybody_lands_in_the_default_team(self) -> None:
+        user = self.store.create_user("ana", PASSWORD)
+        self.assertIsNotNone(user.team_id)
+        self.assertEqual((user.team_name or "").lower(), auth.DEFAULT_TEAM)
+
+    def test_a_team_can_be_created_with_its_members_counted(self) -> None:
+        team = self.store.create_team("data")
+        self.store.create_user("ana", PASSWORD, team=team.id)
+        self.store.create_user("bo", PASSWORD, team=team.id)
+        self.assertEqual(self.store.get_team(team.id).members, 2)
+
+    def test_a_team_can_be_named_instead_of_addressed_by_id(self) -> None:
+        self.store.create_team("data")
+        user = self.store.create_user("ana", PASSWORD, team="data")
+        self.assertEqual(self.store.get_team(user.team_id).name, "data")
+
+    def test_two_teams_cannot_share_a_name(self) -> None:
+        self.store.create_team("data")
+        with self.assertRaises(auth.AuthError):
+            self.store.create_team("DATA")
+
+    def test_a_team_role_is_added_to_the_personal_ones(self) -> None:
+        self.store.create_role("runner", "", self.RUNNER)
+        team = self.store.create_team("data", roles=["runner"])
+        self.store.create_user("ana", PASSWORD, team=team.id)  # viewer, personally
+        principal = self.store.resolve_session(self.store.login("ana", PASSWORD).token)
+        self.assertEqual(principal.roles, [auth.DEFAULT_ROLE])
+        self.assertEqual(principal.team_roles, ["runner"])
+        self.assertTrue(principal.allows("run:Execute"))
+        self.assertTrue(principal.allows("workspace:Read"))
+
+    def test_a_deny_in_the_personal_role_still_wins_over_the_team_grant(self) -> None:
+        # A team is a way of granting, never a way of overriding a refusal.
+        self.store.create_role("runner", "", self.RUNNER)
+        self.store.create_role(
+            "no-runs", "", [{"effect": "deny", "actions": ["run:Execute"], "resources": ["*"]}]
+        )
+        team = self.store.create_team("data", roles=["runner"])
+        self.store.create_user("ana", PASSWORD, roles=["no-runs"], team=team.id)
+        principal = self.store.resolve_session(self.store.login("ana", PASSWORD).token)
+        self.assertFalse(principal.allows("run:Execute"))
+
+    def test_moving_somebody_changes_who_pays_from_now_on(self) -> None:
+        data = self.store.create_team("data")
+        platform = self.store.create_team("platform")
+        user = self.store.create_user("ana", PASSWORD, team=data.id)
+        moved = self.store.set_user_team(user.id, platform.id)
+        self.assertEqual(moved.team_id, platform.id)
+        self.assertEqual(self.store.get_team(data.id).members, 0)
+
+    def test_deleting_a_team_moves_its_members_to_the_default_one(self) -> None:
+        team = self.store.create_team("data")
+        user = self.store.create_user("ana", PASSWORD, team=team.id)
+        self.store.delete_team(team.id)
+        self.assertEqual((self.store.get_user(user.id).team_name or "").lower(), auth.DEFAULT_TEAM)
+
+    def test_the_default_team_cannot_be_removed(self) -> None:
+        user = self.store.create_user("ana", PASSWORD)
+        with self.assertRaises(auth.AuthError):
+            self.store.delete_team(user.team_id)
+
+    def test_a_team_role_can_be_changed_after_the_fact(self) -> None:
+        self.store.create_role("runner", "", self.RUNNER)
+        team = self.store.create_team("data")
+        self.store.create_user("ana", PASSWORD, team=team.id)
+        session = self.store.login("ana", PASSWORD)
+        self.assertFalse(self.store.resolve_session(session.token).allows("run:Execute"))
+        self.store.update_team(team.id, roles=["runner"])
+        self.assertTrue(self.store.resolve_session(session.token).allows("run:Execute"))
+
+    def test_an_unknown_team_is_refused_rather_than_silently_defaulted(self) -> None:
+        with self.assertRaises(auth.AuthError):
+            self.store.create_user("ana", PASSWORD, team="nowhere")
+
+
 if __name__ == "__main__":
     unittest.main()

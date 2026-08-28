@@ -1,3 +1,5 @@
+import { usePermission } from '@/lib/auth/usePermission'
+
 import {
   ArrowRight,
   Boxes,
@@ -87,6 +89,11 @@ export function Dashboard() {
   const duplicateJob = useLibraryStore((state) => state.duplicateJob)
   const deleteJob = useLibraryStore((state) => state.deleteJob)
 
+  // The library lives behind the runner when a workspace backend is configured,
+  // and it answers 403 on its own. Hiding the buttons only spares the trip.
+  const mayWrite = usePermission('workspace:Write')
+  const mayDelete = usePermission('workspace:Delete')
+
   const [confirm, confirmDialog] = useConfirm()
   const [creatingJob, setCreatingJob] = useState(false)
   const [creatingWorkflow, setCreatingWorkflow] = useState(false)
@@ -141,6 +148,7 @@ export function Dashboard() {
           <Button
             size="sm"
             icon={<LayoutTemplate className="h-4 w-4" />}
+            disabled={!mayWrite}
             onClick={() => navigate('/templates')}
           >
             Start from template
@@ -149,6 +157,7 @@ export function Dashboard() {
             size="sm"
             variant="primary"
             icon={<Plus className="h-4 w-4" />}
+            disabled={!mayWrite}
             onClick={() => setCreatingJob(true)}
           >
             New job
@@ -193,6 +202,7 @@ export function Dashboard() {
                   size="sm"
                   variant="primary"
                   icon={<Plus className="h-4 w-4" />}
+                  disabled={!mayWrite}
                   onClick={() => setCreatingJob(true)}
                 >
                   New job
@@ -211,6 +221,8 @@ export function Dashboard() {
                 onDuplicate={() => void handleDuplicate(job)}
                 onRename={() => setRenaming(job)}
                 onDelete={() => void handleDelete(job)}
+                editable={mayWrite}
+                deletable={mayDelete}
               />
             ))}
           </ul>
@@ -224,6 +236,7 @@ export function Dashboard() {
               size="xs"
               variant="ghost"
               icon={<Plus className="h-3.5 w-3.5" />}
+              disabled={!mayWrite}
               onClick={() => setCreatingWorkflow(true)}
             >
               New workflow
@@ -365,6 +378,10 @@ interface JobCardProps {
   onDuplicate: () => void
   onRename: () => void
   onDelete: () => void
+  /** `workspace:Write` — duplicating and renaming both write a record. */
+  editable?: boolean
+  /** `workspace:Delete`, which is a separate permission from writing. */
+  deletable?: boolean
 }
 
 function JobCard({
@@ -374,6 +391,8 @@ function JobCard({
   onDuplicate,
   onRename,
   onDelete,
+  editable = true,
+  deletable = true,
 }: JobCardProps) {
   const accent = ACCENT[workflow?.accent ?? 'slate']
   const tags = job.tags.slice(0, 3)
@@ -427,16 +446,24 @@ function JobCard({
             <MenuItem icon={<ArrowRight />} onSelect={onOpen}>
               Open
             </MenuItem>
-            <MenuItem icon={<Copy />} onSelect={onDuplicate}>
-              Duplicate
-            </MenuItem>
-            <MenuItem icon={<Pencil />} onSelect={() => afterMenuClose(onRename)}>
-              Rename
-            </MenuItem>
-            <MenuSeparator />
-            <MenuItem danger icon={<Trash2 />} onSelect={() => afterMenuClose(onDelete)}>
-              Delete
-            </MenuItem>
+            {editable ? (
+              <>
+                <MenuItem icon={<Copy />} onSelect={onDuplicate}>
+                  Duplicate
+                </MenuItem>
+                <MenuItem icon={<Pencil />} onSelect={() => afterMenuClose(onRename)}>
+                  Rename
+                </MenuItem>
+              </>
+            ) : null}
+            {deletable ? (
+              <>
+                <MenuSeparator />
+                <MenuItem danger icon={<Trash2 />} onSelect={() => afterMenuClose(onDelete)}>
+                  Delete
+                </MenuItem>
+              </>
+            ) : null}
           </MenuContent>
         </Menu>
       </div>
