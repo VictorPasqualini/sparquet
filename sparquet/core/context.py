@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
+from pathlib import Path
 
+import pyspark
 from pyspark.sql import SparkSession
 
 from sparquet.core.config import SparkConfig
+from sparquet.utils.logger import defer_warning
 
 
 def _detect_environment() -> str:
@@ -51,6 +55,67 @@ def _pin_local_worker_python(env: str, master: str) -> None:
         os.environ.setdefault(var, sys.executable)
 
 
+def _declared_spark_version(home: Path) -> str | None:
+    """Versão declarada dentro de um `SPARK_HOME`, nos dois layouts que existem:
+    instalação via pip (`version.py` na raiz do pacote) e distribuição do Spark
+    (`python/pyspark/version.py`). `None` quando não há como saber."""
+    for relative in ("version.py", "python/pyspark/version.py"):
+        try:
+            text = (home / relative).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = re.search(r"""__version__[^=]*=\s*["']([^"']+)["']""", text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _align_local_spark_home(env: str, master: str) -> None:
+    """Faz o `SPARK_HOME` do processo concordar com o pyspark que foi importado.
+
+    Um `SPARK_HOME` herdado do ambiente (perfil do shell, instalação antiga, outro
+    venv) vence a descoberta automática do pyspark: o driver importa o pacote do
+    venv atual, mas a JVM e o `pyspark.zip` que vai para o PYTHONPATH do worker
+    saem do `SPARK_HOME`. Versões diferentes nas duas pontas e o worker sobe com um
+    pyspark incompatível e morre **sem traceback nenhum** — o mesmo
+    `Python worker exited unexpectedly (crashed)` de `_pin_local_worker_python`, com
+    a mesma pegadinha de só aparecer na primeira etapa que cria worker (tipicamente
+    o `validations.report`).
+
+    Só corrige quando dá para provar a divergência: `SPARK_HOME` aponta para outro
+    diretório E a versão declarada lá é diferente da importada. Um `SPARK_HOME` sem
+    versão legível (distribuição montada à mão) fica intacto — pode ser deliberado.
+
+    **Só se aplica a master local**: num cluster o `SPARK_HOME` é do ambiente que
+    submeteu o job, e reescrevê-lo com um caminho do driver quebraria a execução.
+    """
+    if env != "local" or not str(master).startswith("local"):
+        return
+    home = os.environ.get("SPARK_HOME")
+    if not home:
+        return  # sem a variável, o pyspark resolve o caminho dele mesmo
+
+    ours = Path(pyspark.__file__).resolve().parent
+    try:
+        if Path(home).resolve() == ours:
+            return
+    except OSError:
+        return
+
+    theirs = _declared_spark_version(Path(home))
+    if theirs is None or theirs == pyspark.__version__:
+        return
+
+    os.environ["SPARK_HOME"] = str(ours)
+    defer_warning(
+        "SPARK_HOME divergia do pyspark importado e foi realinhado",
+        spark_home_descartado=home,
+        versao_descartada=theirs,
+        spark_home=str(ours),
+        versao=pyspark.__version__,
+    )
+
+
 class SparkContextManager:
     """Gerencia um singleton de SparkSession para toda a vida do pipeline.
 
@@ -84,6 +149,7 @@ class SparkContextManager:
                 builder = builder.config(key, value)
 
             _pin_local_worker_python(env, config.master)
+            _align_local_spark_home(env, config.master)
 
             cls._session = builder.getOrCreate()
             cls._session.sparkContext.setLogLevel("WARN")
