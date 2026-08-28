@@ -76,8 +76,20 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
   // The pending source lives outside React, so leaving the screen has to clear it.
   useEffect(() => cancelConnect, [])
 
+  /**
+   * Drilling into a stage carries the execution the canvas is showing, so the job
+   * opens on the same run rather than on its own latest one — the drill-down is
+   * only honest if both levels describe the same execution.
+   */
   const onOpen = useCallback(
-    (jobId: string) => navigate(`/jobs/${jobId}`),
+    (jobId: string, stageId: string) => {
+      const runView = usePipelineEditorStore.getState().runView
+      const jobRunId = runView?.jobRunIds[stageId]
+      navigate(
+        `/jobs/${jobId}`,
+        jobRunId ? { state: { runId: runView?.runId, jobRunId } } : undefined,
+      )
+    },
     [navigate],
   )
 
@@ -209,7 +221,7 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
         // A broken stage points at a deleted job: nothing to open.
         if (!stage?.job) return
         event.preventDefault()
-        onOpen(stage.jobId)
+        onOpen(stage.jobId, stage.id)
         return
       }
 

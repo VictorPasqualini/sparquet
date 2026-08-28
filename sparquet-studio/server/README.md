@@ -79,6 +79,59 @@ curl -H "X-Sparquet-Token: $SPARQUET_STUDIO_TOKEN" \
      http://127.0.0.1:8787/run
 ```
 
+### Users and sessions
+
+Out of the box the runner has no users, and the shared token above is the whole
+of the authentication: whoever holds it can do everything. That is fine for one
+person on one laptop, and it stays the default so that upgrading never locks
+anybody out.
+
+Create a user and the runner switches modes: from then on it wants a **session**
+in addition to the token, and each request is authorized against the roles that
+user holds. Create the first one on the machine the runner runs on:
+
+```bash
+python server/auth.py create-admin      # prompts for a username and password
+python server/auth.py list-users
+```
+
+The same thing can be done from Studio (**Settings → Access → Add user**) while
+the runner still has no users, because the token is the identity until the first
+one exists.
+
+Permissions follow the IAM shape: a statement is `{effect, actions, resources}`,
+an action is `service:Verb` (`workspace:Write`, `run:Execute`, `iam:ManageUsers`),
+a resource is `kind/id` (`job/j1`, `workflow/*`), `*` matches anywhere, **an
+explicit `deny` wins over any `allow`**, and anything not allowed is denied. Four
+roles ship with the runner:
+
+| Role | May |
+|---|---|
+| `admin` | Everything, including who else has access. |
+| `editor` | Build and run pipelines. Cannot manage users. |
+| `operator` | Run what already exists and read the results. Cannot edit. |
+| `viewer` | Read the library and the history. Changes nothing. |
+
+What the store guarantees, because each one is a way to get badly stuck or badly
+exposed:
+
+- Passwords are hashed with scrypt (PBKDF2-HMAC-SHA256 where scrypt is
+  unavailable) and sessions are stored as SHA-256 hashes — a copy of the database
+  file is not a set of live logins.
+- Disabling an account or changing a password **ends the sessions already open**
+  for it, so revoking access does not wait for the next login.
+- The last enabled administrator cannot be demoted, disabled or deleted. Without
+  that guard the only way back in is editing SQLite by hand.
+- An unknown username costs the same time as a wrong password, so the endpoint
+  does not answer "does this person exist?".
+
+Identity lives in its own SQLite file (`SPARQUET_STUDIO_AUTH_DB`), separate from
+the execution history: they have different lifetimes, and a history database is
+something you might copy around.
+
+None of this makes the runner safe to expose. It is still bound to `127.0.0.1`,
+and the token is still required on every call.
+
 ## Install
 
 ```bash
@@ -139,6 +192,10 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_HOST` | `127.0.0.1` | Bind address when running `python server/main.py`. |
 | `SPARQUET_STUDIO_PORT` | `8787` | Port when running `python server/main.py`. |
 | `SPARQUET_FRAMEWORK_PATH` | repo root, inferred from this file | Directory containing the `sparquet` package. |
+| `SPARQUET_STUDIO_HISTORY_DB` | `server/data/execution_history.sqlite3` | SQLite file holding the execution history — the runs, their steps and their logs. |
+| `SPARQUET_STUDIO_AUTH_DB` | `server/data/auth.sqlite3` | SQLite file holding users, roles and sessions. Absent users means the runner stays in token-only mode. |
+| `SPARQUET_STUDIO_SESSION_HOURS` | `12` | How long a session lasts before it has to be renewed by signing in again. |
+| `SPARQUET_STUDIO_WORKSPACE` | `sparquet-workspace/` at the repo root | Directory the Studio library is stored in, as real JSON files. This is what you commit. |
 
 ## Endpoints
 
@@ -150,7 +207,8 @@ and deferred-warning buffer.
   "version": "0.2.0",
   "spark_available": true,
   "framework_version": "0.2.3",
-  "auth_required": true
+  "auth_required": true,
+  "login_required": false
 }
 ```
 
@@ -158,6 +216,8 @@ and deferred-warning buffer.
 endpoint never imports pyspark, so it stays fast, and it needs no token — it is
 how Studio discovers the runner before it has one. `auth_required` is absent on
 runners older than 0.2.0, which accepted unauthenticated `/run` calls.
+`login_required` says whether this runner has users: `false` means the shared
+token is the identity, `true` means a session is needed on top of it.
 
 ### `POST /run`
 
@@ -165,7 +225,14 @@ Requires the `X-Sparquet-Token` header (`401` without it, `403` when `Origin` is
 not allowed).
 
 ```json
-{ "pipeline": { "name": "demo", "input": {}, "output": {} }, "params": {}, "limit": 50, "dry_run": false }
+{
+  "pipeline": { "name": "demo", "input": {}, "output": {} },
+  "params": {},
+  "limit": 50,
+  "dry_run": false,
+  "run_as": "victor",
+  "launched": "manual"
+}
 ```
 
 Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
@@ -191,6 +258,34 @@ Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
 - `dry_run: true` parses the configuration and returns without touching Spark.
 - `rows_written` is the main DataFrame count taken before the writes, so it does
   not necessarily match any single destination.
+- `run_as` is the name the execution is recorded under. It is a **label, not a
+  permission**: the runner authenticates a token, not a person, so a caller can
+  claim any name. Omitted, the runner records its own OS account.
+- `launched` is `manual`, `scheduled` or `api` — how the run was started.
+  Anything the runner does not recognise is recorded as `api`, since a caller it
+  cannot classify is by definition not a person clicking Run.
+- The run is also recorded with its **lineage**: what the submitted configuration
+  reads and writes (`input`/`inputs`, a `join`'s `with`, `output`/`outputs`, and
+  the `validations` sinks), with `{param}` resolved. It comes from the JSON rather
+  than from the run's own logs, so a run that dies on its first read still reports
+  what it was going to touch.
+
+### `POST /run/stream`
+
+Same execution and same request body as `/run`, but as Server-Sent Events, so
+Studio can paint per-step status and stream logs while Spark works.
+
+Events: `start`, then `log`* (one per pipeline/stdout/JVM line, carrying `source`
+and, for step markers, `context.index`/`context.step`), and a final `result` with
+the same payload `/run` returns — or `error`.
+
+```json
+{ "pipeline_name": "demo", "timestamp": "...",
+  "pipeline_run_id": "092fa5bd…", "job_run_id": "fc29e4d9…" }
+```
+
+The `start` event names the ids the run was persisted under: `pipeline_run_id`
+addresses `/runs/{id}/cancel`, `job_run_id` addresses `/job-runs/{id}/logs`.
 
 ### `POST /run/flow/stream`
 
@@ -212,8 +307,10 @@ Stages arrive already ordered and share one SparkSession, so a stage hands data 
 the next through whatever it wrote — a path the next one reads, or a `view` output
 registered as a temp view. No extra wiring is needed here.
 
-Events: `start` (`{flow, total}`), then per stage `stage_start` → `log`* →
-`stage_result`, and a final `result`:
+Events: `start` (`{flow, total, pipeline_run_id}`), then per stage `stage_start` →
+`log`* → `stage_result`, and a final `result`. A stage the stop or an earlier
+failure kept from running arrives as `stage_cancelled` or `stage_skipped` instead.
+The final `result`:
 
 ```json
 {
@@ -238,6 +335,97 @@ Events: `start` (`{flow, total}`), then per stage `stage_start` → `log`* →
 - The whole sequence takes the same single run lock as `/run`, so a second
   Pipeline (or a single run) while one is in progress gets `409`.
 
+### `POST /runs/{run_id}/cancel`
+
+Stops the run in flight. Two things happen: a flag makes the flow stop at the next
+stage boundary, and `cancelAllJobs()` aborts whatever Spark is computing right
+now — without it a long write would run to completion no matter what the flag
+says. `run_id` is the `pipeline_run_id` the `start` event carried.
+
+```json
+{ "cancelled": true, "run_id": "092fa5bd…", "spark_jobs_cancelled": true }
+```
+
+`spark_jobs_cancelled` is false when nothing was computing on Spark yet: the run
+still ends, but no JVM job had to be killed for it. `409` when `run_id` is not the
+run this process is executing — a finished run has nothing to cancel, and
+cancelling one run must never touch another.
+
+A cancelled run is persisted with status `cancelled`: not a failure, not a skip.
+
+### `GET /runs`
+
+Past executions, most recent first. Filters: `workflow_id`, `pipeline_id`,
+`job_id`, `limit` (default 20, max 200). `jobs`/`steps` come back **empty** here —
+fetch `/runs/{id}` for the nested detail.
+
+Each row carries `run_as` and `launched` alongside the status and the timings, so
+a list of runs answers *who* and *how* without a second request. Both are `null`
+on runs recorded before those columns existed.
+
+### `GET /runs/{run_id}`
+
+One execution in full: every job it ran (or skipped) and every step of each, so
+Studio can open a past run and jump straight to whichever step failed. `404` when
+the runner no longer holds it.
+
+Each `job_run` also carries `lineage`, a JSON **string** (like `step_run.details`)
+holding `{"inputs": [...], "outputs": [...]}`, where each entry is
+`{"role", "format", "address"}` plus `"mode"` on a write. `role` is `input`,
+`join`, `output`, or `validation:report` / `validation:valid` / `validation:invalid`
+for the quality sinks. It is `null` when the configuration named no dataset, or on
+a run recorded before lineage existed.
+
+### `GET /job-runs/{job_run_id}/logs`
+
+What one job execution printed, in the order it printed it — the same lines the
+run panel showed live, since every source funnels through the runner's event queue
+and is persisted from there.
+
+```json
+{
+  "job_run_id": "fc29e4d9…",
+  "total": 34,
+  "next_after": 3,
+  "lines": [
+    { "seq": 1, "timestamp": "...", "level": "INFO", "source": "pipeline",
+      "message": "Pipeline started", "context": {} }
+  ]
+}
+```
+
+- Paged by `seq`, not by offset: lines are only ever appended, so `after` never
+  re-reads or skips a line the way an offset does while a run is still going.
+  `limit` defaults to 500, max 2000. `next_after` is null at the end.
+- `source` is `pipeline` (the framework), `spark` (the JVM), `stdout` or `runner`.
+- At most 3000 lines are stored per job execution; past that the runner records a
+  single `WARNING` line naming how many it dropped, so a runaway job cannot grow
+  the database without bound.
+
+### `GET /job-runs/{job_run_id}/config`
+
+The **version of the JSON that this execution ran** — not the Job as it is now.
+
+```json
+{
+  "job_run_id": "fc29e4d9…",
+  "config_hash": "sha256:9f2b…",
+  "config": { "name": "vendas", "input": { "...": "..." } }
+}
+```
+
+`config_hash` is SHA-256 over the canonical form of the configuration (keys
+sorted, no whitespace) **after** `{param}` substitution, for the same reason
+lineage resolves params: the same template run with different parameters did not
+run the same thing. Two runs with the same hash ran the same JSON; two runs of
+"the same Job" with different hashes did not.
+
+`config` is the configuration itself, kept up to 512 KB. Past that only the hash
+is stored and `config` comes back `null` — the question the hash answers is the
+one that matters most, and a run listing must not carry megabytes. This is a
+separate endpoint for the same reason: the configuration dwarfs the row that
+describes the run. A run recorded before this existed reports both as `null`.
+
 ### `POST /validate`
 
 Requires the `X-Sparquet-Token` header, same as `/run`.
@@ -249,6 +437,48 @@ Requires the `X-Sparquet-Token` header, same as `/run`.
 Applies `{param}` substitution and parses the config with
 `PipelineConfig.from_dict` without executing anything → `{ "valid": true, "error": null }`.
 
+### `GET /auth/status`
+
+```json
+{ "login_required": true, "principal": null }
+```
+
+Needs the token but no session — it is the call Studio makes before it can have
+one. `principal` is filled in when the session header names a live session.
+
+### `POST /auth/login`
+
+```json
+{ "username": "ana", "password": "..." }
+```
+
+→ `{ "token": "...", "expires_at": "2026-01-01T12:00:00+00:00", "user": { ... } }`,
+or `401` for a wrong password, an unknown user or a disabled account — all three
+answer the same way. Send the token back as the `X-Sparquet-Session` header (an
+`Authorization: Bearer` header is accepted too) alongside `X-Sparquet-Token`.
+
+### `POST /auth/logout` · `GET /auth/me`
+
+`logout` ends the session in the header; `me` returns the principal behind it,
+including the statements its roles grant, so Studio can grey out what would come
+back `403`.
+
+### `GET /auth/users` · `GET /auth/roles`
+
+Requires `iam:ReadUsers`. Users never include anything derived from the password.
+
+### `POST /auth/users` · `PATCH /auth/users/{id}` · `DELETE /auth/users/{id}`
+
+Requires `iam:ManageUsers`. `POST` takes `{username, password, roles,
+display_name}`; `PATCH` takes `roles` and/or `disabled`. Each refuses with `400`
+when it would leave the runner with no enabled administrator.
+
+### `POST /auth/users/{id}/password`
+
+`{ "password": "...", "current_password": "..." }`. Changing your own password
+requires `current_password`; an administrator resetting somebody else's does not.
+Either way every session that password had opened stops working.
+
 ### `GET /capabilities`
 
 Live registries read from the engines and factories, so custom types registered
@@ -257,6 +487,132 @@ on the running framework instance show up:
 ```json
 { "transformations": ["cast", "..."], "readers": ["csv", "..."], "writers": ["csv", "..."], "validators": ["not_null", "..."] }
 ```
+
+### `GET /workspace`
+
+The whole Studio library in one read — how the editor loads on boot.
+
+```json
+{
+  "root": "/repo/sparquet-workspace",
+  "workflows": [{ "kind": "workflow", "id": "w1", "record": { "...": "..." }, "path": "vendas/workflow.json" }],
+  "jobs": [{ "kind": "job", "id": "j1", "record": { "...": "..." }, "path": "vendas/jobs/ingestao.json" }],
+  "pipelines": [],
+  "meta": { "seeded": true, "version": 4 }
+}
+```
+
+`record` is the Studio record; `path` is the reviewable file it was written to.
+
+### `PUT /workspace/{kind}/{record_id}`
+
+`kind` is `workflow`, `job` or `pipeline`. Body:
+
+```json
+{ "record": { "...": "..." }, "config": { "...": "..." } }
+```
+
+`config` is a Job's **compiled** Sparquet JSON — the client compiles it, because
+the compiler is the client's and a second implementation here would drift. It is
+what the reviewable file holds; `null` for the other kinds, and for a Job that
+does not compile yet.
+
+Each write produces two files: the reviewable one under
+`<workflow-slug>/{jobs,pipelines}/<slug>.json`, and a sidecar in
+`.studio/<kind>/<id>.json` holding the full record. Renaming moves the file
+instead of leaving a stale copy next to the new one, and renaming a Workflow
+moves everything under it. The same write mirrors the record into the catalog
+tables below.
+
+### `DELETE /workspace/{kind}/{record_id}`
+
+Removes both files and soft-deletes the catalog row → `{ "deleted": true }`.
+Soft, because its executions still point at it.
+
+### `PUT` / `DELETE /workspace/meta/{key}`
+
+Small values that belong to the library rather than to a record — which storage
+version wrote it, whether the examples were seeded — kept in `.studio/meta.json`.
+Body for `PUT`: `{ "value": <anything JSON> }`. They travel with the workspace so
+a second checkout does not re-seed or re-migrate a library that is current.
+
+All five require the `X-Sparquet-Token` header.
+
+## Where the library is stored
+
+```
+sparquet-workspace/
+  vendas/
+    workflow.json               the Workflow, readable
+    jobs/ingestao.json          the COMPILED pipeline — runnable as-is
+    pipelines/diario.json       the Pipeline and its stages
+  .studio/
+    workflow/w1.json            the full Studio records, by id
+    job/j1.json
+    pipeline/p1.json
+    index.json                  id → reviewable path
+    meta.json                   library-level bookkeeping
+```
+
+The point of the split: the top of the tree is what a person reviews in a pull
+request, and `sparquet run vendas/jobs/ingestao.json` runs exactly the file they
+read. `.studio/` is the editor's own state — canvas positions, parameters, the
+things the framework has no use for. Both are committed; the directory is the
+library, and a second machine opening the same checkout sees the same one.
+
+Browser storage (IndexedDB, then localStorage) stays behind this as a fallback
+for when the runner is not running. It is a cache, not the store.
+
+## Execution history schema
+
+SQLite, at `server/data/execution_history.sqlite3` (override with
+`SPARQUET_STUDIO_HISTORY_DB`). Two halves in one file, with `PRAGMA
+foreign_keys=ON` throughout: a **catalog** of what exists, and a **history** of
+what ran.
+
+```
+workflow
+  ├── job ─────────────┐            job.workflow_id  -> workflow.id
+  └── pipeline         │            pipeline.workflow_id -> workflow.id
+        └── pipeline_stage ─┘       which Jobs a Pipeline runs, in order
+
+pipeline_run          one execution   -> workflow, pipeline, job
+  └── job_run         one Job in it   -> pipeline_run, job
+        ├── step_run  one input / transformation / validation / output
+        └── run_log   the lines it printed, PK (job_run_id, seq)
+```
+
+**Job to Pipeline is many-to-many, and that is not a compromise.** In the Studio
+a Job belongs to a Workflow, and a Pipeline is an ordered sequence of stages that
+each point at a Job. The same Job can be a stage of several Pipelines, can appear
+twice in one, and can be run on its own without belonging to any. So the relation
+lives in `pipeline_stage (pipeline_id, stage_id, job_id, stage_index)`, keyed by
+stage rather than by job. Every other edge above is a plain foreign key.
+
+The catalog is written by `PUT /workspace/...`: saving a record in the editor
+mirrors it here. Rows are never deleted, only marked with `deleted_at` — a run
+whose Job has been removed is still a run that has to be readable, and deleting a
+Workflow soft-deletes what belonged to it.
+
+A run may still name an id the catalog has not seen (a script, a scheduler, an
+older Studio). Those get a placeholder row, filled in on the next save. History
+records what happened; it does not get to reject an execution because the catalog
+was behind.
+
+`pipeline_run` is the **execution**, not the Studio Pipeline: `kind` says whether
+the user ran a single Job (`kind='job'`, one `job_run`) or a Pipeline
+(`kind='pipeline'`, one `job_run` per stage, ordered by `stage_index`). A Job's
+own runs are found through `job_run.job_id`, never by assuming `kind='job'`.
+
+`job_run` also carries `name`, `lineage`, `config_hash` and `config` of its own:
+they describe the execution as it happened, even if the Job has since been renamed
+or rewritten. The hash is what tells two runs of "the same Job" apart, and what
+matches a run against the file in git — see
+`GET /job-runs/{job_run_id}/config` above.
+
+The schema generation is in `PRAGMA user_version`. An older database is rebuilt
+on open — SQLite cannot add a foreign key in place, so `pipeline_run` and
+`job_run` are recreated with their keys and the rows copied, in one transaction.
 
 ## Notes
 

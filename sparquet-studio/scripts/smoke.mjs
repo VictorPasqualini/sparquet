@@ -20,6 +20,14 @@ const urlArg = args.indexOf('--url')
 const BASE_URL = urlArg >= 0 ? args[urlArg + 1] : 'http://localhost:5273'
 const HEADED = args.includes('--headed')
 
+/**
+ * `DEFAULT_RUNNER_URL` in `src/lib/runner/client.ts`. The runner is optional, and
+ * the editors ask it for run history as soon as they open, so a refused or
+ * unauthorized read there is expected here — Studio handles it in the UI. Console
+ * errors from any OTHER origin still fail the run.
+ */
+const RUNNER_URL = 'http://127.0.0.1:8787'
+
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
@@ -87,9 +95,11 @@ async function main() {
   try {
     const page = await browser.newPage()
     page.on('console', (message) => {
-      if (message.type() === 'error') consoleErrors.push(message.text())
+      if (message.type() === 'error') {
+        consoleErrors.push({ text: message.text(), url: message.location()?.url ?? '' })
+      }
     })
-    page.on('pageerror', (error) => consoleErrors.push(String(error)))
+    page.on('pageerror', (error) => consoleErrors.push({ text: String(error), url: '' }))
 
     /* ------------------------------------------------ library boots clean */
 
@@ -185,8 +195,12 @@ async function main() {
 
     // A pipeline is a second canvas with its own store and route, so prove it
     // mounts and accepts a stage rather than trusting that the screen renders.
+    // The library now loads asynchronously — the workspace on the runner first,
+    // browser storage only if nothing answers — so the seeded workflow appears a
+    // tick after the page is idle rather than with the first paint.
     const workflowHref = await page
       .goto(BASE_URL, { waitUntil: 'networkidle2' })
+      .then(() => page.waitForSelector('a[href*="workflows/"]', { timeout: 15_000 }))
       .then(() => page.$$eval('a[href*="workflows/"]', (links) => links[0]?.getAttribute('href')))
       .catch(() => null)
 
@@ -475,9 +489,18 @@ async function main() {
     }
 
     const realErrors = consoleErrors.filter(
-      (message) => !/favicon|monaco|Download the React DevTools/i.test(message),
+      ({ text, url }) =>
+        !/favicon|monaco|Download the React DevTools/i.test(text) &&
+        !url.startsWith(RUNNER_URL),
     )
-    check('no console errors', realErrors.length === 0, realErrors.slice(0, 3).join(' | '))
+    check(
+      'no console errors',
+      realErrors.length === 0,
+      realErrors
+        .slice(0, 3)
+        .map(({ text }) => text)
+        .join(' | '),
+    )
   } finally {
     await browser.close()
     if (server) server.kill()

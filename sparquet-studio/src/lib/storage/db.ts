@@ -1,23 +1,19 @@
 /**
- * Local persistence for workflows, jobs and pipelines.
+ * Persistence for workflows, jobs and pipelines.
  *
- * IndexedDB (through idb-keyval) is the primary backend; when it is unavailable —
- * Safari/Firefox private windows, blocked storage, SSR — the same API runs on
- * localStorage, and finally on an in-memory map so the app never crashes on boot.
+ * The library lives in the runner's WORKSPACE — real JSON files on disk, one per
+ * record, that a user can diff, review and commit. That is the primary backend
+ * (`remote.ts`). Browser storage is what is left when the runner is not running:
+ * IndexedDB, then localStorage, then an in-memory map so the app never crashes
+ * on boot. Those are a fallback, not the store — the browser cache is not a place
+ * to keep work that took an afternoon to build.
  *
  * Every record lives under its own key, so a save touches exactly one entry and a
  * crash mid-write can never corrupt unrelated records. The AI API key is NOT stored
  * here: it belongs to the settings store (`sparquet-studio:settings`).
  *
- * The physical KEY NAMES predate the current vocabulary and are deliberately left
- * alone — renaming them would strand every workspace already on disk:
- *
- *   `…:db:project:<id>`   holds a Workflow (the container)
- *   `…:db:workflow:<id>`  holds a Job (one pipeline JSON)
- *   `…:db:flow:<id>`      holds a Pipeline (an ordered set of Jobs)
- *
- * The record FIELDS did move to the new names in storage v3; `upgradeRecord`
- * reads the legacy shape and `migrateStep` rewrites it in place.
+ * Key names live in `keys.ts` and are frozen; the record FIELDS moved to the
+ * current vocabulary in storage v3, where `upgradeJob` rewrites them in place.
  */
 
 import {
@@ -31,28 +27,23 @@ import {
 import { nanoid } from 'nanoid'
 
 import { upgradeJob } from '@/lib/storage/migrations'
+import { toStorable, type StorageBackend, type StorageKind } from '@/lib/storage/backend'
+import {
+  FLOW_PREFIX,
+  KEY,
+  META_PREFIX,
+  NS,
+  PROJECT_PREFIX,
+  STORAGE_PREFIX,
+  WORKFLOW_PREFIX,
+} from '@/lib/storage/keys'
+import { workspaceBackend } from '@/lib/storage/remote'
 import type { Pipeline, Workflow, StudioGraph, Job } from '@/types/studio'
 
 /* ------------------------------------------------------------------- keys */
 
-export const STORAGE_PREFIX = 'sparquet-studio:'
-
-/** Records are namespaced under the prefix so `clearAll` never touches settings. */
-const NS = `${STORAGE_PREFIX}db:`
-const META_PREFIX = `${NS}meta:`
-const PROJECT_PREFIX = `${NS}project:`
-const WORKFLOW_PREFIX = `${NS}workflow:`
-const FLOW_PREFIX = `${NS}flow:`
-
-const KEY = {
-  version: `${META_PREFIX}version`,
-  seeded: `${META_PREFIX}seeded`,
-  probe: `${META_PREFIX}probe`,
-  backup: `${NS}backup`,
-  project: (id: string) => `${PROJECT_PREFIX}${id}`,
-  workflow: (id: string) => `${WORKFLOW_PREFIX}${id}`,
-  flow: (id: string) => `${FLOW_PREFIX}${id}`,
-} as const
+export { STORAGE_PREFIX }
+export type { StorageKind }
 
 const IDB_NAME = 'sparquet-studio'
 const IDB_STORE = 'records'
@@ -63,22 +54,6 @@ export const APP_ID = 'sparquet-studio'
 export const STORAGE_VERSION = 7
 
 /* --------------------------------------------------------------- backends */
-
-export type StorageKind = 'indexeddb' | 'localstorage' | 'memory'
-
-interface StorageBackend {
-  kind: StorageKind
-  get(key: string): Promise<unknown>
-  set(key: string, value: unknown): Promise<void>
-  del(key: string): Promise<void>
-  keys(prefix: string): Promise<string[]>
-}
-
-/** Guarantees the value survives structured clone and strips `undefined` holes. */
-function toStorable(value: unknown): unknown {
-  if (value === undefined) return undefined
-  return JSON.parse(JSON.stringify(value)) as unknown
-}
 
 async function indexedDbBackend(): Promise<StorageBackend | null> {
   let store: UseStore
@@ -159,15 +134,69 @@ function memoryBackend(): StorageBackend {
   }
 }
 
+/** Where to reach the workspace. Set by the app from the runner settings. */
+let connection: { baseUrl?: string; token?: string } = {}
+
+/**
+ * Points storage at a runner. Called before the first read, and again whenever the
+ * runner URL or token changes — the next call re-resolves the backend, so a user
+ * who starts the runner after opening Studio gets their files without a reload.
+ */
+export function configureStorage(options: { baseUrl?: string; token?: string }): void {
+  const changed =
+    connection.baseUrl !== options.baseUrl || connection.token !== options.token
+  connection = { ...options }
+  if (changed) reconnectStorage()
+}
+
+/** Drops the resolved backend so the next operation picks one again. */
+export function reconnectStorage(): void {
+  backendPromise = null
+  migrationPromise = null
+}
+
 let backendPromise: Promise<StorageBackend> | null = null
 
 function backend(): Promise<StorageBackend> {
   if (!backendPromise) {
     backendPromise = (async () => {
+      const remote = await workspaceBackend(connection)
+      if (remote) {
+        await adoptBrowserLibrary(remote)
+        return remote
+      }
       return (await indexedDbBackend()) ?? localStorageBackend() ?? memoryBackend()
     })()
   }
   return backendPromise
+}
+
+/**
+ * Moves a library that only ever existed in this browser into an EMPTY workspace.
+ *
+ * Runs once, the first time a workspace answers: without it, everything built
+ * before the runner existed would look deleted. It never overwrites — a workspace
+ * that already holds a record is the source of truth and is left alone.
+ */
+async function adoptBrowserLibrary(remote: StorageBackend): Promise<void> {
+  try {
+    if ((await hasRecords(remote))) return
+    const local = (await indexedDbBackend()) ?? localStorageBackend()
+    if (!local || !(await hasRecords(local))) return
+
+    const bundle = await readBundle(local, STORAGE_VERSION)
+    await writeBundle(remote, bundle, true)
+    const version = await local.get(KEY.version)
+    if (typeof version === 'number') await remote.set(KEY.version, version)
+    if ((await local.get(KEY.seeded)) === true) await remote.set(KEY.seeded, true)
+    console.info(
+      `Sparquet Studio: copied ${bundle.workflows.length} workflow(s), ${bundle.jobs.length} job(s) and ${bundle.pipelines.length} pipeline(s) from browser storage into the workspace.`,
+    )
+  } catch (error) {
+    // The browser copy is still there and still readable next time. Failing the
+    // adoption must not stop the workspace from being used.
+    console.warn(`Sparquet Studio: could not copy browser storage into the workspace. ${messageOf(error)}`)
+  }
 }
 
 /** Which backend actually took over; the UI warns when persistence is in-memory. */

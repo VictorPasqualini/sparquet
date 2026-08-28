@@ -33,12 +33,15 @@ tests/csv/orders_export/
 # testes
 output
 
-# Generated knowledge graph (rebuild with /graphify)
+# Grafo de conhecimento gerado (rebuild: python -m graphify extract . --code-only)
 graphify-out/
 
 # Frontend
 node_modules/
 sparquet-studio/dist/
+
+# Histórico de execuções do Studio (SQLite local, gerado em runtime)
+sparquet-studio/server/data/
 
 # Saidas de verificacao end-to-end (Spark grava part files + _SUCCESS + .crc)
 .tmp_*/

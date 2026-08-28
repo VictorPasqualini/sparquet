@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { JobRunRecord, PipelineRunRecord, StepRunRecord } from '@/types/history'
 import { HANDLE } from '@/types/studio'
 import type { StudioEdge, StudioNode, Job } from '@/types/studio'
 
@@ -516,6 +517,160 @@ describe('run step status', () => {
     editor.setStepStatus('t1', 'success', 7)
     editor.clearStepStatus()
     expect(useEditorStore.getState().stepDuration).toEqual({})
+  })
+
+  /* --------------------------------------------- a past run on the canvas */
+
+  function step(overrides: Partial<StepRunRecord>): StepRunRecord {
+    return {
+      id: `s-${overrides.scope ?? 'transformation'}-${overrides.stepIndex ?? 0}`,
+      jobRunId: 'jr-1',
+      scope: 'transformation',
+      stepIndex: 0,
+      type: 'filter',
+      status: 'success',
+      startedAt: '2026-08-20T10:00:00+00:00',
+      finishedAt: '2026-08-20T10:00:01+00:00',
+      durationMs: 1000,
+      errorMessage: null,
+      errorDetails: null,
+      role: null,
+      details: null,
+      ...overrides,
+    }
+  }
+
+  function jobRun(steps: StepRunRecord[], overrides: Partial<JobRunRecord> = {}): JobRunRecord {
+    return {
+      id: 'jr-1',
+      pipelineRunId: 'run-1',
+      jobId: 'job-1',
+      name: 'orders',
+      stageIndex: 0,
+      status: 'failed',
+      startedAt: '2026-08-20T10:00:00+00:00',
+      finishedAt: '2026-08-20T10:00:04+00:00',
+      durationMs: 4000,
+      error: 'Python worker exited unexpectedly (crashed)',
+      rowsRead: 10,
+      rowsWritten: 0,
+      lineage: null,
+      configHash: null,
+      steps,
+      ...overrides,
+    }
+  }
+
+  function pipelineRun(jobs: JobRunRecord[]): PipelineRunRecord {
+    return {
+      id: 'run-1',
+      kind: 'job',
+      workflowId: 'wf-1',
+      pipelineId: null,
+      jobId: 'job-1',
+      name: 'orders',
+      status: 'failed',
+      startedAt: '2026-08-20T10:00:00+00:00',
+      finishedAt: '2026-08-20T10:00:04+00:00',
+      durationMs: 4000,
+      error: null,
+      runAs: null,
+      launched: 'manual',
+      jobs,
+    }
+  }
+
+  it('reads the lanes a run is reported in off the open graph', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    // Muted nodes never compile, so they occupy no index; a per-destination
+    // transformation is not in the main chain either.
+    expect(useEditorStore.getState().stepNodeLanes()).toEqual({
+      sourceId: 'src',
+      transformIds: ['t1', 't2'],
+      validationIds: ['v1', 'v2'],
+      sinkIds: ['out1', 'out2'],
+      dqSinkIds: {},
+    })
+  })
+
+  it('paints a past execution onto the boxes it ran on', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    const job = jobRun([
+      step({ scope: 'input', stepIndex: 0, type: 'csv', durationMs: 900 }),
+      step({ scope: 'transformation', stepIndex: 0, durationMs: 100 }),
+      step({
+        scope: 'validation',
+        stepIndex: 0,
+        type: 'not_null',
+        status: 'failed',
+        durationMs: 200,
+        errorMessage: 'Python worker exited unexpectedly (crashed)',
+      }),
+      // A box that is gone: the graph was edited after the run.
+      step({ scope: 'output', stepIndex: 7, type: 'parquet' }),
+    ])
+    editor.showRunView(pipelineRun([job]), job, { pinned: true })
+
+    const state = useEditorStore.getState()
+    expect(state.stepStatus).toEqual({
+      src: 'success',
+      t1: 'success',
+      t2: 'pending',
+      v1: 'error',
+      v2: 'pending',
+      out1: 'pending',
+      out2: 'pending',
+    })
+    expect(state.stepDuration).toEqual({ src: 900, t1: 100, v1: 200 })
+    expect(state.stepRuns.v1?.[0].errorMessage).toBe(
+      'Python worker exited unexpectedly (crashed)',
+    )
+    expect(state.runView).toMatchObject({
+      runId: 'run-1',
+      jobRunId: 'jr-1',
+      kind: 'job',
+      status: 'failed',
+      durationMs: 4000,
+      unmatchedSteps: 1,
+      pinned: true,
+    })
+  })
+
+  it('refuses to replace the canvas of a run in flight', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+    editor.setStepStatuses({ t1: 'pending' })
+    editor.setRunning(true)
+
+    const job = jobRun([step({ scope: 'transformation', stepIndex: 0 })])
+    editor.showRunView(pipelineRun([job]), job)
+
+    expect(useEditorStore.getState().runView).toBeNull()
+    expect(useEditorStore.getState().stepStatus).toEqual({ t1: 'pending' })
+    editor.setRunning(false)
+  })
+
+  it('forgets the run when it is dismissed, and when the job closes', () => {
+    const editor = useEditorStore.getState()
+    editor.open(branchedJob())
+
+    const job = jobRun([step({ scope: 'transformation', stepIndex: 0 })])
+    editor.showRunView(pipelineRun([job]), job)
+    expect(useEditorStore.getState().runView).not.toBeNull()
+
+    editor.clearRunView()
+    expect(useEditorStore.getState().runView).toBeNull()
+    expect(useEditorStore.getState().stepStatus).toEqual({})
+    expect(useEditorStore.getState().stepRuns).toEqual({})
+
+    editor.showRunView(pipelineRun([job]), job)
+    editor.close()
+    expect(useEditorStore.getState().runView).toBeNull()
+    expect(useEditorStore.getState().stepRuns).toEqual({})
   })
 })
 

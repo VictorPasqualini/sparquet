@@ -4,11 +4,13 @@ import { Toaster } from 'sonner'
 
 import logoMark from '@/assets/logo.png'
 
+import { LoginGate } from '@/components/auth/LoginGate'
 import { AppShell } from '@/components/layout/AppShell'
 import { Spinner, TooltipProvider } from '@/components/ui'
 import { seedIfEmpty } from '@/lib/storage/seed'
 import { Dashboard } from '@/screens/Dashboard'
 import { NotFound } from '@/screens/NotFound'
+import { useAuthStore } from '@/store/auth'
 import { useLibraryStore } from '@/store/library'
 import { applyTheme, useSettingsStore } from '@/store/settings'
 
@@ -63,14 +65,29 @@ const router = createHashRouter([
 
 export default function App() {
   const theme = useSettingsStore((state) => state.theme)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
   const load = useLibraryStore((state) => state.load)
+  const refreshAuth = useAuthStore((state) => state.refresh)
+  const authReady = useAuthStore((state) => state.ready)
+  const loginRequired = useAuthStore((state) => state.loginRequired)
+  const principal = useAuthStore((state) => state.principal)
   const [ready, setReady] = useState(false)
+
+  // The runner decides whether anyone has to sign in, so it is asked before the
+  // library is read: on a runner with users, every one of those reads is a 401.
+  const locked = authReady && loginRequired && principal === null
 
   useEffect(() => {
     applyTheme(theme)
   }, [theme])
 
   useEffect(() => {
+    void refreshAuth()
+  }, [refreshAuth, runnerUrl, runnerToken])
+
+  useEffect(() => {
+    if (!authReady || locked) return
     let cancelled = false
     void (async () => {
       await seedIfEmpty()
@@ -80,7 +97,15 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [load])
+  }, [authReady, locked, load])
+
+  if (locked) {
+    return (
+      <TooltipProvider>
+        <LoginGate />
+      </TooltipProvider>
+    )
+  }
 
   return (
     <TooltipProvider>

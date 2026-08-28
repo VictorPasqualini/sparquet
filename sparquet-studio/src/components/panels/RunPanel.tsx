@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleCheck,
   CircleSlash,
+  CircleStop,
   CircleX,
   Clock3,
   Copy,
@@ -28,6 +29,7 @@ import {
   Badge,
   Button,
   EmptyState,
+  ErrorCard,
   Field,
   IconButton,
   Input,
@@ -38,11 +40,13 @@ import {
 } from '@/components/ui'
 import { getTransformation, getValidationSink, getValidator } from '@/catalog'
 import { stepLook } from '@/components/canvas/stepLook'
+import { ExecutionHistoryPanel } from '@/components/history/ExecutionHistoryPanel'
 import {
   checkRunnerHealth,
   createStepTimer,
   DEFAULT_RUNNER_URL,
   isRunnerError,
+  cancelRun,
   runJobStream,
   RUNNER_INSTALL_COMMAND,
   RUNNER_START_COMMAND,
@@ -50,17 +54,11 @@ import {
   type RunnerHealth,
   type RunStepEvent,
 } from '@/lib/runner/client'
+import { nodeIdForStep, pendingStatuses } from '@/lib/runner/stepNodes'
 import { cn } from '@/lib/utils/cn'
 import { formatClockTime, formatCount, formatDuration } from '@/lib/utils/format'
-import {
-  nodeOrdinals,
-  runtimeEndpointNodeIds,
-  useEditorStore,
-  validationNodeIdsInOrder,
-  validationSinkNodeIds,
-} from '@/store/editor'
+import { nodeOrdinals, useEditorStore } from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
-import { isValidationSinkRole } from '@/types/studio'
 import type {
   ParamDefinition,
   RunLogLine,
@@ -68,7 +66,6 @@ import type {
   RunStatus,
   StepStatus,
   StudioNode,
-  ValidationSinkRole,
 } from '@/types/studio'
 
 import { RunResultTable } from './RunResultTable'
@@ -90,6 +87,7 @@ interface AuthIssue {
 }
 
 export function RunPanel() {
+  const job = useEditorStore((state) => state.job)
   const params = useEditorStore((state) => state.params)
   const setParams = useEditorStore((state) => state.setParams)
   const nodes = useEditorStore((state) => state.nodes)
@@ -101,10 +99,13 @@ export function RunPanel() {
   const setRunning = useEditorStore((state) => state.setRunning)
   const setStepStatus = useEditorStore((state) => state.setStepStatus)
   const setStepStatuses = useEditorStore((state) => state.setStepStatuses)
+  const showRunView = useEditorStore((state) => state.showRunView)
+  const runView = useEditorStore((state) => state.runView)
 
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const setRunnerUrl = useSettingsStore((state) => state.setRunnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const runAs = useSettingsStore((state) => state.runAs)
   const setRunnerToken = useSettingsStore((state) => state.setRunnerToken)
 
   const [runner, setRunner] = useState<RunnerStatus>('checking')
@@ -112,9 +113,12 @@ export function RunPanel() {
   const [runnerNote, setRunnerNote] = useState<string | null>(null)
   const [authIssue, setAuthIssue] = useState<AuthIssue | null>(null)
   const [mode, setMode] = useState<RunMode>('run')
+  const [stopping, setStopping] = useState(false)
 
   const runAbort = useRef<AbortController | null>(null)
   const healthAbort = useRef<AbortController | null>(null)
+  /** The execution id the runner opened for this run — what Stop cancels. */
+  const liveRunId = useRef<string | null>(null)
 
   const checkHealth = useCallback(async (url: string) => {
     healthAbort.current?.abort()
@@ -214,45 +218,14 @@ export function RunPanel() {
         let settled: RunResult | null = null
         let lastStarted: string | null = null
 
-        // The runner reports steps by index into the main `transformations`
-        // array; this is the same order the compiler emits, so index → node id.
-        const state = useEditorStore.getState()
-        const transformNodeIds = state.transformNodeIdsInOrder()
-        const validationNodeIds = validationNodeIdsInOrder(state)
-        const { sourceId, sinkIds } = runtimeEndpointNodeIds(state)
-        // The datasets the `validations` block writes are only written when the job
-        // compiles that block at all — which needs at least one rule on the chain.
-        const dqSinkIds: Partial<Record<ValidationSinkRole, string>> =
-          validationNodeIds.length > 0 ? validationSinkNodeIds(state) : {}
-        setStepStatuses(
-          Object.fromEntries(
-            [
-              ...(sourceId ? [sourceId] : []),
-              ...transformNodeIds,
-              ...validationNodeIds,
-              ...Object.values(dqSinkIds),
-              ...sinkIds,
-            ].map((id) => [id, 'pending' as const]),
-          ),
-        )
+        // The runner reports a step by its position in the compiled JSON (or, for
+        // the quality datasets, by role). These lanes are what map that back onto
+        // the canvas — the same mapping a run read back from history goes through.
+        const lanes = useEditorStore.getState().stepNodeLanes()
+        setStepStatuses(pendingStatuses(lanes))
 
-        /**
-         * Which box a marker belongs to. Each index-keyed scope counts in its own
-         * lane, so the same index means a different node in each of them; the
-         * quality datasets are keyed by ROLE instead, because they sit in no lane
-         * — they are standalone declarations with no incoming link, so there is
-         * no position for an index to refer to.
-         */
-        const nodeForStep = (step: RunStepEvent): string | undefined => {
-          if (step.scope === 'validation_sink') {
-            return isValidationSinkRole(step.role) ? dqSinkIds[step.role] : undefined
-          }
-          if (step.index === undefined) return undefined
-          if (step.scope === 'input') return sourceId ?? undefined
-          if (step.scope === 'output') return sinkIds[step.index]
-          if (step.scope === 'validation') return validationNodeIds[step.index]
-          return transformNodeIds[step.index]
-        }
+        const nodeForStep = (step: RunStepEvent): string | undefined =>
+          nodeIdForStep(lanes, step)
 
         // Two timestamped log lines bracket every step, so the panel times each one
         // itself and the framework reports no duration at all. What the number does
@@ -261,8 +234,21 @@ export function RunPanel() {
 
         await runJobStream(
           runnerUrl,
-          { pipeline, params: paramValues, limit: PREVIEW_ROWS },
           {
+            pipeline,
+            params: paramValues,
+            limit: PREVIEW_ROWS,
+            workflowId: job?.workflowId,
+            jobId: job?.id,
+            jobName: job?.name,
+            runAs: runAs || undefined,
+            launched: 'manual',
+          },
+          {
+            // The run exists on the runner from here on, so Stop can cancel it.
+            onStart: (start) => {
+              liveRunId.current = start.runId ?? null
+            },
             onLog: (line) => {
               streamed.push(line)
               setRun({
@@ -288,9 +274,10 @@ export function RunPanel() {
             onResult: (result) => {
               settled = result
               // A failed run stops mid-chain: the step that was running never
-              // reports 'applied', so mark it as the failure point.
-              if (result.status === 'error' && lastStarted) {
-                setStepStatus(lastStarted, 'error')
+              // reports 'applied', so mark it as the failure point. A cancelled one
+              // stops the same way, but the step was stopped, not broken.
+              if (lastStarted && (result.status === 'error' || result.status === 'cancelled')) {
+                setStepStatus(lastStarted, result.status === 'cancelled' ? 'cancelled' : 'error')
               }
             },
           },
@@ -333,9 +320,12 @@ export function RunPanel() {
     } catch (error) {
       const refused = refusedStatus(error)
       if (controller.signal.aborted) {
+        // Only the fallback path lands here: the runner either refused the cancel
+        // or was never asked (a `validate`, or a run that had not started yet).
         setRun({
-          status: 'idle',
+          status: 'cancelled',
           pipelineName: pipeline.name,
+          durationMs: Math.round(performance.now() - startedAt),
           logs: [{ ts: Date.now(), level: 'warning', message: 'Cancelled before it finished' }],
         })
       } else if (refused !== null) {
@@ -361,8 +351,25 @@ export function RunPanel() {
       }
     } finally {
       if (runAbort.current === controller) runAbort.current = null
+      liveRunId.current = null
+      setStopping(false)
       setRunning(false)
     }
+  }
+
+  /**
+   * Stop: cancels the run ON THE RUNNER, then falls back to dropping the stream.
+   *
+   * Aborting alone would leave Spark working to the end with nobody watching — the
+   * panel would say "cancelled" while the write it started kept going.
+   */
+  const stopRun = async () => {
+    setStopping(true)
+    const runId = liveRunId.current
+    const accepted = runId ? await cancelRun(runnerUrl, runId, runnerToken) : false
+    // Cancelled runs still close their stream properly, with a `cancelled` result:
+    // only refuse-to-cancel (finished already, runner gone, a `validate`) aborts.
+    if (!accepted) runAbort.current?.abort()
   }
 
   const sparkMissing = runner === 'connected' && health !== null && !health.sparkAvailable
@@ -403,14 +410,19 @@ export function RunPanel() {
           </Tooltip>
 
           {running ? (
-            <Button
-              variant="danger"
-              size="lg"
-              icon={<Square className="h-3.5 w-3.5" />}
-              onClick={() => runAbort.current?.abort()}
-            >
-              Stop
-            </Button>
+            <Tooltip content="Cancels the execution on the runner, not just this window">
+              <span>
+                <Button
+                  variant="danger"
+                  size="lg"
+                  icon={<Square className="h-3.5 w-3.5" />}
+                  disabled={stopping}
+                  onClick={() => void stopRun()}
+                >
+                  {stopping ? 'Stopping…' : 'Stop'}
+                </Button>
+              </span>
+            </Tooltip>
           ) : (
             <Tooltip content="Check the configuration without touching Spark or any sink">
               <span>
@@ -493,6 +505,21 @@ export function RunPanel() {
               description="Execute the pipeline to see rows, validations and logs here. Everything runs on your machine."
             />
           )
+        )}
+
+        {job && (
+          <ExecutionHistoryPanel
+            runnerUrl={runnerUrl}
+            runnerToken={runnerToken}
+            workflowId={job.workflowId}
+            jobId={job.id}
+            refreshToken={run?.runId}
+            // Picking a run here paints it on the canvas: the user asked which box
+            // did what, and the canvas is where the boxes are.
+            onViewJobRun={(record, jobRun) => showRunView(record, jobRun, { pinned: true })}
+            viewingJobRunId={runView?.jobRunId ?? null}
+            viewingRunId={runView?.runId ?? null}
+          />
         )}
       </div>
     </div>
@@ -1107,9 +1134,15 @@ interface BannerLook {
 const BANNERS: Record<RunStatus, BannerLook> = {
   idle: {
     icon: CircleSlash,
-    title: 'Run cancelled',
+    title: 'No run',
     className: 'border-line bg-surface-sunken',
     iconClassName: 'text-content-subtle',
+  },
+  cancelled: {
+    icon: CircleStop,
+    title: 'Run cancelled',
+    className: 'border-state-warning/40 bg-state-warning/10',
+    iconClassName: 'text-state-warning',
   },
   connecting: {
     icon: Rocket,
@@ -1153,7 +1186,11 @@ function StatusBanner({ run, mode }: { run: RunResult; mode: RunMode }) {
       : mode === 'validate' && run.status === 'error'
         ? 'Configuration rejected'
         : look.title
-  const detail = bannerDetail(run, mode)
+  // A failure carries the runner's own words, which can be a whole stack trace:
+  // it goes in a scrollable card, not in the banner line, so a long one cannot
+  // push the metrics and the logs off the panel.
+  const failure = run.status === 'error' || run.status === 'cancelled' ? (run.error ?? null) : null
+  const detail = failure ? null : bannerDetail(run, mode)
 
   return (
     <div
@@ -1164,10 +1201,17 @@ function StatusBanner({ run, mode }: { run: RunResult; mode: RunMode }) {
       ) : (
         <Icon className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', look.iconClassName)} aria-hidden />
       )}
-      <div className="min-w-0 space-y-0.5">
+      <div className="min-w-0 flex-1 space-y-1">
         <p className="text-xs font-medium text-content">{title}</p>
         {detail && (
           <p className="break-words text-2xs leading-relaxed text-content-muted">{detail}</p>
+        )}
+        {failure && (
+          <ErrorCard
+            message={failure}
+            tone={run.status === 'cancelled' ? 'warning' : 'danger'}
+            className="bg-surface/70"
+          />
         )}
       </div>
     </div>
@@ -1177,7 +1221,9 @@ function StatusBanner({ run, mode }: { run: RunResult; mode: RunMode }) {
 function bannerDetail(run: RunResult, mode: RunMode): string | null {
   switch (run.status) {
     case 'error':
-      return run.error ?? 'The runner returned an error.'
+      return 'The runner returned an error.'
+    case 'cancelled':
+      return 'The run was stopped before it finished.'
     case 'skipped':
       return 'A stop_if_empty step matched, so nothing was written.'
     case 'success':

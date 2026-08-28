@@ -7,6 +7,9 @@ export type { FieldProps, InputProps, SelectOption, SelectProps, TextareaProps }
 export { DialogClose, Modal, useConfirm } from './Dialog'
 export type { ConfirmOptions, ModalProps } from './Dialog'
 
+export { ErrorCard } from './ErrorCard'
+export type { ErrorCardProps, ErrorCardTone } from './ErrorCard'
+
 export { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from './Menu'
 
 export {

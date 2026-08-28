@@ -52,6 +52,7 @@ import {
   type FieldSpec,
   type NodeAccent,
 } from '@/catalog'
+import { NodeRunState } from '@/components/history/NodeRunState'
 import {
   Badge,
   Button,
@@ -326,6 +327,8 @@ export function Inspector() {
         <InspectorHeader key={`header-${node.id}`} id={node.id} data={data} />
         <div key={`body-${node.id}`} className="scroll-area flex-1 space-y-4 px-3 py-3">
           <NodeIssues nodeId={node.id} data={data} onJump={jump} />
+          {/* What this box did on the run the canvas is showing, if any. */}
+          <NodeRunState nodeId={node.id} />
           {(data.kind === 'source' || data.kind === 'sink') && (
             <IoBody id={node.id} data={data} />
           )}

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  cancelRun,
   createStepTimer,
   DEFAULT_RUNNER_URL,
   RunnerError,
@@ -14,6 +15,8 @@ import {
   validateJob,
   type JobStreamHandlers,
   type PipelineStreamHandlers,
+  type PipelineStreamStart,
+  type RunStreamStart,
   type RunStepEvent,
 } from '@/lib/runner/client'
 import type { PipelineSpec } from '@/types/pipeline'
@@ -215,6 +218,35 @@ describe('runJob', () => {
     })
   })
 
+  it('forwards the Studio ids and surfaces the persisted run/job ids back', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        success: true,
+        skipped: false,
+        logs: [],
+        pipeline_run_id: 'run-1',
+        job_run_id: 'job-1',
+      }),
+    )
+
+    const result = await runJob(DEFAULT_RUNNER_URL, {
+      pipeline: PIPELINE,
+      workflowId: 'w1',
+      jobId: 'j1',
+      jobName: 'orders',
+    })
+
+    expect(result.runId).toBe('run-1')
+    expect(result.jobRunId).toBe('job-1')
+    const [, init] = lastCall()
+    expect(JSON.parse(String(init.body))).toEqual({
+      pipeline: PIPELINE,
+      workflow_id: 'w1',
+      job_id: 'j1',
+      job_name: 'orders',
+    })
+  })
+
   it('reports a graceful stop as skipped', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({ success: true, skipped: true, rows_read: 0, rows_written: 0, logs: [] }),
@@ -283,9 +315,13 @@ describe('runJobStream', () => {
   function recorder() {
     const steps: RunStepEvent[] = []
     const logs: RunLogLine[] = []
+    let start: RunStreamStart | undefined
     let result: RunResult | undefined
 
     const handlers: JobStreamHandlers = {
+      onStart: (value) => {
+        start = value
+      },
       onLog: (line) => logs.push(line),
       onStep: (step) => steps.push(step),
       onResult: (value) => {
@@ -297,6 +333,9 @@ describe('runJobStream', () => {
       handlers,
       steps,
       logs,
+      get start() {
+        return start
+      },
       get result() {
         return result
       },
@@ -460,6 +499,75 @@ describe('runJobStream', () => {
       'validation_sink:invalid': 250,
     })
   })
+
+  it('surfaces the ids of the run on start, so Stop can address it', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        frame('start', {
+          pipeline_name: 'demo',
+          pipeline_run_id: 'run-1',
+          job_run_id: 'job-1',
+        }),
+        frame('result', { success: true, logs: [] }),
+      ]),
+    )
+
+    const collected = recorder()
+    await runJobStream(DEFAULT_RUNNER_URL, { pipeline: PIPELINE }, collected.handlers)
+
+    expect(collected.start).toEqual({
+      pipelineName: 'demo',
+      runId: 'run-1',
+      jobRunId: 'job-1',
+    })
+  })
+
+  it('reads a cancelled run as cancelled, not as a failure', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        frame('start', { pipeline_name: 'demo', pipeline_run_id: 'run-1' }),
+        frame('result', {
+          success: false,
+          cancelled: true,
+          error: 'Cancelled from Studio while it was running.',
+          logs: [],
+        }),
+      ]),
+    )
+
+    const collected = recorder()
+    await runJobStream(DEFAULT_RUNNER_URL, { pipeline: PIPELINE }, collected.handlers)
+
+    expect(collected.result?.status).toBe('cancelled')
+    expect(collected.result?.error).toBe('Cancelled from Studio while it was running.')
+  })
+})
+
+describe('cancelRun', () => {
+  it('posts to the run it was given and reports the runner accepted it', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ cancelled: true, run_id: 'run 1' }))
+
+    expect(await cancelRun(DEFAULT_RUNNER_URL, 'run 1', 'secret')).toBe(true)
+
+    const [url, init] = lastCall()
+    expect(url).toBe(`${DEFAULT_RUNNER_URL}/runs/run%201/cancel`)
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)[RUNNER_TOKEN_HEADER]).toBe('secret')
+  })
+
+  it('never throws: a run that already finished answers 409', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ detail: 'This execution is not running on this runner any more.' }, 409),
+    )
+
+    expect(await cancelRun(DEFAULT_RUNNER_URL, 'run-1')).toBe(false)
+  })
+
+  it('never throws when the runner is unreachable', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    expect(await cancelRun(DEFAULT_RUNNER_URL, 'run-1')).toBe(false)
+  })
 })
 
 describe('createStepTimer', () => {
@@ -508,12 +616,12 @@ describe('runPipelineStream', () => {
     const logs: RunLogLine[] = []
     const stageResults: PipelineStageResult[] = []
     const errors: string[] = []
-    let total: number | undefined
+    let start: PipelineStreamStart | undefined
     let result: PipelineRunResult | undefined
 
     const handlers: PipelineStreamHandlers = {
       onStart: (value) => {
-        total = value
+        start = value
       },
       onStageStart: (stage) => stageStarts.push(stage),
       onLog: (line) => logs.push(line),
@@ -530,8 +638,11 @@ describe('runPipelineStream', () => {
       logs,
       stageResults,
       errors,
+      get start() {
+        return start
+      },
       get total() {
-        return total
+        return start?.total
       },
       get result() {
         return result
@@ -695,6 +806,85 @@ describe('runPipelineStream', () => {
 
     expect(spy.stageResults[0].status).toBe('skipped')
     expect(spy.result?.status).toBe('success')
+  })
+
+  it('maps a stage_skipped event onto the same onStageResult handler', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        frame('stage_result', stageResultPayload(0, 's1', { success: false, error: 'boom' })),
+        frame('stage_skipped', { index: 1, id: 's2', name: 'Silver' }),
+        frame('result', {
+          success: false,
+          duration_ms: 10,
+          stages: [stageResultPayload(0, 's1', { success: false, error: 'boom' })],
+          error: 'boom',
+        }),
+      ]),
+    )
+
+    const spy = recorder()
+    await runPipelineStream(DEFAULT_RUNNER_URL, { stages: STAGES }, spy.handlers)
+
+    expect(spy.stageResults).toEqual([
+      expect.objectContaining({ id: 's1', status: 'error' }),
+      { index: 1, id: 's2', name: 'Silver', status: 'skipped' },
+    ])
+  })
+
+  it('maps a cancelled stage and the stages the stop kept from running', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([
+        frame('start', { pipeline: true, total: 2, pipeline_run_id: 'run-1' }),
+        frame(
+          'stage_result',
+          stageResultPayload(0, 's1', {
+            success: false,
+            cancelled: true,
+            error: 'Cancelled from Studio while it was running.',
+          }),
+        ),
+        frame('stage_cancelled', { index: 1, id: 's2', name: 'Silver' }),
+        frame('result', { success: false, cancelled: true, duration_ms: 10, stages: [] }),
+      ]),
+    )
+
+    const spy = recorder()
+    await runPipelineStream(DEFAULT_RUNNER_URL, { stages: STAGES }, spy.handlers)
+
+    // The run id arrives before the first stage, which is what Stop addresses.
+    expect(spy.start).toEqual({ total: 2, runId: 'run-1' })
+    expect(spy.stageResults).toEqual([
+      expect.objectContaining({ id: 's1', status: 'cancelled' }),
+      { index: 1, id: 's2', name: 'Silver', status: 'cancelled' },
+    ])
+    expect(spy.result?.status).toBe('cancelled')
+  })
+
+  it('forwards workflow/pipeline/job ids and surfaces the persisted run id back', async () => {
+    fetchMock.mockResolvedValue(
+      sseResponse([frame('result', { success: true, duration_ms: 10, stages: [], id: 'run-1' })]),
+    )
+
+    const spy = recorder()
+    await runPipelineStream(
+      DEFAULT_RUNNER_URL,
+      {
+        stages: [{ id: 's1', name: 'Bronze', pipeline: PIPELINE, jobId: 'j1' }],
+        workflowId: 'w1',
+        pipelineId: 'p1',
+        name: 'flow',
+      },
+      spy.handlers,
+    )
+
+    expect(spy.result?.runId).toBe('run-1')
+    const [, init] = lastCall()
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      workflow_id: 'w1',
+      pipeline_id: 'p1',
+      name: 'flow',
+      stages: [{ id: 's1', name: 'Bronze', pipeline: PIPELINE, job_id: 'j1' }],
+    })
   })
 
   it('forwards a fatal error event and skips events it does not know', async () => {

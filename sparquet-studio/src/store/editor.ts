@@ -37,9 +37,16 @@ import {
   validationSinkRoleOf,
 } from '@/lib/compiler'
 import { mergeParams } from '@/lib/params'
+import { runViewStatuses, type StepNodeLanes } from '@/lib/runner/stepNodes'
 import * as db from '@/lib/storage/db'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { lintJob } from '@/lib/validation/lint'
+import type {
+  ExecutionStatus,
+  JobRunRecord,
+  PipelineRunRecord,
+  StepRunRecord,
+} from '@/types/history'
 import type { PipelineSpec } from '@/types/pipeline'
 import { HANDLE, VALIDATION_SINK_ROLES } from '@/types/studio'
 import type {
@@ -82,6 +89,35 @@ interface PendingWrite {
 
 export type PanelId = 'inspector' | 'settings' | 'json' | 'ai' | 'run' | 'issues'
 
+/**
+ * A past execution the canvas is showing instead of a live run.
+ *
+ * The statuses themselves go through the same `stepStatus` / `stepDuration` maps a
+ * live run paints, so every box already knows how to draw them. This carries what
+ * the canvas has to SAY about them: which run is on screen, how it ended, and
+ * whether any of its steps belong to boxes that no longer exist.
+ */
+export interface RunView {
+  runId: string
+  jobRunId: string
+  /** `pipeline` when this job ran as one stage of a Studio Pipeline. */
+  kind: 'job' | 'pipeline'
+  /** The execution's name — the Pipeline's when it ran as a stage of one. */
+  runName: string | null
+  status: ExecutionStatus
+  startedAt: string | null
+  durationMs: number | null
+  error: string | null
+  /** Steps the current graph has no box for: the job was edited after the run. */
+  unmatchedSteps: number
+  /**
+   * The user picked this run. A view loaded on its own — the latest run of the
+   * job, shown so the boxes are not blank on open — is not pinned, so the next
+   * automatic load may replace it.
+   */
+  pinned: boolean
+}
+
 interface EditorState {
   job: Job | null
   nodes: StudioNode[]
@@ -113,8 +149,22 @@ interface EditorState {
    * lazy: a transformation only builds a plan, so it lands near 0 ms — the real
    * time belongs to the read, to each validation rule (every rule is a Spark
    * action) and to the writes. These numbers do not sum to the run's duration.
+   *
+   * A run read back from history reports the durations the runner measured, in
+   * the same units and with the same caveat.
    */
   stepDuration: Record<string, number>
+  /**
+   * The past execution painted on the canvas, or null when the canvas shows the
+   * live run (or nothing at all).
+   */
+  runView: RunView | null
+  /**
+   * Per node id, the steps of `runView` that landed on it — what the Inspector
+   * reads to describe one box's last run. Empty while a run is live: the stream
+   * reports a status, not a persisted step row.
+   */
+  stepRuns: Record<string, StepRunRecord[]>
 
   /** The right-hand panel is a single tabbed surface; null means collapsed. */
   activePanel: PanelId | null
@@ -185,6 +235,25 @@ interface EditorState {
   clearStepStatus: () => void
   /** Node ids behind the compiled `transformations`, in the runner's index order. */
   transformNodeIdsInOrder: () => string[]
+  /**
+   * Every lane a step marker can be mapped through, for the current graph — what
+   * `nodeIdForStep` needs to turn a runner step into a box.
+   */
+  stepNodeLanes: () => StepNodeLanes
+  /**
+   * Paints a past execution of this job onto the canvas: each box takes the status
+   * its step ended with, boxes the run never reached stay dimmed, and the steps
+   * behind each box become readable in the Inspector.
+   *
+   * Ignored while a run is in flight — the live stream owns the canvas then.
+   */
+  showRunView: (
+    run: PipelineRunRecord,
+    jobRun: JobRunRecord,
+    options?: { pinned?: boolean },
+  ) => void
+  /** Back to the plain canvas: no run painted, no per-box history. */
+  clearRunView: () => void
 
   /* panels */
   togglePanel: (panel: PanelId, open?: boolean) => void
@@ -372,6 +441,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
     running: false,
     stepStatus: {},
     stepDuration: {},
+    runView: null,
+    stepRuns: {},
 
     activePanel: 'inspector',
     panelWidth: 400,
@@ -412,6 +483,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
         running: false,
         stepStatus: {},
         stepDuration: {},
+        // Whatever ran last belonged to the job being closed. The screen loads
+        // this job's own latest run right after opening it.
+        runView: null,
+        stepRuns: {},
         lastSavedAt: job.updatedAt,
       })
       get().lint()
@@ -446,6 +521,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         run: null,
         stepStatus: {},
         stepDuration: {},
+        runView: null,
+        stepRuns: {},
       })
     },
 
@@ -775,9 +852,54 @@ export const useEditorStore = create<EditorState>((set, get) => {
             ? state.stepDuration
             : { ...state.stepDuration, [nodeId]: durationMs },
       })),
-    setStepStatuses: (stepStatus) => set({ stepStatus, stepDuration: {} }),
-    clearStepStatus: () => set({ stepStatus: {}, stepDuration: {} }),
+    // Seeding the whole map is how a run STARTS, so it also takes the canvas back
+    // from any past run being viewed: the boxes are about to describe this one.
+    setStepStatuses: (stepStatus) =>
+      set({ stepStatus, stepDuration: {}, runView: null, stepRuns: {} }),
+    clearStepStatus: () => set({ stepStatus: {}, stepDuration: {}, runView: null, stepRuns: {} }),
     transformNodeIdsInOrder: () => mainChainTransformNodeIds(get()),
+
+    stepNodeLanes: () => {
+      const state = get()
+      const validationIds = validationNodeIdsInOrder(state)
+      const { sourceId, sinkIds } = runtimeEndpointNodeIds(state)
+      return {
+        sourceId,
+        transformIds: mainChainTransformNodeIds(state),
+        validationIds,
+        sinkIds,
+        // The datasets the `validations` block writes are only written when the
+        // job compiles that block at all — which needs at least one rule.
+        dqSinkIds: validationIds.length > 0 ? validationSinkNodeIds(state) : {},
+      }
+    },
+
+    showRunView: (run, jobRun, options) => {
+      // A live run owns the canvas: overwriting its statuses with a finished run's
+      // would freeze the display mid-flight.
+      if (get().running) return
+      const view = runViewStatuses(get().stepNodeLanes(), jobRun)
+      set({
+        stepStatus: view.status,
+        stepDuration: view.duration,
+        stepRuns: view.steps,
+        runView: {
+          runId: run.id,
+          jobRunId: jobRun.id,
+          kind: run.kind,
+          runName: run.name,
+          status: jobRun.status,
+          startedAt: jobRun.startedAt ?? run.startedAt,
+          durationMs: jobRun.durationMs,
+          error: jobRun.error ?? run.error,
+          unmatchedSteps: view.unmatched.length,
+          pinned: options?.pinned === true,
+        },
+      })
+    },
+
+    clearRunView: () =>
+      set({ runView: null, stepRuns: {}, stepStatus: {}, stepDuration: {} }),
 
     togglePanel: (panel, open) =>
       set((state) => {

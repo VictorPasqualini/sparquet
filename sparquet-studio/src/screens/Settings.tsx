@@ -23,6 +23,7 @@ import {
   Palette,
   Plug,
   ShieldAlert,
+  ShieldCheck,
   Sun,
   Terminal,
   Trash2,
@@ -45,6 +46,7 @@ import {
   Toggle,
 } from '@/components/ui'
 import { sendAiRequest } from '@/lib/ai/client'
+import { AccessPanel } from '@/components/auth/AccessPanel'
 import { AI_PROVIDER_INFO } from '@/lib/ai/providers'
 import {
   checkRunnerHealth,
@@ -70,7 +72,7 @@ const PROBE_TIMEOUT_MS = 20_000
 const INSTALL_COMMAND = RUNNER_INSTALL_COMMAND
 const START_COMMAND = RUNNER_START_COMMAND
 
-type SectionId = 'appearance' | 'ai' | 'runner' | 'data' | 'about'
+type SectionId = 'appearance' | 'ai' | 'runner' | 'access' | 'data' | 'about'
 
 interface SectionMeta {
   id: SectionId
@@ -103,6 +105,13 @@ const SECTIONS: SectionMeta[] = [
     icon: Terminal,
   },
   {
+    id: 'access',
+    label: 'Access',
+    title: 'Access',
+    description: 'Who can sign in to this runner, and what each of them may do.',
+    icon: ShieldCheck,
+  },
+  {
     id: 'data',
     label: 'Data',
     title: 'Data',
@@ -117,6 +126,12 @@ const SECTIONS: SectionMeta[] = [
     icon: Info,
   },
 ]
+
+/** By id, so adding a section never shifts what another one renders. */
+const SECTION = Object.fromEntries(SECTIONS.map((meta) => [meta.id, meta])) as Record<
+  SectionId,
+  SectionMeta
+>
 
 const CANVAS_PREFERENCES: {
   key: keyof CanvasPreferences
@@ -186,6 +201,7 @@ export function Settings() {
           <AppearanceSection />
           <AiSection />
           <RunnerSection />
+          <AccessSection />
           <DataSection />
           <AboutSection />
         </div>
@@ -304,7 +320,7 @@ function AppearanceSection() {
   const setCanvas = useSettingsStore((state) => state.setCanvas)
 
   return (
-    <Section meta={SECTIONS[0]}>
+    <Section meta={SECTION.appearance}>
       <Field label="Theme" help="Light is the default. The choice is remembered on this device.">
         <Segmented value={theme} onChange={setTheme} options={THEME_OPTIONS} />
       </Field>
@@ -425,7 +441,7 @@ function AiSection() {
   ]
 
   return (
-    <Section meta={SECTIONS[1]}>
+    <Section meta={SECTION.ai}>
       <div className="grid gap-5 sm:grid-cols-2">
         <Field label="Provider" htmlFor={ids.provider} help={info.docsNote}>
           <Select
@@ -614,9 +630,12 @@ function RunnerSection() {
   const setRunnerUrl = useSettingsStore((state) => state.setRunnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
   const setRunnerToken = useSettingsStore((state) => state.setRunnerToken)
+  const runAs = useSettingsStore((state) => state.runAs)
+  const setRunAs = useSettingsStore((state) => state.setRunAs)
 
   const baseUrlId = useId()
   const tokenId = useId()
+  const runAsId = useId()
   const [showToken, setShowToken] = useState(false)
   const [probe, setProbe] = useState<Probe<RunnerHealthValue>>(IDLE)
   const abortRef = useRef<AbortController | null>(null)
@@ -649,7 +668,7 @@ function RunnerSection() {
   }
 
   return (
-    <Section meta={SECTIONS[2]}>
+    <Section meta={SECTION.runner}>
       <Field
         label="Runner base URL"
         htmlFor={baseUrlId}
@@ -691,6 +710,20 @@ function RunnerSection() {
             {showToken ? <EyeOff /> : <Eye />}
           </IconButton>
         </div>
+      </Field>
+
+      <Field
+        label="Run as"
+        htmlFor={runAsId}
+        help="Name recorded on every run you start from here. Leave it empty to record the runner's own OS account. This is a label for the history, not a permission — the runner authenticates the token, not a person."
+      >
+        <Input
+          id={runAsId}
+          spellCheck={false}
+          value={runAs}
+          placeholder={'The runner’s OS user'}
+          onChange={(event) => setRunAs(event.target.value)}
+        />
       </Field>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -764,6 +797,14 @@ interface ImportCandidate {
   bundle: unknown
   workflows: number
   jobs: number
+}
+
+function AccessSection() {
+  return (
+    <Section meta={SECTION.access}>
+      <AccessPanel />
+    </Section>
+  )
 }
 
 function DataSection() {
@@ -846,7 +887,7 @@ function DataSection() {
   }
 
   return (
-    <Section meta={SECTIONS[3]}>
+    <Section meta={SECTION.data}>
       <dl className="grid grid-cols-3 gap-3">
         <Stat label="Workflows" value={workflowCount} />
         <Stat label="Jobs" value={jobCount} />
@@ -1057,7 +1098,7 @@ function ResetModal({
 
 function AboutSection() {
   return (
-    <Section meta={SECTIONS[4]}>
+    <Section meta={SECTION.about}>
       <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Stat label="Studio version" value={STUDIO_VERSION} />
         <Stat label="License" value="MIT" />

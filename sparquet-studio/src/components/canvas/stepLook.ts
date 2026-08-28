@@ -18,7 +18,14 @@
  * `label` is the full sentence a screen reader announces and a hover shows.
  */
 
-import { CircleCheck, CircleSlash, CircleX, LoaderCircle, type LucideIcon } from 'lucide-react'
+import {
+  CircleCheck,
+  CircleSlash,
+  CircleStop,
+  CircleX,
+  LoaderCircle,
+  type LucideIcon,
+} from 'lucide-react'
 
 import type { StepStatus } from '@/types/studio'
 
@@ -86,6 +93,18 @@ export const STEP_LOOK: Record<Exclude<StepStatus, 'pending'>, StepLook> = {
     bar: 'h-1 bg-state-danger',
     footer: 'border-state-danger/30 bg-state-danger/10 text-state-danger',
     border: 'border-state-danger/60',
+  },
+  cancelled: {
+    icon: CircleStop,
+    label: 'Cancelled — the run was stopped',
+    short: 'Stopped',
+    ring: 'ring-2 ring-state-warning/45',
+    chip: 'bg-state-warning/15 text-state-warning',
+    // Warning, never danger: a stop the user asked for is not a defect, and
+    // painting it red would send someone hunting for a bug that is not there.
+    bar: 'h-[3px] bg-state-warning/70',
+    footer: 'border-state-warning/30 bg-state-warning/10 text-state-warning',
+    border: 'border-state-warning/50',
   },
   skipped: {
     icon: CircleSlash,

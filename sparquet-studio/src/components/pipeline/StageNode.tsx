@@ -35,7 +35,8 @@ export type StageNodeData = {
   stage: ResolvedStage
   /** Issues scoped to this stage, from `resolvePipeline`. */
   issues: ValidationIssue[]
-  onOpen: (jobId: string) => void
+  /** Opens the job of a stage; the stage id is what carries the run being viewed. */
+  onOpen: (jobId: string, stageId: string) => void
 }
 
 export type StageRfNode = Node<StageNodeData, 'stage'>
@@ -53,6 +54,7 @@ const STAGE_STATUS_LABEL: Record<'running' | PipelineStageOutcome, string> = {
   success: 'Finished successfully',
   error: 'Failed — the pipeline stopped here',
   skipped: 'Skipped — it had no rows to process',
+  cancelled: 'Cancelled — the run was stopped',
 }
 
 export const StageNode = memo(function StageNodeRenderer({
@@ -100,7 +102,7 @@ export const StageNode = memo(function StageNodeRenderer({
    */
   const openJob = () => {
     if (broken) return
-    onOpen(stage.jobId)
+    onOpen(stage.jobId, stage.id)
   }
 
   return (
@@ -315,7 +317,16 @@ export const StageNode = memo(function StageNodeRenderer({
               {result.durationMs !== undefined && ` · ${formatDuration(result.durationMs)}`}
             </p>
             {result.error && (
-              <p className="break-words text-2xs leading-relaxed text-state-danger">
+              // Two lines, never more: a Spark stack trace would grow the box past
+              // everything around it on the canvas. The whole message stays one
+              // hover away, and the run panel shows it in full in a scrollable card.
+              <p
+                title={result.error}
+                className={cn(
+                  'line-clamp-2 break-words text-2xs leading-relaxed',
+                  status === 'cancelled' ? 'text-state-warning' : 'text-state-danger',
+                )}
+              >
                 {result.error}
               </p>
             )}
