@@ -36,8 +36,11 @@ import { useSettingsStore } from '@/store/settings'
 import { StageLinkEdge } from './StageLinkEdge'
 import { StageNode, STAGE_NODE_WIDTH, type StageRfNode } from './StageNode'
 
-/** Payload key the stage picker writes into `dataTransfer`. */
+/** Payload key the stage picker writes into `dataTransfer` for a Job. */
 export const STAGE_DND_MIME = 'application/sparquet-pipeline-stage'
+
+/** Payload key for a stage dragged from the library's files: a relative path. */
+export const STAGE_FILE_DND_MIME = 'application/sparquet-library-file'
 
 /** React Flow re-mounts every node when these identities change. */
 const nodeTypes = { stage: StageNode }
@@ -66,6 +69,7 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
   const canvas = useSettingsStore((state) => state.canvas)
   const selectedStageId = usePipelineEditorStore((state) => state.selectedStageId)
   const addStage = usePipelineEditorStore((state) => state.addStage)
+  const addFileStage = usePipelineEditorStore((state) => state.addFileStage)
   const moveStage = usePipelineEditorStore((state) => state.moveStage)
   const removeStages = usePipelineEditorStore((state) => state.removeStages)
   const removeLinks = usePipelineEditorStore((state) => state.removeLinks)
@@ -176,7 +180,8 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
   /* ------------------------------------------------------------ drag & drop */
 
   const onDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (!event.dataTransfer.types.includes(STAGE_DND_MIME)) return
+    const types = event.dataTransfer.types
+    if (!types.includes(STAGE_DND_MIME) && !types.includes(STAGE_FILE_DND_MIME)) return
     event.preventDefault()
     // Must stay compatible with the picker's `effectAllowed = 'copy'`, or the
     // browser cancels the drop before `onDrop` ever fires.
@@ -186,12 +191,15 @@ export function PipelineCanvas({ resolved }: { resolved: ResolvedPipeline }) {
   const onDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       const jobId = event.dataTransfer.getData(STAGE_DND_MIME)
-      if (!jobId) return
+      const path = event.dataTransfer.getData(STAGE_FILE_DND_MIME)
+      if (!jobId && !path) return
       event.preventDefault()
       const point = screenToFlowPosition({ x: event.clientX, y: event.clientY })
-      addStage(jobId, { x: point.x - DROP_OFFSET.x, y: point.y - DROP_OFFSET.y })
+      const position = { x: point.x - DROP_OFFSET.x, y: point.y - DROP_OFFSET.y }
+      if (jobId) addStage(jobId, position)
+      else addFileStage(path, position)
     },
-    [addStage, screenToFlowPosition],
+    [addFileStage, addStage, screenToFlowPosition],
   )
 
   /* ------------------------------------------------------ keyboard gestures */

@@ -132,12 +132,20 @@ export interface RunJobRequest {
 /** How a run was started, as the history records it. */
 export type RunLaunch = 'manual' | 'scheduled' | 'api'
 
-/** One stage of a pipeline run, already in execution order. */
+/**
+ * One stage of a pipeline run, already in execution order.
+ *
+ * Exactly one of `pipeline` and `path`: the compiled JSON for a stage backed by
+ * a Job, or a `.json` in the library — relative to its root — that the runner
+ * reads when the stage starts. It refuses both, and it refuses neither.
+ */
 export interface RunPipelineStageRequest {
   /** Echoed back on every stage event, so the canvas can find the box. */
   id: string
   name?: string
-  pipeline: PipelineSpec
+  pipeline?: PipelineSpec
+  /** A file in the library, read at run time. The file is the source, not a copy. */
+  path?: string
   params?: Record<string, RunParamValue>
   /** Studio job id this stage runs, for the persisted execution history. */
   jobId?: string
@@ -800,9 +808,14 @@ export async function runPipelineStream(
         stages: body.stages.map((stage) => ({
           id: stage.id,
           name: stage.name,
-          pipeline: stage.pipeline,
+          // Exactly one of the two: the compiled JSON for a stage backed by a
+          // Job, or the library path for one backed by a file — which the runner
+          // reads when the stage starts, so the file stays the source.
+          ...(stage.path ? { path: stage.path } : { pipeline: stage.pipeline }),
           params: stage.params,
-          job_id: stage.jobId,
+          // A file-backed stage has no Job, and an empty id in the history would
+          // read as one that was deleted.
+          job_id: stage.jobId || undefined,
         })),
         limit: body.limit,
         stop_on_error: body.stopOnError,

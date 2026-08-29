@@ -659,22 +659,19 @@ Pendente aqui:
 
 ### 9.6 Biblioteca e arquivos
 
-- [ ] **Apontar um estágio do Pipeline para um arquivo JSON existente.** Hoje uma caixa
-      do Pipeline referencia um Job da biblioteca, e o Job é o dono do arquivo. Falta o
-      caminho inverso: apontar a caixa para um `.json` que já existe no disco — gerado
-      por outro time, versionado em outro repositório, escrito à mão — e executá-lo sem
-      importar para dentro da biblioteca. Desenho proposto: o estágio ganha uma origem
-      alternativa (`{ "source": "file", "path": "vendas/jobs/ingestao.json" }`, relativa
-      à raiz da biblioteca), o runner resolve na hora de executar, e o Studio mostra o
-      JSON em modo leitura com o linter rodando em cima — editar continua sendo pelo
-      Job. Pontos a decidir antes: (a) caminho relativo à raiz **sempre**, para não
-      vazar caminho absoluto de uma máquina para outra e para manter a recusa de
-      escapar da raiz que `workspace.py` já faz; (b) o que a execução registra no
-      histórico quando não há `job.id` — provavelmente um Job sintético identificado
-      pelo caminho, senão o catálogo fica com órfão; (c) o que acontece quando o arquivo
-      some ou deixa de compilar — falhar no lint do Pipeline, antes de rodar, não no
-      meio da execução; (d) se o mesmo mecanismo vale para um Workflow inteiro
-      (montar a biblioteca a partir de um diretório) ou só para estágio.
+- ✅ **Apontar um estágio do Pipeline para um arquivo JSON existente.** Uma caixa do
+      Pipeline nomeia *ou* um Job da biblioteca *ou* um `.json` que já existe — gerado
+      por outro time, versionado em outro repositório, escrito à mão — e o executa sem
+      importar. O estágio guarda `path`, relativo à raiz da biblioteca; o runner lê o
+      arquivo no momento em que o estágio começa, então nada é importado nem
+      cacheado e uma edição feita fora do Studio vale na execução seguinte. Endpoints
+      `GET /workspace/files` e `GET /workspace/files/{path}` (`workspace:Read`); a
+      resolução acontece **antes** de cobrar, travar ou executar, então arquivo que
+      falta é `400` e não Pipeline que morre no meio com estágios já escritos.
+      Caminho absoluto é recusado — nomeia um diretório que existe em uma máquina só.
+      Fica em aberto: (a) o histórico registra o estágio sem `job_id`, o que basta para
+      a linha do tempo mas deixa o catálogo sem dono do arquivo; (b) montar uma
+      biblioteca inteira a partir de um diretório, em vez de estágio a estágio.
 
 ---
 

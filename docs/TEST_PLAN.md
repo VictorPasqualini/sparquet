@@ -67,7 +67,7 @@ with the same two layers: `tests/test_cola_lib.py` (25 pure) and
 | Write metrics (`rows_written`) | — | 17 (11 Spark-free on metric selection, 6 against real Spark) |
 | External execution history | — | 34 (Spark-free) on the framework side, 16 on the runner |
 | Studio | — | 502 tests + 21 smoke checks |
-| Runner service (`server/`) | — | 327 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 36, replaceable pieces 12) |
+| Runner service (`server/`) | — | 355 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 36, replaceable pieces 12, library files 28) |
 
 Two findings worth stating plainly, because they are the reason this document exists:
 
@@ -231,10 +231,10 @@ Two capabilities in this layer *are* pinned, both added in framework 0.7.0:
 
 ## 7. Studio
 
-The Studio is the best-covered part of the project (502 unit tests, 21 smoke checks in
-a real Chrome, and 327 `unittest` tests on the runner: 92 on the history database, 64 on
+The Studio is the best-covered part of the project (518 unit tests, 21 smoke checks in
+a real Chrome, and 355 `unittest` tests on the runner: 92 on the history database, 64 on
 identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution routes and
-33 on the workspace). What is pinned, and what is not:
+61 on the workspace and the files in it). What is pinned, and what is not:
 
 | Area | Status | Notes |
 |---|:---:|---|
@@ -264,6 +264,7 @@ identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution r
 | Canvas / nodes / inspector | ◐ | node previews, handles and connection guards are pinned; the interactive canvas is covered by the smoke script rather than unit tests |
 | Workspace tabs and the Runs browser | ⬜ | the Flow/JSON/Runs switch, the runs table and the run-detail dialog (its **Details** tab: job id, job run id, run as, launched, timestamps, duration, status, lineage) are React with no unit test. What they read is pinned — `runView.ts`, `history.ts`, `lineage_of` above — so the gap is the rendering, not the data |
 | The `targets` field UI | ⬜ | the JSON widget renders and its `validate` mirrors the library's refusals — no test asserts the inspector shows those messages |
+| A stage that runs a file | ✅ | 28 `unittest` tests (`server/test_library_files.py`) plus 16 vitest (`lib/runner/libraryFiles.ts`, and the file stages in `lib/pipeline/pipeline.test.ts`). The rule they protect: a Pipeline stage may run a JSON the Studio never wrote, and the **file stays the source** — nothing is imported, nothing is cached, so an edit made outside the Studio is what the next run executes. Pinned — the listing offers only runnable files (the editor's own `.studio/`, hidden files and the half-written `.tmp-*.json` of a save in flight are excluded), a path is always relative to the library root and comes back with forward slashes, a Windows separator and a leading slash read the same file, and the refusals: missing, not JSON, not a JSON *object*, `..`, an absolute path (detail says "relative"). On the flow: a file-backed stage resolves before anything is charged or started, naming both a `pipeline` and a `path` — or neither — is a `422` that says **which** stage, and a missing file is a `400` rather than a Pipeline that dies halfway with earlier stages already written. On the client: the box carries no job and is not treated as broken, it is named after the file, it orders and cycles like any other stage, and the request sends `path` instead of a compiled pipeline |
 | Runner service (`server/main.py`) | ◐ | what a run authorizes is now pinned (see *Scope of the execution routes*), but there is still **no test over HTTP**: token auth, the origin allow-list, the SSE event sequence, the per-stage status of `/run/flow/stream`, and the `requires(...)` dependency that maps each route to an action (the evaluator behind it is pinned — see *Identity and permissions* — but no test asserts that `PUT /workspace` is the route demanding `workspace:Write`). The execution-history side-effects of these endpoints (`server/history.py`) are covered — see the row above. FastAPI's `TestClient` would cover all of it without Spark, and the only thing in the way is the dependency: starlette answers `RuntimeError: The starlette.testclient module requires the httpx2 package to be installed.`, and `httpx` is not in this environment — which is why `test_run_scope.py` calls the helpers directly instead |
 
 The runner service is the gap that matters most here — it is the only component that

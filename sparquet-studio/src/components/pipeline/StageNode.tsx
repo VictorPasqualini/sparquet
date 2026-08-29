@@ -12,6 +12,7 @@ import { Handle, NodeToolbar, Position, type Node, type NodeProps } from '@xyflo
 import {
   CircleX,
   ExternalLink,
+  FileJson,
   FileWarning,
   Link2,
   Trash2,
@@ -81,7 +82,13 @@ export const StageNode = memo(function StageNodeRenderer({
       ? STAGE_STATUS_LABEL[status as 'running' | PipelineStageOutcome]
       : null
 
-  const broken = stage.job === null
+  /**
+   * A stage that names a file has no Job behind it on purpose: the runner reads
+   * the JSON when the stage starts. So there is nothing to open, nothing to
+   * describe from the graph, and — unlike a dangling reference — nothing wrong.
+   */
+  const fromFile = typeof stage.path === 'string' && stage.path.length > 0
+  const broken = stage.job === null && !fromFile
   const errorCount = issues.filter((issue) => issue.severity === 'error').length
   const warningCount = issues.filter((issue) => issue.severity === 'warning').length
   const flagged = errorCount + warningCount
@@ -101,7 +108,7 @@ export const StageNode = memo(function StageNodeRenderer({
    * open, and navigating to a dead route would hide the very state it reports.
    */
   const openJob = () => {
-    if (broken) return
+    if (broken || fromFile) return
     onOpen(stage.jobId, stage.id)
   }
 
@@ -113,7 +120,7 @@ export const StageNode = memo(function StageNodeRenderer({
         openJob()
       }}
       title={
-        broken
+        broken || fromFile
           ? undefined
           : `Open "${stage.name}" in the editor — double-click, or press Enter`
       }
@@ -121,6 +128,7 @@ export const StageNode = memo(function StageNodeRenderer({
         'relative rounded-xl border bg-surface shadow-card transition-shadow hover:shadow-raised',
         selected ? 'border-brand-500 ring-2 ring-brand-500/40' : 'border-line',
         broken && 'border-dashed border-state-danger/60',
+        fromFile && !selected && 'border-dashed',
         !selected && errorCount > 0 && 'ring-2 ring-state-danger/45',
         !selected && errorCount === 0 && warningCount > 0 && 'ring-2 ring-state-warning/40',
         // Selection and issues win the ring: a broken stage stays flagged mid-run.
@@ -174,7 +182,7 @@ export const StageNode = memo(function StageNodeRenderer({
       <span
         className={cn(
           'absolute inset-y-0 left-0 w-1 rounded-l-xl',
-          broken ? 'bg-state-danger' : 'bg-brand-500',
+          broken ? 'bg-state-danger' : fromFile ? 'bg-content-subtle' : 'bg-brand-500',
         )}
         aria-hidden
       />
@@ -183,11 +191,17 @@ export const StageNode = memo(function StageNodeRenderer({
         <span
           className={cn(
             'mt-px flex h-7 w-7 shrink-0 items-center justify-center rounded-lg',
-            broken ? 'bg-state-danger/12 text-state-danger' : 'bg-brand-500/12 text-brand-500',
+            broken
+              ? 'bg-state-danger/12 text-state-danger'
+              : fromFile
+                ? 'bg-surface-sunken text-content-subtle'
+                : 'bg-brand-500/12 text-brand-500',
           )}
         >
           {broken ? (
             <FileWarning className="h-4 w-4" aria-hidden />
+          ) : fromFile ? (
+            <FileJson className="h-4 w-4" aria-hidden />
           ) : (
             <JobIcon className="h-4 w-4" aria-hidden />
           )}
@@ -252,17 +266,19 @@ export const StageNode = memo(function StageNodeRenderer({
           <p className="truncate text-2xs leading-4 text-content-muted">
             {broken
               ? `Reference ${stage.jobId}`
-              : `${plural(stage.description?.transformationCount ?? 0, 'transformation')} · ${plural(
-                  stage.description?.validationRuleCount ?? 0,
-                  'validation',
-                )}`}
+              : fromFile
+                ? stage.path
+                  : `${plural(stage.description?.transformationCount ?? 0, 'transformation')} · ${plural(
+                    stage.description?.validationRuleCount ?? 0,
+                    'validation',
+                  )}`}
           </p>
         </div>
 
         {/* Always visible, not only in the hover toolbar: drilling into the
             pipeline is the whole point of a stage, and it must be reachable
             without a pointer — and without knowing the gestures. */}
-        {!broken && (
+        {!broken && !fromFile && (
           <Button
             size="xs"
             variant="ghost"
@@ -281,6 +297,14 @@ export const StageNode = memo(function StageNodeRenderer({
           <p className="text-2xs leading-relaxed text-state-danger">
             The job this stage points at was deleted. Remove the stage, or recreate the
             job.
+          </p>
+        ) : fromFile ? (
+          // No endpoints: reading them would mean reading the file and holding a
+          // copy, and the copy would be a lie the moment somebody edited the file.
+          <p className="text-2xs leading-relaxed text-content-muted">
+            Runs the JSON in the library as it stands. The runner reads the file when
+            the stage starts, so an edit outside the Studio takes effect on the next
+            run.
           </p>
         ) : (
           <>

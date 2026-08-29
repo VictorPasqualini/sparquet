@@ -12,7 +12,13 @@
 
 import { create } from 'zustand'
 
-import { linkRejection, newLink, newStage, type LinkRejection } from '@/lib/pipeline'
+import {
+  linkRejection,
+  newFileStage,
+  newLink,
+  newStage,
+  type LinkRejection,
+} from '@/lib/pipeline'
 import { stageRunStatuses } from '@/lib/runner/stageRuns'
 import * as db from '@/lib/storage/db'
 import type { ExecutionStatus, PipelineRunRecord } from '@/types/history'
@@ -97,6 +103,8 @@ interface PipelineEditorState {
 
   /* graph */
   addStage: (jobId: string, position: { x: number; y: number }) => string
+  /** Adds a stage that runs a file in the library instead of a Job. */
+  addFileStage: (path: string, position: { x: number; y: number }) => string
   moveStage: (id: string, position: { x: number; y: number }, settled: boolean) => void
   removeStages: (ids: string[]) => void
   /** Adds an order link. Returns why it was refused, or `null` on success. */
@@ -276,6 +284,17 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
 
     addStage: (jobId, position) => {
       const stage = newStage(jobId, position)
+      commit(() =>
+        set((state) => ({
+          stages: [...state.stages, stage],
+          selectedStageId: stage.id,
+        })),
+      )
+      return stage.id
+    },
+
+    addFileStage: (path, position) => {
+      const stage = newFileStage(path, position)
       commit(() =>
         set((state) => ({
           stages: [...state.stages, stage],

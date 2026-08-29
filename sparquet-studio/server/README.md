@@ -484,6 +484,15 @@ the same payload `/run` returns — or `error`.
 The `start` event names the ids the run was persisted under: `pipeline_run_id`
 addresses `/runs/{id}/cancel`, `job_run_id` addresses `/job-runs/{id}/logs`.
 
+Step markers come from the framework's own log, and what they report differs by
+kind: `input`, `validation` and `output` did touch data, but a `transformation`
+marker means the operation was **added to the plan**, not that rows went through
+it — Spark is lazy and nothing here forces an action to find out. So a
+transformation whose error only the executor can find is reported as succeeded,
+and the failure arrives on the next step that forces one. Reporting otherwise
+would mean a `count()` after every transformation, re-reading the input once per
+step.
+
 ### `POST /run/flow/stream`
 
 Runs several pipeline JSONs **in sequence** — a Studio **Pipeline**, where each Job
@@ -499,6 +508,22 @@ is one stage. Requires the token, same as `/run`. Server-Sent Events.
   "stop_on_error": true
 }
 ```
+
+A stage names **one** of two things: `pipeline`, the JSON to run inline, or
+`path`, a `.json` in the library relative to its root:
+
+```json
+{ "id": "s3", "name": "gold", "path": "vendas/jobs/gold.json" }
+```
+
+The runner reads that file when the flow starts — nothing is imported and nothing
+is cached, so an edit made outside the Studio takes effect on the next run, and
+the file stays the source. Both together, or neither, is a `422` naming the stage.
+A path that does not exist, is not JSON, or climbs out of the library root is a
+`400`, raised **before** anything is charged, locked or executed: a Pipeline that
+dies halfway with earlier stages already written is worse than one that never
+started. Paths are always relative — an absolute one names a directory that
+exists on exactly one machine.
 
 Stages arrive already ordered and share one SparkSession, so a stage hands data to
 the next through whatever it wrote — a path the next one reads, or a `view` output
@@ -1000,7 +1025,37 @@ reading and writing the new place, which is what makes this the way to *adopt* a
 directory that already holds a library. Moving files is the operator's job: a
 half-finished copy with no way back is worse than a move nobody made.
 
-All seven require the `X-Sparquet-Token` header.
+### `GET /workspace/files`
+
+Every runnable JSON in the library, for a stage that wants to point at a file
+rather than at a Job. Needs **`workspace:Read`**.
+
+```json
+{
+  "root": "/home/ana/.local/share/sparquet/workspace",
+  "files": [
+    { "path": "vendas/jobs/ingestao.json", "name": "ingestao",
+      "size": 812, "modified": 1756400000 }
+  ]
+}
+```
+
+Paths are relative to `root`, forward slashes on every platform. The editor's own
+state (`.studio/`), anything hidden, and the half-written `.tmp-*.json` of a save
+in flight are not listed: none of them is something to run.
+
+### `GET /workspace/files/{path}`
+
+The JSON at that path, **uncompiled** — exactly what is on disk:
+
+```json
+{ "path": "vendas/jobs/ingestao.json", "pipeline": { "name": "ingestao", "...": "..." } }
+```
+
+Needs `workspace:Read`. Same refusals as a staged path: `400` for a missing file,
+for something that is not a JSON object, and for a path that leaves the root.
+
+All nine require the `X-Sparquet-Token` header.
 
 ## Where the library is stored
 

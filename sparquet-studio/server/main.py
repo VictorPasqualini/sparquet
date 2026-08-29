@@ -158,11 +158,29 @@ class RunRequest(BaseModel):
 
 
 class FlowStageRequest(BaseModel):
-    """One JSON of a composed flow — a pipeline that is a stage of a larger job."""
+    """One JSON of a composed flow — a pipeline that is a stage of a larger job.
+
+    A stage names its JSON one of two ways, and exactly one:
+
+    * `pipeline` — the compiled config, sent inline. This is what a stage backed
+      by a Studio Job does: the Job is the source, the Studio compiles it, and
+      the file on disk is that same JSON written out.
+    * `path` — a file **in the library**, relative to its root. The file is the
+      source: nothing is imported, and it is read at the moment the stage runs,
+      so an edit made outside the Studio takes effect on the next run. This is
+      how a Pipeline points at a JSON another team owns, a script generated, or
+      somebody wrote by hand.
+
+    The path is relative on purpose. An absolute one would name a directory that
+    exists on one machine, and a Pipeline that runs on the author's laptop and
+    silently stops running anywhere else is worse than one that never ran.
+    """
 
     id: str
     name: Optional[str] = None
-    pipeline: Dict[str, Any]
+    pipeline: Dict[str, Any] = Field(default_factory=dict)
+    #: A `.json` in the library, relative to its root, read when the stage runs.
+    path: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     job_id: Optional[str] = None
 
@@ -1735,6 +1753,37 @@ def run_stream(
     )
 
 
+def _resolve_staged_files(stages: List[FlowStageRequest]) -> None:
+    """Turns every `path` stage into an inline `pipeline`, in place.
+
+    Reading happens here, once, for the whole flow: everything downstream —
+    charging, lineage, the config stored with the run — is written against
+    `stage.pipeline`, and a stage that read its file late would be a stage the
+    history recorded as running something it never saw.
+    """
+    for index, stage in enumerate(stages, start=1):
+        named = (stage.path or "").strip()
+        if named and stage.pipeline:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Stage {index} names both a file and an inline pipeline. "
+                    "It runs one or the other."
+                ),
+            )
+        if not named:
+            if not stage.pipeline:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Stage {index} has neither a pipeline nor a file to run.",
+                )
+            continue
+        try:
+            stage.pipeline = _workspace.read_file(named)
+        except workspace.WorkspaceError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.post("/run/flow/stream")
 def run_flow_stream(
     body: RunFlowRequest, principal: Any = Depends(current_principal)
@@ -1761,6 +1810,11 @@ def run_flow_stream(
 
     if not body.stages:
         raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
+
+    # Before anything is charged, locked or started: a stage that points at a file
+    # gets that file read now, so a missing or unparseable one is a 400 naming it
+    # rather than a flow that dies halfway with earlier stages already written.
+    _resolve_staged_files(body.stages)
 
     # One check for the flow, against its first stage: a Pipeline whose team has
     # nothing available should not start at all. Nothing is held here — each stage
@@ -2488,6 +2542,62 @@ def put_workspace_root(body: WorkspaceRootRequest) -> WorkspaceRootOut:
     _WORKSPACE_LOCATION = workspace.Location(store.root, source)
     _log.info("The library is now read from %s (%s).", store.root, source)
     return _workspace_root_out()
+
+
+class LibraryFileOut(BaseModel):
+    """One runnable JSON in the library. `path` is always relative to its root."""
+
+    path: str
+    name: str
+    size: int
+    modified: float
+
+
+class LibraryFilesOut(BaseModel):
+    root: str
+    files: List[LibraryFileOut]
+
+
+class LibraryFileContentOut(BaseModel):
+    path: str
+    #: The JSON as it is on disk, uncompiled and unmodified.
+    pipeline: Dict[str, Any]
+
+
+@app.get(
+    "/workspace/files",
+    response_model=LibraryFilesOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def list_library_files() -> LibraryFilesOut:
+    """Every runnable JSON in the library, so a Pipeline stage can point at one.
+
+    The whole tree, not only what the Studio wrote — a file another team owns, a
+    script generated or somebody hand-wrote is exactly the case for this. The
+    editor's own state under `.studio/` is not listed: it is not something to run.
+    """
+    return LibraryFilesOut(
+        root=str(_WORKSPACE_ROOT),
+        files=[LibraryFileOut(**item.to_json()) for item in _workspace.list_files()],
+    )
+
+
+@app.get(
+    "/workspace/files/{path:path}",
+    response_model=LibraryFileContentOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def read_library_file(path: str) -> LibraryFileContentOut:
+    """The JSON at a relative path, as it is on disk.
+
+    Studio reads it to show and lint what a file-backed stage would run. It is
+    **not** cached: the file is the source of truth, and what is shown has to be
+    what the next run will execute.
+    """
+    try:
+        return LibraryFileContentOut(path=path, pipeline=_workspace.read_file(path))
+    except workspace.WorkspaceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 class WorkspaceMetaRequest(BaseModel):

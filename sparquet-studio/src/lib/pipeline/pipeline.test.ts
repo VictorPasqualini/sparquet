@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import { pipelineToGraph } from '@/lib/compiler'
 import {
+  fileStageName,
   linkRejection,
+  newFileStage,
   newPipeline,
   planPipelineRun,
   resolvePipeline,
@@ -42,6 +44,14 @@ const pipe = (name: string, inPath: string, outPath: string) => ({
 const stage = (id: string, jobId: string, x = 0): PipelineStage => ({
   id,
   jobId,
+  position: { x, y: 0 },
+})
+
+/** A stage that names a JSON in the library instead of a Job. */
+const fileStage = (id: string, path: string, x = 0): PipelineStage => ({
+  id,
+  jobId: '',
+  path,
   position: { x, y: 0 },
 })
 
@@ -223,6 +233,84 @@ describe('resolvePipeline — broken references', () => {
   })
 })
 
+describe('resolvePipeline — stages backed by a file', () => {
+  it('resolves without a job, and does not call that broken', () => {
+    const resolved = resolvePipeline(
+      pipeline([fileStage('a', 'vendas/jobs/ingestao.json')], []),
+      JOBS,
+    )
+    const entry = resolved.stages[0]
+
+    expect(entry.path).toBe('vendas/jobs/ingestao.json')
+    expect(entry.job).toBeNull()
+    // Nothing is read here: the runner reads the file when the stage starts.
+    expect(entry.description).toBeNull()
+    expect(entry.pipeline).toBeNull()
+    expect(resolved.issues).toEqual([])
+  })
+
+  it('names the box after the file, without the extension', () => {
+    const resolved = resolvePipeline(pipeline([fileStage('a', 'a/b/ingestao.json')], []), JOBS)
+
+    expect(resolved.stages[0].name).toBe('ingestao')
+    expect(fileStageName('a/b/ingestao.JSON')).toBe('ingestao')
+  })
+
+  it('orders and links like any other stage', () => {
+    const resolved = resolvePipeline(
+      pipeline(
+        [stage('b', 'w-silver', 200), fileStage('a', 'bronze.json')],
+        [link('l1', 'a', 'b')],
+      ),
+      JOBS,
+    )
+
+    expect(orderOf(resolved)).toEqual([
+      ['a', 1],
+      ['b', 2],
+    ])
+  })
+
+  it('is still refused when it would close a cycle', () => {
+    const resolved = resolvePipeline(
+      pipeline(
+        [fileStage('a', 'one.json'), fileStage('b', 'two.json', 200)],
+        [link('l1', 'a', 'b'), link('l2', 'b', 'a')],
+      ),
+      JOBS,
+    )
+
+    expect(resolved.issues.map((issue) => issue.id)).toContain('pipeline-cycle-a')
+  })
+
+  it('sends the path instead of a compiled pipeline', () => {
+    const plan = planPipelineRun(
+      resolvePipeline(
+        pipeline([stage('a', 'w-bronze'), fileStage('b', 'vendas/limpeza.json', 200)], [
+          link('l1', 'a', 'b'),
+        ]),
+        JOBS,
+      ),
+    )
+
+    expect(plan.blockers).toEqual([])
+    expect(plan.stages.map((entry) => [entry.name, entry.path ?? null])).toEqual([
+      ['Bronze', null],
+      ['limpeza', 'vendas/limpeza.json'],
+    ])
+    expect(plan.stages[1].pipeline).toBeUndefined()
+    expect(plan.stages[1].jobId).toBe('')
+  })
+
+  it('builds one with an empty job id, so nothing reads it as a deleted job', () => {
+    const created = newFileStage('vendas/limpeza.json', { x: 10, y: 0 })
+
+    expect(created.jobId).toBe('')
+    expect(created.path).toBe('vendas/limpeza.json')
+    expect(created.id.startsWith('stage-')).toBe(true)
+  })
+})
+
 describe('link rules', () => {
   it('refuses a self-link', () => {
     expect(linkRejection([], 'a', 'a')).toBe('self')
@@ -266,7 +354,7 @@ describe('planPipelineRun', () => {
       ['b', 'Silver'],
       ['c', 'Gold'],
     ])
-    expect(plan.stages[0].pipeline.input).toEqual({ format: 'csv', path: '/raw/orders' })
+    expect(plan.stages[0].pipeline?.input).toEqual({ format: 'csv', path: '/raw/orders' })
     // No params declared: the key is omitted rather than sent empty.
     expect(plan.stages[0].params).toBeUndefined()
   })
