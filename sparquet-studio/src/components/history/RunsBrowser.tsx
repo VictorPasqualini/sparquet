@@ -11,13 +11,13 @@
  * it ended with. The numbers behind it (timestamps, lineage, logs) are one further
  * click away, in the dialog the action column opens.
  *
- * Twin of `ExecutionHistoryPanel`, which says the same thing in a 380px column and
- * therefore can only afford the shape of the history. Here there is room for who
- * launched it, as whom, and for how long.
+ * The only place the history is shown. It used to be repeated in a 380px column
+ * beside the canvas, which said the same thing with room for less of it; the run
+ * panel now links here instead.
  */
 
 import { History as HistoryIcon, PanelRight, RefreshCw } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { RunDetailDialog } from '@/components/history/RunDetailDialog'
 import { StatusIcon, formatTimestamp, statusTone } from '@/components/history/status'
@@ -26,10 +26,67 @@ import { isRunnerError } from '@/lib/runner/client'
 import { getRun, listRuns } from '@/lib/runner/history'
 import { cn } from '@/lib/utils/cn'
 import { formatDuration, plural, relativeTime } from '@/lib/utils/format'
-import type { JobRunRecord, PipelineRunRecord } from '@/types/history'
+import type { ExecutionStatus, JobRunRecord, PipelineRunRecord } from '@/types/history'
 
 /** How many executions the table holds before the user has to narrow the question. */
 const PAGE_SIZE = 50
+
+/**
+ * The question a run list is opened with is almost always one of these three, so
+ * they are one click rather than a search: is anything running, what broke, and
+ * what worked.
+ */
+type StatusFilter = 'all' | 'running' | 'failed' | 'success'
+
+const FILTERS: { id: StatusFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'running', label: 'Running' },
+  { id: 'failed', label: 'Failed' },
+  { id: 'success', label: 'Succeeded' },
+]
+
+function matchesFilter(status: ExecutionStatus, filter: StatusFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'running') return status === 'running' || status === 'pending'
+  if (filter === 'failed') return status === 'failed' || status === 'cancelled'
+  return status === 'success'
+}
+
+interface Summary {
+  total: number
+  succeeded: number
+  failed: number
+  running: number
+  /** Of the runs that finished, the share that succeeded. Null while none has. */
+  successRate: number | null
+  /** Median, not mean: one pathological run must not describe the other fifty. */
+  medianMs: number | null
+  lastAt: string | null
+}
+
+function summarize(runs: PipelineRunRecord[]): Summary {
+  const succeeded = runs.filter((run) => run.status === 'success').length
+  const failed = runs.filter(
+    (run) => run.status === 'failed' || run.status === 'cancelled',
+  ).length
+  const running = runs.filter(
+    (run) => run.status === 'running' || run.status === 'pending',
+  ).length
+  const settled = succeeded + failed
+  const durations = runs
+    .map((run) => run.durationMs)
+    .filter((value): value is number => typeof value === 'number' && value >= 0)
+    .sort((a, b) => a - b)
+  return {
+    total: runs.length,
+    succeeded,
+    failed,
+    running,
+    successRate: settled > 0 ? Math.round((succeeded / settled) * 100) : null,
+    medianMs: durations.length > 0 ? durations[Math.floor(durations.length / 2)] ?? null : null,
+    lastAt: runs[0]?.startedAt ?? null,
+  }
+}
 
 const LAUNCH_LABELS: Record<string, string> = {
   manual: 'Manually',
@@ -76,7 +133,14 @@ export function RunsBrowser({
   const [error, setError] = useState<string | null>(null)
   const [openRunId, setOpenRunId] = useState<string | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  const [filter, setFilter] = useState<StatusFilter>('all')
   const abortRef = useRef<AbortController | null>(null)
+
+  const summary = useMemo(() => summarize(runs), [runs])
+  const shown = useMemo(
+    () => runs.filter((run) => matchesFilter(run.status, filter)),
+    [runs, filter],
+  )
 
   useEffect(() => {
     const controller = new AbortController()
@@ -132,25 +196,76 @@ export function RunsBrowser({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-2.5">
-        <div className="min-w-0">
-          <p className="truncate text-xs font-medium text-content">{subject}</p>
-          <p className="text-2xs text-content-subtle">
-            {loading && runs.length === 0
-              ? 'Loading executions…'
-              : `${plural(runs.length, 'execution')}, most recent first`}
-          </p>
+      <div className="shrink-0 border-b border-line px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <div className="min-w-0">
+            <p className="truncate text-xs font-medium text-content">{subject}</p>
+            <p className="text-2xs text-content-subtle">
+              {loading && runs.length === 0
+                ? 'Loading executions…'
+                : `${plural(runs.length, 'execution')}, most recent first`}
+            </p>
+          </div>
+          <Button
+            size="xs"
+            variant="ghost"
+            className="ml-auto"
+            disabled={loading}
+            icon={<RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />}
+            onClick={() => setReloadKey((key) => key + 1)}
+          >
+            Refresh
+          </Button>
         </div>
-        <Button
-          size="xs"
-          variant="ghost"
-          className="ml-auto"
-          disabled={loading}
-          icon={<RefreshCw className={cn('h-3 w-3', loading && 'animate-spin')} />}
-          onClick={() => setReloadKey((key) => key + 1)}
-        >
-          Refresh
-        </Button>
+
+        {runs.length > 0 && (
+          <>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-1.5">
+              <Stat
+                label="Success rate"
+                value={summary.successRate === null ? '—' : `${summary.successRate}%`}
+                hint={`${summary.succeeded} succeeded, ${summary.failed} failed`}
+              />
+              <Stat
+                label="Median duration"
+                value={summary.medianMs === null ? '—' : formatDuration(summary.medianMs)}
+              />
+              <Stat
+                label="Last run"
+                value={summary.lastAt ? relativeTime(Date.parse(summary.lastAt)) : '—'}
+              />
+              {summary.running > 0 && (
+                <Badge tone="info">{plural(summary.running, 'run')} in flight</Badge>
+              )}
+            </div>
+
+            <div className="mt-2.5 flex items-center gap-1">
+              {FILTERS.map((option) => {
+                const count =
+                  option.id === 'all'
+                    ? summary.total
+                    : runs.filter((run) => matchesFilter(run.status, option.id)).length
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setFilter(option.id)}
+                    aria-pressed={filter === option.id}
+                    className={cn(
+                      'rounded-lg px-2 py-0.5 text-2xs transition-colors',
+                      filter === option.id
+                        ? 'bg-brand-500/12 text-brand-600 dark:text-brand-400'
+                        : 'text-content-subtle hover:bg-surface-sunken hover:text-content',
+                    )}
+                  >
+                    {option.label}
+                    <span className="ml-1 tabular-nums text-content-muted">{count}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
       </div>
 
       {error && (
@@ -175,7 +290,17 @@ export function RunsBrowser({
         </div>
       )}
 
-      {runs.length > 0 && (
+      {runs.length > 0 && shown.length === 0 && (
+        <div className="flex flex-1 items-center justify-center p-6">
+          <EmptyState
+            icon={<HistoryIcon />}
+            title="Nothing under this filter"
+            description="These executions exist, none of them is in this state. Pick All to see them."
+          />
+        </div>
+      )}
+
+      {shown.length > 0 && (
         <div className="scroll-area min-h-0 flex-1">
           <table className="w-full border-collapse text-2xs">
             <thead className="sticky top-0 z-10 bg-surface">
@@ -190,7 +315,7 @@ export function RunsBrowser({
               </tr>
             </thead>
             <tbody>
-              {runs.map((run) => (
+              {shown.map((run) => (
                 <RunRow
                   key={run.id}
                   run={run}
@@ -229,6 +354,17 @@ export function RunsBrowser({
         viewActionLabel={viewActionLabel}
         viewingJobRunId={viewingJobRunId}
       />
+    </div>
+  )
+}
+
+/** One number of the summary strip, with the reading of it underneath. */
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-2xs text-content-subtle">{label}</p>
+      <p className="text-xs font-medium tabular-nums text-content">{value}</p>
+      {hint && <p className="text-2xs text-content-muted">{hint}</p>}
     </div>
   )
 }

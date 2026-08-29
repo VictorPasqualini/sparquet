@@ -87,7 +87,17 @@ interface PendingWrite {
   settings: JobSettings
 }
 
-export type PanelId = 'inspector' | 'settings' | 'json' | 'ai' | 'run' | 'issues'
+export type PanelId = 'inspector' | 'settings' | 'ai' | 'run' | 'issues'
+
+/**
+ * Which surface the middle of the editor is showing.
+ *
+ * It lives here rather than in the component because the keyboard shortcuts and
+ * the command palette have to reach it from outside the workspace. The JSON is
+ * one of these and never a side panel: two Monaco editors on the same model path
+ * share it, so opening the JSON in both places and closing one blanked the other.
+ */
+export type WorkspaceView = 'flow' | 'json' | 'runs'
 
 /**
  * A past execution the canvas is showing instead of a live run.
@@ -169,6 +179,8 @@ interface EditorState {
   /** The right-hand panel is a single tabbed surface; null means collapsed. */
   activePanel: PanelId | null
   panelWidth: number
+  /** The middle of the editor: canvas, JSON or the run history. */
+  workspaceView: WorkspaceView
 
   /* lifecycle */
   open: (job: Job) => void
@@ -258,6 +270,7 @@ interface EditorState {
   /* panels */
   togglePanel: (panel: PanelId, open?: boolean) => void
   setPanelWidth: (width: number) => void
+  setWorkspaceView: (view: WorkspaceView) => void
 }
 
 export const PANEL_MIN_WIDTH = 320
@@ -445,6 +458,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     stepRuns: {},
 
     activePanel: 'inspector',
+    workspaceView: 'flow',
     panelWidth: 400,
 
     open: (job) => {
@@ -911,6 +925,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }),
 
     setPanelWidth: (width) => set({ panelWidth: clampPanelWidth(width) }),
+
+    setWorkspaceView: (view) => set({ workspaceView: view }),
   }
 })
 

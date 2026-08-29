@@ -25,8 +25,10 @@ export interface CreditAccount {
   freeUsed: number
   freeMonthly: number
   freeRemaining: number
-  /** What could be spent right now: the rest of the allowance plus the balance. */
+  /** What could be spent right now: the allowance plus the balance, less holds. */
   available: number
+  /** Reserved by runs still in flight. Promised, not spent — a hold comes back. */
+  held: number
   createdAt: string | null
   updatedAt: string | null
 }
@@ -87,4 +89,35 @@ export interface CreditEntry {
   target: string | null
   jobName: string | null
   note: string | null
+  /** The workflow the run belonged to. Null for a run started outside Studio. */
+  workflowId: string | null
+  /** Who ran it. Null when the caller was a shared runner token, which is nobody. */
+  actor: string | null
+}
+
+/** How a month of spending can be sliced. The team always pays; this is only
+ *  how its invoice is read back. */
+export type SpendGroupBy = 'team' | 'user' | 'workflow' | 'job'
+
+/** One line of a bill. `key` null is spending with no such dimension — a run
+ *  from a script belongs to no workflow — reported rather than dropped, so the
+ *  lines always add up to the month. */
+export interface SpendGroup {
+  key: string | null
+  label: string | null
+  writes: number
+  /** The whole cost. `waived` is the part the free allowance absorbed. */
+  charged: number
+  waived: number
+  runs: number
+  lastAt: string | null
+}
+
+export interface SpendBreakdown {
+  period: string
+  groupBy: SpendGroupBy
+  /** An account id, or `all` when the caller may see the whole runner. */
+  scope: string
+  total: SpendGroup
+  groups: SpendGroup[]
 }

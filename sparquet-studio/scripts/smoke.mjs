@@ -476,6 +476,8 @@ async function main() {
     for (const [route, needle] of [
       ['#/templates', /template/i],
       ['#/learn', /lesson|learn/i],
+      ['#/billing', /Execution credits/i],
+      ['#/access', /Access &amp; IAM|Users, teams and roles/i],
       ['#/settings', /AI assistant|Appearance/i],
     ]) {
       await page.goto(`${BASE_URL}/${route}`, { waitUntil: 'networkidle2' })

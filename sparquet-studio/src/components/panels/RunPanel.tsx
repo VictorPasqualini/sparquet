@@ -1,5 +1,6 @@
 import {
   ArrowDownToLine,
+  ArrowRight,
   ArrowUpFromLine,
   Check,
   ChevronRight,
@@ -9,6 +10,7 @@ import {
   CircleX,
   Clock3,
   Copy,
+  History as HistoryIcon,
   KeyRound,
   Play,
   PlugZap,
@@ -40,7 +42,6 @@ import {
 } from '@/components/ui'
 import { getTransformation, getValidationSink, getValidator } from '@/catalog'
 import { stepLook } from '@/components/canvas/stepLook'
-import { ExecutionHistoryPanel } from '@/components/history/ExecutionHistoryPanel'
 import {
   checkRunnerHealth,
   createStepTimer,
@@ -58,6 +59,7 @@ import { nodeIdForStep, pendingStatuses } from '@/lib/runner/stepNodes'
 import { usePermissionReason } from '@/lib/auth/usePermission'
 import { cn } from '@/lib/utils/cn'
 import { formatClockTime, formatCount, formatDuration } from '@/lib/utils/format'
+import { refreshCredits } from '@/store/credits'
 import { nodeOrdinals, useEditorStore } from '@/store/editor'
 import { useSettingsStore } from '@/store/settings'
 import type {
@@ -100,8 +102,7 @@ export function RunPanel() {
   const setRunning = useEditorStore((state) => state.setRunning)
   const setStepStatus = useEditorStore((state) => state.setStepStatus)
   const setStepStatuses = useEditorStore((state) => state.setStepStatuses)
-  const showRunView = useEditorStore((state) => state.showRunView)
-  const runView = useEditorStore((state) => state.runView)
+  const setWorkspaceView = useEditorStore((state) => state.setWorkspaceView)
 
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const setRunnerUrl = useSettingsStore((state) => state.setRunnerUrl)
@@ -364,6 +365,9 @@ export function RunPanel() {
       liveRunId.current = null
       setStopping(false)
       setRunning(false)
+      // The run either spent credits or gave a hold back: either way the badge
+      // in the header is now wrong.
+      refreshCredits()
     }
   }
 
@@ -526,18 +530,22 @@ export function RunPanel() {
         )}
 
         {job && (
-          <ExecutionHistoryPanel
-            runnerUrl={runnerUrl}
-            runnerToken={runnerToken}
-            workflowId={job.workflowId}
-            jobId={job.id}
-            refreshToken={run?.runId}
-            // Picking a run here paints it on the canvas: the user asked which box
-            // did what, and the canvas is where the boxes are.
-            onViewJobRun={(record, jobRun) => showRunView(record, jobRun, { pinned: true })}
-            viewingJobRunId={runView?.jobRunId ?? null}
-            viewingRunId={runView?.runId ?? null}
-          />
+          // The history itself lives on the Runs tab, where there is room for who
+          // launched it and for how long it took. Repeating it in a 380px column
+          // said the same thing worse, so this is the door to it.
+          <button
+            type="button"
+            onClick={() => setWorkspaceView('runs')}
+            className={cn(
+              'flex w-full items-center gap-2 rounded-xl border border-line px-3 py-2',
+              'text-2xs text-content-subtle transition-colors',
+              'hover:border-line-strong hover:text-content',
+            )}
+          >
+            <HistoryIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span className="flex-1 text-left">Run history</span>
+            <ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          </button>
         )}
       </div>
     </div>

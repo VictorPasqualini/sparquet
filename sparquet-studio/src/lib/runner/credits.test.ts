@@ -4,6 +4,7 @@ import { DEFAULT_RUNNER_URL, RUNNER_TOKEN_HEADER } from '@/lib/runner/client'
 import {
   getCreditLedger,
   getMyCredits,
+  getSpendBreakdown,
   grantCredits,
   isOutOfCredits,
   listCreditAccounts,
@@ -35,6 +36,7 @@ const ACCOUNT = {
   free_monthly: 40,
   free_remaining: 31,
   available: 38,
+  held: 4,
   created_at: '2026-08-20T10:00:00Z',
   updated_at: '2026-08-20T11:00:00Z',
 }
@@ -58,6 +60,8 @@ const ENTRY = {
   target: 'spark://cluster:7077',
   job_name: 'orders',
   note: null,
+  workflow_id: 'w1',
+  actor: 'ana',
 }
 
 beforeEach(() => {
@@ -94,6 +98,7 @@ describe('getMyCredits', () => {
         freeMonthly: 40,
         freeRemaining: 31,
         available: 38,
+        held: 4,
         createdAt: '2026-08-20T10:00:00Z',
         updatedAt: '2026-08-20T11:00:00Z',
       },
@@ -189,6 +194,8 @@ describe('getCreditLedger', () => {
       target: 'spark://cluster:7077',
       jobName: 'orders',
       note: null,
+      workflowId: 'w1',
+      actor: 'ana',
     })
     expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/credits/t1/ledger?limit=20`)
   })
@@ -236,5 +243,75 @@ describe('isOutOfCredits', () => {
     expect(isOutOfCredits(forbidden)).toBe(false)
 
     expect(isOutOfCredits(new Error('boom'))).toBe(false)
+  })
+})
+
+describe('getSpendBreakdown', () => {
+  it('asks for the requested slice and maps the rows', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        period: '2026-08',
+        group_by: 'workflow',
+        scope: 't1',
+        total: { key: null, label: 'Total', writes: 5, charged: 5, waived: 1, runs: 3 },
+        groups: [
+          {
+            key: 'w1',
+            label: 'Billing',
+            writes: 4,
+            charged: 4,
+            waived: 1,
+            runs: 2,
+            last_at: '2026-08-20T11:00:00Z',
+          },
+        ],
+      }),
+    )
+
+    const bill = await getSpendBreakdown(
+      DEFAULT_RUNNER_URL,
+      { groupBy: 'workflow', period: '2026-08', accountId: 't1' },
+      'secret',
+    )
+
+    expect(bill.scope).toBe('t1')
+    expect(bill.total.charged).toBe(5)
+    expect(bill.groups[0]).toEqual({
+      key: 'w1',
+      label: 'Billing',
+      writes: 4,
+      charged: 4,
+      waived: 1,
+      runs: 2,
+      lastAt: '2026-08-20T11:00:00Z',
+    })
+    const [url] = lastCall()
+    expect(url).toBe(
+      `${DEFAULT_RUNNER_URL}/credits/usage?group_by=workflow&period=2026-08&account_id=t1`,
+    )
+  })
+
+  it('keeps unattributed spending as a null key rather than dropping it', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        period: '2026-08',
+        group_by: 'workflow',
+        scope: 'all',
+        total: { charged: 3 },
+        groups: [{ key: null, charged: 3, writes: 3, runs: 1 }],
+      }),
+    )
+
+    const bill = await getSpendBreakdown()
+
+    expect(bill.groups[0].key).toBeNull()
+    expect(bill.groups[0].charged).toBe(3)
+    expect(bill.groups[0].lastAt).toBeNull()
+  })
+
+  it('defaults to grouping by workflow', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}))
+    await getSpendBreakdown()
+    expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/credits/usage?group_by=workflow`)
   })
 })

@@ -13,6 +13,7 @@
  * make the store and this module depend on each other.
  */
 
+import { getFormat, getTransformation, getValidator } from '@/catalog'
 import type { ExecutionStatus, JobRunRecord, StepRunRecord } from '@/types/history'
 import { isValidationSinkRole, type StepStatus, type ValidationSinkRole } from '@/types/studio'
 
@@ -164,6 +165,26 @@ export function stepDetails(step: StepRunRecord): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+/**
+ * The name a person would call the step: `Filter rows`, `Parquet`, `Not null`.
+ *
+ * The runner records the framework's own identifiers (`filter`, `parquet`,
+ * `not_null`) because that is what the JSON says, and the catalog is what turns
+ * them back into the words the palette used. An identifier the catalog does not
+ * know falls through unchanged rather than being hidden — a step nobody can name
+ * still has to be readable in a list of what ran.
+ */
+export function stepName(step: StepRunRecord): string {
+  const scope = normalizeStepScope(step.scope)
+  if (scope === 'validation_sink') {
+    return step.role ? `${step.role[0]?.toUpperCase()}${step.role.slice(1)} dataset` : 'Dataset'
+  }
+  if (scope === 'transformation') return getTransformation(step.type)?.label ?? step.type
+  if (scope === 'validation') return getValidator(step.type)?.label ?? step.type
+  if (scope === 'input' || scope === 'output') return getFormat(step.type)?.label ?? step.type
+  return step.role ?? step.type ?? scope
 }
 
 /** How a step reads in a list: `validation · not_null`, `validation_sink · report`. */

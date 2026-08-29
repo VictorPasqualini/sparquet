@@ -27,6 +27,8 @@ const LessonDetail = lazy(() =>
   import('@/screens/LessonDetail').then((m) => ({ default: m.LessonDetail })),
 )
 const Settings = lazy(() => import('@/screens/Settings').then((m) => ({ default: m.Settings })))
+const Billing = lazy(() => import('@/screens/Billing').then((m) => ({ default: m.Billing })))
+const Access = lazy(() => import('@/screens/Access').then((m) => ({ default: m.Access })))
 const JobEditor = lazy(() =>
   import('@/screens/JobEditor').then((m) => ({ default: m.JobEditor })),
 )
@@ -54,6 +56,8 @@ const router = createHashRouter([
       { path: '/templates', element: lazyRoute(<Templates />) },
       { path: '/learn', element: lazyRoute(<Learn />) },
       { path: '/learn/:lessonId', element: lazyRoute(<LessonDetail />) },
+      { path: '/billing', element: lazyRoute(<Billing />) },
+      { path: '/access', element: lazyRoute(<Access />) },
       { path: '/settings', element: lazyRoute(<Settings />) },
       { path: '*', element: <NotFound /> },
     ],

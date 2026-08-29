@@ -373,7 +373,7 @@ export interface RunResult {
     truncated: boolean
   }
   logs: RunLogLine[]
-  /** Persisted execution history ids, for opening this run in `ExecutionHistoryPanel`. */
+  /** Persisted execution history ids, for opening this run in `RunsBrowser`. */
   runId?: string
   jobRunId?: string
 }
@@ -408,7 +408,7 @@ export interface PipelineRunResult {
   preview?: RunResult['preview']
   error?: string
   logs: RunLogLine[]
-  /** Persisted execution history id, for opening this run in `ExecutionHistoryPanel`. */
+  /** Persisted execution history id, for opening this run in `RunsBrowser`. */
   runId?: string
 }
 

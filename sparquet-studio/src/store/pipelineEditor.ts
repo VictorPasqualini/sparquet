@@ -58,6 +58,9 @@ export interface PipelineRunView {
   pinned: boolean
 }
 
+/** The middle of the pipeline editor: the stage canvas or its executions. */
+export type PipelineWorkspaceView = 'flow' | 'runs'
+
 interface PipelineEditorState {
   pipeline: Pipeline | null
   stages: PipelineStage[]
@@ -81,6 +84,11 @@ interface PipelineEditorState {
   logs: RunLogLine[]
   /** The past execution painted on the boxes, or `null` while none is. */
   runView: PipelineRunView | null
+  /**
+   * Which surface the middle of the editor shows. In the store because the run
+   * panel, off to the side, is what sends the user to the run history.
+   */
+  workspaceView: PipelineWorkspaceView
 
   /* lifecycle */
   open: (pipeline: Pipeline) => void
@@ -113,6 +121,7 @@ interface PipelineEditorState {
   showRunView: (run: PipelineRunRecord, options?: { pinned?: boolean }) => void
   /** Back to a canvas that describes only the pipeline as it stands. */
   clearRunView: () => void
+  setWorkspaceView: (view: PipelineWorkspaceView) => void
 }
 
 let autosaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -207,6 +216,7 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
     stageResults: {},
     logs: [],
     runView: null,
+    workspaceView: 'flow',
 
     open: (pipeline) => {
       if (get().pipeline?.id === pipeline.id) return
@@ -409,5 +419,7 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
     },
 
     clearRunView: () => set({ runView: null, stageStatus: {}, stageResults: {} }),
+
+    setWorkspaceView: (view) => set({ workspaceView: view }),
   }
 })

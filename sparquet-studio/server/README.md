@@ -679,6 +679,47 @@ the run detail in Studio shows.
 A run refused for lack of credits answers **402** with the message naming the
 grant endpoint. Nothing is written to the history for it — it never started.
 
+### `GET /credits/usage`
+
+`?group_by=workflow|user|team|job&period=YYYY-MM&account_id=...` — the month's
+spending read along one dimension. Grouping by anything else answers **400**: the
+column goes into the SQL, so only those four are accepted.
+
+```json
+{ "period": "2026-08", "group_by": "workflow", "scope": "t1",
+  "total": { "writes": 12, "charged": 3, "waived": 9, "runs": 5 },
+  "groups": [{ "key": "w1", "label": "Vendas", "writes": 8, "charged": 2,
+               "waived": 6, "runs": 3, "last_at": "2026-08-28T19:02:11Z" }] }
+```
+
+Your own team is always readable; `account_id` pointing at somebody else's, or
+omitting the scope to read the whole runner, needs `credits:Read` and answers
+**403** without it — rather than quietly answering about yourself.
+
+The account is the **team**; `workflow` and `user` are ways of reading its
+invoice, not payers. Workflow names are resolved at read time from the history
+catalog, so renaming a workflow relabels every past month too. A row whose key is
+`null` is reported as unattributed, never dropped — runs charged before the
+attribution existed still add up to the total.
+
+### `GET /audit`
+
+`?limit=&actor_id=&resource=&outcome=&action=&since=` — the trail of state-changing
+requests the runner accepted or refused, newest first. Needs `iam:ReadAudit`.
+
+```json
+[{ "id": "a1", "at": "2026-08-29T14:03:11Z", "actor": "ana", "actor_id": "u1",
+   "team": "platform", "roles": ["admin"], "action": "iam:CreateUser",
+   "method": "POST", "path": "/auth/users", "resource": "u2",
+   "outcome": "allowed", "status": 200, "detail": { "username": "bruno" },
+   "ip": "127.0.0.1" }]
+```
+
+`action` accepts a `iam:*`-style prefix. A refused request is recorded with
+`outcome: "denied"` and whatever identity it had — including none, which is
+exactly the row worth reading. Bodies are never stored: `detail` holds only the
+few named fields that say what changed.
+
 ### `GET /capabilities`
 
 Live registries read from the engines and factories, so custom types registered

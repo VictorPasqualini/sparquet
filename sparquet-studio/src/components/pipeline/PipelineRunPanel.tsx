@@ -10,11 +10,13 @@
 import { usePermissionReason } from '@/lib/auth/usePermission'
 
 import {
+  ArrowRight,
   ChevronRight,
   CircleCheck,
   CircleSlash,
   CircleStop,
   CircleX,
+  History as HistoryIcon,
   ListOrdered,
   Play,
   RefreshCw,
@@ -26,11 +28,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 
 import { stepLook } from '@/components/canvas/stepLook'
-import { ExecutionHistoryPanel } from '@/components/history/ExecutionHistoryPanel'
-import { showPipelineRun } from '@/components/history/PipelineRunViewBanner'
 import { RunResultTable } from '@/components/panels/RunResultTable'
 import {
   Badge,
@@ -52,6 +51,7 @@ import {
 } from '@/lib/runner/client'
 import { cn } from '@/lib/utils/cn'
 import { formatClockTime, formatCount, formatDuration, plural } from '@/lib/utils/format'
+import { refreshCredits } from '@/store/credits'
 import { usePipelineEditorStore } from '@/store/pipelineEditor'
 import { useSettingsStore } from '@/store/settings'
 import type { PipelineStageResult, RunLogLine, StepStatus } from '@/types/studio'
@@ -62,8 +62,6 @@ const PREVIEW_ROWS = 50
 type RunnerStatus = 'checking' | 'connected' | 'offline'
 
 export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
-  const navigate = useNavigate()
-
   const pipeline = usePipelineEditorStore((state) => state.pipeline)
   const running = usePipelineEditorStore((state) => state.running)
   const run = usePipelineEditorStore((state) => state.run)
@@ -75,7 +73,7 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
   const markStage = usePipelineEditorStore((state) => state.markStage)
   const setStageResult = usePipelineEditorStore((state) => state.setStageResult)
   const finishRun = usePipelineEditorStore((state) => state.finishRun)
-  const runView = usePipelineEditorStore((state) => state.runView)
+  const setWorkspaceView = usePipelineEditorStore((state) => state.setWorkspaceView)
 
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
@@ -212,6 +210,8 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
       if (abort.current === controller) abort.current = null
       liveRunId.current = null
       setStopping(false)
+      // Every stage that ran settled or released its hold; the badge is stale.
+      refreshCredits()
       // `finishRun` already cleared `running` on every path above, except when the
       // stream ended without a `result` event — this keeps the button usable.
       if (usePipelineEditorStore.getState().running) {
@@ -372,24 +372,21 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
         )}
 
         {pipeline && (
-          <ExecutionHistoryPanel
-            runnerUrl={runnerUrl}
-            runnerToken={runnerToken}
-            workflowId={pipeline.workflowId}
-            pipelineId={pipeline.id}
-            refreshToken={run?.runId}
-            // A whole run paints every stage box; one job of it opens that job's
-            // canvas showing the same execution, step by step.
-            onViewRun={(runId) => void showPipelineRun(runId, runnerUrl, runnerToken)}
-            viewingRunId={runView?.runId ?? null}
-            onViewJobRun={(record, jobRun) => {
-              if (!jobRun.jobId) return
-              navigate(`/jobs/${jobRun.jobId}`, {
-                state: { runId: record.id, jobRunId: jobRun.id },
-              })
-            }}
-            viewActionLabel="Open job"
-          />
+          // The history has a tab of its own, with room for who launched each run
+          // and how long it took; a second copy in this column only repeated it.
+          <button
+            type="button"
+            onClick={() => setWorkspaceView('runs')}
+            className={cn(
+              'flex w-full items-center gap-2 rounded-xl border border-line px-3 py-2',
+              'text-2xs text-content-subtle transition-colors',
+              'hover:border-line-strong hover:text-content',
+            )}
+          >
+            <HistoryIcon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            <span className="flex-1 text-left">Run history</span>
+            <ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          </button>
         )}
       </div>
     </div>

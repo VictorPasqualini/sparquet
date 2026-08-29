@@ -1,4 +1,5 @@
 import {
+  Coins,
   Github,
   GraduationCap,
   LayoutDashboard,
@@ -9,6 +10,7 @@ import {
   Plus,
   Search,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sun,
   type LucideIcon,
 } from 'lucide-react'
@@ -22,6 +24,7 @@ import {
 } from 'react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 
+import { CreditsBadge } from '@/components/credits/CreditsBadge'
 import { CommandPalette, NEW_WORKFLOW_EVENT } from '@/components/layout/CommandPalette'
 import {
   Button,
@@ -59,9 +62,14 @@ interface NavEntry {
   end?: boolean
 }
 
+// The services a shared runner has, above this browser's own preferences:
+// Billing decides whether a run starts, Access decides who may start it. Both
+// used to be sections of Settings, where nobody looking for them found them.
 const NAV: NavEntry[] = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/templates', label: 'Templates', icon: LayoutTemplate },
+  { to: '/billing', label: 'Billing', icon: Coins },
+  { to: '/access', label: 'Access & IAM', icon: ShieldCheck },
   { to: '/learn', label: 'Learn', icon: GraduationCap },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
@@ -418,9 +426,12 @@ function SidebarFooter({
         </IconButton>
       </Tooltip>
 
-      {!collapsed && (
-        <span className="ml-auto pr-1 text-2xs tabular-nums text-content-subtle">
-          v{APP_VERSION}
+      {collapsed ? (
+        <CreditsBadge />
+      ) : (
+        <span className="ml-auto flex items-center gap-2 pr-1">
+          <CreditsBadge />
+          <span className="text-2xs tabular-nums text-content-subtle">v{APP_VERSION}</span>
         </span>
       )}
     </div>

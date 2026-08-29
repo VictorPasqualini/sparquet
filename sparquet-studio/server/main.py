@@ -125,6 +125,7 @@ history = _load_sibling_module("history")
 workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
 credits = _load_sibling_module("credits")
+audit = _load_sibling_module("audit")
 
 
 # ------------------------------------------------------------------ models
@@ -974,9 +975,11 @@ def current_principal(request: Request) -> Any:
         principal = _auth.resolve_session(token)
         if principal is None:
             raise HTTPException(status_code=401, detail=SESSION_EXPIRED_HELP)
+        request.state.principal = principal
         return principal
     if _auth.has_users():
         raise HTTPException(status_code=401, detail=LOGIN_REQUIRED_HELP)
+    request.state.principal = auth.TOKEN_PRINCIPAL
     return auth.TOKEN_PRINCIPAL
 
 
@@ -1010,17 +1013,47 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
 
 _credits = credits.CreditStore()
 
+# A hold belongs to a run in flight, and a run in flight belonged to the process
+# that took it. This process is starting, so anything still open was left by a
+# crash or a restart: give it back rather than let an account stay poorer for a
+# run that never finished.
+_credits.release_stale()
+
 NO_CREDITS_STATUS = 402
 
 
-def _admit_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
-    """Refuse, before Spark is started, a team that cannot pay for a single write.
+def _admit_execution(
+    principal: Any, pipeline: Dict[str, Any], *, job_name: Optional[str] = None
+) -> Any:
+    """Hold what the run declares it will cost, before Spark is started.
 
-    This is all that can honestly be checked up front: nobody knows yet how many
-    destinations the run will manage to write. What it does buy is that a team
-    with nothing left never starts a cluster it cannot pay for. Whether the target
-    is local — and therefore free — is read from the configuration rather than
-    from the request, so a caller cannot declare their own run free.
+    The configuration says how many destinations it intends to write, and that
+    much is reserved: a team that cannot cover its own declaration is refused here
+    rather than halfway through a cluster hour. The hold is not a charge — what
+    the run really cost is settled at the end and the rest comes back. Whether the
+    target is local, and therefore free, is read from the configuration rather
+    than from the request, so a caller cannot declare their own run free.
+    """
+    account_id, username = credits.account_for(principal)
+    try:
+        return _credits.reserve(
+            account_id, credits.target_of(pipeline),
+            credits.declared_writes(pipeline),
+            username=username, job_name=job_name,
+        )
+    except credits.InsufficientCredits as error:
+        raise HTTPException(status_code=NO_CREDITS_STATUS, detail=str(error)) from error
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _precheck_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
+    """Refuse a flow whose team has nothing available, without holding anything.
+
+    A flow reserves per stage, as each one starts: holding for the whole flow up
+    front would make a five-Job Pipeline unaffordable for a team that can pay for
+    every one of them in turn. This is the cheap front-door check that keeps a
+    flow with an empty account from starting a cluster at all.
     """
     account_id, username = credits.account_for(principal)
     try:
@@ -1031,10 +1064,27 @@ def _admit_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+def _release_reservation(reservation: Any) -> None:
+    """Give a hold back when the run is over, whichever way it ended.
+
+    Called from the `finally` that releases the run lock, so a run that raised, or
+    was cancelled, or never wrote anything, does not leave credits promised to
+    nobody. Releasing twice is a no-op, which is what makes it safe to also let
+    `settle` release on the normal path.
+    """
+    if reservation is None:
+        return
+    try:
+        _credits.release(reservation)
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        _log.warning("Could not release the credit reservation: %s", error)
+
+
 def _charge_execution(
     principal: Any, pipeline: Dict[str, Any], writes: int, *,
     job_name: Optional[str] = None, job_run_id: Optional[str] = None,
-    pipeline_run_id: Optional[str] = None,
+    pipeline_run_id: Optional[str] = None, reservation: Any = None,
+    workflow_id: Optional[str] = None,
 ) -> Any:
     """Charge one credit per destination the run actually wrote.
 
@@ -1051,9 +1101,11 @@ def _charge_execution(
     """
     account_id, username = credits.account_for(principal)
     try:
-        return _credits.charge(
-            account_id, credits.target_of(pipeline), writes, username=username,
-            job_run_id=job_run_id, pipeline_run_id=pipeline_run_id, job_name=job_name,
+        return _credits.settle(
+            reservation, credits.target_of(pipeline), writes, account_id=account_id,
+            username=username, job_run_id=job_run_id,
+            pipeline_run_id=pipeline_run_id, job_name=job_name,
+            workflow_id=workflow_id, actor=credits.actor_for(principal),
         )
     except credits.CreditError as error:  # pragma: no cover - defensive
         _log.warning("Could not charge execution credits: %s", error)
@@ -1146,6 +1198,70 @@ app = FastAPI(
     version=SERVICE_VERSION,
     description="Executes Sparquet pipelines locally. Never expose this publicly.",
 )
+
+_audit = audit.AuditStore()
+
+#: Methods that change something. Reads are recorded only when they are refused —
+#: a log of every GET is a log nobody reads.
+_WRITING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def audit_detail(request: Request, **fields: Any) -> None:
+    """Let a handler say *what* it changed, in words the log can show.
+
+    The middleware knows the route and the outcome but not the meaning: that a
+    PATCH on `/auth/users/u3` demoted somebody is something only the handler
+    knows. Never pass a password, a token or a pipeline body — see `audit.py`.
+    """
+    existing = getattr(request.state, "audit_detail", None) or {}
+    existing.update(fields)
+    request.state.audit_detail = existing
+
+
+@app.middleware("http")
+async def _audit_middleware(request: Request, call_next: Callable) -> Any:
+    response = await call_next(request)
+    path = request.url.path
+    if audit.is_quiet(path):
+        return response
+    status = response.status_code
+    writing = request.method.upper() in _WRITING_METHODS
+    refused = status in (401, 403, 402)
+    if not writing and not refused:
+        return response
+
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        # Refused before any dependency resolved an identity: the request still
+        # gets an entry, because an unauthenticated probe is the event most worth
+        # having. Resolving the session here is a read, and a cheap one.
+        token = _session_token(request)
+        principal = _auth.resolve_session(token) if token else None
+
+    if status >= 500:
+        outcome = audit.FAILED
+    elif refused:
+        outcome = audit.DENIED
+    else:
+        outcome = audit.ALLOWED
+
+    _audit.record(
+        actor=getattr(principal, "username", None) or "anonymous",
+        actor_id=getattr(principal, "user_id", None),
+        team=getattr(principal, "team_name", None),
+        team_id=getattr(principal, "team_id", None),
+        roles=list(getattr(principal, "roles", []) or []),
+        action=audit.action_for(request.method, path),
+        method=request.method.upper(),
+        path=path,
+        resource=getattr(request.state, "audit_resource", None),
+        outcome=outcome,
+        status=status,
+        detail=getattr(request.state, "audit_detail", None),
+        ip=request.client.host if request.client else None,
+    )
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -1250,7 +1366,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     # not happen, and the lock has to go back or the runner stays busy over a
     # refusal. What it will actually cost is only known once it has run.
     try:
-        _admit_execution(principal, body.pipeline)
+        reservation = _admit_execution(
+            principal, body.pipeline, job_name=body.job_name or name
+        )
     except HTTPException:
         _RUN_LOCK.release()
         raise
@@ -1278,6 +1396,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
         cancelled = _ACTIVE_RUN.cancelled
         _ACTIVE_RUN.end()
         _RUN_LOCK.release()
+        # The run is over however it ended: the hold goes back now, and what the
+        # writes really cost is taken below.
+        _release_reservation(reservation)
 
     # Only the framework's own records exist here: this endpoint captures no JVM
     # stderr and no stdout — those are streamed, and only `/run/stream` opens them.
@@ -1308,7 +1429,8 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     response.credits = _charge_out(_charge_execution(
         principal, body.pipeline, len(response.output_metrics),
         job_name=body.job_name or name, job_run_id=job_run_id,
-        pipeline_run_id=pipeline_run_id,
+        pipeline_run_id=pipeline_run_id, reservation=reservation,
+        workflow_id=body.workflow_id,
     ))
     return response
 
@@ -1383,7 +1505,9 @@ def run_stream(
         )
 
     try:
-        _admit_execution(principal, body.pipeline)
+        reservation = _admit_execution(
+            principal, body.pipeline, job_name=body.job_name or name
+        )
     except HTTPException:
         _RUN_LOCK.release()
         raise
@@ -1472,7 +1596,8 @@ def run_stream(
                 response.credits = _charge_out(_charge_execution(
                     principal, body.pipeline, len(response.output_metrics),
                     job_name=body.job_name or name, job_run_id=job_run_id,
-                    pipeline_run_id=pipeline_run_id,
+                    pipeline_run_id=pipeline_run_id, reservation=reservation,
+                    workflow_id=body.workflow_id,
                 ))
                 yield _sse("result", response.model_dump())
             else:
@@ -1506,6 +1631,7 @@ def run_stream(
             recorder.flush()
             _ACTIVE_RUN.end()
             _RUN_LOCK.release()
+            _release_reservation(reservation)
 
     return StreamingResponse(
         _stream(),
@@ -1541,10 +1667,10 @@ def run_flow_stream(
     if not body.stages:
         raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
 
-    # One admission for the flow, against its first stage: a Pipeline whose team
-    # has nothing left should not start at all. Each stage is charged for its own
-    # writes as it finishes.
-    _admit_execution(principal, body.stages[0].pipeline)
+    # One check for the flow, against its first stage: a Pipeline whose team has
+    # nothing available should not start at all. Nothing is held here — each stage
+    # reserves what it declares as it starts, and settles as it finishes.
+    _precheck_execution(principal, body.stages[0].pipeline)
 
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
@@ -1597,7 +1723,10 @@ def run_flow_stream(
                 # rest are recorded as SKIPPED, so a flow that runs out of credit
                 # at stage four has really run three and the ledger says so.
                 try:
-                    _admit_execution(principal, stage.pipeline)
+                    stage_hold = _admit_execution(
+                        principal, stage.pipeline, job_name=stage.name
+                    )
+                    holds.append(stage_hold)
                 except HTTPException as refusal:
                     box["error"] = str(refusal.detail)
                     _history.skip_job_run(
@@ -1668,7 +1797,8 @@ def run_flow_stream(
                 charge = _charge_out(_charge_execution(
                     principal, stage.pipeline, len(response.output_metrics),
                     job_name=stage.name, job_run_id=job_run_id,
-                    pipeline_run_id=pipeline_run_id,
+                    pipeline_run_id=pipeline_run_id, reservation=stage_hold,
+                    workflow_id=body.workflow_id,
                 ))
                 payload = {
                     "index": index,
@@ -1790,6 +1920,11 @@ def run_flow_stream(
             recorder.flush()
             _ACTIVE_RUN.end()
             _RUN_LOCK.release()
+            # A stage that raised, or a client that hung up between stages, leaves
+            # its hold open. Releasing is idempotent, so the ones already settled
+            # cost nothing here.
+            for hold in holds:
+                _release_reservation(hold)
 
     return StreamingResponse(
         _stream(),
@@ -2365,8 +2500,11 @@ class AccountOut(BaseModel):
     free_monthly: int = 0
     free_remaining: int = 0
     #: What could be spent right now: the rest of this month's allowance plus the
-    #: granted balance.
+    #: granted balance, minus whatever runs in flight are holding.
     available: int = 0
+    #: Reserved by runs that have not finished. Promised, not spent — a hold that
+    #: nobody settles comes back at the next restart.
+    held: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -2407,6 +2545,37 @@ class LedgerEntryOut(BaseModel):
     target: Optional[str] = None
     job_name: Optional[str] = None
     note: Optional[str] = None
+    #: Where the spending happened and who caused it. The account still pays; these
+    #: are what let one invoice be read by workflow and by person.
+    workflow_id: Optional[str] = None
+    actor: Optional[str] = None
+
+
+class UsageGroupOut(BaseModel):
+    """One row of a bill: what a team, a person, a workflow or a job spent.
+
+    `key` is null for spending that has no such dimension - a run started from a
+    script belongs to no workflow. It is reported rather than dropped, so the rows
+    always add up to the month.
+    """
+
+    key: Optional[str] = None
+    label: Optional[str] = None
+    writes: int = 0
+    charged: int = 0
+    waived: int = 0
+    runs: int = 0
+    last_at: Optional[str] = None
+
+
+class UsageBreakdownOut(BaseModel):
+    period: str
+    group_by: str
+    #: Whether this is the whole runner or a single account. A caller without
+    #: `credits:Read` only ever sees their own team.
+    scope: str
+    total: UsageGroupOut
+    groups: List[UsageGroupOut] = Field(default_factory=list)
 
 
 class GrantRequest(BaseModel):
@@ -2419,6 +2588,23 @@ class RoleOut(BaseModel):
     description: str
     statements: List[Dict[str, Any]] = Field(default_factory=list)
     custom: bool = False
+
+
+class AuditEventOut(BaseModel):
+    id: str
+    at: str
+    actor: str
+    action: str
+    method: str
+    path: str
+    outcome: str
+    actor_id: Optional[str] = None
+    team: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    resource: Optional[str] = None
+    status: Optional[int] = None
+    detail: Optional[Dict[str, Any]] = None
+    ip: Optional[str] = None
 
 
 def _principal_out(principal: Any) -> PrincipalOut:
@@ -2459,9 +2645,26 @@ def _account_out(account: Any) -> AccountOut:
         id=account.id, username=account.username, balance=account.balance,
         spent=account.spent, period=account.period, free_used=account.free_used,
         free_monthly=account.free_monthly, free_remaining=account.free_remaining,
-        available=account.available, created_at=account.created_at,
+        available=account.available, held=account.held, created_at=account.created_at,
         updated_at=account.updated_at,
     )
+
+
+def _catalog_names() -> Dict[str, str]:
+    """Workflow ids to their names, for a bill that reads in words.
+
+    The ledger stores the id and nothing else: a workflow that is renamed should be
+    renamed on every invoice it ever appeared on, which a copy taken at charge time
+    would not do. A workflow the catalog has never heard of keeps its id.
+    """
+    try:
+        return {
+            record.id: record.name
+            for record in _history.list_catalog(include_deleted=True)
+            if record.kind == "workflow" and record.name
+        }
+    except Exception:  # pragma: no cover - a bill is not worth failing over
+        return {}
 
 
 def _entry_out(entry: Any) -> LedgerEntryOut:
@@ -2472,6 +2675,7 @@ def _entry_out(entry: Any) -> LedgerEntryOut:
         free_amount=entry.free_amount, shortfall=entry.shortfall, period=entry.period,
         job_run_id=entry.job_run_id, pipeline_run_id=entry.pipeline_run_id,
         target=entry.target, job_name=entry.job_name, note=entry.note,
+        workflow_id=entry.workflow_id, actor=entry.actor,
     )
 
 
@@ -2680,7 +2884,7 @@ def list_users() -> List[UserOut]:
     response_model=UserOut,
     dependencies=[Depends(requires("iam:ManageUsers"))],
 )
-def create_user(body: CreateUserRequest) -> UserOut:
+def create_user(request: Request, body: CreateUserRequest) -> UserOut:
     """Creates a user.
 
     The first one is the moment this runner stops being token-only: until it
@@ -2695,6 +2899,10 @@ def create_user(body: CreateUserRequest) -> UserOut:
         )
     except auth.AuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    audit_detail(
+        request, created=user.username, roles=list(user.roles), team=user.team_name
+    )
+    request.state.audit_resource = f"user/{user.id}"
     return _user_out(user)
 
 
@@ -2703,7 +2911,8 @@ def create_user(body: CreateUserRequest) -> UserOut:
     response_model=UserOut,
     dependencies=[Depends(requires("iam:ManageUsers"))],
 )
-def update_user(user_id: str, body: UpdateUserRequest) -> UserOut:
+def update_user(request: Request, user_id: str, body: UpdateUserRequest) -> UserOut:
+    before = _auth.get_user(user_id)
     try:
         if body.roles is not None:
             _auth.set_roles(user_id, body.roles)
@@ -2716,6 +2925,19 @@ def update_user(user_id: str, body: UpdateUserRequest) -> UserOut:
     user = _auth.get_user(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="No such user.")
+    request.state.audit_resource = f"user/{user_id}"
+    changed: Dict[str, Any] = {"user": user.username}
+    if body.roles is not None:
+        changed["roles"] = {
+            "from": list(getattr(before, "roles", []) or []), "to": list(user.roles)
+        }
+    if body.disabled is not None:
+        changed["disabled"] = bool(body.disabled)
+    if body.team is not None:
+        changed["team"] = {
+            "from": getattr(before, "team_name", None), "to": user.team_name
+        }
+    audit_detail(request, **changed)
     return _user_out(user)
 
 
@@ -2818,6 +3040,37 @@ def delete_user(user_id: str) -> Dict[str, bool]:
 # --------------------------------------------------------------------- credits
 
 
+@app.get("/audit", response_model=List[AuditEventOut])
+def list_audit(
+    limit: int = 100,
+    actor_id: Optional[str] = None,
+    resource: Optional[str] = None,
+    outcome: Optional[str] = None,
+    action: Optional[str] = None,
+    since: Optional[str] = None,
+    _: Any = Depends(requires("iam:ReadAudit")),
+) -> List[AuditEventOut]:
+    """The audit log, newest first.
+
+    `action` accepts a service wildcard (`iam:*`), which is how the interface asks
+    for "everything that touched access" without knowing every verb.
+    """
+    events = _audit.list(
+        limit=limit, actor_id=actor_id, resource=resource,
+        outcome=outcome, action=action, since=since,
+    )
+    return [
+        AuditEventOut(
+            id=event.id, at=event.at, actor=event.actor, actor_id=event.actor_id,
+            team=event.team, roles=event.roles, action=event.action,
+            method=event.method, path=event.path, resource=event.resource,
+            outcome=event.outcome, status=event.status, detail=event.detail,
+            ip=event.ip,
+        )
+        for event in events
+    ]
+
+
 @app.get("/credits/me", response_model=CreditsOut)
 def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
     """Your own balance. No permission needed: knowing what you may spend is part
@@ -2830,6 +3083,56 @@ def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
         credits_per_write=credits.credits_per_write(),
         free_monthly=credits.free_monthly(),
         usage=UsageOut(**_credits.usage(account_id)),
+    )
+
+
+@app.get("/credits/usage", response_model=UsageBreakdownOut)
+def credit_usage(
+    group_by: str = "workflow",
+    period: Optional[str] = None,
+    account_id: Optional[str] = None,
+    principal: Any = Depends(current_principal),
+) -> UsageBreakdownOut:
+    """A month of spending, grouped by team, user, workflow or job.
+
+    Scope follows the same rule as the ledger: your own team is always readable,
+    the whole runner needs `credits:Read`. A caller without it asking for another
+    account is not told a different total - it is refused, because a bill that
+    quietly answers about somebody else is worse than one that answers nothing.
+    """
+    own, _ = credits.account_for(principal)
+    everyone = principal is not None and principal.allows("credits:Read")
+    if account_id and account_id != own and not everyone:
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's spending needs credits:Read.",
+        )
+    scoped = account_id or (None if everyone else own)
+    try:
+        groups = _credits.breakdown(
+            group_by=group_by, period=period, account_id=scoped
+        )
+    except credits.CreditError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    names = _catalog_names() if group_by == "workflow" else {}
+    rows = [
+        UsageGroupOut(**{**row, "label": names.get(str(row["key"]), row["label"])})
+        if row["key"] else UsageGroupOut(**row)
+        for row in groups
+    ]
+    return UsageBreakdownOut(
+        period=period or credits.current_period(),
+        group_by=group_by,
+        scope="all" if scoped is None else scoped,
+        total=UsageGroupOut(
+            key=None, label="Total",
+            writes=sum(row.writes for row in rows),
+            charged=sum(row.charged for row in rows),
+            waived=sum(row.waived for row in rows),
+            runs=sum(row.runs for row in rows),
+        ),
+        groups=rows,
     )
 
 

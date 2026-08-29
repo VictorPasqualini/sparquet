@@ -465,10 +465,12 @@ Pendente aqui:
 
 Pendente aqui:
 
-- [ ] **Log de auditoria** — quem mudou o quê e quando (usuário criado, papel alterado,
-      equipe trocada, crédito concedido, código de recuperação emitido). O histórico
-      registra *execução*, não *alteração*; hoje a única trilha de uma mudança de
-      permissão é o estado final no SQLite.
+- ✅ **Log de auditoria** — `server/audit.py` + middleware: toda requisição que muda
+      estado vira uma linha com quem, o quê, sobre qual recurso e com que desfecho —
+      inclusive as **recusadas**, que são as que interessam ler. Filtros por ator,
+      recurso, desfecho, prefixo de ação (`iam:*`) e data em `GET /audit`, atrás de
+      `iam:ReadAudit`; corpo de requisição nunca é gravado, só os campos nomeados. Na
+      interface: **Access & IAM › Audit log**.
 - [ ] **SSO / OIDC** e senha gerenciada fora do runner — para instalação corporativa,
       onde criar mais um usuário/senha local é justamente o que não se quer.
 - [ ] **Expiração e rotação de sessão por política** — hoje é só
@@ -546,16 +548,24 @@ Pendente aqui:
 - [ ] **Preço por tamanho** — toda escrita remota custa igual, independentemente de
       gravar dez linhas ou dez bilhões. O caminho natural é ponderar por duração ou por
       linhas escritas, dados que o histórico já tem (`rows_written`, duração por step).
-- [ ] **Reserva antes de executar, com estorno** — hoje é checagem mínima na entrada +
-      débito no fim. Uma reserva do custo estimado (e estorno quando o cluster recusa o
-      run) evita duas execuções paralelas gastarem o mesmo saldo.
+- ✅ **Reserva antes de executar, com estorno** — o run segura o custo estimado antes
+      de começar e liquida no fim (`reserve` → `settle`/`release`). `available` desconta
+      o que está preso, então duas execuções paralelas não gastam o mesmo saldo; a
+      liberação é idempotente e uma queda do runner deixa reserva órfã, varrida por
+      `release_stale()` na subida.
 - [ ] **Conciliação com o custo real do cluster** — o crédito é unidade interna, sem
       relação com o que a nuvem cobrou pelo mesmo run.
 - [ ] **Cobrar execução que não passa pelo runner** — `sparquet.cli`, job agendado,
       Databricks: hoje é invisível para o razão. Sem isso, "conta da equipe" é a conta
       *do que rodou pelo Studio*.
-- [ ] **Conta por Workflow** — além de por equipe, para rateio interno entre projetos da
-      mesma equipe.
+- ✅ **Rateio por Workflow, usuário e Job** — resolvido **sem** conta por Workflow:
+      quem paga continua sendo a equipe, e o Workflow virou *dimensão de leitura*. Cada
+      lançamento do razão carrega `workflow_id` e `actor`, e `GET /credits/usage`
+      agrupa por equipe, usuário, workflow ou job. A decisão é deliberada: um Workflow
+      é uma pasta — ele é renomeado e muda de equipe —, então um orçamento preso a ele
+      quebraria no dia em que alguém arrastasse um Job para fora. O nome do Workflow é
+      resolvido na leitura, a partir do catálogo do histórico, de modo que renomear
+      reetiqueta também as faturas passadas. Na interface: **Billing › Spending**.
 
 ### 9.4 Monitoramento e observabilidade
 
@@ -662,8 +672,14 @@ Restante, na ordem do plano:
       Os itens (a) e (b) são unitários e baratos (o catálogo e o compilador já estão em
       memória no teste); (c) e (d) pedem provider dublê. Chamada real a provider fica
       atrás de env var, nunca na execução default.
-- [ ] **Semântica de `on_failure`** — que `fail` aborta **antes** de qualquer escrita e
-      antes do relatório é promessa de segurança de dado, e nada verifica.
+- ✅ **Semântica de `on_failure`** — 13 testes em `tests/validation/test_on_failure.py`,
+      sem Spark: `fail` (o default, inclusive quando a chave está ausente) aborta sem
+      escrever **nada** — nem os destinos nem o relatório, porque o engine levanta antes
+      de o pipeline chegar lá — e volta como `PipelineResult(success=False)` com as
+      falhas em `error`, nunca como exceção; `warn` e `skip` seguem e escrevem tudo, com
+      os resultados falhos ainda no objeto; validação com `skip` **não** liga
+      `PipelineResult.skipped`, que significa outra coisa (`stop_if_empty`); e resultado
+      de **severidade** `warn` nunca aborta, nem sob `fail`.
 - [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
       CLAUDE.md já é a lista de casos.
 - [ ] **Camada HTTP do runner** (`sparquet-studio/server/main.py`) — os módulos de apoio

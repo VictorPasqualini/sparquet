@@ -284,6 +284,153 @@ class EnforcementTests(StoreTestCase):
             self.store.precheck("t2", self._remote(), username="plataforma")
 
 
+class DeclaredWritesTests(unittest.TestCase):
+    """How big a hold a configuration asks for."""
+
+    def test_one_per_output(self):
+        pipeline = {"outputs": [{"format": "parquet"}, {"format": "delta"}]}
+        self.assertEqual(credits.declared_writes(pipeline), 2)
+
+    def test_a_configuration_without_outputs_still_declares_one(self):
+        """Reserving nothing would let an empty account start a cluster."""
+        self.assertEqual(credits.declared_writes({"name": "vendas"}), 1)
+        self.assertEqual(credits.declared_writes({"outputs": []}), 1)
+
+    def test_a_malformed_configuration_does_not_raise(self):
+        self.assertEqual(credits.declared_writes({"outputs": "parquet"}), 1)
+        self.assertEqual(credits.declared_writes(None), 1)
+
+
+class ReservationTests(StoreTestCase):
+    """What a run holds while it is in flight, and what comes back."""
+
+    def setUp(self):
+        super().setUp()
+        self._enforce(True)
+        self._free(0)
+
+    def _charges(self, account_id):
+        """The ledger without the grants that set the tests up."""
+        return [item for item in self.store.ledger(account_id) if item.reason != "grant"]
+
+    def test_a_hold_leaves_available_without_leaving_the_balance(self):
+        self.store.grant("t1", 10, username="data")
+        self.store.reserve("t1", self._remote(), 3, username="data")
+        account = self.store.account("t1")
+        self.assertEqual(account.held, 3)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(account.available, 7)
+
+    def test_a_hold_is_not_on_the_ledger(self):
+        """Only a settlement is a movement; a promise is not."""
+        self.store.grant("t1", 10, username="data")
+        self.store.reserve("t1", self._remote(), 3, username="data")
+        self.assertEqual(self._charges("t1"), [])
+        self.assertEqual(self.store.account("t1").spent, 0)
+
+    def test_a_run_that_cannot_cover_its_declaration_is_refused(self):
+        self.store.grant("t1", 2, username="data")
+        with self.assertRaises(credits.InsufficientCredits) as caught:
+            self.store.reserve("t1", self._remote(), 5, username="data")
+        self.assertEqual(caught.exception.needed, 5)
+        self.assertEqual(caught.exception.available, 2)
+        self.assertEqual(self.store.account("t1").held, 0)
+
+    def test_two_runs_cannot_hold_the_same_credits(self):
+        """The whole point of holding rather than checking twice."""
+        self.store.grant("t1", 4, username="data")
+        self.store.reserve("t1", self._remote(), 3, username="data")
+        with self.assertRaises(credits.InsufficientCredits):
+            self.store.reserve("t1", self._remote(), 2, username="data")
+
+    def test_a_local_run_holds_nothing(self):
+        reservation = self.store.reserve("t1", self._local(), 5, username="data")
+        self.assertFalse(reservation.held)
+        self.assertEqual(self.store.account("t1").held, 0)
+
+    def test_nothing_is_held_when_enforcement_is_off(self):
+        self._enforce(False)
+        reservation = self.store.reserve("t1", self._remote(), 5, username="data")
+        self.assertEqual(reservation.amount, 0)
+        self.assertEqual(self.store.account("t1").held, 0)
+
+    def test_settling_charges_what_ran_and_gives_the_rest_back(self):
+        self.store.grant("t1", 10, username="data")
+        reservation = self.store.reserve("t1", self._remote(), 5, username="data")
+        charge = self.store.settle(reservation, self._remote(), 2, username="data")
+        account = self.store.account("t1")
+        self.assertEqual(charge.amount, 2)
+        self.assertEqual(account.held, 0)
+        self.assertEqual(account.balance, 8)
+        self.assertEqual(account.available, 8)
+
+    def test_a_run_that_wrote_more_than_it_declared_spends_its_own_hold(self):
+        """Releasing before charging is what keeps this from a false shortfall."""
+        self.store.grant("t1", 6, username="data")
+        reservation = self.store.reserve("t1", self._remote(), 5, username="data")
+        charge = self.store.settle(reservation, self._remote(), 6, username="data")
+        self.assertEqual(charge.amount, 6)
+        self.assertEqual(charge.shortfall, 0)
+        self.assertEqual(self.store.account("t1").balance, 0)
+
+    def test_a_run_that_failed_before_writing_gives_everything_back(self):
+        self.store.grant("t1", 10, username="data")
+        reservation = self.store.reserve("t1", self._remote(), 4, username="data")
+        self.assertEqual(self.store.release(reservation), 4)
+        account = self.store.account("t1")
+        self.assertEqual(account.held, 0)
+        self.assertEqual(account.balance, 10)
+        self.assertEqual(self._charges("t1"), [])
+
+    def test_releasing_twice_gives_back_once(self):
+        """The failure path and `settle` both release; a double refund would be
+        worse than either."""
+        self.store.grant("t1", 10, username="data")
+        reservation = self.store.reserve("t1", self._remote(), 4, username="data")
+        self.store.release(reservation)
+        self.assertEqual(self.store.release(reservation), 0)
+        self.assertEqual(self.store.account("t1").held, 0)
+
+    def test_settling_after_a_release_still_charges_the_writes(self):
+        self.store.grant("t1", 10, username="data")
+        reservation = self.store.reserve("t1", self._remote(), 4, username="data")
+        self.store.release(reservation)
+        charge = self.store.settle(reservation, self._remote(), 2, username="data")
+        self.assertEqual(charge.amount, 2)
+        self.assertEqual(self.store.account("t1").balance, 8)
+        self.assertEqual(self.store.account("t1").held, 0)
+
+    def test_settling_without_a_reservation_is_a_plain_charge(self):
+        """A local run holds nothing, and still has to be metered."""
+        self.store.grant("t1", 10, username="data")
+        charge = self.store.settle(
+            None, self._remote(), 2, account_id="t1", username="data"
+        )
+        self.assertEqual(charge.amount, 2)
+        self.assertEqual(self.store.account("t1").balance, 8)
+
+    def test_a_restart_gives_back_what_the_crash_was_holding(self):
+        """A hold belongs to a run in flight; if this process is starting, there
+        are none."""
+        self.store.grant("t1", 10, username="data")
+        self.store.reserve("t1", self._remote(), 4, username="data")
+        self.store.reserve("t1", self._remote(), 2, username="data")
+        self.assertEqual(self.store.release_stale(), 2)
+        account = self.store.account("t1")
+        self.assertEqual(account.held, 0)
+        self.assertEqual(account.available, 10)
+        self.assertEqual(self.store.release_stale(), 0)
+
+    def test_the_allowance_can_be_held_like_a_balance(self):
+        self._free(5)
+        reservation = self.store.reserve("t1", self._remote(), 4, username="data")
+        self.assertEqual(self.store.account("t1").available, 1)
+        self.store.settle(reservation, self._remote(), 4, username="data")
+        account = self.store.account("t1")
+        self.assertEqual(account.free_used, 4)
+        self.assertEqual(account.available, 1)
+
+
 class AccountTests(StoreTestCase):
     def test_an_account_appears_on_first_use(self):
         self.store.charge("t1", self._remote(), 1, username="data")
@@ -398,6 +545,118 @@ class PrincipalTests(unittest.TestCase):
         )
         self.assertEqual(account_id, credits.TOKEN_ACCOUNT)
         self.assertEqual(credits.account_for(None)[0], credits.TOKEN_ACCOUNT)
+
+    def test_the_actor_is_the_person_not_the_payer(self):
+        """The team pays; the bill still has to say who spent it."""
+        principal = self._Principal("ana", "u1", team_id="t1", team_name="data")
+        self.assertEqual(credits.account_for(principal)[0], "t1")
+        self.assertEqual(credits.actor_for(principal), "ana")
+
+    def test_a_shared_token_names_nobody(self):
+        self.assertIsNone(credits.actor_for(None))
+        self.assertIsNone(
+            credits.actor_for(self._Principal("local", "u1", token_only=True))
+        )
+
+
+class BreakdownTests(StoreTestCase):
+    """Reading one month back by team, by person, by workflow and by job."""
+
+    def setUp(self):
+        super().setUp()
+        self._enforce(True)
+        self._free(0)
+        self.store.grant("t1", 100, username="data")
+        self.store.grant("t2", 100, username="plataforma")
+
+    def _run(self, account, writes, **kwargs):
+        return self.store.charge(account, self._remote(), writes, **kwargs)
+
+    def _by_key(self, rows):
+        return {row["key"]: row["charged"] for row in rows}
+
+    def test_groups_by_workflow(self):
+        self._run("t1", 2, workflow_id="w1", job_name="vendas", actor="ana")
+        self._run("t1", 3, workflow_id="w2", job_name="estoque", actor="bruno")
+        self._run("t1", 1, workflow_id="w1", job_name="vendas", actor="bruno")
+        rows = self.store.breakdown(group_by="workflow", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"w1": 3, "w2": 3})
+        self.assertEqual([row["runs"] for row in rows if row["key"] == "w1"], [2])
+
+    def test_groups_by_user_and_by_job(self):
+        self._run("t1", 2, workflow_id="w1", job_name="vendas", actor="ana")
+        self._run("t1", 5, workflow_id="w1", job_name="estoque", actor="bruno")
+        self.assertEqual(
+            self._by_key(self.store.breakdown(group_by="user", account_id="t1")),
+            {"ana": 2, "bruno": 5},
+        )
+        self.assertEqual(
+            self._by_key(self.store.breakdown(group_by="job", account_id="t1")),
+            {"vendas": 2, "estoque": 5},
+        )
+
+    def test_grouping_by_team_spans_the_accounts(self):
+        self._run("t1", 2, workflow_id="w1", actor="ana")
+        self._run("t2", 4, workflow_id="w1", actor="ana")
+        rows = self.store.breakdown(group_by="team")
+        self.assertEqual(self._by_key(rows), {"t1": 2, "t2": 4})
+        self.assertEqual(
+            {row["key"]: row["label"] for row in rows},
+            {"t1": "data", "t2": "plataforma"},
+        )
+
+    def test_an_account_only_sees_itself_when_scoped(self):
+        self._run("t1", 2, workflow_id="w1")
+        self._run("t2", 4, workflow_id="w1")
+        rows = self.store.breakdown(group_by="workflow", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"w1": 2})
+
+    def test_spending_with_no_workflow_is_reported_not_dropped(self):
+        """A run from a script belongs to no workflow. A total that omitted it
+        would be wrong; a row that says "unattributed" is merely honest."""
+        self._run("t1", 2, workflow_id="w1")
+        self._run("t1", 3)
+        rows = self.store.breakdown(group_by="workflow", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"w1": 2, None: 3})
+        self.assertEqual(sum(row["charged"] for row in rows), 5)
+
+    def test_grants_are_not_spending(self):
+        self._run("t1", 2, workflow_id="w1")
+        self.store.grant("t1", 50, note="top-up")
+        rows = self.store.breakdown(group_by="workflow", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"w1": 2})
+
+    def test_another_month_is_another_bill(self):
+        self._run("t1", 2, workflow_id="w1")
+        rows = self.store.breakdown(group_by="workflow", period="1999-01")
+        self.assertEqual(rows, [])
+
+    def test_what_the_allowance_covered_is_reported_apart(self):
+        """`charged` is the whole cost and `waived` is the part the free
+        allowance absorbed — the same convention `usage()` already uses, so a
+        month that cost nothing out of pocket reads charged 4, waived 4."""
+        self._free(10)
+        self._run("t1", 4, workflow_id="w1")
+        rows = self.store.breakdown(group_by="workflow", account_id="t1")
+        self.assertEqual(rows[0]["charged"], 4)
+        self.assertEqual(rows[0]["waived"], 4)
+        self.assertEqual(rows[0]["writes"], 4)
+        self.assertEqual(self.store.account("t1").balance, 100)
+
+    def test_an_unknown_grouping_is_refused(self):
+        """The dimension goes straight into the SQL, so nothing but the four
+        known columns may ever reach it."""
+        with self.assertRaises(credits.CreditError):
+            self.store.breakdown(group_by="account_id; DROP TABLE ledger")
+
+    def test_a_settled_run_carries_its_attribution(self):
+        hold = self.store.reserve("t1", self._remote(), 2, username="data")
+        self.store.settle(
+            hold, self._remote(), 2, account_id="t1",
+            workflow_id="w1", actor="ana", job_name="vendas",
+        )
+        rows = self.store.breakdown(group_by="user", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"ana": 2})
 
 
 if __name__ == "__main__":

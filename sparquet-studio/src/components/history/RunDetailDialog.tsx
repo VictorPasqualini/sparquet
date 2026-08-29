@@ -16,7 +16,7 @@ import { Badge, Button, ErrorCard, Modal, Segmented, Spinner } from '@/component
 import { isRunnerError } from '@/lib/runner/client'
 import { isErrorText, sameErrorText } from '@/lib/runner/errorText'
 import { getJobRunConfig, getRun } from '@/lib/runner/history'
-import { normalizeStepScope, stepDetails, stepLabel } from '@/lib/runner/stepNodes'
+import { normalizeStepScope, stepDetails, stepName } from '@/lib/runner/stepNodes'
 import { cn } from '@/lib/utils/cn'
 import { formatCount, formatDuration, plural } from '@/lib/utils/format'
 import type { RunCharge } from '@/types/credits'
@@ -180,7 +180,12 @@ export function RunDetailDialog({
                             : 'text-content-muted hover:bg-surface-sunken/60',
                         )}
                       >
-                        <StatusIcon status={job.status} className="h-3.5 w-3.5" />
+                        {/* The position in the flow, which is how a stage is
+                            referred to when somebody reports what broke. */}
+                        <span className="w-4 shrink-0 text-right font-mono tabular-nums text-content-subtle">
+                          {index + 1}
+                        </span>
+                        <StatusIcon status={job.status} className="h-3.5 w-3.5 shrink-0" />
                         <span className="min-w-0 flex-1 truncate">
                           {job.name ?? job.jobId ?? `stage ${index + 1}`}
                         </span>
@@ -573,9 +578,12 @@ function LineageSide({ title, datasets }: { title: string; datasets: LineageData
  *
  * The first question about a run is how far it got, and a number answers that
  * where a lane name does not — so the count runs 1, 2, 3 across the whole job
- * while the lane stays as a heading above its steps. The row says what the step
- * is and nothing else: rows, format and path are in the tooltip, and the Details
- * tab is where they are read.
+ * while the lane stays as a heading above its steps.
+ *
+ * Each row carries the three things somebody reading a finished run asks for: the
+ * position, the name the palette gave the step, and how long it took. What it
+ * produced — rows, format, path — sits under the name when the runner recorded
+ * it, so the common questions never need the tooltip.
  */
 function StepList({ steps }: { steps: StepRunRecord[] }) {
   const groups = useMemo(() => {
@@ -624,17 +632,24 @@ function StepRow({ step, number }: { step: StepRunRecord; number: number }) {
 
   return (
     <li className="space-y-1 rounded-lg border border-line bg-surface-sunken/40 px-2 py-1.5">
-      <div
-        className="flex items-center gap-2 text-2xs"
-        title={summary ? `${stepTiming(step)} · ${summary}` : stepTiming(step)}
-      >
-        <span className="w-4 shrink-0 text-right font-mono tabular-nums text-content-subtle">
+      <div className="flex items-start gap-2 text-2xs" title={stepTiming(step)}>
+        <span className="w-4 shrink-0 pt-px text-right font-mono tabular-nums text-content-subtle">
           {number}
         </span>
-        <StatusIcon status={step.status} className="h-3.5 w-3.5" />
-        <span className="min-w-0 flex-1 truncate text-content">{step.role ?? step.type}</span>
-        <span className="shrink-0 text-content-subtle">
+        <StatusIcon status={step.status} className="mt-px h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-baseline gap-1.5">
+            <span className="truncate text-content">{stepName(step)}</span>
+            {/* The framework's own identifier, for anyone reading the JSON beside this. */}
+            <span className="shrink-0 font-mono text-content-muted">{step.type}</span>
+          </span>
+          {summary && <span className="block truncate text-content-subtle">{summary}</span>}
+        </span>
+        <span className="shrink-0 pt-px text-right tabular-nums text-content-subtle">
           {formatDuration(step.durationMs ?? undefined)}
+          {step.startedAt && (
+            <span className="block text-content-muted">{formatClock(step.startedAt)}</span>
+          )}
         </span>
       </div>
       {isErrorText(step.errorMessage) && (
@@ -657,7 +672,18 @@ function StepRow({ step, number }: { step: StepRunRecord; number: number }) {
 }
 
 function stepTiming(step: StepRunRecord): string {
-  return `${stepLabel(step)} · started ${formatTimestamp(step.startedAt)}`
+  return `${stepName(step)} · started ${formatTimestamp(step.startedAt)}`
+}
+
+/** `14:03:22` — the wall clock a log line is matched against. */
+function formatClock(iso: string): string {
+  const parsed = Date.parse(iso)
+  if (Number.isNaN(parsed)) return ''
+  return new Date(parsed).toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
 }
 
 /** The one or two facts worth a single line: how many rows, and where they went. */

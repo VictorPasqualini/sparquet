@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { CreditsBadge } from '@/components/credits/CreditsBadge'
 import { PipelineRunViewBanner, showPipelineRun } from '@/components/history/PipelineRunViewBanner'
 import { RunsBrowser } from '@/components/history/RunsBrowser'
 import {
@@ -42,7 +43,10 @@ import { resolvePipeline, stageRowPosition, type ResolvedPipeline } from '@/lib/
 import { getPipeline } from '@/lib/storage/db'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
-import { usePipelineEditorStore } from '@/store/pipelineEditor'
+import {
+  usePipelineEditorStore,
+  type PipelineWorkspaceView,
+} from '@/store/pipelineEditor'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 import type { Pipeline, ValidationIssue } from '@/types/studio'
@@ -170,9 +174,7 @@ function PipelineWorkbench() {
   )
 }
 
-type PipelineView = 'flow' | 'runs'
-
-const PIPELINE_TABS: WorkspaceTab<PipelineView>[] = [
+const PIPELINE_TABS: WorkspaceTab<PipelineWorkspaceView>[] = [
   { id: 'flow', label: 'Flow', icon: Workflow },
   { id: 'runs', label: 'Runs', icon: HistoryIcon },
 ]
@@ -187,7 +189,9 @@ const PIPELINE_TABS: WorkspaceTab<PipelineView>[] = [
  * The canvas stays mounted across tabs so React Flow keeps the viewport.
  */
 function PipelineWorkspace({ resolved }: { resolved: ResolvedPipeline }) {
-  const [view, setView] = useState<PipelineView>('flow')
+  // In the store, so the run panel can send the user here from the side.
+  const view = usePipelineEditorStore((state) => state.workspaceView)
+  const setView = usePipelineEditorStore((state) => state.setWorkspaceView)
   const navigate = useNavigate()
 
   const pipeline = usePipelineEditorStore((state) => state.pipeline)
@@ -358,6 +362,8 @@ function PipelineTopBar({
           </IconButton>
         </Tooltip>
       </div>
+
+      <CreditsBadge linkToBilling={false} />
 
       <div className="mx-1 h-6 w-px bg-line" />
 

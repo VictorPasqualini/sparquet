@@ -192,6 +192,7 @@ ACTIONS: Dict[str, str] = {
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
     "iam:ManageRoles": "Create and edit roles, and choose the actions each one allows.",
     "iam:ManageTeams": "Create teams, move people between them, give a team roles.",
+    "iam:ReadAudit": "Read the audit log: who changed what, and who was refused.",
     "credits:Read": "See every team's execution credits and what they were spent on.",
     "credits:Manage": "Grant execution credits, or take them back.",
 }
