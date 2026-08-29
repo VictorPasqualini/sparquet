@@ -10,6 +10,8 @@ Notes on the history below:
   [docs/DEPLOY_PYPI.md](docs/DEPLOY_PYPI.md) for the release procedure.
 - Git tags start at `v0.3.0`. The entries for `0.2.3` and earlier were reconstructed
   from the commits that bumped `__version__`, so their dates are commit dates.
+- `0.4.0` has an entry but no link: it was never tagged and never reached PyPI, so
+  its changes shipped inside `0.5.0`.
 - Releases up to `0.2.3` were published under the old distribution name
   **`spark-framework`** (import `spark_framework`). `sparquet` is the name from
   `0.3.0` on.
@@ -427,6 +429,9 @@ Published as `spark-framework`.
   validation engines, the extension registries (`register_*`), `PipelineResult`, the
   structured JSON logger and the CLI.
 
-[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.3.1...v0.5.0
 [0.3.1]: https://github.com/VictorPasqualini/sparquet/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/VictorPasqualini/sparquet/releases/tag/v0.3.0
