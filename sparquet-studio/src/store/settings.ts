@@ -5,6 +5,28 @@ import type { AiSettings } from '@/types/ai'
 
 export type Theme = 'dark' | 'light'
 
+/** Key read by the inline script in index.html to paint the right theme first. */
+export const THEME_STORAGE_KEY = 'sparquet-studio:theme'
+
+/**
+ * The default follows the browser: an explicit choice is persisted and wins, and
+ * until then the OS preference decides. Read here as well as in the pre-paint
+ * script in index.html so the store never disagrees with what is on screen.
+ */
+export function storedTheme(): Theme | null {
+  try {
+    const value = localStorage.getItem(THEME_STORAGE_KEY)
+    return value === 'dark' || value === 'light' ? value : null
+  } catch {
+    return null
+  }
+}
+
+export function systemTheme(): Theme {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'light'
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
 export interface CanvasPreferences {
   snapToGrid: boolean
   showGrid: boolean
@@ -64,7 +86,7 @@ const DEFAULT_CANVAS: CanvasPreferences = {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
-      theme: 'light',
+      theme: storedTheme() ?? systemTheme(),
       ai: DEFAULT_AI_SETTINGS,
       persistApiKey: false,
       runnerUrl: 'http://127.0.0.1:8787',
@@ -89,9 +111,11 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'sparquet-studio:settings',
       version: 1,
-      // The API key is only written to disk when the user opts in.
+      // The API key is only written to disk when the user opts in. `theme` is
+      // deliberately absent: it lives in THEME_STORAGE_KEY, written only when the
+      // user picks one, so an untouched install keeps following the system
+      // instead of freezing whatever it happened to be on the first visit.
       partialize: (state) => ({
-        theme: state.theme,
         ai: state.persistApiKey ? state.ai : { ...state.ai, apiKey: '' },
         persistApiKey: state.persistApiKey,
         runnerUrl: state.runnerUrl,
@@ -100,22 +124,25 @@ export const useSettingsStore = create<SettingsState>()(
         canvas: state.canvas,
         onboarded: state.onboarded,
       }),
-      onRehydrateStorage: () => (state) => {
-        if (state) applyTheme(state.theme)
+      onRehydrateStorage: () => () => {
+        paintTheme(useSettingsStore.getState().theme)
       },
     },
   ),
 )
 
-/** Key read by the inline script in index.html to paint the right theme first. */
-export const THEME_STORAGE_KEY = 'sparquet-studio:theme'
+/** Paints the theme without recording it as a choice the user made. */
+export function paintTheme(theme: Theme): void {
+  document.documentElement.dataset.theme = theme
+}
 
 /**
- * Writes the theme in both places: the DOM attribute the app renders against,
- * and the standalone key the pre-paint script reads before React boots.
+ * Records an explicit choice: paints it and writes the standalone key the
+ * pre-paint script in index.html reads before React boots. Only call this from a
+ * user action — writing it on boot would turn 'follow the system' into a pin.
  */
 export function applyTheme(theme: Theme): void {
-  document.documentElement.dataset.theme = theme
+  paintTheme(theme)
   try {
     localStorage.setItem(THEME_STORAGE_KEY, theme)
   } catch {

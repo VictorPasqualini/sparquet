@@ -334,7 +334,7 @@ function AppearanceSection() {
 
   return (
     <Section meta={SECTION.appearance}>
-      <Field label="Theme" help="Light is the default. The choice is remembered on this device.">
+      <Field label="Theme" help="Follows your system until you pick one. The choice is remembered on this device.">
         <Segmented value={theme} onChange={setTheme} options={THEME_OPTIONS} />
       </Field>
 
