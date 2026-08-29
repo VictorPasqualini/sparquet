@@ -1,0 +1,479 @@
+{
+  "id": "eOm7lP8-le",
+  "workflowId": "JuZqOPDGSB",
+  "name": "Ingestion with data quality",
+  "description": "Clean a customer feed and measure it: five validation rules plus a persisted quality report.",
+  "tags": [],
+  "settings": {
+    "pipelineName": "ingestion_with_data_quality",
+    "description": "Customer ingestion with cleansing, five quality rules and a persisted validation report.",
+    "spark": {},
+    "validations": {
+      "onFailure": "warn"
+    }
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "source-wnzFZRuY",
+        "type": "source",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "data": {
+          "kind": "source",
+          "format": "csv",
+          "path": "/data/landing/orders",
+          "options": {}
+        },
+        "measured": {
+          "width": 264,
+          "height": 112
+        },
+        "selected": false
+      },
+      {
+        "id": "transform-Ya97CwBk",
+        "type": "transform",
+        "position": {
+          "x": 400,
+          "y": 0
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "filter",
+          "params": {
+            "condition": "status = 'active'"
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        },
+        "selected": false
+      },
+      {
+        "id": "transform-XU68njZi",
+        "type": "transform",
+        "position": {
+          "x": 800,
+          "y": 0
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "select",
+          "params": {
+            "columns": [
+              "id",
+              "name",
+              "email",
+              "age",
+              "country",
+              "created_at"
+            ]
+          },
+          "disabled": false
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        },
+        "selected": false
+      },
+      {
+        "id": "transform-8gSZnJYn",
+        "type": "transform",
+        "position": {
+          "x": 1200,
+          "y": 0
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "cast",
+          "params": {
+            "columns": {
+              "age": "integer",
+              "created_at": "timestamp"
+            }
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        }
+      },
+      {
+        "id": "transform-0OxCkPHH",
+        "type": "transform",
+        "position": {
+          "x": 1600,
+          "y": 0
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "rename",
+          "params": {
+            "mappings": {
+              "created_at": "creation_date"
+            }
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        }
+      },
+      {
+        "id": "transform-T61FmFld",
+        "type": "transform",
+        "position": {
+          "x": 2000,
+          "y": 0
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "with_column",
+          "params": {
+            "column": "loaded_at",
+            "expression": "current_timestamp()"
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        }
+      },
+      {
+        "id": "transform-6ty_SMxH",
+        "type": "transform",
+        "position": {
+          "x": 2400,
+          "y": 0
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "drop_duplicates",
+          "params": {
+            "columns": [
+              "id"
+            ]
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        }
+      },
+      {
+        "id": "validation-lqWBFCK3",
+        "type": "validation",
+        "position": {
+          "x": 2800,
+          "y": 0
+        },
+        "data": {
+          "kind": "validation",
+          "validator": "not_null",
+          "params": {
+            "columns": [
+              "id",
+              "email"
+            ]
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 91
+        }
+      },
+      {
+        "id": "validation-_NiAe48t",
+        "type": "validation",
+        "position": {
+          "x": 3200,
+          "y": 0
+        },
+        "data": {
+          "kind": "validation",
+          "validator": "unique",
+          "params": {
+            "columns": [
+              "id"
+            ]
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 91
+        }
+      },
+      {
+        "id": "validation-LjtBHIQy",
+        "type": "validation",
+        "position": {
+          "x": 3600,
+          "y": 0
+        },
+        "data": {
+          "kind": "validation",
+          "validator": "range",
+          "params": {
+            "column": "age",
+            "min": 0,
+            "max": 150
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 91
+        }
+      },
+      {
+        "id": "validation-m3oSQaJw",
+        "type": "validation",
+        "position": {
+          "x": 4000,
+          "y": 0
+        },
+        "data": {
+          "kind": "validation",
+          "validator": "regex",
+          "params": {
+            "column": "email",
+            "pattern": "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$"
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 91
+        }
+      },
+      {
+        "id": "validation-dJhYzq0u",
+        "type": "validation",
+        "position": {
+          "x": 4400,
+          "y": 0
+        },
+        "data": {
+          "kind": "validation",
+          "validator": "row_count",
+          "params": {
+            "min": 1
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 91
+        }
+      },
+      {
+        "id": "sink-lpTXdCnk",
+        "type": "sink",
+        "position": {
+          "x": 4544,
+          "y": 496
+        },
+        "data": {
+          "kind": "sink",
+          "format": "csv",
+          "path": "/data/curated/customers3",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {},
+          "dqRole": "report"
+        },
+        "measured": {
+          "width": 264,
+          "height": 119
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "sink--wfzzUrM",
+        "type": "sink",
+        "position": {
+          "x": 4576,
+          "y": 336
+        },
+        "data": {
+          "kind": "sink",
+          "format": "parquet",
+          "path": "/data/curated/customers2",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {},
+          "dqRole": "valid"
+        },
+        "measured": {
+          "width": 264,
+          "height": 119
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "sink-_tXpjSeS",
+        "type": "sink",
+        "position": {
+          "x": 4656,
+          "y": 176
+        },
+        "data": {
+          "kind": "sink",
+          "format": "csv",
+          "path": "/data/curated/customers1",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {},
+          "dqRole": "invalid"
+        },
+        "measured": {
+          "width": 264,
+          "height": 119
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "sink-LVhq8jVi",
+        "type": "sink",
+        "position": {
+          "x": 4768,
+          "y": -16
+        },
+        "data": {
+          "kind": "sink",
+          "format": "txt",
+          "path": "/data/curated/customers",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {}
+        },
+        "measured": {
+          "width": 264,
+          "height": 112
+        },
+        "selected": false,
+        "dragging": false
+      }
+    ],
+    "edges": [
+      {
+        "id": "e-source-wnzFZRuY-out-in-transform-Ya97CwBk",
+        "source": "source-wnzFZRuY",
+        "target": "transform-Ya97CwBk",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-transform-Ya97CwBk-out-in-transform-XU68njZi",
+        "source": "transform-Ya97CwBk",
+        "target": "transform-XU68njZi",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-transform-XU68njZi-out-in-transform-8gSZnJYn",
+        "source": "transform-XU68njZi",
+        "target": "transform-8gSZnJYn",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-transform-8gSZnJYn-out-in-transform-0OxCkPHH",
+        "source": "transform-8gSZnJYn",
+        "target": "transform-0OxCkPHH",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-transform-0OxCkPHH-out-in-transform-T61FmFld",
+        "source": "transform-0OxCkPHH",
+        "target": "transform-T61FmFld",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-transform-T61FmFld-out-in-transform-6ty_SMxH",
+        "source": "transform-T61FmFld",
+        "target": "transform-6ty_SMxH",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-transform-6ty_SMxH-out-in-validation-lqWBFCK3",
+        "source": "transform-6ty_SMxH",
+        "target": "validation-lqWBFCK3",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-lqWBFCK3-out-in-validation-_NiAe48t",
+        "source": "validation-lqWBFCK3",
+        "target": "validation-_NiAe48t",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-_NiAe48t-out-in-validation-LjtBHIQy",
+        "source": "validation-_NiAe48t",
+        "target": "validation-LjtBHIQy",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-LjtBHIQy-out-in-validation-m3oSQaJw",
+        "source": "validation-LjtBHIQy",
+        "target": "validation-m3oSQaJw",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-m3oSQaJw-out-in-validation-dJhYzq0u",
+        "source": "validation-m3oSQaJw",
+        "target": "validation-dJhYzq0u",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-dJhYzq0u-out-in-sink-LVhq8jVi",
+        "source": "validation-dJhYzq0u",
+        "target": "sink-LVhq8jVi",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-dJhYzq0u-out-in-sink-lpTXdCnk",
+        "source": "validation-dJhYzq0u",
+        "target": "sink-lpTXdCnk",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-dJhYzq0u-out-in-sink--wfzzUrM",
+        "source": "validation-dJhYzq0u",
+        "target": "sink--wfzzUrM",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e-validation-dJhYzq0u-out-in-sink-_tXpjSeS",
+        "source": "validation-dJhYzq0u",
+        "target": "sink-_tXpjSeS",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      }
+    ]
+  },
+  "params": [],
+  "createdAt": 1787018051165,
+  "updatedAt": 1787978454932,
+  "revision": 115
+}

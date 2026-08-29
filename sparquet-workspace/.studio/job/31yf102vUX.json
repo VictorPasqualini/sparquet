@@ -1,0 +1,204 @@
+{
+  "id": "31yf102vUX",
+  "workflowId": "JuZqOPDGSB",
+  "name": "txt to csv quality",
+  "description": "Read a CSV drop, keep the rows that matter, fix the types and land partitioned Parquet.",
+  "tags": [],
+  "settings": {
+    "pipelineName": "csv_to_parquet",
+    "description": "Landing CSV cleaned, typed and written as partitioned Parquet.",
+    "spark": {},
+    "validations": {
+      "onFailure": "warn"
+    }
+  },
+  "graph": {
+    "nodes": [
+      {
+        "id": "source-uC3DIUsL",
+        "type": "source",
+        "position": {
+          "x": 16,
+          "y": 0
+        },
+        "data": {
+          "kind": "source",
+          "format": "txt",
+          "path": "/data/test/",
+          "options": {}
+        },
+        "measured": {
+          "width": 264,
+          "height": 112
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "transform-o4qkbGtt",
+        "type": "transform",
+        "position": {
+          "x": 384,
+          "y": 16
+        },
+        "data": {
+          "kind": "transform",
+          "transform": "select",
+          "params": {
+            "columns": [
+              "substring(value, 1, 2) as id",
+              "value",
+              "ingestion_ts"
+            ]
+          }
+        },
+        "measured": {
+          "width": 264,
+          "height": 84
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "sink-HwR8_jd_",
+        "type": "sink",
+        "position": {
+          "x": 1200,
+          "y": 16
+        },
+        "data": {
+          "kind": "sink",
+          "format": "csv",
+          "path": "/data/test/saida/",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {}
+        },
+        "measured": {
+          "width": 264,
+          "height": 112
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "sink-L6OxKR",
+        "type": "sink",
+        "position": {
+          "x": 1200,
+          "y": 192
+        },
+        "data": {
+          "kind": "sink",
+          "format": "csv",
+          "path": "/data/validation/report",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {},
+          "dqRole": "report"
+        },
+        "measured": {
+          "width": 264,
+          "height": 119
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "validation-xqnwA3",
+        "type": "validation",
+        "position": {
+          "x": 832,
+          "y": 16
+        },
+        "data": {
+          "kind": "validation",
+          "validator": "range",
+          "params": {
+            "column": "id",
+            "min": 1,
+            "max": 99
+          },
+          "label": "Range"
+        },
+        "measured": {
+          "width": 264,
+          "height": 91
+        },
+        "selected": false,
+        "dragging": false
+      },
+      {
+        "id": "sink-jLcEN6",
+        "type": "sink",
+        "position": {
+          "x": 1200,
+          "y": 352
+        },
+        "data": {
+          "kind": "sink",
+          "format": "csv",
+          "path": "/data/validation/valid/",
+          "mode": "overwrite",
+          "partitionBy": [],
+          "columns": null,
+          "options": {},
+          "dqRole": "valid"
+        },
+        "measured": {
+          "width": 264,
+          "height": 119
+        },
+        "selected": false,
+        "dragging": false
+      }
+    ],
+    "edges": [
+      {
+        "type": "pipeline",
+        "source": "transform-o4qkbGtt",
+        "sourceHandle": "out",
+        "target": "validation-xqnwA3",
+        "targetHandle": "in",
+        "id": "e-3S7iNJ"
+      },
+      {
+        "type": "pipeline",
+        "source": "validation-xqnwA3",
+        "sourceHandle": "out",
+        "target": "sink-HwR8_jd_",
+        "targetHandle": "in",
+        "id": "e-4jYhQe"
+      },
+      {
+        "id": "e-validation-xqnwA3-out-in-sink-jLcEN6",
+        "source": "validation-xqnwA3",
+        "target": "sink-jLcEN6",
+        "sourceHandle": "out",
+        "targetHandle": "in"
+      },
+      {
+        "type": "pipeline",
+        "source": "validation-xqnwA3",
+        "sourceHandle": "out",
+        "target": "sink-L6OxKR",
+        "targetHandle": "in",
+        "id": "e-Er_g1U"
+      },
+      {
+        "type": "pipeline",
+        "source": "source-uC3DIUsL",
+        "sourceHandle": "out",
+        "target": "transform-o4qkbGtt",
+        "targetHandle": "in",
+        "id": "e-vUvrFD"
+      }
+    ]
+  },
+  "params": [],
+  "createdAt": 1787086973431,
+  "updatedAt": 1787884805122,
+  "revision": 275
+}

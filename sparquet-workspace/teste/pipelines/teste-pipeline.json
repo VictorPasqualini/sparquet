@@ -1,0 +1,20 @@
+{
+  "name": "teste-pipeline",
+  "description": "",
+  "stages": [
+    {
+      "id": "stage-6Lelf-",
+      "job_id": "31yf102vUX"
+    },
+    {
+      "id": "stage-M1l6UN",
+      "job_id": "eOm7lP8-le"
+    }
+  ],
+  "links": [
+    {
+      "source": "stage-6Lelf-",
+      "target": "stage-M1l6UN"
+    }
+  ]
+}

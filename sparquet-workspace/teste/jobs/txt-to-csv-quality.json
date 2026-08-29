@@ -1,0 +1,46 @@
+{
+  "name": "csv_to_parquet",
+  "description": "Landing CSV cleaned, typed and written as partitioned Parquet.",
+  "input": {
+    "format": "txt",
+    "path": "/data/test/"
+  },
+  "transformations": [
+    {
+      "type": "select",
+      "columns": [
+        "substring(value, 1, 2) as id",
+        "value",
+        "ingestion_ts"
+      ]
+    }
+  ],
+  "validations": {
+    "on_failure": "warn",
+    "report": {
+      "format": "csv",
+      "path": "/data/validation/report",
+      "mode": "overwrite"
+    },
+    "outputs": {
+      "valid": {
+        "format": "csv",
+        "path": "/data/validation/valid/",
+        "mode": "overwrite"
+      }
+    },
+    "rules": [
+      {
+        "type": "range",
+        "column": "id",
+        "min": 1,
+        "max": 99
+      }
+    ]
+  },
+  "output": {
+    "format": "csv",
+    "path": "/data/test/saida/",
+    "mode": "overwrite"
+  }
+}

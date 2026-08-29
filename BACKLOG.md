@@ -646,6 +646,22 @@ Restante, na ordem do plano:
       (16 casos): quais recursos um run nomeia, `allow` no Workflow cobrindo o Job de
       dentro, `deny` que não é alargado por um grant mais amplo, Job não salvo caindo em
       `*`, e a recusa dizendo quem foi recusado e com que papéis.
+- [ ] **Ferramenta de IA — testar de ponta a ponta** — hoje os 28 testes cobrem só o
+      transporte e o parse (`lib/ai/client.ts`, `lib/ai/parse.ts`): que o streaming é lido
+      e que um JSON de proposta vira grafo. Nada afirma que a proposta **serve**. Falta:
+      (a) o prompt montado por `lib/ai/prompt.ts` conter de fato o catálogo — uma
+      transformação, formato ou validator sem entrada em `src/catalog/` some do prompt e a
+      IA passa a inventar `type` que não existe, e isso quebra em silêncio a cada
+      capacidade nova; (b) a proposta aceita sobreviver a `compileGraph` e passar no
+      linter, que é a promessa real da ferramenta ("o que a IA gera roda"); (c)
+      `lib/ai/providers.ts` — cada provider tem endpoint, cabeçalho de autenticação e
+      formato de evento próprios, e um deles pode quebrar sem que os outros percebam;
+      (d) as respostas ruins: JSON truncado no meio do stream, texto fora do bloco,
+      `type` inexistente, chave de API recusada — o usuário tem de ver uma mensagem, não
+      um canvas vazio.
+      Os itens (a) e (b) são unitários e baratos (o catálogo e o compilador já estão em
+      memória no teste); (c) e (d) pedem provider dublê. Chamada real a provider fica
+      atrás de env var, nunca na execução default.
 - [ ] **Semântica de `on_failure`** — que `fail` aborta **antes** de qualquer escrita e
       antes do relatório é promessa de segurança de dado, e nada verifica.
 - [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
