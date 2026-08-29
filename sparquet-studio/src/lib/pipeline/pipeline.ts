@@ -325,6 +325,8 @@ export interface PipelineRunStage {
   name: string
   pipeline: PipelineSpec
   params?: Record<string, string | number | boolean | string[]>
+  /** The Studio job this stage runs, so the persisted execution history can link back to it. */
+  jobId: string
 }
 
 export interface PipelineRunPlan {
@@ -366,6 +368,7 @@ export function planPipelineRun(resolved: ResolvedPipeline): PipelineRunPlan {
       id: stage.id,
       name: stage.name,
       pipeline: stage.pipeline,
+      jobId: stage.job.id,
       ...(Object.keys(values).length > 0 ? { params: values } : {}),
     })
   }

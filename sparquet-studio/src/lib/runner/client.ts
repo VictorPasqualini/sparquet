@@ -64,6 +64,39 @@ export interface RunnerHealth {
  */
 export const RUNNER_TOKEN_HEADER = 'x-sparquet-token'
 
+/**
+ * The logged-in session, when the runner has users. Sent alongside the token, not
+ * instead of it: the token says a request may reach the runner at all, the session
+ * says who is making it.
+ */
+export const RUNNER_SESSION_HEADER = 'x-sparquet-session'
+
+/**
+ * Held here rather than passed through every call.
+ *
+ * A session belongs to the browser tab, the way a cookie would — every request
+ * this app makes is made by the same person, and threading it through each
+ * signature would only create places to forget it. `src/store/auth.ts` owns the
+ * value; this module owns attaching it.
+ */
+let sessionToken = ''
+
+export function setRunnerSession(token: string | null | undefined): void {
+  sessionToken = token ?? ''
+}
+
+export function runnerSession(): string {
+  return sessionToken
+}
+
+/** The headers that authenticate a runner call: the shared token, and the session. */
+export function authHeaders(token?: string): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (token) headers[RUNNER_TOKEN_HEADER] = token
+  if (sessionToken) headers[RUNNER_SESSION_HEADER] = sessionToken
+  return headers
+}
+
 export interface RunnerCapabilities {
   transformations: string[]
   readers: string[]
@@ -86,7 +119,18 @@ export interface RunJobRequest {
   limit?: number
   /** Parse the config and return without touching Spark. */
   dryRun?: boolean
+  /** Studio ids, sent only so the persisted execution history links back to them. */
+  workflowId?: string
+  jobId?: string
+  jobName?: string
+  /** Who to record the run against; the runner uses its own OS account if absent. */
+  runAs?: string
+  /** How it started. Studio always presses the button, so: `manual`. */
+  launched?: RunLaunch
 }
+
+/** How a run was started, as the history records it. */
+export type RunLaunch = 'manual' | 'scheduled' | 'api'
 
 /** One stage of a pipeline run, already in execution order. */
 export interface RunPipelineStageRequest {
@@ -95,6 +139,8 @@ export interface RunPipelineStageRequest {
   name?: string
   pipeline: PipelineSpec
   params?: Record<string, RunParamValue>
+  /** Studio job id this stage runs, for the persisted execution history. */
+  jobId?: string
 }
 
 export interface RunPipelineRequest {
@@ -103,6 +149,12 @@ export interface RunPipelineRequest {
   limit?: number
   /** Stop at the first failing stage. Server default: true. */
   stopOnError?: boolean
+  /** Studio ids, sent only so the persisted execution history links back to them. */
+  workflowId?: string
+  pipelineId?: string
+  name?: string
+  runAs?: string
+  launched?: RunLaunch
 }
 
 /* ------------------------------------------------------------------ narrow */
@@ -214,8 +266,10 @@ function expectRecord(payload: unknown): Record<string, unknown> {
 }
 
 function jsonPost(body: unknown, token?: string): RequestInit {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
-  if (token) headers[RUNNER_TOKEN_HEADER] = token
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...authHeaders(token),
+  }
   return { method: 'POST', headers, body: JSON.stringify(body) }
 }
 
@@ -266,6 +320,31 @@ export async function validateJob(
   }
 }
 
+/**
+ * Stops a run that is in flight.
+ *
+ * Aborting the stream only drops the client's end of the socket — the runner
+ * keeps working, and Spark with it. This is what actually ends the run: it kills
+ * the Spark jobs and stops a pipeline at its next stage.
+ *
+ * Never throws: Stop is a button, and there is nothing useful to say when the run
+ * has already finished on its own (HTTP 409) or the runner has gone away. The
+ * outcome that matters — the run's own `cancelled` status — arrives through the
+ * stream. Returns whether the runner accepted the cancellation.
+ */
+export async function cancelRun(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  runId: string,
+  token?: string,
+): Promise<boolean> {
+  try {
+    await requestJson(baseUrl, `/runs/${encodeURIComponent(runId)}/cancel`, jsonPost({}, token))
+    return true
+  } catch {
+    return false
+  }
+}
+
 export async function runJob(
   baseUrl: string = DEFAULT_RUNNER_URL,
   body: RunJobRequest,
@@ -282,6 +361,11 @@ export async function runJob(
           params: body.params,
           limit: body.limit,
           dry_run: body.dryRun,
+          workflow_id: body.workflowId,
+          job_id: body.jobId,
+          job_name: body.jobName,
+          run_as: body.runAs,
+          launched: body.launched,
         },
         token,
       ),
@@ -321,9 +405,21 @@ export interface RunStepEvent {
   ts: number
 }
 
+/**
+ * The `start` event: the runner accepted the run and opened the history rows.
+ *
+ * `runId` is what `cancelRun` addresses — it arrives before the first log line
+ * precisely so Stop can reach a run that has barely begun.
+ */
+export interface RunStreamStart {
+  pipelineName?: string
+  runId?: string
+  jobRunId?: string
+}
+
 export interface JobStreamHandlers {
   /** The runner accepted the run and started the worker thread. */
-  onStart?: (pipelineName?: string) => void
+  onStart?: (start: RunStreamStart) => void
   onLog?: (line: RunLogLine) => void
   /** Progress of one step of the pipeline. */
   onStep?: (step: RunStepEvent) => void
@@ -448,7 +544,15 @@ function dispatchSseFrame(frame: SseFrame, handlers: JobStreamHandlers): void {
 
   switch (frame.event) {
     case 'start':
-      handlers.onStart?.(isRecord(payload) ? optionalString(payload.pipeline_name) : undefined)
+      handlers.onStart?.(
+        isRecord(payload)
+          ? {
+              pipelineName: optionalString(payload.pipeline_name),
+              runId: optionalString(payload.pipeline_run_id),
+              jobRunId: optionalString(payload.job_run_id),
+            }
+          : {},
+      )
       return
     case 'log': {
       const line = toLogLine(payload)
@@ -581,6 +685,11 @@ export async function runJobStream(
       params: body.params,
       limit: body.limit,
       dry_run: body.dryRun,
+      workflow_id: body.workflowId,
+      job_id: body.jobId,
+      job_name: body.jobName,
+      run_as: body.runAs,
+      launched: body.launched,
     },
     (frame) => dispatchSseFrame(frame, handlers),
     signal,
@@ -590,9 +699,16 @@ export async function runJobStream(
 
 /* ----------------------------------------------------------- pipeline streaming */
 
+export interface PipelineStreamStart {
+  /** How many stages the runner was handed. */
+  total: number
+  /** The execution `cancelRun` addresses, known before the first stage starts. */
+  runId?: string
+}
+
 export interface PipelineStreamHandlers {
   /** The runner accepted the pipeline and knows how many stages it holds. */
-  onStart?: (total: number) => void
+  onStart?: (start: PipelineStreamStart) => void
   /** A stage began. `index` is 0-based in the sequence that was submitted. */
   onStageStart?: (stage: { index: number; id: string; name?: string }) => void
   /** A log line, carrying `stageId` when the runner attributed it to a stage. */
@@ -608,7 +724,11 @@ function dispatchPipelineFrame(frame: SseFrame, handlers: PipelineStreamHandlers
 
   switch (frame.event) {
     case 'start':
-      handlers.onStart?.(isRecord(payload) ? asNumber(payload.total) : 0)
+      handlers.onStart?.(
+        isRecord(payload)
+          ? { total: asNumber(payload.total), runId: optionalString(payload.pipeline_run_id) }
+          : { total: 0 },
+      )
       return
     case 'stage_start': {
       if (!isRecord(payload)) return
@@ -629,6 +749,19 @@ function dispatchPipelineFrame(frame: SseFrame, handlers: PipelineStreamHandlers
     case 'stage_result': {
       const stage = toPipelineStageResult(payload)
       if (stage) handlers.onStageResult?.(stage)
+      return
+    }
+    case 'stage_skipped':
+    case 'stage_cancelled': {
+      if (!isRecord(payload)) return
+      const id = optionalString(payload.id)
+      if (!id) return
+      handlers.onStageResult?.({
+        index: asNumber(payload.index),
+        id,
+        ...(optionalString(payload.name) ? { name: optionalString(payload.name) } : {}),
+        status: frame.event === 'stage_cancelled' ? 'cancelled' : 'skipped',
+      })
       return
     }
     case 'result':
@@ -669,9 +802,15 @@ export async function runPipelineStream(
           name: stage.name,
           pipeline: stage.pipeline,
           params: stage.params,
+          job_id: stage.jobId,
         })),
         limit: body.limit,
         stop_on_error: body.stopOnError,
+        workflow_id: body.workflowId,
+        pipeline_id: body.pipelineId,
+        name: body.name,
+        run_as: body.runAs,
+        launched: body.launched,
       },
       (frame) => dispatchPipelineFrame(frame, handlers),
       signal,
@@ -759,6 +898,9 @@ function toPreview(value: unknown): RunResult['preview'] {
 }
 
 function toStatus(payload: Record<string, unknown>): RunStatus {
+  // Cancelled first: the run also comes back unsuccessful, and reporting it as an
+  // error would send the user looking for a bug they caused on purpose.
+  if (asBoolean(payload.cancelled)) return 'cancelled'
   if (!asBoolean(payload.success)) return 'error'
   return asBoolean(payload.skipped) ? 'skipped' : 'success'
 }
@@ -771,12 +913,13 @@ function toPipelineStageResult(value: unknown): PipelineStageResult | null {
 
   const success = asBoolean(value.success)
   const skipped = asBoolean(value.skipped)
+  const cancelled = asBoolean(value.cancelled)
   return {
     index: asNumber(value.index),
     id,
     ...(optionalString(value.name) ? { name: optionalString(value.name) } : {}),
     // A skipped stage still succeeded: `stop_if_empty` is a graceful early exit.
-    status: !success ? 'error' : skipped ? 'skipped' : 'success',
+    status: cancelled ? 'cancelled' : !success ? 'error' : skipped ? 'skipped' : 'success',
     rowsRead: asNumber(value.rows_read),
     rowsWritten: asNumber(value.rows_written),
     durationMs: asNumber(value.duration_ms),
@@ -796,12 +939,17 @@ function toPipelineRunResult(payload: Record<string, unknown>): PipelineRunResul
     .filter((stage): stage is PipelineStageResult => stage !== null)
 
   return {
-    status: asBoolean(payload.success) ? 'success' : 'error',
+    status: asBoolean(payload.cancelled)
+      ? 'cancelled'
+      : asBoolean(payload.success)
+        ? 'success'
+        : 'error',
     durationMs: asNumber(payload.duration_ms),
     stages,
     preview: toPreview(payload.preview),
     error: optionalString(payload.error),
     logs: [],
+    runId: optionalString(payload.id),
   }
 }
 
@@ -822,5 +970,7 @@ function toRunResult(payload: Record<string, unknown>): RunResult {
     outputMetrics: toOutputMetrics(payload.output_metrics),
     preview: toPreview(payload.preview),
     logs,
+    runId: optionalString(payload.pipeline_run_id),
+    jobRunId: optionalString(payload.job_run_id),
   }
 }

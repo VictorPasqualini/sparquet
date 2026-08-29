@@ -13,26 +13,38 @@ import {
   AlertTriangle,
   ArrowLeft,
   CircleCheck,
+  History as HistoryIcon,
   Loader2,
   PanelRightClose,
   PanelRightOpen,
   Redo2,
   Save,
   Undo2,
+  Workflow,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { PipelineRunViewBanner, showPipelineRun } from '@/components/history/PipelineRunViewBanner'
+import { RunsBrowser } from '@/components/history/RunsBrowser'
+import {
+  WorkspaceTabs,
+  workspacePanelId,
+  workspaceTabId,
+  type WorkspaceTab,
+} from '@/components/layout/WorkspaceTabs'
 import { PipelineCanvas } from '@/components/pipeline/PipelineCanvas'
 import { PipelineRunPanel } from '@/components/pipeline/PipelineRunPanel'
 import { StagePicker } from '@/components/pipeline/StagePicker'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
-import { resolvePipeline, stageRowPosition } from '@/lib/pipeline'
+import { resolvePipeline, stageRowPosition, type ResolvedPipeline } from '@/lib/pipeline'
 import { getPipeline } from '@/lib/storage/db'
+import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
 import { usePipelineEditorStore } from '@/store/pipelineEditor'
 import { useLibraryStore } from '@/store/library'
+import { useSettingsStore } from '@/store/settings'
 import type { Pipeline, ValidationIssue } from '@/types/studio'
 
 export function PipelineEditor() {
@@ -144,9 +156,7 @@ function PipelineWorkbench() {
               onAdd={(jobId) => addStage(jobId, stageRowPosition(stages.length))}
             />
           </aside>
-          <main className="relative min-w-0 flex-1">
-            <PipelineCanvas resolved={resolved} />
-          </main>
+          <PipelineWorkspace resolved={resolved} />
           {showPanel && (
             <aside className="flex w-[380px] shrink-0 flex-col border-l border-line bg-surface">
               <PipelineRunPanel resolved={resolved} />
@@ -157,6 +167,89 @@ function PipelineWorkbench() {
       </div>
       <PipelineShortcuts />
     </ReactFlowProvider>
+  )
+}
+
+type PipelineView = 'flow' | 'runs'
+
+const PIPELINE_TABS: WorkspaceTab<PipelineView>[] = [
+  { id: 'flow', label: 'Flow', icon: Workflow },
+  { id: 'runs', label: 'Runs', icon: HistoryIcon },
+]
+
+/**
+ * The middle of the pipeline editor: the flow, and the executions it has had.
+ *
+ * Opening a pipeline lands on the flow, never on an old run painted over it. A run
+ * is something you go and get — `Pipeline → run id` in the Runs tab — and from
+ * there either onto these stage boxes or into the job that ran as one of them.
+ *
+ * The canvas stays mounted across tabs so React Flow keeps the viewport.
+ */
+function PipelineWorkspace({ resolved }: { resolved: ResolvedPipeline }) {
+  const [view, setView] = useState<PipelineView>('flow')
+  const navigate = useNavigate()
+
+  const pipeline = usePipelineEditorStore((state) => state.pipeline)
+  const run = usePipelineEditorStore((state) => state.run)
+  const runView = usePipelineEditorStore((state) => state.runView)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
+
+  return (
+    <main className="flex min-w-0 flex-1 flex-col">
+      <WorkspaceTabs
+        value={view}
+        onChange={setView}
+        tabs={PIPELINE_TABS}
+        ariaLabel="Pipeline workspace"
+      />
+
+      <div className="relative min-h-0 flex-1">
+        <div
+          role="tabpanel"
+          id={workspacePanelId('flow')}
+          aria-labelledby={workspaceTabId('flow')}
+          className={cn('absolute inset-0', view !== 'flow' && 'hidden')}
+        >
+          <PipelineCanvas resolved={resolved} />
+          {/* Says which execution the stage boxes are describing, and loads it. */}
+          <PipelineRunViewBanner />
+        </div>
+
+        {view === 'runs' && pipeline && (
+          <div
+            role="tabpanel"
+            id={workspacePanelId('runs')}
+            aria-labelledby={workspaceTabId('runs')}
+            className="absolute inset-0 bg-surface"
+          >
+            <RunsBrowser
+              runnerUrl={runnerUrl}
+              runnerToken={runnerToken}
+              workflowId={pipeline.workflowId}
+              pipelineId={pipeline.id}
+              refreshToken={run?.runId}
+              subject={pipeline.name}
+              // A whole run paints every stage box; one job of it opens that job's
+              // canvas showing the same execution, step by step.
+              onViewRun={(runId) => {
+                void showPipelineRun(runId, runnerUrl, runnerToken)
+                setView('flow')
+              }}
+              viewingRunId={runView?.runId ?? null}
+              onViewJobRun={(record, jobRun) => {
+                if (!jobRun.jobId) return
+                navigate(`/jobs/${jobRun.jobId}`, {
+                  state: { runId: record.id, jobRunId: jobRun.id },
+                })
+              }}
+              viewActionLabel="View on canvas"
+            />
+          </div>
+        )}
+      </div>
+    </main>
   )
 }
 

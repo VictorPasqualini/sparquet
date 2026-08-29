@@ -13,7 +13,9 @@
 import { create } from 'zustand'
 
 import { linkRejection, newLink, newStage, type LinkRejection } from '@/lib/pipeline'
+import { stageRunStatuses } from '@/lib/runner/stageRuns'
 import * as db from '@/lib/storage/db'
+import type { ExecutionStatus, PipelineRunRecord } from '@/types/history'
 import type {
   Pipeline,
   PipelineLink,
@@ -32,6 +34,28 @@ const HISTORY_LIMIT = 60
 interface Snapshot {
   stages: PipelineStage[]
   links: PipelineLink[]
+}
+
+/**
+ * Which past execution the stage boxes are describing.
+ *
+ * Without it a coloured box is ambiguous: nothing on the canvas says whether the
+ * red stage failed a minute ago or last week. The twin of `RunView` in
+ * `store/editor.ts`, one level up.
+ */
+export interface PipelineRunView {
+  runId: string
+  runName: string | null
+  status: ExecutionStatus
+  startedAt: string | null
+  durationMs: number | null
+  error: string | null
+  /** Per stage id, the `job_run` that opens that Job at this execution. */
+  jobRunIds: Record<string, string>
+  /** Executions this canvas has no box for, because the pipeline was edited since. */
+  unmatchedJobs: number
+  /** Chosen from the history list, so an automatic load must not replace it. */
+  pinned: boolean
 }
 
 interface PipelineEditorState {
@@ -55,6 +79,8 @@ interface PipelineEditorState {
   stageResults: Record<string, PipelineStageResult>
   /** Lines streamed by the current run, in arrival order. */
   logs: RunLogLine[]
+  /** The past execution painted on the boxes, or `null` while none is. */
+  runView: PipelineRunView | null
 
   /* lifecycle */
   open: (pipeline: Pipeline) => void
@@ -81,6 +107,12 @@ interface PipelineEditorState {
   setStageResult: (result: PipelineStageResult) => void
   finishRun: (result: PipelineRunResult) => void
   clearRun: () => void
+
+  /* past executions on the canvas */
+  /** Paints a persisted pipeline execution onto the stage boxes. */
+  showRunView: (run: PipelineRunRecord, options?: { pinned?: boolean }) => void
+  /** Back to a canvas that describes only the pipeline as it stands. */
+  clearRunView: () => void
 }
 
 let autosaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -174,6 +206,7 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
     stageStatus: {},
     stageResults: {},
     logs: [],
+    runView: null,
 
     open: (pipeline) => {
       if (get().pipeline?.id === pipeline.id) return
@@ -199,6 +232,7 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
         stageStatus: {},
         stageResults: {},
         logs: [],
+        runView: null,
       })
     },
 
@@ -224,6 +258,7 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
         stageStatus: {},
         stageResults: {},
         logs: [],
+        runView: null,
       })
     },
 
@@ -322,6 +357,9 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
         stageStatus: Object.fromEntries(stageIds.map((id) => [id, 'pending' as const])),
         stageResults: {},
         logs: [],
+        // The run in flight owns the boxes now; the past execution stops speaking
+        // for them the moment the first stage starts.
+        runView: null,
       })
     },
 
@@ -339,6 +377,37 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
     finishRun: (result) => set({ running: false, run: result }),
 
     clearRun: () =>
-      set({ running: false, run: null, stageStatus: {}, stageResults: {}, logs: [] }),
+      set({
+        running: false,
+        run: null,
+        stageStatus: {},
+        stageResults: {},
+        logs: [],
+        runView: null,
+      }),
+
+    showRunView: (run, options) => {
+      // A run in flight is reporting on these very boxes; a past one must not
+      // overwrite it halfway through.
+      if (get().running) return
+      const view = stageRunStatuses(get().stages, run.jobs)
+      set({
+        stageStatus: view.status,
+        stageResults: view.results,
+        runView: {
+          runId: run.id,
+          runName: run.name,
+          status: run.status,
+          startedAt: run.startedAt,
+          durationMs: run.durationMs,
+          error: run.error,
+          jobRunIds: view.jobRunIds,
+          unmatchedJobs: view.unmatched.length,
+          pinned: options?.pinned === true,
+        },
+      })
+    },
+
+    clearRunView: () => set({ runView: null, stageStatus: {}, stageResults: {} }),
   }
 })

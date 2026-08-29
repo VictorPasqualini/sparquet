@@ -1,0 +1,34 @@
+{
+  "id": "rxR0lL4LK2",
+  "workflowId": "JuZqOPDGSB",
+  "name": "teste",
+  "description": "",
+  "stages": [
+    {
+      "id": "stage-I-S52T",
+      "jobId": "eOm7lP8-le",
+      "position": {
+        "x": 481.717500399673,
+        "y": -191.3664448738177
+      }
+    },
+    {
+      "id": "stage-YlOf5w",
+      "jobId": "31yf102vUX",
+      "position": {
+        "x": -58.066563462988924,
+        "y": -207.39581051072048
+      }
+    }
+  ],
+  "links": [
+    {
+      "id": "link-IoHN3L",
+      "source": "stage-YlOf5w",
+      "target": "stage-I-S52T"
+    }
+  ],
+  "createdAt": 1787018280724,
+  "updatedAt": 1787978376873,
+  "revision": 20
+}

@@ -7,10 +7,13 @@
  * errors — and the log lines, each labelled with the stage that emitted it.
  */
 
+import { usePermissionReason } from '@/lib/auth/usePermission'
+
 import {
   ChevronRight,
   CircleCheck,
   CircleSlash,
+  CircleStop,
   CircleX,
   ListOrdered,
   Play,
@@ -23,12 +26,25 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import { stepLook } from '@/components/canvas/stepLook'
+import { ExecutionHistoryPanel } from '@/components/history/ExecutionHistoryPanel'
+import { showPipelineRun } from '@/components/history/PipelineRunViewBanner'
 import { RunResultTable } from '@/components/panels/RunResultTable'
-import { Badge, Button, EmptyState, SectionTitle, Spinner, Tooltip } from '@/components/ui'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorCard,
+  SectionTitle,
+  Spinner,
+  Tooltip,
+} from '@/components/ui'
+import { isErrorText, sameErrorText } from '@/lib/runner/errorText'
 import { planPipelineRun, type ResolvedPipeline } from '@/lib/pipeline'
 import {
+  cancelRun,
   checkRunnerHealth,
   isRunnerError,
   RUNNER_START_COMMAND,
@@ -46,6 +62,9 @@ const PREVIEW_ROWS = 50
 type RunnerStatus = 'checking' | 'connected' | 'offline'
 
 export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
+  const navigate = useNavigate()
+
+  const pipeline = usePipelineEditorStore((state) => state.pipeline)
   const running = usePipelineEditorStore((state) => state.running)
   const run = usePipelineEditorStore((state) => state.run)
   const logs = usePipelineEditorStore((state) => state.logs)
@@ -56,14 +75,19 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
   const markStage = usePipelineEditorStore((state) => state.markStage)
   const setStageResult = usePipelineEditorStore((state) => state.setStageResult)
   const finishRun = usePipelineEditorStore((state) => state.finishRun)
+  const runView = usePipelineEditorStore((state) => state.runView)
 
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const runAs = useSettingsStore((state) => state.runAs)
 
   const [runner, setRunner] = useState<RunnerStatus>('checking')
   const [runnerNote, setRunnerNote] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
   const abort = useRef<AbortController | null>(null)
   const healthAbort = useRef<AbortController | null>(null)
+  /** The execution id the runner opened for this run — what Stop cancels. */
+  const liveRunId = useRef<string | null>(null)
 
   const checkHealth = useCallback(async (url: string) => {
     healthAbort.current?.abort()
@@ -97,11 +121,24 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
     return labels
   }, [resolved.stages])
 
+  // The runner authorizes the run again against the Workflow, the Pipeline and
+  // each Job; this only spares the round trip that would come back 403.
+  const runDenied = usePermissionReason(
+    'run:Execute',
+    pipeline ? `pipeline/${pipeline.id}` : '*',
+  )
+  const cancelDenied = usePermissionReason(
+    'run:Cancel',
+    pipeline ? `pipeline/${pipeline.id}` : '*',
+  )
+
   const disabledReason = running
     ? 'A run is already in progress'
     : plan.blockers.length > 0
       ? plan.blockers[0].message
       : null
+
+  const runReason = runDenied ?? disabledReason
 
   const execute = async () => {
     if (plan.stages.length === 0) return
@@ -114,10 +151,22 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
     try {
       await runPipelineStream(
         runnerUrl,
-        { stages: plan.stages, limit: PREVIEW_ROWS, stopOnError: true },
         {
-          onStart: (total) =>
-            appendLog(line('info', `Running ${plural(total, 'stage')} in sequence`)),
+          stages: plan.stages,
+          limit: PREVIEW_ROWS,
+          stopOnError: true,
+          workflowId: pipeline?.workflowId,
+          pipelineId: pipeline?.id,
+          name: pipeline?.name,
+          runAs: runAs || undefined,
+          launched: 'manual',
+        },
+        {
+          onStart: (start) => {
+            // The run exists on the runner from here on, so Stop can cancel it.
+            liveRunId.current = start.runId ?? null
+            appendLog(line('info', `Running ${plural(start.total, 'stage')} in sequence`))
+          },
           onStageStart: (stage) => markStage(stage.id, 'running'),
           onLog: appendLog,
           onStageResult: setStageResult,
@@ -143,11 +192,13 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
       )
       setRunner('connected')
     } catch (error) {
+      // Only the fallback path lands here: a cancel the runner accepted closes the
+      // stream normally, with a `cancelled` result of its own.
       const cancelled = controller.signal.aborted
       const message = cancelled ? 'Cancelled before it finished' : messageOf(error)
       appendLog(line(cancelled ? 'warning' : 'error', message))
       finishRun({
-        status: cancelled ? 'idle' : 'error',
+        status: cancelled ? 'cancelled' : 'error',
         error: cancelled ? undefined : message,
         stages: [],
         logs: [],
@@ -159,6 +210,8 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
       }
     } finally {
       if (abort.current === controller) abort.current = null
+      liveRunId.current = null
+      setStopping(false)
       // `finishRun` already cleared `running` on every path above, except when the
       // stream ended without a `result` event — this keeps the button usable.
       if (usePipelineEditorStore.getState().running) {
@@ -171,6 +224,31 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
       }
     }
   }
+
+  /**
+   * Stop: cancels the run ON THE RUNNER, then falls back to dropping the stream.
+   *
+   * The stage in flight takes the Spark cancellation and the ones behind it never
+   * start — aborting alone would leave the whole sequence running unwatched.
+   */
+  const stopRun = async () => {
+    setStopping(true)
+    const runId = liveRunId.current
+    const accepted = runId ? await cancelRun(runnerUrl, runId, runnerToken) : false
+    if (!accepted) abort.current?.abort()
+  }
+
+  /**
+   * The pipeline's error is the failing stage's error, and that stage prints it
+   * again in the list right below. Once is enough, and the row is the better
+   * place: it also says which stage it was. The banner keeps the message only
+   * when no stage claims it — a runner that never started one, say.
+   */
+  const bannerError = isErrorText(run?.error)
+    ? Object.values(stageResults).some((result) => sameErrorText(result?.error, run?.error))
+      ? undefined
+      : run?.error
+    : undefined
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
@@ -186,7 +264,7 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
 
         <div className="flex items-center gap-2">
           <Tooltip
-            content={disabledReason ?? 'Run every stage, in the order drawn on the canvas'}
+            content={runReason ?? 'Run every stage, in the order drawn on the canvas'}
           >
             <span className="min-w-0 flex-1">
               <Button
@@ -195,7 +273,7 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
                 fullWidth
                 icon={<Play className="h-4 w-4" />}
                 loading={running}
-                disabled={disabledReason !== null}
+                disabled={runReason !== null}
                 onClick={() => void execute()}
               >
                 {running ? 'Running…' : `Run ${plural(plan.stages.length, 'stage')}`}
@@ -203,14 +281,23 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
             </span>
           </Tooltip>
           {running && (
-            <Button
-              variant="danger"
-              size="lg"
-              icon={<Square className="h-3.5 w-3.5" />}
-              onClick={() => abort.current?.abort()}
+            <Tooltip
+              content={
+                cancelDenied ?? 'Cancels the execution on the runner, not just this window'
+              }
             >
-              Stop
-            </Button>
+              <span>
+                <Button
+                  variant="danger"
+                  size="lg"
+                  icon={<Square className="h-3.5 w-3.5" />}
+                  disabled={stopping || cancelDenied !== null}
+                  onClick={() => void stopRun()}
+                >
+                  {stopping ? 'Stopping…' : 'Stop'}
+                </Button>
+              </span>
+            </Tooltip>
           )}
         </div>
 
@@ -244,7 +331,7 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
 
       <div className="scroll-area flex-1 space-y-4 p-3">
         {run && (
-          <StatusBanner status={run.status} error={run.error} durationMs={run.durationMs} />
+          <StatusBanner status={run.status} error={bannerError} durationMs={run.durationMs} />
         )}
 
         {resolved.stages.length > 0 && (
@@ -282,6 +369,27 @@ export function PipelineRunPanel({ resolved }: { resolved: ResolvedPipeline }) {
               description="Run the pipeline to watch each pipeline execute in order. Everything runs on your machine."
             />
           )
+        )}
+
+        {pipeline && (
+          <ExecutionHistoryPanel
+            runnerUrl={runnerUrl}
+            runnerToken={runnerToken}
+            workflowId={pipeline.workflowId}
+            pipelineId={pipeline.id}
+            refreshToken={run?.runId}
+            // A whole run paints every stage box; one job of it opens that job's
+            // canvas showing the same execution, step by step.
+            onViewRun={(runId) => void showPipelineRun(runId, runnerUrl, runnerToken)}
+            viewingRunId={runView?.runId ?? null}
+            onViewJobRun={(record, jobRun) => {
+              if (!jobRun.jobId) return
+              navigate(`/jobs/${jobRun.jobId}`, {
+                state: { runId: record.id, jobRunId: jobRun.id },
+              })
+            }}
+            viewActionLabel="Open job"
+          />
         )}
       </div>
     </div>
@@ -340,9 +448,15 @@ const BANNERS: Record<
     className: 'border-state-danger/40 bg-state-danger/10',
     iconClassName: 'text-state-danger',
   },
+  cancelled: {
+    icon: CircleStop,
+    title: 'Pipeline cancelled',
+    className: 'border-state-warning/40 bg-state-warning/10',
+    iconClassName: 'text-state-warning',
+  },
   idle: {
     icon: CircleSlash,
-    title: 'Run cancelled',
+    title: 'No run',
     className: 'border-line bg-surface-sunken',
     iconClassName: 'text-content-subtle',
   },
@@ -365,11 +479,21 @@ function StatusBanner({
       className={cn('flex items-start gap-2.5 rounded-xl border px-3 py-2.5', look.className)}
     >
       <Icon className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', look.iconClassName)} aria-hidden />
-      <div className="min-w-0 space-y-0.5">
+      <div className="min-w-0 flex-1 space-y-1">
         <p className="text-xs font-medium text-content">{look.title}</p>
-        <p className="break-words text-2xs leading-relaxed text-content-muted">
-          {error ?? `Took ${formatDuration(durationMs)}.`}
-        </p>
+        {/* The stage's own error can be a whole stack trace: it gets a scrollable
+            card of its own, so it cannot push the stages and the logs off screen. */}
+        {error ? (
+          <ErrorCard
+            message={error}
+            tone={status === 'cancelled' ? 'warning' : 'danger'}
+            className="bg-surface/70"
+          />
+        ) : (
+          <p className="break-words text-2xs leading-relaxed text-content-muted">
+            {`Took ${formatDuration(durationMs)}.`}
+          </p>
+        )}
       </div>
     </div>
   )
@@ -421,7 +545,12 @@ function StageRow({
         </p>
       )}
       {result?.error && (
-        <p className="pl-6 text-2xs leading-relaxed text-state-danger">{result.error}</p>
+        <ErrorCard
+          message={result.error}
+          tone={result.status === 'cancelled' ? 'warning' : 'danger'}
+          size="sm"
+          className="ml-6 mt-1"
+        />
       )}
     </li>
   )

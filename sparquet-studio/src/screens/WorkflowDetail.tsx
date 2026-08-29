@@ -40,6 +40,7 @@ import {
   useConfirm,
 } from '@/components/ui'
 import { TEMPLATES } from '@/data/templates'
+import { usePermission } from '@/lib/auth/usePermission'
 import { compileGraph, serializePipeline } from '@/lib/compiler'
 import { cn } from '@/lib/utils/cn'
 import { downloadText } from '@/lib/utils/download'
@@ -79,6 +80,11 @@ export function WorkflowDetail() {
   const duplicateJob = useLibraryStore((state) => state.duplicateJob)
   const deleteJob = useLibraryStore((state) => state.deleteJob)
   const deletePipeline = useLibraryStore((state) => state.deletePipeline)
+
+  // The runner evaluates the same policy and answers 403 anyway; disabling here
+  // only spares the round trip and the surprise.
+  const mayWrite = usePermission('workspace:Write')
+  const mayDelete = usePermission('workspace:Delete')
 
   const [confirm, confirmDialog] = useConfirm()
   const [query, setQuery] = useState('')
@@ -243,6 +249,7 @@ export function WorkflowDetail() {
             <Input
               value={name}
               aria-label="Workflow name"
+              disabled={!mayWrite}
               onChange={(event) => setName(event.target.value)}
               onBlur={commitName}
               onKeyDown={(event) => {
@@ -259,6 +266,7 @@ export function WorkflowDetail() {
             value={description}
             rows={2}
             aria-label="Workflow description"
+            disabled={!mayWrite}
             placeholder="What lives in this workflow?"
             onChange={(event) => setDescription(event.target.value)}
             onBlur={commitDescription}
@@ -273,7 +281,7 @@ export function WorkflowDetail() {
         <div className="flex items-center gap-1">
           <Popover>
             <PopoverTrigger asChild>
-              <IconButton label="Workflow accent" size="sm">
+              <IconButton label="Workflow accent" size="sm" disabled={!mayWrite}>
                 <Palette />
               </IconButton>
             </PopoverTrigger>
@@ -287,6 +295,7 @@ export function WorkflowDetail() {
           <IconButton
             label="Delete workflow"
             size="sm"
+            disabled={!mayDelete}
             onClick={() => void handleDeleteWorkflow()}
             className="hover:text-state-danger"
           >
@@ -318,11 +327,13 @@ export function WorkflowDetail() {
           <Button
             size="sm"
             icon={<ListOrdered className="h-4 w-4" />}
-            disabled={owned.length === 0}
+            disabled={owned.length === 0 || !mayWrite}
             title={
-              owned.length === 0
-                ? 'Create a job first — a pipeline orders jobs that already exist'
-                : 'Chain several jobs into one sequential run'
+              !mayWrite
+                ? 'Your role does not allow workspace:Write'
+                : owned.length === 0
+                  ? 'Create a job first — a pipeline orders jobs that already exist'
+                  : 'Chain several jobs into one sequential run'
             }
             onClick={() => setCreatingPipeline(true)}
           >
@@ -332,6 +343,7 @@ export function WorkflowDetail() {
             size="sm"
             variant="primary"
             icon={<Plus className="h-4 w-4" />}
+            disabled={!mayWrite}
             onClick={() => setCreating(true)}
           >
             New job
@@ -352,6 +364,8 @@ export function WorkflowDetail() {
                   onOpen={() => navigate(`/pipelines/${pipeline.id}`)}
                   onRename={() => setRenamingPipeline(pipeline)}
                   onDelete={() => void handleDeletePipeline(pipeline)}
+                  editable={mayWrite}
+                  deletable={mayDelete}
                 />
               ))}
             </ul>
@@ -369,6 +383,7 @@ export function WorkflowDetail() {
                   size="sm"
                   variant="primary"
                   icon={<Plus className="h-4 w-4" />}
+                  disabled={!mayWrite}
                   onClick={() => setCreating(true)}
                 >
                   New job
@@ -406,6 +421,8 @@ export function WorkflowDetail() {
                   onMove={() => setMoving(job)}
                   onExport={() => exportJob(job)}
                   onDelete={() => void handleDelete(job)}
+                  editable={mayWrite}
+                  deletable={mayDelete}
                 />
               ))}
             </ul>
@@ -461,6 +478,10 @@ interface JobRowProps {
   onMove: () => void
   onExport: () => void
   onDelete: () => void
+  /** `workspace:Write` — duplicating, renaming and moving all write a record. */
+  editable?: boolean
+  /** `workspace:Delete`, a permission of its own. */
+  deletable?: boolean
 }
 
 function JobRow({
@@ -471,6 +492,8 @@ function JobRow({
   onMove,
   onExport,
   onDelete,
+  editable = true,
+  deletable = true,
 }: JobRowProps) {
   return (
     <li className="flex items-center gap-2 pr-2 transition-colors hover:bg-surface-raised">
@@ -524,22 +547,30 @@ function JobRow({
           <MenuItem icon={<ArrowRight />} onSelect={onOpen}>
             Open
           </MenuItem>
-          <MenuItem icon={<Copy />} onSelect={onDuplicate}>
-            Duplicate
-          </MenuItem>
-          <MenuItem icon={<Pencil />} onSelect={() => afterMenuClose(onRename)}>
-            Rename
-          </MenuItem>
-          <MenuItem icon={<FolderSymlink />} onSelect={() => afterMenuClose(onMove)}>
-            Move to workflow…
-          </MenuItem>
+          {editable ? (
+            <>
+              <MenuItem icon={<Copy />} onSelect={onDuplicate}>
+                Duplicate
+              </MenuItem>
+              <MenuItem icon={<Pencil />} onSelect={() => afterMenuClose(onRename)}>
+                Rename
+              </MenuItem>
+              <MenuItem icon={<FolderSymlink />} onSelect={() => afterMenuClose(onMove)}>
+                Move to workflow…
+              </MenuItem>
+            </>
+          ) : null}
           <MenuItem icon={<FileJson />} onSelect={onExport}>
             Export JSON
           </MenuItem>
-          <MenuSeparator />
-          <MenuItem danger icon={<Trash2 />} onSelect={() => afterMenuClose(onDelete)}>
-            Delete
-          </MenuItem>
+          {deletable ? (
+            <>
+              <MenuSeparator />
+              <MenuItem danger icon={<Trash2 />} onSelect={() => afterMenuClose(onDelete)}>
+                Delete
+              </MenuItem>
+            </>
+          ) : null}
         </MenuContent>
       </Menu>
     </li>
@@ -553,9 +584,21 @@ interface PipelineRowProps {
   onOpen: () => void
   onRename: () => void
   onDelete: () => void
+  /** `workspace:Write` — renaming writes a record. */
+  editable?: boolean
+  /** `workspace:Delete`, a permission of its own. */
+  deletable?: boolean
 }
 
-function PipelineRow({ pipeline, jobs, onOpen, onRename, onDelete }: PipelineRowProps) {
+function PipelineRow({
+  pipeline,
+  jobs,
+  onOpen,
+  onRename,
+  onDelete,
+  editable = true,
+  deletable = true,
+}: PipelineRowProps) {
   const known = new Set(jobs.map((job) => job.id))
   const broken = pipeline.stages.filter((stage) => !known.has(stage.jobId)).length
 
@@ -603,13 +646,19 @@ function PipelineRow({ pipeline, jobs, onOpen, onRename, onDelete }: PipelineRow
           <MenuItem icon={<ArrowRight />} onSelect={onOpen}>
             Open
           </MenuItem>
-          <MenuItem icon={<Pencil />} onSelect={() => afterMenuClose(onRename)}>
-            Rename
-          </MenuItem>
-          <MenuSeparator />
-          <MenuItem danger icon={<Trash2 />} onSelect={() => afterMenuClose(onDelete)}>
-            Delete
-          </MenuItem>
+          {editable ? (
+            <MenuItem icon={<Pencil />} onSelect={() => afterMenuClose(onRename)}>
+              Rename
+            </MenuItem>
+          ) : null}
+          {deletable ? (
+            <>
+              <MenuSeparator />
+              <MenuItem danger icon={<Trash2 />} onSelect={() => afterMenuClose(onDelete)}>
+                Delete
+              </MenuItem>
+            </>
+          ) : null}
         </MenuContent>
       </Menu>
     </li>

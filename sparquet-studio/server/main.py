@@ -27,6 +27,7 @@ root into sys.path so `sparquet` is importable:
 
 from __future__ import annotations
 
+import getpass
 import importlib
 import importlib.util
 import json
@@ -44,7 +45,7 @@ from datetime import date, datetime, timezone
 from datetime import time as clock_time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +58,9 @@ DEFAULT_ORIGINS = ("http://localhost:5273", "http://127.0.0.1:5273")
 DEFAULT_PREVIEW_LIMIT = 50
 MAX_PREVIEW_LIMIT = 1000
 TOKEN_HEADER = "x-sparquet-token"
+#: A login, on top of the token. The token says "this request may reach the
+#: runner at all"; this says who is making it. See `server/auth.py`.
+SESSION_HEADER = "x-sparquet-session"
 
 _VERSION_PATTERN = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
 
@@ -99,6 +103,30 @@ _bootstrap_sys_path()
 _pin_pyspark_python()
 
 
+def _load_sibling_module(name: str) -> Any:
+    """Loads a sibling module by path, not by package name — this module is started
+    both as `uvicorn server.main:app` (from `sparquet-studio/`) and as
+    `python server/main.py` (script mode), and only a path-based load is correct
+    under both: a plain `import history` breaks under the first, a relative
+    `from . import history` breaks under the second."""
+    spec = importlib.util.spec_from_file_location(
+        f"sparquet_studio_{name}", Path(__file__).resolve().parent / f"{name}.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses (Python 3.14) resolves annotations via sys.modules[cls.__module__];
+    # module_from_spec alone does not register it there.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+history = _load_sibling_module("history")
+workspace = _load_sibling_module("workspace")
+auth = _load_sibling_module("auth")
+credits = _load_sibling_module("credits")
+
+
 # ------------------------------------------------------------------ models
 
 
@@ -107,6 +135,17 @@ class RunRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
     limit: int = Field(default=DEFAULT_PREVIEW_LIMIT, ge=1, le=MAX_PREVIEW_LIMIT)
     dry_run: bool = False
+    # Identify the Studio Job this run belongs to, so it is persisted linked to it
+    # and shows up in that Job's execution history. Optional: an older Studio build
+    # (or a bare API call) that omits these still runs fine, just unlinked.
+    workflow_id: Optional[str] = None
+    job_id: Optional[str] = None
+    job_name: Optional[str] = None
+    # Who this run is attributed to, and how it got started ("manual",
+    # "scheduled", "api"). The runner authenticates a token, not a person, so
+    # `run_as` is a claim: absent, the account the runner runs under is recorded.
+    run_as: Optional[str] = None
+    launched: Optional[str] = None
 
 
 class FlowStageRequest(BaseModel):
@@ -116,6 +155,7 @@ class FlowStageRequest(BaseModel):
     name: Optional[str] = None
     pipeline: Dict[str, Any]
     params: Optional[Dict[str, Any]] = None
+    job_id: Optional[str] = None
 
 
 class RunFlowRequest(BaseModel):
@@ -129,6 +169,11 @@ class RunFlowRequest(BaseModel):
     stages: List[FlowStageRequest]
     limit: int = Field(default=DEFAULT_PREVIEW_LIMIT, ge=1, le=MAX_PREVIEW_LIMIT)
     stop_on_error: bool = True
+    workflow_id: Optional[str] = None
+    pipeline_id: Optional[str] = None
+    name: Optional[str] = None
+    run_as: Optional[str] = None
+    launched: Optional[str] = None
 
 
 class ValidateRequest(BaseModel):
@@ -163,9 +208,32 @@ class LogOut(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
+class RunChargeOut(BaseModel):
+    """What one execution cost its team.
+
+    Sent back with the run and stored against the job execution, so the price
+    appears where the work does instead of only in a billing screen: `writes` is
+    what was actually written, `amount` what that cost, `free_amount` how much of
+    it the monthly allowance covered, and `applied` whether a balance really moved
+    (false on a runner that meters without enforcing).
+    """
+
+    amount: int
+    writes: int
+    applied: bool
+    free_amount: int = 0
+    #: Non-zero only when a run wrote more than its team could pay for. The work
+    #: is done and recorded; the next run is the one that gets refused.
+    shortfall: int = 0
+    target: Optional[str] = None
+    balance_after: Optional[int] = None
+
+
 class RunResponse(BaseModel):
     success: bool
     skipped: bool = False
+    # Stopped on request, not broken: the client paints `cancelled`, never `failed`.
+    cancelled: bool = False
     pipeline_name: Optional[str] = None
     rows_read: int = 0
     rows_written: int = 0
@@ -175,6 +243,11 @@ class RunResponse(BaseModel):
     output_metrics: List[OutputMetricOut] = Field(default_factory=list)
     preview: Optional[PreviewOut] = None
     logs: List[LogOut] = Field(default_factory=list)
+    pipeline_run_id: Optional[str] = None
+    job_run_id: Optional[str] = None
+    #: What this run cost. Null for a local run, which is free, and for a run on a
+    #: runner where crediting failed — never a reason to fail a run that worked.
+    credits: Optional[RunChargeOut] = None
 
 
 class ValidateResponse(BaseModel):
@@ -189,6 +262,13 @@ class HealthResponse(BaseModel):
     framework_version: Optional[str] = None
     # Lets Studio tell this build apart from an older, unauthenticated runner.
     auth_required: bool = True
+    # Whether this runner has users. False is the single-operator runner, where
+    # the shared token is the whole of the authentication; true means Studio has
+    # to log in before anything else will answer.
+    login_required: bool = False
+    # Whether a balance actually gates execution. False still meters: the ledger
+    # records every remote Job either way. See `credits.py`.
+    credits_enforced: bool = False
 
 
 class CapabilitiesResponse(BaseModel):
@@ -238,9 +318,10 @@ def _json_safe(value: Any) -> Any:
 class _LogCollector(logging.Handler):
     """Collects the framework's structured JSON log lines emitted during a run."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_record: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
         super().__init__(level=logging.INFO)
         self.records: List[Dict[str, Any]] = []
+        self._on_record = on_record
 
     def emit(self, record: logging.LogRecord) -> None:
         raw = record.getMessage()
@@ -269,19 +350,22 @@ class _LogCollector(logging.Handler):
     def append(
         self, timestamp: str, level: str, message: str, context: Dict[str, Any]
     ) -> None:
-        self.records.append(
-            {
-                "timestamp": timestamp,
-                "level": level,
-                "message": message,
-                "context": context,
-            }
-        )
+        record = {
+            "timestamp": timestamp,
+            "level": level,
+            "message": message,
+            "context": context,
+        }
+        self.records.append(record)
+        if self._on_record is not None:
+            self._on_record(record)
 
 
 @contextmanager
-def _capture_logs() -> Iterator[_LogCollector]:
-    collector = _LogCollector()
+def _capture_logs(
+    on_record: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Iterator[_LogCollector]:
+    collector = _LogCollector(on_record)
     log = logging.getLogger(FRAMEWORK_LOGGER)
     previous_level = log.level
     if log.getEffectiveLevel() > logging.INFO:
@@ -303,8 +387,12 @@ class _StreamCollector(_LogCollector):
     end). The `step=True` records (with `index`/`total`) drive the per-node status
     in Studio; everything else is a normal log line."""
 
-    def __init__(self, events: "queue.Queue[Optional[Dict[str, Any]]]") -> None:
-        super().__init__()
+    def __init__(
+        self,
+        events: "queue.Queue[Optional[Dict[str, Any]]]",
+        on_record: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        super().__init__(on_record)
         self._events = events
 
     def append(
@@ -418,11 +506,170 @@ def _sse(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+# ------------------------------------------------------------- log recording
+
+# How many lines one job execution keeps. The JVM alone can print thousands per
+# second, and this database sits on the user's laptop: past the ceiling the run
+# records that it stopped recording, which beats growing without bound in silence.
+MAX_STORED_LOG_LINES = 3000
+# Lines per INSERT batch. Small enough that a run killed mid-flight still leaves
+# most of its log behind, large enough not to write once per line.
+_LOG_FLUSH_EVERY = 200
+
+
+class _LogRecorder:
+    """Persists a run's log lines, in batches, under the job execution they belong to.
+
+    Fed from the SSE generator rather than from the worker thread: the queue there is
+    the one funnel every source passes through — the framework's structured records,
+    the JVM's stderr and stdout alike — so what history keeps is exactly what the
+    user watched go by.
+    """
+
+    def __init__(self, repo: Any, job_run_id: Optional[str] = None) -> None:
+        self._repo = repo
+        self._job_run_id = job_run_id
+        self._buffer: List[Dict[str, Any]] = []
+        self._stored = 0
+        self._dropped = 0
+
+    def switch(self, job_run_id: str) -> None:
+        """Files the lines from here on under another job execution — one stage of a
+        flow handing over to the next. Each stage gets its own ceiling."""
+        self.flush()
+        self._job_run_id = job_run_id
+        self._stored = 0
+        self._dropped = 0
+
+    def add(self, entry: Dict[str, Any]) -> None:
+        if self._job_run_id is None:
+            return
+        if self._stored + len(self._buffer) >= MAX_STORED_LOG_LINES:
+            self._dropped += 1
+            return
+        self._buffer.append(entry)
+        if len(self._buffer) >= _LOG_FLUSH_EVERY:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._job_run_id is None:
+            return
+        pending = self._buffer
+        self._buffer = []
+        # `_dropped` only ever leaves zero once the ceiling was hit, so a flush that
+        # sees it owes the reader one line saying the rest is missing.
+        if self._dropped:
+            pending = pending + [{
+                "source": "runner",
+                "timestamp": _now_iso(),
+                "level": "WARNING",
+                "message": (
+                    f"{self._dropped} further log lines were produced but not "
+                    f"recorded: history keeps the first {MAX_STORED_LOG_LINES} "
+                    "lines of a run."
+                ),
+                "context": {},
+            }]
+            self._dropped = 0
+        if not pending:
+            return
+        try:
+            self._repo.append_logs(self._job_run_id, pending)
+            self._stored += len(pending)
+        except Exception:
+            # A log line is never worth failing a run over.
+            pass
+
+
 # -------------------------------------------------------------- framework
 
 
 _RUN_LOCK = threading.Lock()
 _framework: Any = None
+
+
+class _ActiveRun:
+    """The run this process is executing, so `POST /runs/{id}/cancel` can reach it.
+
+    `_RUN_LOCK` allows exactly one run at a time, so one slot is enough. The flag is
+    read by the worker thread and written by the HTTP handler thread, hence the lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._run_id: Optional[str] = None
+        self._cancelled = False
+
+    def begin(self, run_id: str) -> None:
+        with self._lock:
+            self._run_id = run_id
+            self._cancelled = False
+
+    def end(self) -> None:
+        with self._lock:
+            self._run_id = None
+            self._cancelled = False
+
+    def request(self, run_id: str) -> bool:
+        """Records a cancel request. False when `run_id` is not the run in flight."""
+        with self._lock:
+            if self._run_id != run_id:
+                return False
+            self._cancelled = True
+            return True
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+
+_ACTIVE_RUN = _ActiveRun()
+
+
+def _cancel_spark_jobs() -> bool:
+    """Interrupts whatever Spark is computing right now.
+
+    Python cannot kill a thread, so the flag alone would only take effect at the
+    next stage boundary — a job blocked on a long `write` would keep going to the
+    end. `cancelAllJobs()` makes the JVM abort the running stages, and the action
+    raises inside the worker thread, which is what actually stops the run.
+
+    Returns False when this process has no SparkSession to cancel (nothing has
+    touched Spark yet) — not an error: the flag still ends the run.
+    """
+    module = sys.modules.get("sparquet.core.context")
+    session = getattr(getattr(module, "SparkContextManager", None), "_session", None)
+    if session is None:
+        return False
+    try:
+        session.sparkContext.cancelAllJobs()
+        return True
+    except Exception:  # a session already stopped, a dead JVM — nothing left to kill
+        return False
+
+_HISTORY_DB_PATH = Path(
+    os.getenv("SPARQUET_STUDIO_HISTORY_DB")
+    or (Path(__file__).resolve().parent / "data" / "execution_history.sqlite3")
+)
+_history: Any = history.SQLiteExecutionRepository(_HISTORY_DB_PATH)
+
+# Where the library lives as files. Defaults to a directory next to the framework so
+# it is inside the repository the user already versions; point the env var somewhere
+# else (a shared checkout, a mounted volume) to move the whole library with it.
+_WORKSPACE_ROOT = Path(
+    os.getenv("SPARQUET_STUDIO_WORKSPACE") or (_framework_root() / "sparquet-workspace")
+).expanduser()
+_workspace: Any = workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+
+
+CANCELLED_ERROR = "Cancelled from Studio while it was running."
+
+
+def _job_outcome_status(response: "RunResponse") -> str:
+    if response.skipped:
+        return history.SKIPPED
+    return history.SUCCESS if response.success else history.FAILED
 
 
 def _spark_available() -> bool:
@@ -478,6 +725,89 @@ def _apply_params(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) ->
     if not isinstance(parsed, dict):
         raise ValueError("Template substitution produced a non-object pipeline.")
     return parsed
+
+
+def _run_as(principal: Any, claimed: Optional[str]) -> str:
+    """Who the run is recorded against.
+
+    An authenticated session wins over anything the body claims: on a runner with
+    users, "who ran this" is a fact, and a caller must not be able to file their
+    run under someone else's name. With no users the runner has one operator and
+    no directory to check against, so the claim is taken as given, falling back to
+    the OS account the runner process runs under.
+    """
+    if principal is not None and not getattr(principal, "token_only", False):
+        return str(principal.username)[:120]
+    claimed = (claimed or "").strip()
+    if claimed:
+        return claimed[:120]
+    try:
+        return getpass.getuser()
+    except Exception:  # pragma: no cover - no account name on this platform
+        return "unknown"
+
+
+def _launched(claimed: Optional[str]) -> str:
+    """How the run got started. Anything unrecognised is recorded as `api`: it
+    reached the runner without Studio saying otherwise, which is what `api` means."""
+    value = (claimed or "").strip().lower()
+    if value in history.LAUNCH_KINDS:
+        return value
+    return history.MANUAL if not value else history.API
+
+
+def _ensure_catalog(
+    *, workflow_id: Optional[str], pipeline_id: Optional[str] = None,
+    job_id: Optional[str] = None, name: Optional[str] = None,
+    job_ids: Optional[List[Optional[str]]] = None,
+) -> None:
+    """Registers the ids a run is about, so the run's foreign keys resolve.
+
+    A run is allowed to name a Job the workspace has never sent — a script, a
+    scheduler, a Studio that has not synced. History records what happened; it does
+    not reject an execution because the catalog was behind. A failure here is
+    swallowed for the same reason: no run is worth losing over bookkeeping.
+    """
+    try:
+        _history.ensure_run_targets(
+            workflow_id=workflow_id, pipeline_id=pipeline_id, job_id=job_id, name=name,
+        )
+        for stage_job_id in job_ids or ():
+            if stage_job_id:
+                _history.ensure_run_targets(
+                    workflow_id=workflow_id, pipeline_id=None, job_id=stage_job_id,
+                )
+    except Exception:  # pragma: no cover - bookkeeping must never fail a run
+        pass
+
+
+def _lineage(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The datasets this JSON reads and writes, with `{param}` values resolved.
+
+    Resolving matters: an unresolved `/data/{ano}/vendas` would file every run of
+    the job under the same fictional path. A template that cannot be resolved is
+    not worth failing a run over — the raw configuration is recorded instead.
+    """
+    try:
+        return history.lineage_of(_apply_params(pipeline, params))
+    except Exception:
+        return history.lineage_of(pipeline)
+
+
+def _config_version(
+    pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]
+) -> Tuple[Optional[str], Optional[str]]:
+    """The fingerprint of the JSON this run is about to execute, and its text.
+
+    Fingerprinted after `{param}` substitution, for the same reason lineage is:
+    what ran is the resolved configuration, and two runs of one template with
+    different parameters did not execute the same thing. A template that cannot
+    be resolved is recorded raw rather than not at all.
+    """
+    try:
+        return history.config_version(_apply_params(pipeline, params))
+    except Exception:
+        return history.config_version(pipeline)
 
 
 def _parse_config_error(
@@ -604,6 +934,210 @@ def require_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
 
 
+# ------------------------------------------------------------------ identity
+
+_auth = auth.AuthStore()
+
+LOGIN_REQUIRED_HELP = (
+    "This runner has users, so the shared token is no longer enough on its own. "
+    f"Log in through Studio and send the session as the '{SESSION_HEADER}' header "
+    "(or as `Authorization: Bearer <session>`)."
+)
+SESSION_EXPIRED_HELP = (
+    "That session is not valid any more — it expired, it was logged out, or the "
+    "account was disabled. Log in again."
+)
+
+
+def _session_token(request: Request) -> str:
+    """The session, from either header. `Authorization: Bearer` is there because
+    every HTTP client already knows it; the explicit header because the browser
+    treats it like the runner token it travels with."""
+    header = request.headers.get(SESSION_HEADER, "").strip()
+    if header:
+        return header
+    authorization = request.headers.get("authorization", "").strip()
+    scheme, _, value = authorization.partition(" ")
+    return value.strip() if scheme.lower() == "bearer" else ""
+
+
+def current_principal(request: Request) -> Any:
+    """Who is calling, after `require_token` has already vouched for the request.
+
+    Two modes, and the difference is only whether any user exists. With none, the
+    runner behaves as it always has: the shared token is the identity, with full
+    rights — that runner has one operator, and upgrading must not lock them out.
+    With users, a session is required for everything but logging in.
+    """
+    token = _session_token(request)
+    if token:
+        principal = _auth.resolve_session(token)
+        if principal is None:
+            raise HTTPException(status_code=401, detail=SESSION_EXPIRED_HELP)
+        return principal
+    if _auth.has_users():
+        raise HTTPException(status_code=401, detail=LOGIN_REQUIRED_HELP)
+    return auth.TOKEN_PRINCIPAL
+
+
+def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
+    """Dependency for one action, optionally on one resource.
+
+    `resource` may be a callable taking the request, for the endpoints whose
+    target is in the path (`workspace/job/j1`). The run endpoints do not use this
+    dependency at all: their target is in the body, which a dependency cannot read
+    without consuming it, so they call `_authorize_run` once the body is parsed.
+    """
+
+    def dependency(request: Request) -> Any:
+        require_token(request)
+        principal = current_principal(request)
+        target = resource(request) if callable(resource) else str(resource)
+        if not principal.allows(action, target):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"'{principal.username}' is not allowed to {action} on '{target}'. "
+                    f"Roles held: {', '.join(principal.roles) or 'none'}."
+                ),
+            )
+        return principal
+
+    return dependency
+
+
+# --------------------------------------------------------------------- credits
+
+_credits = credits.CreditStore()
+
+NO_CREDITS_STATUS = 402
+
+
+def _admit_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
+    """Refuse, before Spark is started, a team that cannot pay for a single write.
+
+    This is all that can honestly be checked up front: nobody knows yet how many
+    destinations the run will manage to write. What it does buy is that a team
+    with nothing left never starts a cluster it cannot pay for. Whether the target
+    is local — and therefore free — is read from the configuration rather than
+    from the request, so a caller cannot declare their own run free.
+    """
+    account_id, username = credits.account_for(principal)
+    try:
+        _credits.precheck(account_id, credits.target_of(pipeline), username=username)
+    except credits.InsufficientCredits as error:
+        raise HTTPException(status_code=NO_CREDITS_STATUS, detail=str(error)) from error
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _charge_execution(
+    principal: Any, pipeline: Dict[str, Any], writes: int, *,
+    job_name: Optional[str] = None, job_run_id: Optional[str] = None,
+    pipeline_run_id: Optional[str] = None,
+) -> Any:
+    """Charge one credit per destination the run actually wrote.
+
+    Called **after** the execution, which is the only moment the number of
+    successful writes exists: `RunResponse.output_metrics` carries one entry per
+    completed write, because the framework appends to `PipelineResult.outputs`
+    only once the writer returns. A run that failed before writing anything has
+    none of them and therefore costs nothing — that is the whole of "errors do not
+    spend a token", and it needs no cooperation from the framework.
+
+    This never raises for lack of credit: the writes already happened. An account
+    that could not cover them goes to zero with the gap recorded on the ledger
+    entry, and it is the next `_admit_execution` that refuses.
+    """
+    account_id, username = credits.account_for(principal)
+    try:
+        return _credits.charge(
+            account_id, credits.target_of(pipeline), writes, username=username,
+            job_run_id=job_run_id, pipeline_run_id=pipeline_run_id, job_name=job_name,
+        )
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        _log.warning("Could not charge execution credits: %s", error)
+        return None
+
+
+def _charge_out(charge: Any) -> Optional[RunChargeOut]:
+    """A `credits.Charge` as the API shape, or nothing when the run was free."""
+    if charge is None or not getattr(charge, "charged", False):
+        return None
+    return RunChargeOut(
+        amount=charge.amount, writes=charge.writes, applied=charge.applied,
+        free_amount=charge.free_amount, shortfall=charge.shortfall,
+        target=charge.target, balance_after=charge.balance_after,
+    )
+
+
+def _entry_charge_out(entry: Any) -> RunChargeOut:
+    """A ledger row as the same shape, for a past run read back from history.
+
+    The ledger stores what a charge did to the account, so the amount is negative
+    there and positive here: this says what the run cost, not which way the
+    balance moved.
+    """
+    return RunChargeOut(
+        amount=-entry.amount, writes=entry.writes, applied=entry.applied,
+        free_amount=entry.free_amount, shortfall=entry.shortfall,
+        target=entry.target, balance_after=entry.balance_after,
+    )
+
+
+def _run_targets(
+    workflow_id: Optional[str], pipeline_id: Optional[str], job_id: Optional[str]
+) -> List[str]:
+    """The resources a run can be authorized against: `workflow/w1`, `pipeline/p1`,
+    `job/j1` — whichever of them the request actually named.
+
+    A run belongs to all three at once, so a role may reasonably be written against
+    any of them: "may run anything in this Workflow" and "may run this one Job" are
+    both sensible grants. An unsaved Job from the editor names none of them and
+    falls back to `*`, which is what every role scoped to everything already
+    matches.
+    """
+    named = [
+        f"{kind}/{value}" for kind, value in
+        (("workflow", workflow_id), ("pipeline", pipeline_id), ("job", job_id))
+        if value
+    ]
+    return named or ["*"]
+
+
+def _authorize_run(
+    principal: Any, action: str, *, workflow_id: Optional[str] = None,
+    pipeline_id: Optional[str] = None, job_id: Optional[str] = None,
+) -> None:
+    """Authorize an execution once the body is parsed and the target is known.
+
+    One allow among the run's identifiers is enough, but an explicit deny on any
+    of them settles it — otherwise "may not run job/j1" could be walked around by
+    also holding "may run everything in workflow/w1", and a deny that can be
+    widened away is not a deny.
+    """
+    targets = _run_targets(workflow_id, pipeline_id, job_id)
+    denied = next((target for target in targets if principal.denies(action, target)), None)
+    if denied is None and any(principal.allows(action, target) for target in targets):
+        return
+    target = denied or ", ".join(targets)
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"'{principal.username}' is not allowed to {action} on '{target}'. "
+            f"Roles held: {', '.join(principal.roles) or 'none'}."
+        ),
+    )
+
+
+def _workspace_resource(request: Request) -> str:
+    """`job/j1` — what a workspace call is actually touching, so a role can be
+    scoped to one record without the endpoints changing."""
+    kind = request.path_params.get("kind", "*")
+    record_id = request.path_params.get("record_id", "*")
+    return f"{kind}/{record_id}"
+
+
 # --------------------------------------------------------------------- app
 
 
@@ -617,7 +1151,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins(),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -631,10 +1165,16 @@ def health() -> HealthResponse:
         version=SERVICE_VERSION,
         spark_available=available,
         framework_version=version,
+        login_required=_auth.has_users(),
+        credits_enforced=credits.enforced(),
     )
 
 
-@app.post("/validate", response_model=ValidateResponse, dependencies=[Depends(require_token)])
+@app.post(
+    "/validate",
+    response_model=ValidateResponse,
+    dependencies=[Depends(requires("run:Validate"))],
+)
 def validate(body: ValidateRequest) -> ValidateResponse:
     error = _parse_config_error(body.pipeline, body.params)
     return ValidateResponse(valid=error is None, error=error)
@@ -669,8 +1209,14 @@ def capabilities() -> CapabilitiesResponse:
     )
 
 
-@app.post("/run", response_model=RunResponse, dependencies=[Depends(require_token)])
-def run(body: RunRequest) -> RunResponse:
+@app.post("/run", response_model=RunResponse)
+def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunResponse:
+    # Authorized here rather than through `Depends(requires(...))`: the Job being
+    # run is in the body, so this is the first point where the permission can be
+    # about *this* Job instead of about running in general.
+    _authorize_run(
+        principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
+    )
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -700,11 +1246,71 @@ def run(body: RunRequest) -> RunResponse:
             detail="A pipeline run is already in progress on this runner.",
         )
 
+    # Before anything is recorded: a run that cannot pay for even one write did
+    # not happen, and the lock has to go back or the runner stays busy over a
+    # refusal. What it will actually cost is only known once it has run.
     try:
-        with _capture_logs() as collector:
-            return _execute_run(body, name, started, collector)
-    finally:
+        _admit_execution(principal, body.pipeline)
+    except HTTPException:
         _RUN_LOCK.release()
+        raise
+
+    _ensure_catalog(
+        workflow_id=body.workflow_id, job_id=body.job_id, name=body.job_name or name,
+    )
+    pipeline_run_id = _history.create_pipeline_run(
+        kind="job", workflow_id=body.workflow_id, pipeline_id=None,
+        job_id=body.job_id, name=body.job_name or name,
+        run_as=_run_as(principal, body.run_as), launched=_launched(body.launched),
+    )
+    config_hash, config_text = _config_version(body.pipeline, body.params)
+    job_run_id = _history.create_job_run(
+        pipeline_run_id, job_id=body.job_id, name=body.job_name or name, stage_index=0,
+        lineage=_lineage(body.pipeline, body.params),
+        config_hash=config_hash, config=config_text,
+    )
+    tracker = history.StepTracker(_history, job_run_id)
+    _ACTIVE_RUN.begin(pipeline_run_id)
+    try:
+        with _capture_logs(tracker.handle) as collector:
+            response = _execute_run(body, name, started, collector)
+    finally:
+        cancelled = _ACTIVE_RUN.cancelled
+        _ACTIVE_RUN.end()
+        _RUN_LOCK.release()
+
+    # Only the framework's own records exist here: this endpoint captures no JVM
+    # stderr and no stdout — those are streamed, and only `/run/stream` opens them.
+    recorder = _LogRecorder(_history, job_run_id)
+    for entry in collector.records:
+        recorder.add({**entry, "source": "pipeline"})
+    recorder.flush()
+
+    status = history.CANCELLED if cancelled else _job_outcome_status(response)
+    error = CANCELLED_ERROR if cancelled else response.error
+    if cancelled:
+        tracker.close(CANCELLED_ERROR, status=history.CANCELLED)
+        response.cancelled = True
+        response.error = error
+    else:
+        tracker.close(response.error if not response.success else None)
+    _history.finish_job_run(
+        job_run_id, status=status, duration_ms=response.duration_ms,
+        error=error, rows_read=response.rows_read,
+        rows_written=response.rows_written,
+    )
+    _history.finish_pipeline_run(
+        pipeline_run_id, status=status, duration_ms=response.duration_ms,
+        error=error,
+    )
+    response.pipeline_run_id = pipeline_run_id
+    response.job_run_id = job_run_id
+    response.credits = _charge_out(_charge_execution(
+        principal, body.pipeline, len(response.output_metrics),
+        job_name=body.job_name or name, job_run_id=job_run_id,
+        pipeline_run_id=pipeline_run_id,
+    ))
+    return response
 
 
 def _execute_run(
@@ -748,8 +1354,10 @@ def _execute_run(
     )
 
 
-@app.post("/run/stream", dependencies=[Depends(require_token)])
-def run_stream(body: RunRequest) -> StreamingResponse:
+@app.post("/run/stream")
+def run_stream(
+    body: RunRequest, principal: Any = Depends(current_principal)
+) -> StreamingResponse:
     """Same execution as `/run`, but as Server-Sent Events, so Studio can paint
     per-step status and stream logs while Spark works.
 
@@ -761,6 +1369,9 @@ def run_stream(body: RunRequest) -> StreamingResponse:
     almost instantly; the wall-clock time shows up on the read, the validations and
     the write — the actions that really touch data.
     """
+    _authorize_run(
+        principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
+    )
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -771,11 +1382,34 @@ def run_stream(body: RunRequest) -> StreamingResponse:
             detail="A pipeline run is already in progress on this runner.",
         )
 
+    try:
+        _admit_execution(principal, body.pipeline)
+    except HTTPException:
+        _RUN_LOCK.release()
+        raise
+
+    _ensure_catalog(
+        workflow_id=body.workflow_id, job_id=body.job_id, name=body.job_name or name,
+    )
+    pipeline_run_id = _history.create_pipeline_run(
+        kind="job", workflow_id=body.workflow_id, pipeline_id=None,
+        job_id=body.job_id, name=body.job_name or name,
+        run_as=_run_as(principal, body.run_as), launched=_launched(body.launched),
+    )
+    config_hash, config_text = _config_version(body.pipeline, body.params)
+    job_run_id = _history.create_job_run(
+        pipeline_run_id, job_id=body.job_id, name=body.job_name or name, stage_index=0,
+        lineage=_lineage(body.pipeline, body.params),
+        config_hash=config_hash, config=config_text,
+    )
+    tracker = history.StepTracker(_history, job_run_id)
+    _ACTIVE_RUN.begin(pipeline_run_id)
+
     events: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
     box: Dict[str, Any] = {}
 
     def _work() -> None:
-        collector = _StreamCollector(events)
+        collector = _StreamCollector(events, tracker.handle)
         log = logging.getLogger(FRAMEWORK_LOGGER)
         previous_level = log.level
         if log.getEffectiveLevel() > logging.INFO:
@@ -794,22 +1428,83 @@ def run_stream(body: RunRequest) -> StreamingResponse:
     def _stream() -> Iterator[str]:
         worker = threading.Thread(target=_work, daemon=True)
         worker.start()
+        recorder = _LogRecorder(_history, job_run_id)
         try:
-            yield _sse("start", {"pipeline_name": name, "timestamp": _now_iso()})
+            # The ids travel in the very first event: Studio needs them to address
+            # `POST /runs/{id}/cancel` while the run is still going.
+            yield _sse("start", {
+                "pipeline_name": name, "timestamp": _now_iso(),
+                "pipeline_run_id": pipeline_run_id, "job_run_id": job_run_id,
+            })
             while True:
                 entry = events.get()
                 if entry is None:
                     break
+                recorder.add(entry)
                 yield _sse("log", entry)
+            recorder.flush()
             worker.join(timeout=5)
+            cancelled = _ACTIVE_RUN.cancelled
             if "response" in box:
-                yield _sse("result", box["response"].model_dump())
+                response: RunResponse = box["response"]
+                status = history.CANCELLED if cancelled else _job_outcome_status(response)
+                # Whatever Spark raised on the way out is the cancellation itself,
+                # not a defect in the pipeline — say so plainly.
+                error = CANCELLED_ERROR if cancelled else response.error
+                if cancelled:
+                    tracker.close(CANCELLED_ERROR, status=history.CANCELLED)
+                else:
+                    tracker.close(response.error if not response.success else None)
+                _history.finish_job_run(
+                    job_run_id, status=status, duration_ms=response.duration_ms,
+                    error=error, rows_read=response.rows_read,
+                    rows_written=response.rows_written,
+                )
+                _history.finish_pipeline_run(
+                    pipeline_run_id, status=status, duration_ms=response.duration_ms,
+                    error=error,
+                )
+                response.pipeline_run_id = pipeline_run_id
+                response.job_run_id = job_run_id
+                response.cancelled = cancelled
+                if cancelled:
+                    response.error = error
+                response.credits = _charge_out(_charge_execution(
+                    principal, body.pipeline, len(response.output_metrics),
+                    job_name=body.job_name or name, job_run_id=job_run_id,
+                    pipeline_run_id=pipeline_run_id,
+                ))
+                yield _sse("result", response.model_dump())
             else:
+                error_message = (
+                    CANCELLED_ERROR if cancelled
+                    else box.get("error", "Run finished without a result")
+                )
+                status = history.CANCELLED if cancelled else history.FAILED
+                tracker.close(error_message, status=status)
+                duration_ms = _elapsed_ms(started)
+                _history.finish_job_run(
+                    job_run_id, status=status, duration_ms=duration_ms,
+                    error=error_message, rows_read=None, rows_written=None,
+                )
+                _history.finish_pipeline_run(
+                    pipeline_run_id, status=status, duration_ms=duration_ms,
+                    error=error_message,
+                )
                 yield _sse(
                     "error",
-                    {"error": box.get("error", "Run finished without a result")},
+                    {
+                        "error": error_message,
+                        "cancelled": cancelled,
+                        "pipeline_run_id": pipeline_run_id,
+                        "job_run_id": job_run_id,
+                    },
                 )
         finally:
+            # A client that hangs up mid-run closes the generator here: whatever
+            # was buffered still belongs to the history of that run.
+            recorder.flush()
+            _ACTIVE_RUN.end()
             _RUN_LOCK.release()
 
     return StreamingResponse(
@@ -819,8 +1514,10 @@ def run_stream(body: RunRequest) -> StreamingResponse:
     )
 
 
-@app.post("/run/flow/stream", dependencies=[Depends(require_token)])
-def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
+@app.post("/run/flow/stream")
+def run_flow_stream(
+    body: RunFlowRequest, principal: Any = Depends(current_principal)
+) -> StreamingResponse:
     """Runs several pipelines in sequence — a composed flow, where each JSON is one
     stage — streaming per-stage progress as Server-Sent Events.
 
@@ -835,10 +1532,19 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
     Stage markers travel through the same queue as the logs, so a stage's lines can
     never be attributed to its neighbour: the queue is FIFO.
     """
+    _authorize_run(
+        principal, "run:Execute", workflow_id=body.workflow_id,
+        pipeline_id=body.pipeline_id,
+    )
     started = time.perf_counter()
 
     if not body.stages:
         raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
+
+    # One admission for the flow, against its first stage: a Pipeline whose team
+    # has nothing left should not start at all. Each stage is charged for its own
+    # writes as it finishes.
+    _admit_execution(principal, body.stages[0].pipeline)
 
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
@@ -846,8 +1552,31 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
             detail="A pipeline run is already in progress on this runner.",
         )
 
+    _ensure_catalog(
+        workflow_id=body.workflow_id, pipeline_id=body.pipeline_id, name=body.name,
+        job_ids=[stage.job_id for stage in body.stages],
+    )
+    pipeline_run_id = _history.create_pipeline_run(
+        kind="pipeline", workflow_id=body.workflow_id, pipeline_id=body.pipeline_id,
+        job_id=None, name=body.name,
+        run_as=_run_as(principal, body.run_as), launched=_launched(body.launched),
+    )
+    _ACTIVE_RUN.begin(pipeline_run_id)
+
     events: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
     box: Dict[str, Any] = {"stages": [], "error": None, "preview": None}
+
+    def _cancel_remaining(from_index: int) -> None:
+        """Every stage the cancel kept from running, recorded and announced."""
+        for stage_index in range(from_index, len(body.stages)):
+            pending = body.stages[stage_index]
+            _history.skip_job_run(
+                pipeline_run_id, job_id=pending.job_id, name=pending.name,
+                stage_index=stage_index, status=history.CANCELLED,
+            )
+            events.put({"__stage_cancelled__": {
+                "index": stage_index, "id": pending.id, "name": pending.name,
+            }})
 
     def _work() -> None:
         log = logging.getLogger(FRAMEWORK_LOGGER)
@@ -856,10 +1585,47 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
             log.setLevel(logging.INFO)
         try:
             for index, stage in enumerate(body.stages):
+                # A cancel between two stages stops the flow here: the stage that
+                # was running took the Spark cancellation, the rest never start.
+                if _ACTIVE_RUN.cancelled:
+                    box["error"] = CANCELLED_ERROR
+                    _cancel_remaining(index)
+                    break
+                # A flow is charged stage by stage, each for the destinations it
+                # actually wrote (below, once the stage is done). A stage that
+                # cannot be paid for is not started: the flow stops here and the
+                # rest are recorded as SKIPPED, so a flow that runs out of credit
+                # at stage four has really run three and the ledger says so.
+                try:
+                    _admit_execution(principal, stage.pipeline)
+                except HTTPException as refusal:
+                    box["error"] = str(refusal.detail)
+                    _history.skip_job_run(
+                        pipeline_run_id, job_id=stage.job_id, name=stage.name,
+                        stage_index=index, status=history.FAILED,
+                    )
+                    for pending_index in range(index + 1, len(body.stages)):
+                        pending = body.stages[pending_index]
+                        _history.skip_job_run(
+                            pipeline_run_id, job_id=pending.job_id, name=pending.name,
+                            stage_index=pending_index, status=history.SKIPPED,
+                        )
+                    break
+                stage_hash, stage_config = _config_version(stage.pipeline, stage.params)
+                job_run_id = _history.create_job_run(
+                    pipeline_run_id, job_id=stage.job_id, name=stage.name,
+                    stage_index=index,
+                    lineage=_lineage(stage.pipeline, stage.params),
+                    config_hash=stage_hash, config=stage_config,
+                )
+                # The marker carries the job execution the next lines belong to, so
+                # the generator can file this stage's logs under it.
                 events.put({"__stage__": {"index": index, "id": stage.id,
-                                          "name": stage.name}})
+                                          "name": stage.name,
+                                          "job_run_id": job_run_id}})
+                tracker = history.StepTracker(_history, job_run_id)
                 # A fresh collector per stage keeps each stage's `logs` its own.
-                collector = _StreamCollector(events)
+                collector = _StreamCollector(events, tracker.handle)
                 log.addHandler(collector)
                 stage_started = time.perf_counter()
                 # Only the last stage's preview is kept: it is the flow's output.
@@ -884,16 +1650,39 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
                 finally:
                     log.removeHandler(collector)
 
+                stage_cancelled = _ACTIVE_RUN.cancelled
+                if stage_cancelled:
+                    tracker.close(CANCELLED_ERROR, status=history.CANCELLED)
+                    job_status = history.CANCELLED
+                    stage_error: Optional[str] = CANCELLED_ERROR
+                else:
+                    tracker.close(response.error if not response.success else None)
+                    job_status = _job_outcome_status(response)
+                    stage_error = response.error
+                _history.finish_job_run(
+                    job_run_id, status=job_status, duration_ms=response.duration_ms,
+                    error=stage_error, rows_read=response.rows_read,
+                    rows_written=response.rows_written,
+                )
+
+                charge = _charge_out(_charge_execution(
+                    principal, stage.pipeline, len(response.output_metrics),
+                    job_name=stage.name, job_run_id=job_run_id,
+                    pipeline_run_id=pipeline_run_id,
+                ))
                 payload = {
                     "index": index,
                     "id": stage.id,
                     "name": stage.name,
+                    "job_run_id": job_run_id,
+                    "credits": charge.model_dump() if charge else None,
                     "success": response.success,
                     "skipped": response.skipped,
+                    "cancelled": stage_cancelled,
                     "rows_read": response.rows_read,
                     "rows_written": response.rows_written,
                     "duration_ms": response.duration_ms,
-                    "error": response.error,
+                    "error": stage_error,
                     "validations": [v.model_dump() for v in response.validations],
                     "output_metrics": [m.model_dump() for m in response.output_metrics],
                 }
@@ -902,11 +1691,28 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
                     box["preview"] = response.preview.model_dump()
                 events.put({"__stage_result__": payload})
 
+                if stage_cancelled:
+                    box["error"] = CANCELLED_ERROR
+                    _cancel_remaining(index + 1)
+                    break
+
                 if not response.success and body.stop_on_error:
                     box["error"] = (
                         f"Stage {index + 1} ({stage.name or stage.id}) failed: "
                         f"{response.error or 'unknown error'}"
                     )
+                    # The remaining stages never run — persist and announce them as
+                    # SKIPPED rather than leaving them stuck looking "pending" forever.
+                    for skipped_index in range(index + 1, len(body.stages)):
+                        skipped_stage = body.stages[skipped_index]
+                        _history.skip_job_run(
+                            pipeline_run_id, job_id=skipped_stage.job_id,
+                            name=skipped_stage.name, stage_index=skipped_index,
+                        )
+                        events.put({"__stage_skipped__": {
+                            "index": skipped_index, "id": skipped_stage.id,
+                            "name": skipped_stage.name,
+                        }})
                     break
         except Exception as exc:  # pragma: no cover - defensive
             box["error"] = _describe(exc)
@@ -918,9 +1724,11 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
         worker = threading.Thread(target=_work, daemon=True)
         worker.start()
         current: Optional[str] = None
+        recorder = _LogRecorder(_history)
         try:
             yield _sse("start", {"flow": True, "total": len(body.stages),
-                                 "timestamp": _now_iso()})
+                                 "timestamp": _now_iso(),
+                                 "pipeline_run_id": pipeline_run_id})
             while True:
                 entry = events.get()
                 if entry is None:
@@ -928,20 +1736,50 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
                 marker = entry.get("__stage__")
                 if marker is not None:
                     current = marker["id"]
+                    recorder.switch(marker["job_run_id"])
                     yield _sse("stage_start", marker)
+                    continue
+                skipped = entry.get("__stage_skipped__")
+                if skipped is not None:
+                    yield _sse("stage_skipped", skipped)
+                    continue
+                stopped = entry.get("__stage_cancelled__")
+                if stopped is not None:
+                    yield _sse("stage_cancelled", stopped)
                     continue
                 result = entry.get("__stage_result__")
                 if result is not None:
+                    # The stage is over: its lines are complete, so they go in now
+                    # rather than waiting for the next stage to push them.
+                    recorder.flush()
                     yield _sse("stage_result", result)
                     continue
+                recorder.add(entry)
                 yield _sse("log", {**entry, "stage_id": current})
+            recorder.flush()
             worker.join(timeout=5)
+            cancelled = _ACTIVE_RUN.cancelled
             stages = box["stages"]
+            overall_success = (
+                bool(stages) and all(s["success"] for s in stages)
+                and len(stages) == len(body.stages)
+            )
+            if cancelled:
+                status = history.CANCELLED
+            elif overall_success:
+                status = history.SUCCESS
+            else:
+                status = history.FAILED
+            _history.finish_pipeline_run(
+                pipeline_run_id, status=status,
+                duration_ms=_elapsed_ms(started), error=box["error"],
+            )
             yield _sse(
                 "result",
                 {
-                    "success": bool(stages) and all(s["success"] for s in stages)
-                    and len(stages) == len(body.stages),
+                    "id": pipeline_run_id,
+                    "success": overall_success,
+                    "cancelled": cancelled,
                     "duration_ms": _elapsed_ms(started),
                     "stages": stages,
                     "preview": box["preview"],
@@ -949,12 +1787,1116 @@ def run_flow_stream(body: RunFlowRequest) -> StreamingResponse:
                 },
             )
         finally:
+            recorder.flush()
+            _ACTIVE_RUN.end()
             _RUN_LOCK.release()
 
     return StreamingResponse(
         _stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class StepRunOut(BaseModel):
+    id: str
+    job_run_id: str
+    scope: str
+    step_index: int
+    type: str
+    status: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error_message: Optional[str] = None
+    error_details: Optional[str] = None
+    # Set on the quality datasets only ("report"/"valid"/"invalid"): those are
+    # addressed by role, not by a position in a lane. See `history.StepTracker`.
+    role: Optional[str] = None
+    # What the framework reported about the step, as a JSON object: rows, path,
+    # format, whether a rule passed. Studio shows it when a past run is reopened.
+    details: Optional[str] = None
+
+
+class JobRunOut(BaseModel):
+    id: str
+    pipeline_run_id: str
+    job_id: Optional[str] = None
+    name: Optional[str] = None
+    stage_index: int
+    status: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error: Optional[str] = None
+    rows_read: Optional[int] = None
+    rows_written: Optional[int] = None
+    # `{"inputs": [...], "outputs": [...]}` as a JSON string — the datasets this
+    # execution read and wrote, taken from the JSON that was submitted.
+    lineage: Optional[str] = None
+    # `sha256:<hex>` over the JSON that ran, so two executions of the same Job can
+    # be told apart after the Job has been edited. The JSON itself is read with
+    # `GET /job-runs/{id}/config`; it is too large to ship with every listing.
+    config_hash: Optional[str] = None
+    #: What this execution was charged, so the price is visible in the history
+    #: next to the work it paid for. Null for a local run, which is free.
+    credits: Optional[RunChargeOut] = None
+    steps: List[StepRunOut] = Field(default_factory=list)
+
+
+class PipelineRunOut(BaseModel):
+    id: str
+    kind: str
+    workflow_id: Optional[str] = None
+    pipeline_id: Optional[str] = None
+    job_id: Optional[str] = None
+    name: Optional[str] = None
+    status: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error: Optional[str] = None
+    # Who it ran as, and how it was started: "manual", "scheduled" or "api".
+    run_as: Optional[str] = None
+    launched: Optional[str] = None
+    jobs: List[JobRunOut] = Field(default_factory=list)
+
+
+def _step_run_out(step: Any) -> StepRunOut:
+    return StepRunOut(**vars(step))
+
+
+def _job_run_out(job: Any, charges: Optional[Dict[str, Any]] = None) -> JobRunOut:
+    data = {key: value for key, value in vars(job).items() if key != "steps"}
+    entry = (charges or {}).get(job.id)
+    return JobRunOut(
+        **data, credits=_entry_charge_out(entry) if entry else None,
+        steps=[_step_run_out(step) for step in job.steps],
+    )
+
+
+def _pipeline_run_out(run: Any, charges: Optional[Dict[str, Any]] = None) -> PipelineRunOut:
+    data = {key: value for key, value in vars(run).items() if key != "jobs"}
+    return PipelineRunOut(
+        **data, jobs=[_job_run_out(job, charges) for job in run.jobs]
+    )
+
+
+@app.get(
+    "/runs",
+    response_model=List[PipelineRunOut],
+    dependencies=[Depends(requires("history:Read"))],
+)
+def list_runs(
+    workflow_id: Optional[str] = None,
+    pipeline_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    limit: int = 20,
+) -> List[PipelineRunOut]:
+    """Past executions of a Job or Pipeline, most recent first. `jobs`/`steps` come
+    back empty here — fetch `/runs/{id}` for the full nested detail."""
+    runs = _history.list_pipeline_runs(
+        workflow_id=workflow_id, pipeline_id=pipeline_id, job_id=job_id,
+        limit=min(max(limit, 1), 200),
+    )
+    return [_pipeline_run_out(run) for run in runs]
+
+
+@app.get(
+    "/runs/{run_id}",
+    response_model=PipelineRunOut,
+    dependencies=[Depends(requires("history:Read"))],
+)
+def get_run(run_id: str) -> PipelineRunOut:
+    """One execution in full: every job it ran (or skipped) and every step of each,
+    so Studio can open a past run and jump straight to whichever step failed."""
+    run = _history.get_pipeline_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    # One lookup for the whole run rather than one per stage: a Pipeline with
+    # twenty Jobs would otherwise be twenty queries for twenty small rows.
+    charges = _credits.entries_for_job_runs([job.id for job in run.jobs])
+    return _pipeline_run_out(run, charges)
+
+
+_log = logging.getLogger("sparquet_studio.server")
+
+
+# --------------------------------------------------------------- workspace
+#
+# The library as files on disk. The browser holds no authoritative copy: it reads
+# this on load and writes back on every change, so what a user has is a directory
+# they can diff, review and commit like any other source, and a second machine
+# opening the same checkout sees the same library.
+
+
+class WorkspaceDocumentOut(BaseModel):
+    kind: str
+    id: str
+    record: Dict[str, Any]
+    #: Relative path of the reviewable file, so the UI can tell the user what to commit.
+    path: Optional[str] = None
+
+
+class WorkspaceSnapshotOut(BaseModel):
+    root: str
+    workflows: List[WorkspaceDocumentOut] = Field(default_factory=list)
+    jobs: List[WorkspaceDocumentOut] = Field(default_factory=list)
+    pipelines: List[WorkspaceDocumentOut] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceWriteRequest(BaseModel):
+    #: The Studio record exactly as the editor holds it.
+    record: Dict[str, Any]
+    #: A Job's compiled Sparquet JSON. Sent so the readable file is the pipeline the
+    #: framework runs, not an editor-shaped document nobody can execute.
+    config: Optional[Dict[str, Any]] = None
+
+
+class WorkspaceDeleteResponse(BaseModel):
+    deleted: bool
+
+
+def _workspace_doc_out(doc: Any) -> WorkspaceDocumentOut:
+    return WorkspaceDocumentOut(kind=doc.kind, id=doc.id, record=doc.record, path=doc.path)
+
+
+def _mirror_catalog(doc: Any) -> None:
+    """Copies what the workspace just wrote into the catalog tables.
+
+    The files are the source of truth; the catalog is the queryable index that the
+    run foreign keys point at. Failing to index must never fail a save — the next
+    write, or a run of the record, puts it back.
+    """
+    record = doc.record if isinstance(doc.record, dict) else {}
+    name = record.get("name")
+    description = record.get("description")
+    try:
+        if doc.kind == workspace.WORKFLOW:
+            _history.upsert_workflow(
+                doc.id, name=name, description=description, path=doc.path
+            )
+        elif doc.kind == workspace.JOB:
+            _history.upsert_job(
+                doc.id, workflow_id=record.get("workflowId"), name=name,
+                description=description, path=doc.path,
+            )
+        elif doc.kind == workspace.PIPELINE:
+            stages = record.get("stages")
+            _history.upsert_pipeline(
+                doc.id, workflow_id=record.get("workflowId"), name=name,
+                description=description, path=doc.path,
+                stages=stages if isinstance(stages, list) else None,
+            )
+    except Exception:  # pragma: no cover - indexing is bookkeeping, not the save
+        _log.warning("Could not index %s %s in the catalog.", doc.kind, doc.id)
+
+
+@app.get(
+    "/workspace",
+    response_model=WorkspaceSnapshotOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def get_workspace() -> WorkspaceSnapshotOut:
+    """The whole library in one read — how Studio loads on start."""
+    try:
+        snapshot = _workspace.snapshot()
+    except workspace.WorkspaceError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return WorkspaceSnapshotOut(
+        root=snapshot.root,
+        workflows=[_workspace_doc_out(doc) for doc in snapshot.workflows],
+        jobs=[_workspace_doc_out(doc) for doc in snapshot.jobs],
+        pipelines=[_workspace_doc_out(doc) for doc in snapshot.pipelines],
+        meta=snapshot.meta,
+    )
+
+
+class WorkspaceMetaRequest(BaseModel):
+    value: Any = None
+
+
+@app.put(
+    "/workspace/meta/{key}",
+    response_model=Dict[str, Any],
+    dependencies=[Depends(requires("workspace:Write", "meta/*"))],
+)
+def put_workspace_meta(key: str, body: WorkspaceMetaRequest) -> Dict[str, Any]:
+    """Library-level bookkeeping (storage version, seeded flag). Kept with the files
+    rather than in the browser, so the answer to "was this library already
+    migrated?" travels with the library."""
+    _workspace.write_meta(key, body.value)
+    return {"key": key, "value": body.value}
+
+
+@app.delete(
+    "/workspace/meta/{key}",
+    response_model=Dict[str, Any],
+    dependencies=[Depends(requires("workspace:Write", "meta/*"))],
+)
+def delete_workspace_meta(key: str) -> Dict[str, Any]:
+    _workspace.delete_meta(key)
+    return {"key": key, "deleted": True}
+
+
+@app.get(
+    "/workspace/{kind}/{record_id}",
+    response_model=WorkspaceDocumentOut,
+    dependencies=[Depends(requires("workspace:Read", _workspace_resource))],
+)
+def get_workspace_document(kind: str, record_id: str) -> WorkspaceDocumentOut:
+    try:
+        doc = _workspace.read(kind, record_id)
+    except workspace.WorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Record not found in the workspace.")
+    return _workspace_doc_out(doc)
+
+
+@app.put(
+    "/workspace/{kind}/{record_id}",
+    response_model=WorkspaceDocumentOut,
+    dependencies=[Depends(requires("workspace:Write", _workspace_resource))],
+)
+def put_workspace_document(
+    kind: str, record_id: str, body: WorkspaceWriteRequest
+) -> WorkspaceDocumentOut:
+    """Saves one record. Writes the file first, then indexes it."""
+    try:
+        doc = _workspace.write(
+            workspace.Document(
+                kind=kind, id=record_id, record=body.record, config=body.config
+            )
+        )
+    except workspace.WorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Could not write to the workspace: {exc}"
+        ) from exc
+    _mirror_catalog(doc)
+    return _workspace_doc_out(doc)
+
+
+@app.delete(
+    "/workspace/{kind}/{record_id}",
+    response_model=WorkspaceDeleteResponse,
+    dependencies=[Depends(requires("workspace:Delete", _workspace_resource))],
+)
+def delete_workspace_document(kind: str, record_id: str) -> WorkspaceDeleteResponse:
+    """Removes the files. The catalog row stays, marked deleted, because past runs
+    point at it and a run that names a record nobody can look up is worse than a
+    record marked gone."""
+    try:
+        removed = _workspace.delete(kind, record_id)
+    except workspace.WorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        _history.soft_delete(kind, record_id)
+    except Exception:  # pragma: no cover - see _mirror_catalog
+        _log.warning("Could not mark %s %s deleted in the catalog.", kind, record_id)
+    return WorkspaceDeleteResponse(deleted=removed)
+
+
+class RunLogOut(BaseModel):
+    seq: int
+    timestamp: str
+    level: str
+    source: str
+    message: str
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RunLogsResponse(BaseModel):
+    job_run_id: str
+    lines: List[RunLogOut]
+    # Total lines stored for this job execution, so the client can say how many it
+    # is not showing.
+    total: int
+    # The `seq` to pass back as `after` to continue reading; None at the end.
+    next_after: Optional[int] = None
+
+
+@app.get(
+    "/job-runs/{job_run_id}/logs",
+    response_model=RunLogsResponse,
+    dependencies=[Depends(requires("history:Read"))],
+)
+def get_job_run_logs(
+    job_run_id: str, after: int = 0, limit: int = 500
+) -> RunLogsResponse:
+    """What one job execution printed, in the order it printed it.
+
+    Paged by `seq` rather than by offset: lines are only ever appended, so `after`
+    never re-reads or skips a line the way an offset does when a run is still going.
+    """
+    page = min(max(limit, 1), 2000)
+    lines = _history.list_logs(job_run_id, after_seq=after, limit=page)
+    out = [
+        RunLogOut(
+            seq=line.seq, timestamp=line.timestamp, level=line.level,
+            source=line.source, message=line.message,
+            context=_decode_context(line.context),
+        )
+        for line in lines
+    ]
+    return RunLogsResponse(
+        job_run_id=job_run_id,
+        lines=out,
+        total=_history.count_logs(job_run_id),
+        next_after=out[-1].seq if len(out) == page else None,
+    )
+
+
+class JobRunConfigResponse(BaseModel):
+    job_run_id: str
+    # `sha256:<hex>`, or None for a run recorded before this was kept.
+    config_hash: Optional[str] = None
+    # The JSON that ran. None when the run predates the column, or when the
+    # configuration was over the size the history stores — `config_hash` still
+    # identifies it, so two runs can be compared even then.
+    config: Optional[Dict[str, Any]] = None
+
+
+@app.get(
+    "/job-runs/{job_run_id}/config",
+    response_model=JobRunConfigResponse,
+    dependencies=[Depends(requires("history:Read"))],
+)
+def get_job_run_config(job_run_id: str) -> JobRunConfigResponse:
+    """The version of the JSON one execution ran.
+
+    The history points at a Job, and a Job keeps being edited: this is what makes
+    a past run reproducible, and what a reader compares against the file in git
+    when a run that used to work stops working.
+    """
+    stored = _history.job_config(job_run_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Unknown job run.")
+    return JobRunConfigResponse(
+        job_run_id=job_run_id, config_hash=stored.config_hash, config=stored.config,
+    )
+
+
+def _decode_context(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+class CancelResponse(BaseModel):
+    cancelled: bool
+    run_id: str
+    # False when nothing was computing on Spark yet: the run still ends, but no
+    # JVM job had to be killed for it.
+    spark_jobs_cancelled: bool = False
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class PrincipalOut(BaseModel):
+    username: str
+    display_name: Optional[str] = None
+    user_id: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    # The policy statements behind those roles, so Studio can grey out what this
+    # person cannot do instead of letting them find out from a 403.
+    statements: List[Dict[str, Any]] = Field(default_factory=list)
+    # True on a runner with no users: the shared token is the identity.
+    token_only: bool = False
+    # The team, which is both who pays for this person's runs and a second source
+    # of roles: `roles` above are the ones held personally, `team_roles` the ones
+    # that come with the team, and the statements are the union of both.
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    team_roles: List[str] = Field(default_factory=list)
+
+
+class SessionOut(BaseModel):
+    token: str
+    expires_at: str
+    user: PrincipalOut
+
+
+class AuthStatusOut(BaseModel):
+    # Whether this runner has users at all.
+    login_required: bool
+    # Who the request is from, or None when it carries no session.
+    principal: Optional[PrincipalOut] = None
+
+
+class UserOut(BaseModel):
+    id: str
+    username: str
+    display_name: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    disabled: bool = False
+    created_at: Optional[str] = None
+    last_login_at: Optional[str] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+
+
+class TeamOut(BaseModel):
+    """A group of people that shares one credit account and, optionally, roles."""
+
+    id: str
+    name: str
+    roles: List[str] = Field(default_factory=list)
+    members: int = 0
+    created_at: Optional[str] = None
+
+
+class CreateTeamRequest(BaseModel):
+    name: str
+    roles: List[str] = Field(default_factory=list)
+
+
+class UpdateTeamRequest(BaseModel):
+    name: Optional[str] = None
+    roles: Optional[List[str]] = None
+
+
+class MoveUserRequest(BaseModel):
+    #: Id or name. Empty moves the person back to the default team.
+    team: Optional[str] = None
+
+
+class CreateRoleRequest(BaseModel):
+    name: str
+    description: str = ""
+    statements: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class UpdateRoleRequest(BaseModel):
+    description: Optional[str] = None
+    statements: Optional[List[Dict[str, Any]]] = None
+
+
+class ActionOut(BaseModel):
+    """One thing a policy can allow, with what it guards, for the role editor."""
+
+    name: str
+    description: str
+    #: `run`, `workspace`, `iam`, `credits`, `history` — the half before the colon,
+    #: so the editor can group by service instead of showing a flat list.
+    service: str
+
+
+class PolicyVocabularyOut(BaseModel):
+    actions: List[ActionOut] = Field(default_factory=list)
+    resource_kinds: List[ActionOut] = Field(default_factory=list)
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    roles: List[str] = Field(default_factory=list)
+    display_name: Optional[str] = None
+    #: Id or name of the team to put them in. Omitted means the default team.
+    team: Optional[str] = None
+
+
+class UpdateUserRequest(BaseModel):
+    roles: Optional[List[str]] = None
+    disabled: Optional[bool] = None
+    team: Optional[str] = None
+
+
+class PasswordRequest(BaseModel):
+    password: str
+    # Required when changing your own password, so a borrowed session cannot
+    # quietly become a permanent one.
+    current_password: Optional[str] = None
+
+
+class RecoveryIssuedOut(BaseModel):
+    """A recovery code, shown once. The runner keeps only its hash, so this
+    response is the only copy that will ever exist."""
+
+    user_id: str
+    username: str
+    code: str
+    expires_at: str
+
+
+class RecoverRequest(BaseModel):
+    code: str
+    password: str
+
+
+class IssueRecoveryRequest(BaseModel):
+    """The administrator's **own** password, re-entered to mint a code.
+
+    Not the password of the person being recovered — they are by definition the
+    one who cannot supply it. This is a step-up: a session left open on an
+    unlocked laptop should not be enough to take over another account, and minting
+    a recovery code is exactly that if nobody has to prove who is holding the
+    keyboard.
+    """
+
+    password: str
+
+
+class AccountOut(BaseModel):
+    """One team's standing. The account id is the team id; `username` is its name.
+    """
+
+    id: str
+    username: str
+    balance: int
+    #: Every credit a remote write ever cost this account, whether or not a
+    #: balance was actually taken. See the metering-versus-enforcement split in
+    #: credits.py.
+    spent: int
+    #: `YYYY-MM`. The free allowance below is scoped to it and refills on its own
+    #: when the month turns.
+    period: str = ""
+    free_used: int = 0
+    free_monthly: int = 0
+    free_remaining: int = 0
+    #: What could be spent right now: the rest of this month's allowance plus the
+    #: granted balance.
+    available: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class UsageOut(BaseModel):
+    """One month in three numbers. `waived` is what the free allowance covered —
+    "you used 40 of your 40 free" and "you owe 40" are not the same sentence."""
+
+    period: str
+    writes: int
+    charged: int
+    waived: int
+
+
+class CreditsOut(BaseModel):
+    account: AccountOut
+    enforced: bool
+    credits_per_write: int
+    free_monthly: int
+    usage: UsageOut
+
+
+class LedgerEntryOut(BaseModel):
+    id: str
+    account_id: str
+    amount: int
+    reason: str
+    applied: bool
+    balance_after: int
+    created_at: str
+    #: Successful writes this entry paid for. Zero on a grant.
+    writes: int = 0
+    free_amount: int = 0
+    shortfall: int = 0
+    period: Optional[str] = None
+    job_run_id: Optional[str] = None
+    pipeline_run_id: Optional[str] = None
+    target: Optional[str] = None
+    job_name: Optional[str] = None
+    note: Optional[str] = None
+
+
+class GrantRequest(BaseModel):
+    amount: int
+    note: Optional[str] = None
+
+
+class RoleOut(BaseModel):
+    name: str
+    description: str
+    statements: List[Dict[str, Any]] = Field(default_factory=list)
+    custom: bool = False
+
+
+def _principal_out(principal: Any) -> PrincipalOut:
+    return PrincipalOut(
+        username=principal.username, display_name=principal.display_name,
+        user_id=principal.user_id, roles=list(principal.roles),
+        statements=list(principal.statements), token_only=principal.token_only,
+        team_id=principal.team_id, team_name=principal.team_name,
+        team_roles=list(principal.team_roles),
+    )
+
+
+def _user_out(user: Any) -> UserOut:
+    return UserOut(
+        id=user.id, username=user.username, display_name=user.display_name,
+        roles=list(user.roles), disabled=user.disabled, created_at=user.created_at,
+        last_login_at=user.last_login_at, team_id=user.team_id,
+        team_name=user.team_name,
+    )
+
+
+def _team_out(team: Any) -> TeamOut:
+    return TeamOut(
+        id=team.id, name=team.name, roles=list(team.roles), members=team.members,
+        created_at=team.created_at,
+    )
+
+
+def _role_out(role: Any) -> RoleOut:
+    return RoleOut(
+        name=role.name, description=role.description, statements=role.statements,
+        custom=role.custom,
+    )
+
+
+def _account_out(account: Any) -> AccountOut:
+    return AccountOut(
+        id=account.id, username=account.username, balance=account.balance,
+        spent=account.spent, period=account.period, free_used=account.free_used,
+        free_monthly=account.free_monthly, free_remaining=account.free_remaining,
+        available=account.available, created_at=account.created_at,
+        updated_at=account.updated_at,
+    )
+
+
+def _entry_out(entry: Any) -> LedgerEntryOut:
+    return LedgerEntryOut(
+        id=entry.id, account_id=entry.account_id, amount=entry.amount,
+        reason=entry.reason, applied=entry.applied, balance_after=entry.balance_after,
+        created_at=entry.created_at, writes=entry.writes,
+        free_amount=entry.free_amount, shortfall=entry.shortfall, period=entry.period,
+        job_run_id=entry.job_run_id, pipeline_run_id=entry.pipeline_run_id,
+        target=entry.target, job_name=entry.job_name, note=entry.note,
+    )
+
+
+@app.get("/auth/status", response_model=AuthStatusOut, dependencies=[Depends(require_token)])
+def auth_status(request: Request) -> AuthStatusOut:
+    """Whether a login is needed here, and who the caller already is.
+
+    The one authenticated endpoint that answers without a session: Studio calls it
+    on start to decide between showing the editor and showing a login form, and it
+    cannot have a session yet at that point.
+    """
+    login_required = _auth.has_users()
+    token = _session_token(request)
+    principal = _auth.resolve_session(token) if token else None
+    if principal is None and not login_required:
+        principal = auth.TOKEN_PRINCIPAL
+    return AuthStatusOut(
+        login_required=login_required,
+        principal=_principal_out(principal) if principal else None,
+    )
+
+
+@app.post("/auth/login", response_model=SessionOut, dependencies=[Depends(require_token)])
+def auth_login(body: LoginRequest) -> SessionOut:
+    """Exchanges a username and password for a session.
+
+    One message for every kind of failure — unknown user, wrong password, disabled
+    account — because saying which one is a free answer to somebody guessing.
+    """
+    session = _auth.login(body.username, body.password)
+    if session is None:
+        raise HTTPException(status_code=401, detail="Wrong username or password.")
+    return SessionOut(
+        token=session.token,
+        expires_at=session.expires_at,
+        user=PrincipalOut(
+            username=session.user.username, display_name=session.user.display_name,
+            user_id=session.user.id, roles=list(session.user.roles),
+        ),
+    )
+
+
+@app.post("/auth/logout", dependencies=[Depends(require_token)])
+def auth_logout(request: Request) -> Dict[str, bool]:
+    """Ends this session. Silent when there is none — logging out twice is not an
+    error, and neither is logging out of a session that already expired."""
+    token = _session_token(request)
+    if token:
+        _auth.logout(token)
+    return {"logged_out": True}
+
+
+@app.get("/auth/me", response_model=PrincipalOut)
+def auth_me(principal: Any = Depends(current_principal)) -> PrincipalOut:
+    return _principal_out(principal)
+
+
+@app.get(
+    "/auth/roles",
+    response_model=List[RoleOut],
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def list_roles() -> List[RoleOut]:
+    return [_role_out(role) for role in _auth.list_roles()]
+
+
+@app.get(
+    "/auth/policy",
+    response_model=PolicyVocabularyOut,
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def policy_vocabulary() -> PolicyVocabularyOut:
+    """Everything a policy statement may name: the actions and the resource kinds.
+
+    The role editor is built from this rather than from a list copied into the
+    client, so an action added to the runner shows up in the UI without a second
+    change — and a client can never offer an action the server would reject.
+    """
+    return PolicyVocabularyOut(
+        actions=[
+            ActionOut(name=name, description=description, service=name.split(":")[0])
+            for name, description in sorted(auth.ACTIONS.items())
+        ],
+        resource_kinds=[
+            ActionOut(name=name, description=description, service=name)
+            for name, description in sorted(auth.RESOURCE_KINDS.items())
+        ],
+    )
+
+
+@app.post(
+    "/auth/roles",
+    response_model=RoleOut,
+    dependencies=[Depends(requires("iam:ManageRoles"))],
+)
+def create_role(body: CreateRoleRequest) -> RoleOut:
+    """A role written here, rather than shipped with the runner.
+
+    The built-in names are refused: the shipped roles are rewritten on every start
+    so that fixing a policy in code fixes it on every installation, and an edit
+    made here would be silently lost on the next restart.
+    """
+    try:
+        role = _auth.create_role(body.name, body.description, body.statements)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _role_out(role)
+
+
+@app.patch(
+    "/auth/roles/{name}",
+    response_model=RoleOut,
+    dependencies=[Depends(requires("iam:ManageRoles"))],
+)
+def update_role(name: str, body: UpdateRoleRequest) -> RoleOut:
+    try:
+        role = _auth.update_role(
+            name, description=body.description, statements=body.statements
+        )
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _role_out(role)
+
+
+@app.delete(
+    "/auth/roles/{name}",
+    dependencies=[Depends(requires("iam:ManageRoles"))],
+)
+def delete_role(name: str) -> Dict[str, bool]:
+    """Removes a custom role. Refused while anyone still holds it: deleting a role
+    out from under a user would quietly change what they can do, and the operator
+    should decide what those people get instead."""
+    try:
+        _auth.delete_role(name)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"deleted": True}
+
+
+@app.get(
+    "/auth/teams",
+    response_model=List[TeamOut],
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def list_teams() -> List[TeamOut]:
+    return [_team_out(team) for team in _auth.list_teams()]
+
+
+@app.post(
+    "/auth/teams",
+    response_model=TeamOut,
+    dependencies=[Depends(requires("iam:ManageTeams"))],
+)
+def create_team(body: CreateTeamRequest) -> TeamOut:
+    """A team is a billing account and a way of granting roles to a group at once.
+
+    Roles given here are added to whatever each member holds personally; a team
+    never takes anything away, because a grant that can also revoke makes "why can
+    this person not do X" an unanswerable question.
+    """
+    try:
+        team = _auth.create_team(body.name, roles=body.roles)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _team_out(team)
+
+
+@app.patch(
+    "/auth/teams/{team_id}",
+    response_model=TeamOut,
+    dependencies=[Depends(requires("iam:ManageTeams"))],
+)
+def update_team(team_id: str, body: UpdateTeamRequest) -> TeamOut:
+    try:
+        team = _auth.update_team(team_id, name=body.name, roles=body.roles)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _team_out(team)
+
+
+@app.delete(
+    "/auth/teams/{team_id}",
+    dependencies=[Depends(requires("iam:ManageTeams"))],
+)
+def delete_team(team_id: str) -> Dict[str, bool]:
+    """Removes a team; its members move to the default one rather than being left
+    without an account to charge. The default team itself cannot go."""
+    try:
+        _auth.delete_team(team_id)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"deleted": True}
+
+
+@app.get(
+    "/auth/users",
+    response_model=List[UserOut],
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def list_users() -> List[UserOut]:
+    return [_user_out(user) for user in _auth.list_users()]
+
+
+@app.post(
+    "/auth/users",
+    response_model=UserOut,
+    dependencies=[Depends(requires("iam:ManageUsers"))],
+)
+def create_user(body: CreateUserRequest) -> UserOut:
+    """Creates a user.
+
+    The first one is the moment this runner stops being token-only: until it
+    exists the shared token authorizes everything, including this call, which is
+    how an operator bootstraps themselves an account without a second channel.
+    Give that first user the `admin` role — nothing else can create the next one.
+    """
+    try:
+        user = _auth.create_user(
+            body.username, body.password, roles=body.roles,
+            display_name=body.display_name, team=body.team,
+        )
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _user_out(user)
+
+
+@app.patch(
+    "/auth/users/{user_id}",
+    response_model=UserOut,
+    dependencies=[Depends(requires("iam:ManageUsers"))],
+)
+def update_user(user_id: str, body: UpdateUserRequest) -> UserOut:
+    try:
+        if body.roles is not None:
+            _auth.set_roles(user_id, body.roles)
+        if body.disabled is not None:
+            _auth.set_disabled(user_id, body.disabled)
+        if body.team is not None:
+            _auth.set_user_team(user_id, body.team)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    user = _auth.get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="No such user.")
+    return _user_out(user)
+
+
+@app.post("/auth/users/{user_id}/password")
+def set_password(
+    user_id: str, body: PasswordRequest, principal: Any = Depends(current_principal)
+) -> Dict[str, bool]:
+    """Sets a password: your own, or anyone's with `iam:ManageUsers`.
+
+    Changing your own requires the current one. An administrator resetting someone
+    else's does not have it — that is the point of a reset — which is why the two
+    paths are told apart here rather than merged.
+    """
+    own = principal.user_id is not None and principal.user_id == user_id
+    if not own and not principal.allows("iam:ManageUsers"):
+        raise HTTPException(
+            status_code=403, detail="Only an administrator can change another user's password.",
+        )
+    if own:
+        if not body.current_password or not _auth.verify_credentials(
+            principal.username, body.current_password
+        ):
+            raise HTTPException(status_code=403, detail="The current password is wrong.")
+    try:
+        _auth.set_password(user_id, body.password)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"changed": True}
+
+
+@app.post(
+    "/auth/users/{user_id}/recovery",
+    response_model=RecoveryIssuedOut,
+    dependencies=[Depends(requires("iam:ManageUsers"))],
+)
+def issue_recovery(
+    user_id: str, body: IssueRecoveryRequest,
+    principal: Any = Depends(current_principal),
+) -> RecoveryIssuedOut:
+    """Mints a single-use code the person can trade for a password of their own.
+
+    An administrator could simply set the password instead; this exists so they
+    do not have to know it. The code is handed over out of band — chat, phone,
+    in person — and it is short-lived because that trip is all it has to survive.
+
+    The administrator re-enters **their own** password to do it. Not the password
+    of the person being recovered: that person is by definition the one who cannot
+    supply it. This is a step-up, and it is here because minting a recovery code
+    is a way to take over an account — an unattended session with an open Studio
+    should not be enough. A runner with no users has no password to ask for; there
+    the shared token is the identity, and whoever holds it owns the host anyway.
+    """
+    if principal.user_id is not None and not _auth.verify_credentials(
+        principal.username, body.password
+    ):
+        raise HTTPException(status_code=403, detail="Your password is wrong.")
+    user = _auth.get_user(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="No such user.")
+    try:
+        code, expires_at = _auth.issue_recovery(user_id, issued_by=principal.username)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return RecoveryIssuedOut(
+        user_id=user.id, username=user.username, code=code, expires_at=expires_at
+    )
+
+
+@app.post("/auth/recover", dependencies=[Depends(require_token)])
+def recover_password(body: RecoverRequest) -> Dict[str, bool]:
+    """Trades a recovery code for a new password. No session required — the
+    caller is by definition locked out — but the shared token still is, because
+    this endpoint is on the same runner as everything else.
+
+    Every failure reads the same, deliberately: unknown code, expired code, code
+    already used, account disabled. A specific answer would make this an oracle
+    for someone holding the token and guessing.
+    """
+    try:
+        _auth.redeem_recovery(body.code, body.password)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"changed": True}
+
+
+@app.delete(
+    "/auth/users/{user_id}",
+    dependencies=[Depends(requires("iam:ManageUsers"))],
+)
+def delete_user(user_id: str) -> Dict[str, bool]:
+    """Removes access. Hard delete, unlike the catalog: a user is not a record
+    past runs point at — the runs keep the name they were run under, as text."""
+    try:
+        _auth.delete_user(user_id)
+    except auth.AuthError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"deleted": True}
+
+
+# --------------------------------------------------------------------- credits
+
+
+@app.get("/credits/me", response_model=CreditsOut)
+def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
+    """Your own balance. No permission needed: knowing what you may spend is part
+    of being able to spend it, and refusing to say would only produce runs that
+    fail at admission for a reason nobody could look up."""
+    account_id, username = credits.account_for(principal)
+    return CreditsOut(
+        account=_account_out(_credits.account(account_id, username)),
+        enforced=credits.enforced(),
+        credits_per_write=credits.credits_per_write(),
+        free_monthly=credits.free_monthly(),
+        usage=UsageOut(**_credits.usage(account_id)),
+    )
+
+
+@app.get(
+    "/credits",
+    response_model=List[AccountOut],
+    dependencies=[Depends(requires("credits:Read"))],
+)
+def list_credit_accounts() -> List[AccountOut]:
+    return [_account_out(account) for account in _credits.list_accounts()]
+
+
+@app.get(
+    "/credits/{account_id}/ledger",
+    response_model=List[LedgerEntryOut],
+)
+def credit_ledger(
+    account_id: str, limit: int = 100, principal: Any = Depends(current_principal)
+) -> List[LedgerEntryOut]:
+    """What an account was charged, newest first. Your own is always readable;
+    anyone else's needs `credits:Read`."""
+    own, _ = credits.account_for(principal)
+    if account_id != own and not principal.allows("credits:Read"):
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's credit ledger needs credits:Read.",
+        )
+    return [_entry_out(entry) for entry in _credits.ledger(account_id, limit=limit)]
+
+
+@app.post(
+    "/credits/{account_id}/grant",
+    response_model=AccountOut,
+    dependencies=[Depends(requires("credits:Manage"))],
+)
+def grant_credits(account_id: str, body: GrantRequest) -> AccountOut:
+    """Adds credits, or takes them back with a negative amount. Both are the same
+    operation on purpose: every movement of an account is then one table to read."""
+    try:
+        account = _credits.grant(account_id, body.amount, note=body.note)
+    except credits.CreditError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return _account_out(account)
+
+
+@app.post(
+    "/runs/{run_id}/cancel",
+    response_model=CancelResponse,
+    dependencies=[Depends(requires("run:Cancel"))],
+)
+def cancel_run(run_id: str) -> CancelResponse:
+    """Stops the run in flight.
+
+    Two things happen: the flag makes the flow stop at the next stage boundary, and
+    `cancelAllJobs()` aborts whatever Spark is computing right now — without it a
+    long write would run to completion no matter what the flag says.
+
+    409 when `run_id` is not the run this process is executing: a finished run has
+    nothing to cancel, and cancelling one run must never touch another.
+    """
+    if not _ACTIVE_RUN.request(run_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This execution is not running on this runner any more.",
+        )
+    return CancelResponse(
+        cancelled=True, run_id=run_id, spark_jobs_cancelled=_cancel_spark_jobs()
     )
 
 

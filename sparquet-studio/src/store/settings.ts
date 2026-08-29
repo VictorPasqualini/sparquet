@@ -44,6 +44,12 @@ interface SettingsState {
   runnerUrl: string
   /** Shared secret printed by the local runner; required by /run and /validate. */
   runnerToken: string
+  /**
+   * Name every run started here is attributed to ("run as" in the history).
+   * Empty means the runner records its own OS account instead — the runner
+   * authenticates a token, not a person, so this is a label, never a permission.
+   */
+  runAs: string
   canvas: CanvasPreferences
   /** Dismissed the first-run tour. */
   onboarded: boolean
@@ -54,6 +60,7 @@ interface SettingsState {
   setPersistApiKey: (value: boolean) => void
   setRunnerUrl: (url: string) => void
   setRunnerToken: (token: string) => void
+  setRunAs: (name: string) => void
   setCanvas: (patch: Partial<CanvasPreferences>) => void
   setOnboarded: (value: boolean) => void
 }
@@ -84,6 +91,7 @@ export const useSettingsStore = create<SettingsState>()(
       persistApiKey: false,
       runnerUrl: 'http://127.0.0.1:8787',
       runnerToken: '',
+      runAs: '',
       canvas: DEFAULT_CANVAS,
       onboarded: false,
 
@@ -96,6 +104,7 @@ export const useSettingsStore = create<SettingsState>()(
       setPersistApiKey: (persistApiKey) => set({ persistApiKey }),
       setRunnerUrl: (runnerUrl) => set({ runnerUrl }),
       setRunnerToken: (runnerToken) => set({ runnerToken }),
+      setRunAs: (runAs) => set({ runAs }),
       setCanvas: (patch) => set((state) => ({ canvas: { ...state.canvas, ...patch } })),
       setOnboarded: (onboarded) => set({ onboarded }),
     }),
@@ -111,6 +120,7 @@ export const useSettingsStore = create<SettingsState>()(
         persistApiKey: state.persistApiKey,
         runnerUrl: state.runnerUrl,
         runnerToken: state.runnerToken,
+        runAs: state.runAs,
         canvas: state.canvas,
         onboarded: state.onboarded,
       }),

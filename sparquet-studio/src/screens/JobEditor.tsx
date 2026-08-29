@@ -5,6 +5,7 @@ import {
   Bot,
   Braces,
   CircleCheck,
+  History as HistoryIcon,
   LayoutGrid,
   PanelRightClose,
   ListChecks,
@@ -15,6 +16,7 @@ import {
   Settings2,
   SlidersHorizontal,
   Undo2,
+  Workflow,
 } from 'lucide-react'
 import {
   lazy,
@@ -29,7 +31,15 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { JobCanvas } from '@/components/canvas/JobCanvas'
+import { RunsBrowser } from '@/components/history/RunsBrowser'
+import { RunViewBanner } from '@/components/history/RunViewBanner'
 import { CommandPalette } from '@/components/layout/CommandPalette'
+import {
+  WorkspaceTabs,
+  workspacePanelId,
+  workspaceTabId,
+  type WorkspaceTab,
+} from '@/components/layout/WorkspaceTabs'
 import { AiPanel } from '@/components/panels/AiPanel'
 import { Inspector } from '@/components/panels/Inspector'
 import { IssuesPanel } from '@/components/panels/IssuesPanel'
@@ -42,6 +52,7 @@ import { cn } from '@/lib/utils/cn'
 import { getJob } from '@/lib/storage/db'
 import { useEditorStore, type PanelId } from '@/store/editor'
 import { useLibraryStore } from '@/store/library'
+import { useSettingsStore } from '@/store/settings'
 import type { Job } from '@/types/studio'
 
 /** Monaco is heavy and only the JSON tab needs it. */
@@ -134,9 +145,7 @@ export function JobEditor() {
           <aside className="w-60 shrink-0 border-r border-line bg-surface">
             <NodePalette />
           </aside>
-          <main className="relative min-w-0 flex-1">
-            <JobCanvas />
-          </main>
+          <JobWorkspace />
           <SidePanel />
         </div>
         <EditorStatusBar />
@@ -144,6 +153,104 @@ export function JobEditor() {
       <EditorShortcuts />
       <EditorCommandPalette />
     </ReactFlowProvider>
+  )
+}
+
+type WorkspaceView = 'flow' | 'json' | 'runs'
+
+const WORKSPACE_TABS: WorkspaceTab<WorkspaceView>[] = [
+  { id: 'flow', label: 'Flow', icon: Workflow },
+  { id: 'json', label: 'JSON', icon: Braces },
+  { id: 'runs', label: 'Runs', icon: HistoryIcon },
+]
+
+/**
+ * The middle of the editor: the flow, the JSON behind it, and the executions it
+ * has had.
+ *
+ * The canvas stays mounted across tabs — React Flow holds the viewport, and
+ * remounting it would throw away where the user was looking. The other two are
+ * mounted only while shown: Monaco is heavy, and the run list should refetch when
+ * it is asked for rather than poll behind a tab nobody is on.
+ */
+function JobWorkspace() {
+  const [view, setView] = useState<WorkspaceView>('flow')
+
+  const job = useEditorStore((state) => state.job)
+  const run = useEditorStore((state) => state.run)
+  const runView = useEditorStore((state) => state.runView)
+  const showRunView = useEditorStore((state) => state.showRunView)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
+
+  return (
+    <main className="flex min-w-0 flex-1 flex-col">
+      <WorkspaceTabs
+        value={view}
+        onChange={setView}
+        tabs={WORKSPACE_TABS}
+        ariaLabel="Job workspace"
+      />
+
+      <div className="relative min-h-0 flex-1">
+        <div
+          role="tabpanel"
+          id={workspacePanelId('flow')}
+          aria-labelledby={workspaceTabId('flow')}
+          className={cn('absolute inset-0', view !== 'flow' && 'hidden')}
+        >
+          <JobCanvas />
+          {/* Says which execution the boxes are describing, and loads it. */}
+          <RunViewBanner />
+        </div>
+
+        {view === 'json' && (
+          <div
+            role="tabpanel"
+            id={workspacePanelId('json')}
+            aria-labelledby={workspaceTabId('json')}
+            className="absolute inset-0 flex flex-col bg-surface"
+          >
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center">
+                  <Spinner />
+                </div>
+              }
+            >
+              <JsonPanel />
+            </Suspense>
+          </div>
+        )}
+
+        {view === 'runs' && job && (
+          <div
+            role="tabpanel"
+            id={workspacePanelId('runs')}
+            aria-labelledby={workspaceTabId('runs')}
+            className="absolute inset-0 bg-surface"
+          >
+            <RunsBrowser
+              runnerUrl={runnerUrl}
+              runnerToken={runnerToken}
+              workflowId={job.workflowId}
+              jobId={job.id}
+              refreshToken={run?.runId}
+              subject={job.name}
+              // Picking a run paints it on the canvas, and the canvas is where the
+              // boxes are — so the tab follows the answer.
+              onViewJobRun={(record, jobRun) => {
+                showRunView(record, jobRun, { pinned: true })
+                setView('flow')
+              }}
+              viewActionLabel="View on canvas"
+              viewingJobRunId={runView?.jobRunId ?? null}
+              viewingRunId={runView?.runId ?? null}
+            />
+          </div>
+        )}
+      </div>
+    </main>
   )
 }
 

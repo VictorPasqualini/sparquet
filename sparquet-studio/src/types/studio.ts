@@ -309,7 +309,15 @@ export interface ValidationIssue {
 
 /* --------------------------------------------------------------- runtime */
 
-export type RunStatus = 'idle' | 'connecting' | 'running' | 'success' | 'error' | 'skipped'
+export type RunStatus =
+  | 'idle'
+  | 'connecting'
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'skipped'
+  /** Stopped from Studio while it was running. */
+  | 'cancelled'
 
 export interface RunLogLine {
   ts: number
@@ -323,7 +331,14 @@ export interface RunLogLine {
 }
 
 /** Lifecycle of a single transformation while the pipeline streams. */
-export type StepStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped'
+export type StepStatus =
+  | 'pending'
+  | 'running'
+  | 'success'
+  | 'error'
+  | 'skipped'
+  /** The run was stopped from Studio before this step could finish. */
+  | 'cancelled'
 
 /**
  * Per-transformation progress, keyed by the transformation's 0-based index in
@@ -358,10 +373,16 @@ export interface RunResult {
     truncated: boolean
   }
   logs: RunLogLine[]
+  /** Persisted execution history ids, for opening this run in `ExecutionHistoryPanel`. */
+  runId?: string
+  jobRunId?: string
 }
 
 /** How one stage of a pipeline run ended. */
-export type PipelineStageOutcome = Extract<StepStatus, 'success' | 'error' | 'skipped'>
+export type PipelineStageOutcome = Extract<
+  StepStatus,
+  'success' | 'error' | 'skipped' | 'cancelled'
+>
 
 export interface PipelineStageResult {
   /** 0-based position in the sequence the runner was given. */
@@ -387,6 +408,8 @@ export interface PipelineRunResult {
   preview?: RunResult['preview']
   error?: string
   logs: RunLogLine[]
+  /** Persisted execution history id, for opening this run in `ExecutionHistoryPanel`. */
+  runId?: string
 }
 
 /* ------------------------------------------------------------ templates */
