@@ -198,6 +198,10 @@ ACTIONS: Dict[str, str] = {
     "iam:ReadAudit": "Read the audit log: who changed what, and who was refused.",
     "credits:Read": "See every team's execution credits and what they were spent on.",
     "credits:Manage": "Grant execution credits, or take them back.",
+    # Deliberately not under `workspace:*`: moving the whole library to another
+    # directory decides where this runner writes on the host, which is an
+    # administrator's call and not an editor's, and `editor` holds `workspace:*`.
+    "runner:Configure": "Change how this runner is set up, such as where the library is stored.",
 }
 
 #: What a policy statement may name as a resource, for the role editor. The

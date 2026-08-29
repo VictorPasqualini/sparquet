@@ -56,6 +56,113 @@ _STUDIO_DIR = ".studio"
 _INDEX_FILE = "index.json"
 _META_FILE = "meta.json"
 
+# ------------------------------------------------- where the library lives
+
+#: Where the chosen location is remembered. Deliberately not inside the
+#: workspace: a setting that says where the workspace is cannot live in it.
+_SETTINGS_FILE = "studio.json"
+_ROOT_KEY = "workspace"
+_DEFAULT_DIR = "workspace"
+
+
+def data_home() -> Path:
+    """The per-user directory this machine keeps application data in.
+
+    The runner must never write into its own source tree. A checkout is code: it
+    gets pulled, reset, moved and deleted, and a library living inside one is a
+    library that disappears with a `git clean` — or, worse, one that turns up as
+    noise in every `git status` and eventually gets committed by accident. So the
+    default is the platform's own place for user data, and `SPARQUET_HOME`
+    overrides the lot for anyone who wants everything in one directory.
+    """
+    override = os.getenv("SPARQUET_HOME")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        base = os.getenv("APPDATA") or "~/AppData/Roaming"
+        return Path(base).expanduser() / "Sparquet"
+    base = os.getenv("XDG_DATA_HOME") or "~/.local/share"
+    return Path(base).expanduser() / "sparquet"
+
+
+def settings_path() -> Path:
+    """The file `remember_root` writes."""
+    return data_home() / _SETTINGS_FILE
+
+
+def default_root() -> Path:
+    """Where a library goes when nobody has said otherwise."""
+    return data_home() / _DEFAULT_DIR
+
+
+@dataclass(frozen=True)
+class Location:
+    """A resolved workspace root, and why it is that one.
+
+    `source` is what the interface shows: somebody who cannot find their Jobs is
+    almost always looking at a different root than the runner is, and naming the
+    reason ("the SPARQUET_STUDIO_WORKSPACE variable") answers that in one line.
+    """
+
+    root: Path
+    #: One of `env`, `settings`, `legacy`, `default`.
+    source: str
+
+
+def read_setting(key: str) -> Optional[Any]:
+    """One value from the settings file, or None when there is nothing to read.
+
+    A settings file that is corrupt is treated as absent. It holds preferences,
+    not data: refusing to start because a preference will not parse would trade a
+    small problem for a total one.
+    """
+    payload = _read_json(settings_path())
+    if not isinstance(payload, dict):
+        return None
+    return payload.get(key)
+
+
+def write_setting(key: str, value: Any) -> None:
+    """Changes one value in the settings file, leaving the rest alone."""
+    payload = _read_json(settings_path())
+    settings = dict(payload) if isinstance(payload, dict) else {}
+    if value is None:
+        settings.pop(key, None)
+    else:
+        settings[key] = value
+    _write_json(settings_path(), settings)
+
+
+def remember_root(root: Path) -> Path:
+    """Records where the library should live, from now on and after a restart."""
+    resolved = Path(root).expanduser().resolve()
+    write_setting(_ROOT_KEY, str(resolved))
+    return resolved
+
+
+def resolve_root(legacy: Optional[Path] = None) -> Location:
+    """Where this runner's library lives.
+
+    In order: the `SPARQUET_STUDIO_WORKSPACE` variable, which a deployment sets
+    and nothing may override; then what somebody chose in the interface; then a
+    `legacy` directory that already holds a library, adopted rather than
+    abandoned, because a default that moved is no reason to lose what is in the
+    old place; then the per-user default.
+    """
+    from_env = os.getenv("SPARQUET_STUDIO_WORKSPACE")
+    if from_env:
+        return Location(Path(from_env).expanduser(), "env")
+
+    chosen = read_setting(_ROOT_KEY)
+    if isinstance(chosen, str) and chosen.strip():
+        return Location(Path(chosen).expanduser(), "settings")
+
+    if legacy is not None and (Path(legacy) / _STUDIO_DIR).is_dir():
+        return Location(Path(legacy), "legacy")
+
+    return Location(default_root(), "default")
+
+
 # A slug is what makes the tree readable in a diff. Anything a file system or a
 # reviewer would struggle with collapses to a dash.
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")

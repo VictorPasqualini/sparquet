@@ -13,6 +13,7 @@ of leaving a second copy behind, and a reload has to return exactly what was wri
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -168,6 +169,133 @@ class FileWorkspaceStoreTest(unittest.TestCase):
         for bad in ("../escape", "a/b", "", "  "):
             with self.assertRaises(workspace.WorkspaceError, msg=bad):
                 self.store.write(workspace.Document(kind="workflow", id=bad, record={}))
+
+
+class WorkspaceLocationTest(unittest.TestCase):
+    """Where the library lives.
+
+    The rule that matters is the last one: the runner must not keep a user's Jobs
+    inside its own checkout. A checkout is pulled, reset and deleted, and a
+    library in one is lost to a `git clean` — or committed by accident long
+    before that.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "home"
+        self._env = _Environment(
+            SPARQUET_HOME=str(self.home), SPARQUET_STUDIO_WORKSPACE=None
+        )
+        self._env.apply()
+
+    def tearDown(self) -> None:
+        self._env.restore()
+        self._tmp.cleanup()
+
+    def test_the_default_is_outside_any_source_tree(self) -> None:
+        self.assertEqual(workspace.default_root(), self.home / "workspace")
+        self.assertEqual(workspace.resolve_root().source, "default")
+        self.assertEqual(workspace.resolve_root().root, self.home / "workspace")
+
+    def test_nothing_is_created_just_by_asking_where_it_would_go(self) -> None:
+        """Resolving is a question. Only a store actually makes directories."""
+        workspace.resolve_root()
+        self.assertFalse(self.home.exists())
+
+    def test_the_environment_wins_over_everything(self) -> None:
+        workspace.remember_root(Path(self._tmp.name) / "chosen")
+        with _Environment(SPARQUET_STUDIO_WORKSPACE=str(Path(self._tmp.name) / "forced")):
+            location = workspace.resolve_root()
+        self.assertEqual(location.source, "env")
+        self.assertEqual(location.root, Path(self._tmp.name) / "forced")
+
+    def test_a_choice_survives_a_restart(self) -> None:
+        chosen = Path(self._tmp.name) / "chosen"
+        self.assertEqual(workspace.remember_root(chosen), chosen.resolve())
+        location = workspace.resolve_root()
+        self.assertEqual(location.source, "settings")
+        self.assertEqual(location.root, chosen.resolve())
+
+    def test_the_setting_lives_outside_the_workspace_it_points_at(self) -> None:
+        """A setting that says where the workspace is cannot live in the workspace."""
+        chosen = Path(self._tmp.name) / "chosen"
+        workspace.remember_root(chosen)
+        self.assertEqual(workspace.settings_path(), self.home / "studio.json")
+        self.assertFalse((chosen / "studio.json").exists())
+
+    def test_clearing_the_choice_goes_back_to_the_default(self) -> None:
+        workspace.remember_root(Path(self._tmp.name) / "chosen")
+        workspace.write_setting("workspace", None)
+        self.assertEqual(workspace.resolve_root().source, "default")
+
+    def test_a_settings_file_that_will_not_parse_is_treated_as_absent(self) -> None:
+        """It holds a preference, not data. Refusing to start over one would trade
+        a small problem for a total one."""
+        workspace.settings_path().parent.mkdir(parents=True, exist_ok=True)
+        workspace.settings_path().write_text("{ not json", encoding="utf-8")
+        self.assertEqual(workspace.resolve_root().source, "default")
+
+    def test_a_library_left_in_the_old_place_is_adopted_not_abandoned(self) -> None:
+        """The default moved. That is no reason for somebody's Jobs to disappear."""
+        legacy = Path(self._tmp.name) / "repo" / "sparquet-workspace"
+        workspace.FileWorkspaceStore(legacy).write(_workflow())
+        location = workspace.resolve_root(legacy)
+        self.assertEqual(location.source, "legacy")
+        self.assertEqual(location.root, legacy)
+
+    def test_an_empty_old_directory_is_not_a_library(self) -> None:
+        """A bare directory left behind must not pin a fresh install to the repo."""
+        legacy = Path(self._tmp.name) / "repo" / "sparquet-workspace"
+        legacy.mkdir(parents=True)
+        self.assertEqual(workspace.resolve_root(legacy).source, "default")
+
+    def test_a_choice_wins_over_the_old_place(self) -> None:
+        legacy = Path(self._tmp.name) / "repo" / "sparquet-workspace"
+        workspace.FileWorkspaceStore(legacy).write(_workflow())
+        chosen = Path(self._tmp.name) / "chosen"
+        workspace.remember_root(chosen)
+        self.assertEqual(workspace.resolve_root(legacy).root, chosen.resolve())
+
+    def test_other_settings_are_left_alone(self) -> None:
+        workspace.write_setting("theme", "dark")
+        workspace.remember_root(Path(self._tmp.name) / "chosen")
+        self.assertEqual(workspace.read_setting("theme"), "dark")
+
+
+class _Environment:
+    """Sets environment variables for a block, and puts them back afterwards.
+
+    `None` means "unset", which is the case that matters: a developer with
+    SPARQUET_STUDIO_WORKSPACE exported must not get different results from these
+    tests than CI does.
+    """
+
+    def __init__(self, **values: object) -> None:
+        self._values = values
+        self._before: dict = {}
+
+    def apply(self) -> None:
+        for key, value in self._values.items():
+            self._before[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
+
+    def restore(self) -> None:
+        for key, value in self._before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        self._before = {}
+
+    def __enter__(self) -> "_Environment":
+        self.apply()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.restore()
 
 
 if __name__ == "__main__":

@@ -129,6 +129,22 @@ muda a API Python.
   (`src/lib/storage/db.ts` + `remote.ts`) — e uma biblioteca que só existia no
   navegador é empurrada uma única vez para um workspace vazio. Fonte da verdade: o
   arquivo; o navegador virou cache de quando o runner não está no ar.
+- ✅ **O produto não escreve dentro do próprio código-fonte.** Um checkout é código:
+  ele é puxado, resetado e apagado, então uma biblioteca dentro dele morre no primeiro
+  `git clean` — ou é commitada por engano muito antes disso. O default virou o
+  diretório de dados do usuário (`%APPDATA%\Sparquet\workspace` no Windows,
+  `$XDG_DATA_HOME/sparquet/workspace` no resto; `SPARQUET_HOME` sobrescreve), e
+  `GET`/`PUT /workspace/root` deixam escolher outro pela interface (Settings → Local
+  runner → *Library location*). Precedência: `SPARQUET_STUDIO_WORKSPACE` (deployment
+  decide, a interface não sobrepõe — `409` + `locked`) › escolha salva em
+  `studio.json` › `sparquet-workspace/` antigo **que já tenha um `.studio/`**, adotado
+  para ninguém perder biblioteca › default. Trocar a raiz **não copia nada**: adotar um
+  diretório que já tem biblioteca é o caso de uso, e uma cópia pela metade sem volta é
+  pior do que uma mudança que ninguém fez. Recusas: caminho relativo, diretório que não
+  dá para criar ou escrever, e qualquer caminho dentro do código-fonte. A ação é
+  `runner:Configure`, de propósito fora de `workspace:*` — o papel `editor` tem
+  `workspace:*`, e decidir onde o runner escreve na máquina é decisão de administrador.
+  `spark-warehouse/` e `sparquet-workspace/` saíram do git.
 
 O que é execução, histórico, IAM e billing está em §9, com o que ainda falta em cada
 um logo abaixo do que já existe.
@@ -640,6 +656,25 @@ Pendente aqui:
       runner, consumível pelo Studio e pela IA como contexto) ou integração com um
       existente (Unity Catalog, DataHub, OpenMetadata) — e, se próprio, se ele também
       alimenta a paleta do Studio com fontes já conhecidas.
+
+### 9.6 Biblioteca e arquivos
+
+- [ ] **Apontar um estágio do Pipeline para um arquivo JSON existente.** Hoje uma caixa
+      do Pipeline referencia um Job da biblioteca, e o Job é o dono do arquivo. Falta o
+      caminho inverso: apontar a caixa para um `.json` que já existe no disco — gerado
+      por outro time, versionado em outro repositório, escrito à mão — e executá-lo sem
+      importar para dentro da biblioteca. Desenho proposto: o estágio ganha uma origem
+      alternativa (`{ "source": "file", "path": "vendas/jobs/ingestao.json" }`, relativa
+      à raiz da biblioteca), o runner resolve na hora de executar, e o Studio mostra o
+      JSON em modo leitura com o linter rodando em cima — editar continua sendo pelo
+      Job. Pontos a decidir antes: (a) caminho relativo à raiz **sempre**, para não
+      vazar caminho absoluto de uma máquina para outra e para manter a recusa de
+      escapar da raiz que `workspace.py` já faz; (b) o que a execução registra no
+      histórico quando não há `job.id` — provavelmente um Job sintético identificado
+      pelo caminho, senão o catálogo fica com órfão; (c) o que acontece quando o arquivo
+      some ou deixa de compilar — falhar no lint do Pipeline, antes de rodar, não no
+      meio da execução; (d) se o mesmo mecanismo vale para um Workflow inteiro
+      (montar a biblioteca a partir de um diretório) ou só para estágio.
 
 ---
 

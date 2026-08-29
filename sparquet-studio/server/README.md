@@ -112,6 +112,11 @@ roles ship with the runner:
 | `operator` | Run what already exists and read the results. Cannot edit. |
 | `viewer` | Read the library and the history. Changes nothing. |
 
+`editor` holds `workspace:*`, so a couple of actions sit deliberately outside that
+family: **`runner:Configure`** — moving the library to another directory decides
+where this runner writes on its host, which is an administrator's call, not an
+editor's. `admin` holds `*` and gets it for free.
+
 Those four are rewritten on every start, so fixing a policy in code fixes it in
 every installation — which is also why they cannot be edited. **Custom roles** are
 written in the interface (**Settings → Access & IAM → Roles**) and are never
@@ -321,7 +326,8 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_FREE_MONTHLY` | `40` | Writes a team gets for free each calendar month (UTC). Does not accumulate. |
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
-| `SPARQUET_STUDIO_WORKSPACE` | `sparquet-workspace/` at the repo root | Directory the Studio library is stored in, as real JSON files. This is what you commit. |
+| `SPARQUET_STUDIO_WORKSPACE` | unset | Pins the library directory. Set it and the interface may not change it — a deployment that decides centrally decides centrally. Unset, the runner uses what was chosen in Settings, falling back to the per-user default. |
+| `SPARQUET_HOME` | `%APPDATA%\Sparquet` on Windows, `$XDG_DATA_HOME/sparquet` (or `~/.local/share/sparquet`) elsewhere | Per-user data directory. Holds `studio.json` and, unless told otherwise, `workspace/` — the library. |
 | `SPARQUET_STUDIO_HISTORY_PURGE` | on | `off`/`0`/`false`/`no` stops the runner from applying retention on its own. `POST /runs/purge` still works. |
 | `SPARQUET_STUDIO_HISTORY_DETAIL_DAYS` | `30` | After this many days a run loses its logs, its steps and its stored JSON, and keeps its row. |
 | `SPARQUET_STUDIO_HISTORY_MAX_DAYS` | `365` | After this many days the run row itself goes — but only with `SPARQUET_STUDIO_HISTORY_DELETE` on. |
@@ -895,12 +901,67 @@ version wrote it, whether the examples were seeded — kept in `.studio/meta.jso
 Body for `PUT`: `{ "value": <anything JSON> }`. They travel with the workspace so
 a second checkout does not re-seed or re-migrate a library that is current.
 
-All five require the `X-Sparquet-Token` header.
+### `GET /workspace/root`
+
+Where the library is, and why it is there. Needs `workspace:Read`.
+
+```json
+{
+  "root": "/home/ana/.local/share/sparquet/workspace",
+  "source": "default",
+  "default": "/home/ana/.local/share/sparquet/workspace",
+  "settings_file": "/home/ana/.local/share/sparquet/studio.json",
+  "writable": true,
+  "inside_source_tree": false,
+  "locked": false
+}
+```
+
+`source` is the reason, strongest first: `env` (`SPARQUET_STUDIO_WORKSPACE` — then
+`locked` is true and the interface may not change it), `settings` (chosen in the
+interface), `legacy` (an older directory that already held a library, adopted so
+nobody loses one), `default` (the per-user directory). Somebody who cannot find
+their Jobs is almost always looking at a different directory than the runner is,
+which is why the reason is returned and not only the path.
+
+### `PUT /workspace/root`
+
+Points the runner at another directory. Needs **`runner:Configure`**, not
+`workspace:Write`: the built-in `editor` role holds `workspace:*`, and deciding
+where the runner writes on its host is an administrator's call.
+
+```json
+{ "root": "/srv/sparquet/library" }
+```
+
+`null` or an empty string clears the choice and goes back to the default. The
+answer is the same shape as `GET`. Refusals: `409` when the environment pinned
+it, `400` for a relative path, for a directory that cannot be created or written,
+and for **any path inside the runner's own source tree** — a checkout is code, it
+gets pulled, reset and deleted, and a library in one is lost to the first `git
+clean` or committed by accident long before that.
+
+Changing the root **copies nothing**. The store is rebound and the runner starts
+reading and writing the new place, which is what makes this the way to *adopt* a
+directory that already holds a library. Moving files is the operator's job: a
+half-finished copy with no way back is worse than a move nobody made.
+
+All seven require the `X-Sparquet-Token` header.
 
 ## Where the library is stored
 
+By default, in the per-user data directory — `%APPDATA%\Sparquet\workspace` on
+Windows, `$XDG_DATA_HOME/sparquet/workspace` (usually
+`~/.local/share/sparquet/workspace`) elsewhere. **Not** inside this checkout: a
+checkout is code, and a library living in one is lost to the first `git clean`.
+`PUT /workspace/root` points it anywhere else, and a `sparquet-workspace/` at the
+repository root that already holds a `.studio/` is still adopted, so an existing
+library keeps working — the runner logs a warning telling you to move it.
+
+Whatever the directory, it has the same shape:
+
 ```
-sparquet-workspace/
+<library root>/
   vendas/
     workflow.json               the Workflow, readable
     jobs/ingestao.json          the COMPILED pipeline — runnable as-is
@@ -916,8 +977,10 @@ sparquet-workspace/
 The point of the split: the top of the tree is what a person reviews in a pull
 request, and `sparquet run vendas/jobs/ingestao.json` runs exactly the file they
 read. `.studio/` is the editor's own state — canvas positions, parameters, the
-things the framework has no use for. Both are committed; the directory is the
-library, and a second machine opening the same checkout sees the same one.
+things the framework has no use for. Both belong under version control — of the
+library, which is the user's repository and not this one. Point a second machine
+at the same directory (a checkout, a shared volume, a synced folder) and it opens
+the same library.
 
 Browser storage (IndexedDB, then localStorage) stays behind this as a fallback
 for when the runner is not running. It is a cache, not the store.

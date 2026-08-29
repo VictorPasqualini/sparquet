@@ -68,6 +68,9 @@ _VERSION_PATTERN = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
 # ---------------------------------------------------------------- bootstrap
 
 
+_log = logging.getLogger("sparquet_studio.server")
+
+
 def _framework_root() -> Path:
     override = os.getenv("SPARQUET_FRAMEWORK_PATH")
     if override:
@@ -688,13 +691,26 @@ def _purge_history_periodically() -> None:
         time.sleep(_PURGE_EVERY_SECONDS)
 
 
-# Where the library lives as files. Defaults to a directory next to the framework so
-# it is inside the repository the user already versions; point the env var somewhere
-# else (a shared checkout, a mounted volume) to move the whole library with it.
-_WORKSPACE_ROOT = Path(
-    os.getenv("SPARQUET_STUDIO_WORKSPACE") or (_framework_root() / "sparquet-workspace")
-).expanduser()
+# Where the library lives as files. The runner never writes inside its own source
+# tree: a checkout is code, and a library kept in one is lost to the first
+# `git clean` and committed by accident before that. So the default is the
+# platform's per-user data directory, `SPARQUET_STUDIO_WORKSPACE` wins over
+# everything for a deployment that decides centrally, and in between sits
+# whatever somebody chose in the interface. A directory left over from the old
+# default is adopted rather than abandoned — see `workspace.resolve_root`.
+_LEGACY_WORKSPACE = _framework_root() / "sparquet-workspace"
+_WORKSPACE_LOCATION = workspace.resolve_root(_LEGACY_WORKSPACE)
+_WORKSPACE_ROOT = _WORKSPACE_LOCATION.root
 _workspace: Any = workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+
+if _WORKSPACE_LOCATION.source == "legacy":
+    _log.warning(
+        "The library is still inside the source tree, at %s. It works, but a "
+        "checkout is not a safe place for it: move the directory somewhere of "
+        "your own and point SPARQUET_STUDIO_WORKSPACE at it, or choose the new "
+        "location in Settings.",
+        _WORKSPACE_ROOT,
+    )
 
 
 CANCELLED_ERROR = "Cancelled from Studio while it was running."
@@ -2203,9 +2219,6 @@ def ingest_run(document: Dict[str, Any] = Body(...)) -> RunIngestResponse:
     return RunIngestResponse(**recorded)
 
 
-_log = logging.getLogger("sparquet_studio.server")
-
-
 # --------------------------------------------------------------- workspace
 #
 # The library as files on disk. The browser holds no authoritative copy: it reads
@@ -2296,6 +2309,139 @@ def get_workspace() -> WorkspaceSnapshotOut:
         pipelines=[_workspace_doc_out(doc) for doc in snapshot.pipelines],
         meta=snapshot.meta,
     )
+
+
+class WorkspaceRootOut(BaseModel):
+    """Where the library is, and why it is there."""
+
+    root: str
+    #: `env`, `settings`, `legacy` or `default` — see `workspace.resolve_root`.
+    source: str
+    #: Where a library goes when nobody has said otherwise, so the interface can
+    #: offer it back as the way to undo a choice.
+    default: str
+    #: The file a choice is remembered in.
+    settings_file: str
+    writable: bool
+    #: True while the library is still sitting inside the runner's own source
+    #: tree. It works, and it is not where it belongs.
+    inside_source_tree: bool
+    #: True when `SPARQUET_STUDIO_WORKSPACE` is set, which nothing here may
+    #: override: a deployment that decides centrally decides centrally.
+    locked: bool
+
+
+class WorkspaceRootRequest(BaseModel):
+    """`root: null` goes back to the default rather than choosing it explicitly,
+    so a library that later moves with the platform follows it."""
+
+    root: Optional[str] = None
+
+
+def _workspace_root_out() -> WorkspaceRootOut:
+    root = Path(_WORKSPACE_ROOT)
+    return WorkspaceRootOut(
+        root=str(root),
+        source=_WORKSPACE_LOCATION.source,
+        default=str(workspace.default_root()),
+        settings_file=str(workspace.settings_path()),
+        writable=os.access(root, os.W_OK),
+        inside_source_tree=_is_inside(root, _framework_root()),
+        locked=bool(os.getenv("SPARQUET_STUDIO_WORKSPACE")),
+    )
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+@app.get(
+    "/workspace/root",
+    response_model=WorkspaceRootOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def get_workspace_root() -> WorkspaceRootOut:
+    """Where this runner keeps the JSON files.
+
+    Somebody who cannot find their Jobs is nearly always looking at a different
+    directory than the runner is, so the answer names the path *and* the reason
+    it is that one.
+    """
+    return _workspace_root_out()
+
+
+@app.put(
+    "/workspace/root",
+    response_model=WorkspaceRootOut,
+    dependencies=[Depends(requires("runner:Configure"))],
+)
+def put_workspace_root(body: WorkspaceRootRequest) -> WorkspaceRootOut:
+    """Moves the library to another directory, from now on and after a restart.
+
+    Nothing is copied. The runner starts reading and writing the new place, which
+    is what makes this the way to *adopt* a directory that already holds a
+    library — a shared checkout, a synced folder, a mounted volume — rather than
+    a way to relocate one. Moving the files is the operator's job, and doing it
+    for them would mean a copy that half-fails somewhere with no way back.
+    """
+    global _WORKSPACE_LOCATION, _WORKSPACE_ROOT, _workspace
+
+    if os.getenv("SPARQUET_STUDIO_WORKSPACE"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "SPARQUET_STUDIO_WORKSPACE decides where the library lives on this "
+                "runner. Change the variable and restart."
+            ),
+        )
+
+    chosen = (body.root or "").strip()
+    if chosen:
+        target = Path(chosen).expanduser()
+        if not target.is_absolute():
+            raise HTTPException(
+                status_code=400,
+                detail="Give an absolute path: a relative one would depend on where the runner was started.",
+            )
+        # The one place it must not go. A checkout is code — pulled, reset and
+        # deleted — and a library inside one is lost to the first `git clean`.
+        if _is_inside(target, _framework_root()):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "That is inside the runner's own source tree. Choose a directory "
+                    "of your own: a checkout gets reset and deleted, and it would take "
+                    "the library with it."
+                ),
+            )
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"That directory cannot be created: {exc}"
+            ) from exc
+        if not os.access(target, os.W_OK):
+            raise HTTPException(status_code=400, detail="That directory is not writable.")
+        root, source = workspace.remember_root(target), "settings"
+    else:
+        workspace.write_setting("workspace", None)
+        location = workspace.resolve_root(_LEGACY_WORKSPACE)
+        root, source = location.root, location.source
+
+    try:
+        store = workspace.FileWorkspaceStore(root)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"That directory cannot be used: {exc}") from exc
+
+    _workspace = store
+    _WORKSPACE_ROOT = store.root
+    _WORKSPACE_LOCATION = workspace.Location(store.root, source)
+    _log.info("The library is now read from %s (%s).", store.root, source)
+    return _workspace_root_out()
 
 
 class WorkspaceMetaRequest(BaseModel):
