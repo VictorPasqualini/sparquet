@@ -129,6 +129,7 @@ workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
 credits = _load_sibling_module("credits")
 audit = _load_sibling_module("audit")
+providers = _load_sibling_module("providers")
 
 
 # ------------------------------------------------------------------ models
@@ -280,6 +281,11 @@ class HealthResponse(BaseModel):
     # Whether a balance actually gates execution. False still meters: the ledger
     # records every remote Job either way. See `credits.py`.
     credits_enforced: bool = False
+    # Which implementation is answering each replaceable slot — `"local"` for the
+    # SQLite-and-files default, otherwise the `module:factory` that was injected.
+    # An operator debugging a hosted runner should not have to infer this from
+    # behaviour. See `providers.py`.
+    providers: Dict[str, str] = Field(default_factory=dict)
 
 
 class CapabilitiesResponse(BaseModel):
@@ -701,7 +707,12 @@ def _purge_history_periodically() -> None:
 _LEGACY_WORKSPACE = _framework_root() / "sparquet-workspace"
 _WORKSPACE_LOCATION = workspace.resolve_root(_LEGACY_WORKSPACE)
 _WORKSPACE_ROOT = _WORKSPACE_LOCATION.root
-_workspace: Any = workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+# The third slot. The local store is real files on disk — the point of the
+# product, since a Job is meant to be reviewable in a pull request — and a
+# hosted deployment puts the same documents in object storage.
+_workspace: workspace.WorkspaceStore = providers.load(
+    "workspace", lambda: workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+)
 
 if _WORKSPACE_LOCATION.source == "legacy":
     _log.warning(
@@ -1007,7 +1018,10 @@ def require_token(request: Request) -> None:
 
 # ------------------------------------------------------------------ identity
 
-_auth = auth.AuthStore()
+# Identity is a slot: the local backend is usernames and password hashes in
+# SQLite, and a deployment that arrives with an identity provider names its own
+# factory instead. See `providers.py` for why a failure here is fatal.
+_auth: auth.IdentityStore = providers.load("auth", auth.AuthStore)
 
 LOGIN_REQUIRED_HELP = (
     "This runner has users, so the shared token is no longer enough on its own. "
@@ -1081,7 +1095,9 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
 
 # --------------------------------------------------------------------- credits
 
-_credits = credits.CreditStore()
+# Same slot mechanism as identity: SQLite here, Postgres and a payment gateway
+# in a hosted deployment, the routes below unchanged either way.
+_credits: credits.CreditLedger = providers.load("credits", credits.CreditStore)
 
 # A hold belongs to a run in flight, and a run in flight belonged to the process
 # that took it. This process is starting, so anything still open was left by a
@@ -1354,6 +1370,7 @@ def health() -> HealthResponse:
         framework_version=version,
         login_required=_auth.has_users(),
         credits_enforced=credits.enforced(),
+        providers=providers.describe(),
     )
 
 
@@ -2315,7 +2332,9 @@ class WorkspaceRootOut(BaseModel):
     """Where the library is, and why it is there."""
 
     root: str
-    #: `env`, `settings`, `legacy` or `default` — see `workspace.resolve_root`.
+    #: `env`, `settings`, `legacy` or `default` — see `workspace.resolve_root` —
+    #: or `provider`, when a deployment injected a store of its own and none of
+    #: those apply because there is no local directory to name.
     source: str
     #: Where a library goes when nobody has said otherwise, so the interface can
     #: offer it back as the way to undo a choice.
@@ -2326,8 +2345,9 @@ class WorkspaceRootOut(BaseModel):
     #: True while the library is still sitting inside the runner's own source
     #: tree. It works, and it is not where it belongs.
     inside_source_tree: bool
-    #: True when `SPARQUET_STUDIO_WORKSPACE` is set, which nothing here may
-    #: override: a deployment that decides centrally decides centrally.
+    #: True when the deployment decided — `SPARQUET_STUDIO_WORKSPACE`, or an
+    #: injected store — and nothing here may override it: a deployment that
+    #: decides centrally decides centrally.
     locked: bool
 
 
@@ -2339,6 +2359,21 @@ class WorkspaceRootRequest(BaseModel):
 
 
 def _workspace_root_out() -> WorkspaceRootOut:
+    injected = providers.configured("workspace")
+    if injected:
+        # A store that is not a directory on this disk. There is no local path to
+        # report and nothing here can move it, so the answer says where the
+        # records actually are and that the choice was not made here.
+        described = _workspace.describe()
+        return WorkspaceRootOut(
+            root=str(described.get("root") or described.get("kind") or injected),
+            source="provider",
+            default=str(workspace.default_root()),
+            settings_file=str(workspace.settings_path()),
+            writable=described.get("writable", True) is not False,
+            inside_source_tree=False,
+            locked=True,
+        )
     root = Path(_WORKSPACE_ROOT)
     return WorkspaceRootOut(
         root=str(root),
@@ -2389,6 +2424,17 @@ def put_workspace_root(body: WorkspaceRootRequest) -> WorkspaceRootOut:
     for them would mean a copy that half-fails somewhere with no way back.
     """
     global _WORKSPACE_LOCATION, _WORKSPACE_ROOT, _workspace
+
+    injected = providers.configured("workspace")
+    if injected:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This runner stores the library through {injected}, not in a "
+                "directory of its own. Where the records live is a decision of the "
+                "deployment, not of this screen."
+            ),
+        )
 
     if os.getenv("SPARQUET_STUDIO_WORKSPACE"):
         raise HTTPException(

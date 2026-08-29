@@ -687,6 +687,22 @@ Pendente aqui:
       `dependencies` (`sparquet-cola>=0.1.0`, sem cap — mantido retrocompatível) e é
       validado contra o pacote do PyPI; os shims `sparquet.validation.*` seguem
       reexportando dele.
+- ✅ **As três peças substituíveis do runner** — crédito, identidade e biblioteca são
+      *política*, não mecanismo: o runner aberto responde as três com SQLite e arquivos
+      no disco do operador, o que é certo para uma equipe numa máquina e errado para um
+      serviço hospedado. Em vez de fork, cada uma virou **slot**: um `Protocol` no módulo
+      dono (`credits.CreditLedger`, `auth.IdentityStore`, `workspace.WorkspaceStore`), a
+      classe local como default, e uma variável de ambiente nomeando a fábrica
+      alternativa (`SPARQUET_STUDIO_{CREDITS,AUTH,WORKSPACE}_PROVIDER`, no formato
+      `module:factory`). Carregador em `server/providers.py`; `GET /health` diz o que
+      carregou. **Provider configurado que falha de carregar derruba o processo** — cair
+      no default local calado colocaria o ledger e a identidade de todos os tenants num
+      arquivo só. Ver `sparquet-studio/server/README.md` → *Replaceable pieces*.
+- [ ] **`sparquet-cloud`** — o que só faz sentido hospedado (multi-tenancy real,
+      cobrança, identidade federada, execução gerenciada, segredos, agendamento,
+      observabilidade agregada, colaboração, IA com chave da plataforma, catálogo como
+      serviço) vive em repositório privado próprio (`../sparquet-cloud`), consumindo o
+      runner aberto pelos slots acima. Escopo e backlog lá, em `SCOPE.md` e `BACKLOG.md`.
 - [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
       (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
       mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.

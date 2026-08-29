@@ -19,6 +19,8 @@ export type WorkspaceRootSource =
   | 'legacy'
   /** Nobody chose: the per-user data directory. */
   | 'default'
+  /** The deployment injected a store of its own, so there is no local directory. */
+  | 'provider'
 
 export interface WorkspaceLocation {
   /** Absolute path the runner reads and writes. */

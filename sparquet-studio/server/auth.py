@@ -63,7 +63,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
 
 
 class AuthError(Exception):
@@ -508,6 +508,91 @@ def recovery_minutes() -> int:
         return max(1, int(os.getenv("SPARQUET_STUDIO_RECOVERY_MINUTES", "30")))
     except ValueError:
         return 30
+
+
+class IdentityStore(Protocol):
+    """What the runner needs from an identity backend, and nothing more.
+
+    The local implementation below is usernames and password hashes in SQLite —
+    enough for a team that knows each other, not enough for a customer whose
+    auditors ask who had access in March. A hosted service answers with OIDC,
+    SCIM and MFA, and it gets there by satisfying this protocol rather than by
+    forking the runner (see `providers.py`).
+
+    Three properties the routes depend on, whatever the storage:
+
+    - **`has_users()` is the switch.** False means the runner is in token-only
+      mode and `POST /auth/users` is open, because that is the only way to create
+      the first administrator. A federated backend that has no notion of "no users
+      yet" should return True and refuse local creation.
+    - **`resolve_session(token)` is the whole authorization surface.** Everything a
+      route is allowed to do comes from the `Principal` it returns; a backend that
+      cannot map its own session to roles and a team cannot be plugged in here.
+    - **The password calls may refuse.** `set_password`, `login`,
+      `verify_credentials`, `issue_recovery` and `redeem_recovery` exist because
+      the local backend owns passwords. A federated backend does not, and raising
+      `AuthError` from them is the correct implementation — the identity provider
+      owns that flow, and pretending otherwise creates a second way in.
+    """
+
+    def has_users(self) -> bool: ...
+
+    def create_user(
+        self, username: str, password: str, *, roles: Optional[Iterable[str]] = None,
+        display_name: Optional[str] = None, team: Optional[str] = None,
+    ) -> User: ...
+
+    def list_users(self) -> List[User]: ...
+
+    def get_user(self, user_id: str) -> Optional[User]: ...
+
+    def set_roles(self, user_id: str, roles: Iterable[str]) -> User: ...
+
+    def set_disabled(self, user_id: str, disabled: bool) -> User: ...
+
+    def set_password(self, user_id: str, password: str) -> None: ...
+
+    def delete_user(self, user_id: str) -> None: ...
+
+    def login(self, username: str, password: str) -> Optional[Session]: ...
+
+    def verify_credentials(self, username: str, password: str) -> bool: ...
+
+    def resolve_session(self, token: str) -> Optional[Principal]: ...
+
+    def logout(self, token: str) -> None: ...
+
+    def issue_recovery(
+        self, user_id: str, *, issued_by: Optional[str] = None
+    ) -> tuple[str, str]: ...
+
+    def redeem_recovery(self, code: str, password: str) -> User: ...
+
+    def list_roles(self) -> List[Role]: ...
+
+    def create_role(
+        self, name: str, description: str, statements: List[Dict[str, Any]]
+    ) -> Role: ...
+
+    def update_role(
+        self, name: str, *, description: Optional[str] = None,
+        statements: Optional[List[Dict[str, Any]]] = None,
+    ) -> Role: ...
+
+    def delete_role(self, name: str) -> None: ...
+
+    def list_teams(self) -> List[Team]: ...
+
+    def create_team(self, name: str, *, roles: Optional[Iterable[str]] = None) -> Team: ...
+
+    def update_team(
+        self, team_id: str, *, name: Optional[str] = None,
+        roles: Optional[Iterable[str]] = None,
+    ) -> Team: ...
+
+    def delete_team(self, team_id: str) -> None: ...
+
+    def set_user_team(self, user_id: str, team: Optional[str]) -> User: ...
 
 
 class AuthStore:

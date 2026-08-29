@@ -140,6 +140,29 @@ class WorkspaceRootTest(unittest.TestCase):
         finally:
             os.environ.pop("SPARQUET_STUDIO_WORKSPACE", None)
 
+    # ---- a store that is not a directory ---------------------------------
+
+    def test_an_injected_store_is_reported_as_such(self) -> None:
+        """A deployment can replace the store entirely (`providers.py`). Then
+        there is no local directory to name, and nothing here can move it."""
+        with _InjectedWorkspace({"kind": "bucket", "root": "s3://acme/library"}):
+            out = main.get_workspace_root()
+        self.assertEqual(out.source, "provider")
+        self.assertEqual(out.root, "s3://acme/library")
+        self.assertTrue(out.locked)
+        self.assertFalse(out.inside_source_tree)
+
+    def test_an_injected_store_cannot_be_moved_from_the_interface(self) -> None:
+        with _InjectedWorkspace({"kind": "bucket", "root": "s3://acme/library"}):
+            with self.assertRaises(HTTPException) as caught:
+                _set_root(str(self.elsewhere))
+            self.assertEqual(caught.exception.status_code, 409)
+
+    def test_an_injected_store_that_names_no_root_still_answers(self) -> None:
+        """`describe()` is the store's own; it owes nothing but a kind."""
+        with _InjectedWorkspace({"kind": "bucket"}):
+            self.assertEqual(main.get_workspace_root().root, "bucket")
+
     # ---- who may do it ---------------------------------------------------
 
     def test_moving_the_library_is_not_an_editor_action(self) -> None:
@@ -152,6 +175,37 @@ class WorkspaceRootTest(unittest.TestCase):
         granted = [a for s in editor.statements for a in s["actions"]]
         self.assertNotIn("runner:Configure", granted)
         self.assertNotIn("*", granted)
+
+
+class _FakeStore:
+    """Stands in for a store a deployment injected. Only `describe()` is reached
+    by these tests; anything else would be a different test's business."""
+
+    def __init__(self, described: dict) -> None:
+        self._described = described
+
+    def describe(self) -> dict:
+        return dict(self._described)
+
+
+class _InjectedWorkspace:
+    """Runs a block as if `SPARQUET_STUDIO_WORKSPACE_PROVIDER` had been honoured
+    at start-up: the variable is set and the process-wide store is the injected
+    one. Both go back afterwards."""
+
+    def __init__(self, described: dict) -> None:
+        self._store = _FakeStore(described)
+        self._previous_store: object = None
+
+    def __enter__(self) -> "_InjectedWorkspace":
+        os.environ["SPARQUET_STUDIO_WORKSPACE_PROVIDER"] = "acme.library:build"
+        self._previous_store = main._workspace
+        main._workspace = self._store
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        main._workspace = self._previous_store
+        os.environ.pop("SPARQUET_STUDIO_WORKSPACE_PROVIDER", None)
 
 
 if __name__ == "__main__":
