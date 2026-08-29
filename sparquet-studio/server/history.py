@@ -65,7 +65,11 @@ CANCELLED = "cancelled"
 MANUAL = "manual"
 SCHEDULED = "scheduled"
 API = "api"
-LAUNCH_KINDS = (MANUAL, SCHEDULED, API)
+# The framework itself, reporting a run that happened somewhere else entirely —
+# `sparquet.cli`, Airflow, Databricks — and that this runner never executed. See
+# `ingest_run`.
+EXTERNAL = "external"
+LAUNCH_KINDS = (MANUAL, SCHEDULED, API, EXTERNAL)
 
 
 def _now_iso() -> str:
@@ -359,17 +363,19 @@ class ExecutionRepository(Protocol):
     def create_pipeline_run(
         self, *, kind: str, workflow_id: Optional[str], pipeline_id: Optional[str],
         job_id: Optional[str], name: Optional[str], run_as: Optional[str] = None,
-        launched: str = MANUAL,
+        launched: str = MANUAL, started_at: Optional[str] = None,
     ) -> str: ...
 
     def finish_pipeline_run(
         self, run_id: str, *, status: str, duration_ms: int, error: Optional[str],
+        finished_at: Optional[str] = None,
     ) -> None: ...
 
     def create_job_run(
         self, pipeline_run_id: str, *, job_id: Optional[str], name: Optional[str],
         stage_index: int, lineage: Optional[str] = None,
         config_hash: Optional[str] = None, config: Optional[str] = None,
+        started_at: Optional[str] = None,
     ) -> str: ...
 
     def job_config(self, job_run_id: str) -> Optional[JobConfig]: ...
@@ -377,6 +383,7 @@ class ExecutionRepository(Protocol):
     def finish_job_run(
         self, job_run_id: str, *, status: str, duration_ms: int,
         error: Optional[str], rows_read: Optional[int], rows_written: Optional[int],
+        finished_at: Optional[str] = None,
     ) -> None: ...
 
     def skip_job_run(
@@ -912,7 +919,7 @@ class SQLiteExecutionRepository:
     def create_pipeline_run(
         self, *, kind: str, workflow_id: Optional[str], pipeline_id: Optional[str],
         job_id: Optional[str], name: Optional[str], run_as: Optional[str] = None,
-        launched: str = MANUAL,
+        launched: str = MANUAL, started_at: Optional[str] = None,
     ) -> str:
         run_id = _new_id()
         with self._lock, closing(self._connect()) as conn:
@@ -930,19 +937,20 @@ class SQLiteExecutionRepository:
                 "run_as, launched) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run_id, kind, workflow_id, pipeline_id, job_id, name, RUNNING,
-                 _now_iso(), run_as, launched),
+                 started_at or _now_iso(), run_as, launched),
             )
             conn.commit()
         return run_id
 
     def finish_pipeline_run(
         self, run_id: str, *, status: str, duration_ms: int, error: Optional[str],
+        finished_at: Optional[str] = None,
     ) -> None:
         with self._lock, closing(self._connect()) as conn:
             conn.execute(
                 "UPDATE pipeline_run SET status=?, finished_at=?, duration_ms=?, error=? "
                 "WHERE id=?",
-                (status, _now_iso(), duration_ms, error, run_id),
+                (status, finished_at or _now_iso(), duration_ms, error, run_id),
             )
             conn.commit()
 
@@ -952,6 +960,7 @@ class SQLiteExecutionRepository:
         self, pipeline_run_id: str, *, job_id: Optional[str], name: Optional[str],
         stage_index: int, lineage: Optional[str] = None,
         config_hash: Optional[str] = None, config: Optional[str] = None,
+        started_at: Optional[str] = None,
     ) -> str:
         job_run_id = _new_id()
         with self._lock, closing(self._connect()) as conn:
@@ -966,7 +975,7 @@ class SQLiteExecutionRepository:
                 "lineage, config_hash, config) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_run_id, pipeline_run_id, job_id, name, stage_index, RUNNING,
-                 _now_iso(), lineage, config_hash, config),
+                 started_at or _now_iso(), lineage, config_hash, config),
             )
             conn.commit()
         return job_run_id
@@ -974,12 +983,14 @@ class SQLiteExecutionRepository:
     def finish_job_run(
         self, job_run_id: str, *, status: str, duration_ms: int,
         error: Optional[str], rows_read: Optional[int], rows_written: Optional[int],
+        finished_at: Optional[str] = None,
     ) -> None:
         with self._lock, closing(self._connect()) as conn:
             conn.execute(
                 "UPDATE job_run SET status=?, finished_at=?, duration_ms=?, error=?, "
                 "rows_read=?, rows_written=? WHERE id=?",
-                (status, _now_iso(), duration_ms, error, rows_read, rows_written, job_run_id),
+                (status, finished_at or _now_iso(), duration_ms, error, rows_read,
+                 rows_written, job_run_id),
             )
             conn.commit()
 
@@ -1626,3 +1637,163 @@ class StepTracker:
             )
         self._open.clear()
         self._details.clear()
+
+
+# ------------------------------------------------------------------- ingestion
+
+
+#: Document format this runner knows how to read. The framework stamps it on every
+#: submission; a future format bumps the number and is refused here rather than
+#: half-read into a run that says the wrong thing.
+INGEST_SCHEMA = "sparquet.run/1"
+
+#: Ceiling on the records replayed from one submission. The framework caps what it
+#: sends, but the endpoint is reachable by anything holding a token, and one POST
+#: must not be able to write an unbounded number of rows.
+MAX_INGEST_RECORDS = 5000
+
+_INGEST_STATUS = {
+    "success": SUCCESS,
+    "failed": FAILED,
+    "skipped": SKIPPED,
+    "cancelled": CANCELLED,
+}
+
+
+class IngestError(ValueError):
+    """The submitted document cannot be recorded as a run."""
+
+
+def _duration_ms(started_at: Optional[str], finished_at: Optional[str]) -> int:
+    """How long the run took, from its own clock — not from ours.
+
+    The run happened on another machine, possibly hours ago; measuring from the
+    moment it arrived here would record the delay of the report, not the work.
+    """
+    if not started_at or not finished_at:
+        return 0
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(finished_at)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((end - start).total_seconds() * 1000))
+
+
+def _ingest_int(value: Any) -> Optional[int]:
+    """A row count, or None. The payload comes from another process: a string
+    where a number belongs must not become a row count nobody can compare."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ingest_records(document: Dict[str, Any]) -> List[Dict[str, Any]]:
+    records = document.get("records")
+    if not isinstance(records, list):
+        return []
+    return [r for r in records[:MAX_INGEST_RECORDS] if isinstance(r, dict)]
+
+
+def ingest_run(repo: ExecutionRepository, document: Dict[str, Any]) -> Dict[str, Any]:
+    """Records a run this runner did not execute.
+
+    The framework can report its own runs (`sparquet.observability.history`), so a
+    pipeline running under `sparquet.cli`, Airflow, Databricks or EMR lands in the
+    same history as one launched from the Studio — which is where monitoring is
+    actually wanted, and where it did not exist.
+
+    The submission carries the very records the framework already emits, so they
+    are replayed through the same `StepTracker` and stored through the same
+    `append_logs` that a local run uses. One code path, one shape: an external run
+    and a local one read back identically, and a change to how steps are derived
+    cannot drift between the two.
+
+    Timestamps come from the document, not from the clock here: the run is being
+    reported after the fact, and recording the arrival time would put the whole
+    history of a nightly job at the hour its report reached the runner.
+
+    Raises `IngestError` when the document is not a run this runner can read.
+    """
+    if not isinstance(document, dict):
+        raise IngestError("The submitted document is not an object")
+    schema = str(document.get("schema") or "")
+    if schema != INGEST_SCHEMA:
+        raise IngestError(
+            f"Unsupported document schema {schema!r}; this runner reads {INGEST_SCHEMA!r}"
+        )
+    run = document.get("run")
+    if not isinstance(run, dict):
+        raise IngestError("The submitted document carries no run")
+
+    name = run.get("name")
+    started_at = str(run.get("started_at") or _now_iso())
+    finished_at = str(run.get("finished_at") or _now_iso())
+    # An unknown status is stored as it came: history describes what happened, it
+    # does not police it — the same rule the launch kinds follow.
+    raw_status = str(run.get("status") or FAILED)
+    status = _INGEST_STATUS.get(raw_status, raw_status)
+    error = run.get("error")
+
+    pipeline_run_id = repo.create_pipeline_run(
+        kind="job",
+        workflow_id=run.get("workflow_id"),
+        pipeline_id=run.get("pipeline_id"),
+        job_id=run.get("job_id"),
+        name=name,
+        run_as=run.get("run_as"),
+        launched=EXTERNAL,
+        started_at=started_at,
+    )
+    job_run_id = repo.create_job_run(
+        pipeline_run_id,
+        job_id=run.get("job_id"),
+        name=name,
+        stage_index=0,
+        started_at=started_at,
+    )
+
+    records = _ingest_records(document)
+    tracker = StepTracker(repo, job_run_id)
+    for record in records:
+        tracker.handle(record)
+    # Whatever the framework did not close, the run's own ending closes — the same
+    # rule a local run follows, and the reason a job that died mid-write still has
+    # a failed step to point at instead of one stuck at "running".
+    tracker.close(
+        str(error) if error else None,
+        status=status if status in (FAILED, CANCELLED, SKIPPED) else SUCCESS,
+    )
+
+    stored = 0
+    if records:
+        stored = len(records)
+        repo.append_logs(
+            job_run_id,
+            [{**record, "source": "pipeline"} for record in records],
+        )
+
+    duration_ms = _duration_ms(started_at, finished_at)
+    repo.finish_job_run(
+        job_run_id,
+        status=status,
+        duration_ms=duration_ms,
+        error=str(error) if error else None,
+        rows_read=_ingest_int(run.get("rows_read")),
+        rows_written=_ingest_int(run.get("rows_written")),
+        finished_at=finished_at,
+    )
+    repo.finish_pipeline_run(
+        pipeline_run_id,
+        status=status,
+        duration_ms=duration_ms,
+        error=str(error) if error else None,
+        finished_at=finished_at,
+    )
+    return {
+        "pipeline_run_id": pipeline_run_id,
+        "job_run_id": job_run_id,
+        "records": stored,
+        "duration_ms": duration_ms,
+    }

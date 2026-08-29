@@ -20,6 +20,78 @@ Notes on the history below:
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-29
+
+### Added
+
+- **Execution history outside the Studio** (`sparquet.observability`). The framework
+  runs anywhere and depends on nothing, which is exactly why the runs that matter
+  most — the nightly job on Databricks, the DAG on Airflow, a `sparquet.cli` call on
+  a VM — left no trace in any history: monitoring existed only when Studio's runner
+  was the one executing. Now the framework can report its own runs, and they read
+  back like local ones: same steps, same logs, same screens.
+
+  Off by default and free when off: without `SPARQUET_HISTORY_URL` (and without a
+  sink registered in code) nothing is instantiated and `Pipeline.run` is unchanged.
+  Turned on, the run is collected from the structured records the framework already
+  emits and sent **once, at the end** — one request per execution, not one per step —
+  as a single JSON document (`schema: "sparquet.run/1"`) over stdlib `urllib`, so no
+  new dependency. Failures are reported too, since that is the run a reader wants.
+  Sending never affects the pipeline: a dead receiver, a wrong token or a broken
+  network is a `warning` in the log and an identical `PipelineResult`.
+
+  ```bash
+  export SPARQUET_HISTORY_URL="http://127.0.0.1:8765/runs/ingest"
+  export SPARQUET_HISTORY_TOKEN="$SPARQUET_STUDIO_TOKEN"
+  export SPARQUET_HISTORY_JOB_ID="j-orders"
+  python -m sparquet run orders.json
+  ```
+
+  `SPARQUET_HISTORY_TIMEOUT`, `_WORKFLOW_ID`, `_PIPELINE_ID`, `_RUN_AS`, `_TAGS` and
+  `_LOGS=off` complete the configuration; `Sparquet.register_history_sink(sink)`
+  replaces the environment for anyone who already has somewhere to put telemetry.
+  The receiving end is Studio's `POST /runs/ingest`, which marks such runs
+  `launched="external"`. The token is a password: treat it as a credential, prefer
+  `https://`, and do not publish the runner on a network to collect history — it
+  executes arbitrary Spark and binds to `127.0.0.1` for that reason.
+
+- `sparquet.utils.logger.add_sink` / `remove_sink`: subscribe to the structured
+  records as dictionaries. Observability no longer has to re-instrument what the
+  framework already logs.
+
+### Changed
+
+- **`rows_written` no longer costs an extra pass over the data.** Every output used
+  to be counted with `output_df.count()` right before writing it. Spark is lazy, so
+  that count was a full execution of the plan — read, parse, filter, transform —
+  and then the write executed the same plan again. A pipeline with M destinations
+  ran the work M+1 times to answer a question the write itself already answers:
+  Spark instruments every write command with `BasicWriteJobStatsTracker`, which
+  publishes `number of output rows` for the job that just wrote. `Pipeline` now reads
+  that counter instead of computing its own (`sparquet/core/write_metrics.py`).
+
+  The number is the same, and where it cannot be had it is not guessed. A format
+  that publishes no write metric — JDBC, for instance — makes `measure()` answer
+  `None`, meaning *don't know*, never zero, and the caller falls back to the explicit
+  `count()`. `OutputMetrics.rows_from` says which of the two produced the number
+  (`"write_metrics"` or `"count"`), so a wrong figure can never be mistaken for a
+  measured one in a report, in history or in billing.
+
+  **Benchmark** (`tests/bench_write_metrics.py`, 6,000,000 rows, CSV → Parquet,
+  `local[4]`, minimum of several runs — the machine is noisy, so the minimum is the
+  measure least contaminated by GC and neighbours):
+
+  | destinations | write only (floor) | `write_metrics` | `count` (before) | gain |
+  |---|---|---|---|---|
+  | 1 | 3.66s | 5.61s | 6.87s | **1.27s — 18.4%** |
+  | 2 | 8.05s | 8.79s | 12.50s | **3.71s — 29.7%** |
+
+  The saving grows with the number of destinations, as expected: the old cost was
+  one extra full execution *per output*. Both paths returned exactly the same row
+  counts (5,567,015 and 11,134,030). The residual gap to the floor is
+  `rows_read = df.count()` over the input, which still re-reads the source and is a
+  separate optimisation.
+
 ## [0.6.0] — 2026-08-21
 
 ### Changed

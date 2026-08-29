@@ -171,7 +171,7 @@ function toLineage(value: unknown): RunLineage | null {
   return { inputs, outputs }
 }
 
-const LAUNCH_KINDS: readonly string[] = ['manual', 'scheduled', 'api']
+const LAUNCH_KINDS: readonly string[] = ['manual', 'scheduled', 'api', 'external']
 
 function asLaunched(value: unknown): PipelineRunRecord['launched'] {
   const launched = asString(value)

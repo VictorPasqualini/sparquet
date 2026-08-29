@@ -542,6 +542,55 @@ The answer reports `runs_thinned`, `runs_deleted`, `logs_deleted`, `steps_delete
 `VACUUM` only runs when enough came out to be worth rewriting the file; without it
 SQLite keeps the freed pages.
 
+### `POST /runs/ingest`
+
+Records a run this runner never executed. Requires `history:Ingest`.
+
+The framework runs anywhere and depends on nothing, which is exactly why the runs
+that matter most — the nightly job on Databricks, the DAG on Airflow, a
+`sparquet.cli` call on a VM — used to leave no trace in any history. Point the
+framework at this endpoint and they land here like any other execution: same steps,
+same logs, same screens.
+
+On the machine that runs the pipeline:
+
+```bash
+export SPARQUET_HISTORY_URL="http://127.0.0.1:8765/runs/ingest"
+export SPARQUET_HISTORY_TOKEN="$SPARQUET_STUDIO_TOKEN"
+export SPARQUET_HISTORY_JOB_ID="j-orders"      # which Job in the library this is
+export SPARQUET_HISTORY_RUN_AS="airflow"
+python -m sparquet run orders.json
+```
+
+Nothing is sent unless `SPARQUET_HISTORY_URL` is set, and the framework sends
+**once, at the end of the run** — one request per execution, not one per step. A
+four-hour job appears when it finishes, with every step and every log line it
+produced. Failures are reported too: that is the run a reader most wants. See
+`sparquet/observability/history.py` for the full list of variables and for
+registering a sink in code instead.
+
+The body is the document that module produces (`{"schema": "sparquet.run/1", "run":
+{...}, "records": [...]}`); anything else is refused with `400` rather than stored
+as a run that says the wrong thing. Records are replayed through the same step
+tracker and stored through the same log writer a local run uses, capped at 5000 per
+submission. The answer is `{"pipeline_run_id", "job_run_id", "records",
+"duration_ms"}`.
+
+Two things differ from a local run, both on purpose:
+
+- it is marked `launched: "external"`, so a reader can tell what this runner
+  executed from what it was merely told about;
+- timings come from the document, not from the clock here — otherwise the whole
+  history of a nightly job would sit at the hour its report arrived.
+
+An external run consumes **no credits** on this runner: the compute was not ours.
+
+> **Security.** The token is a password — whoever holds it writes into this
+> history. The runner binds to `127.0.0.1` because it executes arbitrary Spark;
+> publishing it on a network to collect history exposes everything else it can do
+> along with it. To receive runs from other machines, put a reverse proxy in front
+> that accepts **only** this route, over TLS, and leave the runner closed.
+
 ### `GET /job-runs/{job_run_id}/logs`
 
 What one job execution printed, in the order it printed it — the same lines the

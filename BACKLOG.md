@@ -63,8 +63,9 @@ Capacidades já no código, com testes e entrada no catálogo do Studio:
   (colunas/tipos); `ValidationResult` ganhou `severity`/`metric_value`/`check_name`;
   relatório enriquecido; severidade `warn` não aborta.
 - ✅ **Broadcast join**: param `broadcast` no `join` (map-side, sem shuffle).
-- ✅ **Métricas por output**: `PipelineResult.output_metrics` + contagem antes da
-  escrita (`rows_written` = soma por destino). É também o que o billing do Studio
+- ✅ **Métricas por output**: `PipelineResult.output_metrics` (`rows_written` = soma
+  por destino), lido do contador que a própria escrita apura — sem `count()` extra;
+  ver `sparquet/core/write_metrics.py` e o benchmark no CHANGELOG 0.7.0. É também o que o billing do Studio
   conta como escrita bem-sucedida (§9.3) — sem isso a cobrança por escrita não teria
   fonte.
 - ✅ **Renome**: validação `custom_sql` → **`sql`**. **Removido**: alias `add_column`
@@ -399,9 +400,30 @@ Pendente aqui:
       as `KEEP_RUNS` (10) mais recentes de cada Job e de cada Pipeline. O ledger de
       créditos é outro banco e não é tocado — expurgar histórico nunca reescreve o que
       foi cobrado. `VACUUM` só quando saiu volume que justifique reescrever o arquivo.
-- [ ] **Histórico de execução fora do Studio** — `sparquet.cli`, job agendado,
-      Databricks: nada disso aparece no histórico, que só existe quando o runner do
-      Studio é quem executa.
+- ✅ **Histórico de execução fora do Studio** — o framework roda em qualquer lugar sem
+      depender de nada, e era justamente por isso que as execuções que mais importam
+      (job noturno no Databricks, DAG no Airflow, `sparquet.cli` numa VM) não deixavam
+      rastro nenhum. Agora o framework reporta as próprias execuções
+      (`sparquet/observability/`) e elas aparecem no histórico como qualquer outra:
+      mesmas etapas, mesmos logs, mesmas telas.
+
+      Desligado por padrão e de graça quando desligado: sem `SPARQUET_HISTORY_URL` (e
+      sem sink registrado em código) nada é instanciado e `Pipeline.run` não muda.
+      Ligado, a execução é recolhida dos registros estruturados que o framework **já
+      emite** e enviada **uma vez, no fim** — uma requisição por execução, não uma por
+      etapa — como um documento JSON (`schema: "sparquet.run/1"`) por `urllib` da
+      biblioteca padrão, sem dependência nova. Falha também é enviada, que é a execução
+      que mais interessa. Enviar nunca afeta o pipeline: receptor fora do ar, token
+      errado ou rede caída viram `warning` e o mesmo `PipelineResult`.
+
+      Do lado do runner, `POST /runs/ingest` (ação IAM `history:Ingest`) reproduz os
+      registros pelo **mesmo** `StepTracker` e pelo mesmo gravador de log de uma
+      execução local — um caminho só, sem risco de as duas divergirem. A execução fica
+      marcada `launched="external"` (quem lê distingue o que este runner executou do que
+      apenas lhe contaram), os tempos vêm do documento e não do relógio daqui, e ela não
+      consome crédito: o processamento não foi nosso. Identidade
+      (`SPARQUET_HISTORY_JOB_ID`/`_WORKFLOW_ID`/`_PIPELINE_ID`/`_RUN_AS`/`_TAGS`) e
+      `Sparquet.register_history_sink(sink)` completam a configuração. Framework 0.7.0.
 
 ### 9.2 IAM — identidade e permissão
 
@@ -586,8 +608,9 @@ Pendente aqui:
       Job/etapa), traço distribuído por execução, alerta (run falhou, run não rodou,
       duração fora da faixa, queda de volume), painel de saúde do conjunto de Jobs (não
       de um por vez), e o mesmo caminho valendo
-      para execução fora do Studio (`sparquet.cli`, Databricks, EMR) — hoje o histórico
-      só existe quando o runner do Studio é quem executa. Ver §5 (lineage) e §6 (métricas
+      para execução fora do Studio — esta última parte está resolvida em §9.1
+      (`sparquet/observability/` + `POST /runs/ingest`), e o que falta aqui é o resto:
+      exportação de métricas, traço, alerta e painel. Ver §5 (lineage) e §6 (métricas
       por etapa), que são pré-requisitos parciais.
 
 ### 9.5 Catálogo de dados

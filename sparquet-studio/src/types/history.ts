@@ -160,8 +160,12 @@ export interface PipelineRunRecord {
    * itself runs under. Null on runs recorded before it was captured.
    */
   runAs: string | null
-  /** How it started: a person pressed Run, a timer fired, or the API was called. */
-  launched: 'manual' | 'scheduled' | 'api' | null
+  /**
+   * How it started: a person pressed Run, a timer fired, the API was called, or
+   * — `external` — the framework reported a run this runner never executed, from
+   * `sparquet.cli`, Airflow, Databricks or anywhere else it runs.
+   */
+  launched: 'manual' | 'scheduled' | 'api' | 'external' | null
   /**
    * Kept forever. The runner expires history by age; a pinned run is skipped
    * whatever its age, which is how the execution of an incident survives.

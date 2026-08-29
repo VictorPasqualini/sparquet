@@ -1026,5 +1026,189 @@ class CatalogTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.repo.soft_delete("dataset", "d1")
 
+class IngestTest(unittest.TestCase):
+    """Runs executed outside this runner (`ingest_run`).
+
+    The point of the feature is that a run on Databricks or Airflow reads back
+    exactly like a local one, so most of what is checked here is sameness: the same
+    steps, the same logs, the same screens — plus the two things that must differ,
+    the `external` marker and the clock, which belongs to the machine that ran it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = history.SQLiteExecutionRepository(
+            Path(self._tmp.name) / "history.sqlite3"
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def document(self, **run: object) -> dict:
+        return {
+            "schema": "sparquet.run/1",
+            "sparquet_version": "0.7.0",
+            "run": {
+                "name": "orders",
+                "status": "success",
+                "started_at": "2026-08-28T02:00:00+00:00",
+                "finished_at": "2026-08-28T02:03:20+00:00",
+                "error": None,
+                "rows_read": 1000,
+                "rows_written": 950,
+                "launched": "external",
+                "job_id": "j1",
+                "workflow_id": "w1",
+                "run_as": "airflow",
+                **run,
+            },
+            "records": [
+                _log("Input started", scope="input", index=0, total=1, step=True),
+                _log("Input read", scope="input", index=0, total=1, step=True, rows=1000),
+                _log("Pipeline finished", rows_written=950),
+            ],
+        }
+
+    def test_records_a_readable_run(self) -> None:
+        recorded = history.ingest_run(self.repo, self.document())
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.status, history.SUCCESS)
+        self.assertEqual(run.name, "orders")
+        self.assertEqual(run.job_id, "j1")
+        self.assertEqual(run.run_as, "airflow")
+        self.assertEqual(run.jobs[0].rows_read, 1000)
+        self.assertEqual(run.jobs[0].rows_written, 950)
+
+    def test_marks_it_as_external(self) -> None:
+        """A reader has to be able to tell what this runner executed from what it
+        was merely told about."""
+        recorded = history.ingest_run(self.repo, self.document())
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.launched, "external")
+
+    def test_keeps_the_clock_of_the_machine_that_ran_it(self) -> None:
+        recorded = history.ingest_run(self.repo, self.document())
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.started_at, "2026-08-28T02:00:00+00:00")
+        self.assertEqual(run.finished_at, "2026-08-28T02:03:20+00:00")
+        self.assertEqual(run.duration_ms, 200_000)
+        self.assertEqual(recorded["duration_ms"], 200_000)
+
+    def test_steps_come_from_the_same_tracker(self) -> None:
+        recorded = history.ingest_run(self.repo, self.document())
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        steps = run.jobs[0].steps
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].scope, "input")
+        self.assertEqual(steps[0].status, history.SUCCESS)
+
+    def test_logs_are_stored(self) -> None:
+        recorded = history.ingest_run(self.repo, self.document())
+
+        lines = self.repo.list_logs(recorded["job_run_id"])
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[-1].message, "Pipeline finished")
+        self.assertEqual(lines[0].source, "pipeline")
+        self.assertEqual(recorded["records"], 3)
+
+    def test_a_failed_run_keeps_its_error(self) -> None:
+        document = self.document(status="failed", error="Path does not exist: /raw/x")
+        recorded = history.ingest_run(self.repo, document)
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.status, history.FAILED)
+        self.assertEqual(run.error, "Path does not exist: /raw/x")
+
+    def test_a_step_left_open_fails_with_the_run(self) -> None:
+        """The exception interrupted the step mid-flight — same rule as a local run."""
+        document = self.document(status="failed", error="disk full")
+        document["records"] = [
+            _log("Output started", scope="output", index=0, total=1, step=True),
+        ]
+        recorded = history.ingest_run(self.repo, document)
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        step = run.jobs[0].steps[0]
+        self.assertEqual(step.status, history.FAILED)
+        self.assertEqual(step.error_message, "disk full")
+
+    def test_a_skipped_run_is_not_a_failure(self) -> None:
+        recorded = history.ingest_run(self.repo, self.document(status="skipped"))
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.status, history.SKIPPED)
+
+    def test_creates_the_catalog_rows_it_points_at(self) -> None:
+        """A run reported by a machine that never saw this Studio still has to land."""
+        recorded = history.ingest_run(self.repo, self.document())
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.workflow_id, "w1")
+
+    def test_an_unknown_schema_is_refused(self) -> None:
+        document = self.document()
+        document["schema"] = "sparquet.run/99"
+
+        with self.assertRaises(history.IngestError):
+            history.ingest_run(self.repo, document)
+
+    def test_a_document_without_a_run_is_refused(self) -> None:
+        with self.assertRaises(history.IngestError):
+            history.ingest_run(self.repo, {"schema": "sparquet.run/1"})
+
+    def test_junk_is_refused(self) -> None:
+        with self.assertRaises(history.IngestError):
+            history.ingest_run(self.repo, "nope")
+
+    def test_row_counts_that_are_not_numbers_are_dropped(self) -> None:
+        """The payload comes from another process; a string must not become a count."""
+        recorded = history.ingest_run(self.repo, self.document(rows_read="muitas"))
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertIsNone(run.jobs[0].rows_read)
+
+    def test_missing_timestamps_do_not_break_the_run(self) -> None:
+        document = self.document(started_at=None, finished_at=None)
+        recorded = history.ingest_run(self.repo, document)
+
+        run = self.repo.get_pipeline_run(recorded["pipeline_run_id"])
+        assert run is not None
+        self.assertEqual(run.duration_ms, 0)
+        self.assertTrue(run.started_at)
+
+    def test_a_flood_of_records_is_capped(self) -> None:
+        """One POST cannot write an unbounded number of rows."""
+        document = self.document()
+        document["records"] = [
+            _log(f"linha {index}") for index in range(history.MAX_INGEST_RECORDS + 50)
+        ]
+        recorded = history.ingest_run(self.repo, document)
+
+        self.assertEqual(recorded["records"], history.MAX_INGEST_RECORDS)
+        self.assertEqual(
+            self.repo.count_logs(recorded["job_run_id"]), history.MAX_INGEST_RECORDS
+        )
+
+    def test_records_that_are_not_objects_are_ignored(self) -> None:
+        document = self.document()
+        document["records"] = ["texto solto", None, _log("boa")]
+        recorded = history.ingest_run(self.repo, document)
+
+        self.assertEqual(recorded["records"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

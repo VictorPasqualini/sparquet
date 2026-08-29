@@ -92,6 +92,8 @@ const LAUNCH_LABELS: Record<string, string> = {
   manual: 'Manually',
   scheduled: 'Scheduled',
   api: 'API',
+  // Not run here: the framework reported it from wherever it actually ran.
+  external: 'Outside Studio',
 }
 
 export interface RunsBrowserProps {

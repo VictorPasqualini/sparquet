@@ -47,7 +47,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -2128,6 +2128,39 @@ def purge_runs(dry_run: bool = False) -> PurgeResponse:
     policy = history.RetentionPolicy.from_env()
     report = _history.purge(policy, dry_run=dry_run)
     return PurgeResponse(**report.as_dict(), policy=vars(policy))
+
+
+class RunIngestResponse(BaseModel):
+    pipeline_run_id: str
+    job_run_id: str
+    records: int
+    duration_ms: int
+
+
+@app.post(
+    "/runs/ingest",
+    response_model=RunIngestResponse,
+    dependencies=[Depends(requires("history:Ingest"))],
+)
+def ingest_run(document: Dict[str, Any] = Body(...)) -> RunIngestResponse:
+    """Records a run that happened somewhere else.
+
+    The framework runs anywhere and depends on nothing, which is exactly why the
+    runs that matter most — the nightly job on Databricks, the DAG on Airflow —
+    used to leave no trace here at all. With `SPARQUET_HISTORY_URL` pointed at this
+    endpoint, the framework reports itself and those runs read back like any other:
+    same steps, same logs, same screens. They are marked `launched="external"`, so
+    a reader can always tell what this runner executed from what it merely heard
+    about, and they consume no credits here — the compute was not ours.
+
+    The document is what `sparquet.observability.history` produces; anything else
+    is refused with 400 rather than stored as a run that says the wrong thing.
+    """
+    try:
+        recorded = history.ingest_run(_history, document)
+    except history.IngestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return RunIngestResponse(**recorded)
 
 
 _log = logging.getLogger("sparquet_studio.server")

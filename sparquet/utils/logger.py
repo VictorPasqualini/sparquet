@@ -3,7 +3,41 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List
+
+
+#: Assinantes que recebem cada registro emitido, já como dicionário.
+#:
+#: Existe para que a observabilidade fora do Studio não precise reimplementar a
+#: instrumentação: os marcadores de etapa, as contagens e os erros já passam por
+#: aqui. Ver `sparquet.observability`.
+_sinks: List[Callable[[Dict[str, Any]], None]] = []
+
+
+def add_sink(sink: Callable[[Dict[str, Any]], None]) -> None:
+    """Passa a receber uma cópia de cada registro estruturado.
+
+    O sink roda dentro da chamada de log, então tem de ser rápido e não pode
+    levantar exceção — uma falha ali é engolida, porque observabilidade nunca
+    derruba a execução que ela observa.
+    """
+    _sinks.append(sink)
+
+
+def remove_sink(sink: Callable[[Dict[str, Any]], None]) -> None:
+    """Cancela a assinatura. Ignora um sink que já não esteja registrado."""
+    try:
+        _sinks.remove(sink)
+    except ValueError:
+        pass
+
+
+def _publish(record: Dict[str, Any]) -> None:
+    for sink in list(_sinks):
+        try:
+            sink(record)
+        except Exception:  # pragma: no cover - defensivo
+            pass
 
 
 class StructuredLogger:
@@ -29,6 +63,7 @@ class StructuredLogger:
             **self._context,
             **kwargs,
         }
+        _publish(record)
         return json.dumps(record, default=str)
 
     def info(self, message: str, **kwargs: Any) -> None:
