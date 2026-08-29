@@ -182,6 +182,30 @@ Pendentes / candidatos:
 | `kinesis` | AWS Kinesis — via conector do provedor; é essencialmente **streaming** (ver §7) |
 | `excel` | nicho; via `spark-excel` |
 
+- [ ] **`IcebergWriter` não cria a tabela** — a escrita usa
+      `df.write.format("iceberg").save(path)`, e no Spark 4 esse caminho exige que a
+      tabela **já exista**: apontar um output para uma tabela nova devolve
+      `[TABLE_OR_VIEW_NOT_FOUND] The table or view db.x cannot be found`, sem criar
+      nada. Medido com `iceberg-spark-runtime-4.0_2.13:1.11.0` e catálogo hadoop:
+      `save` em tabela inexistente falha; `saveAsTable` cria e funciona, inclusive com
+      `partitionBy`, `overwrite` repetido, `append` e `option`; `save` volta a
+      funcionar depois que a tabela existe; a leitura por `load` está correta nos dois
+      casos. Correção: distinguir identificador de tabela de caminho — o
+      `DeltaWriter` já faz isso em `_is_table_name` — e usar `saveAsTable` no primeiro
+      caso. Cobertura já escrita e desligada em
+      `tests/io/integration/test_lakehouse_spark.py` (`IcebergTest`); tirar o `skip`
+      junto com a correção.
+- [ ] **O bloco `spark` do JSON não chega na criação da sessão** — `Sparquet.__init__`
+      (`sparquet/framework.py:57`) chama `SparkContextManager.get_or_create` com a
+      config **do construtor**, antes de `run_from_dict` ler o JSON. `pipeline.py:160`
+      honraria `config.spark`, mas a `SparkSession` é singleton de processo e já
+      existe; `cli.py:33` faz `Sparquet()` sem argumento, então pela CLI o efeito é o
+      mesmo. Consequência prática: `spark.configs` do JSON é morto — em especial
+      `spark.jars.packages`, ou seja, **nenhum JSON consegue pedir o jar de um
+      conector** (avro, delta, iceberg, kafka, jdbc…). Correção: adiar a criação da
+      sessão para a primeira execução, quando a config do JSON já foi lida. Enquanto
+      não entra, `tests/io/integration/harness.py` passa o bloco pelo construtor.
+
 - [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
       (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
       Falta um **helper de 1ª classe** para configurar chaves/roles por provedor de
