@@ -171,7 +171,7 @@ function toLineage(value: unknown): RunLineage | null {
   return { inputs, outputs }
 }
 
-const LAUNCH_KINDS: readonly string[] = ['manual', 'scheduled', 'api']
+const LAUNCH_KINDS: readonly string[] = ['manual', 'scheduled', 'api', 'external']
 
 function asLaunched(value: unknown): PipelineRunRecord['launched'] {
   const launched = asString(value)
@@ -225,6 +225,7 @@ function toPipelineRun(value: unknown): PipelineRunRecord | null {
     error: asNullableString(value.error),
     runAs: asNullableString(value.run_as),
     launched: asLaunched(value.launched),
+    pinned: value.pinned === true,
     jobs,
   }
 }
@@ -331,6 +332,37 @@ export async function getJobRunConfig(
 }
 
 /** One execution in full: every job it ran (or skipped) and every step of each. */
+/**
+ * Marks a run as kept forever, or unmarks it. Returns the new state; null when
+ * the runner does not know that run any more.
+ */
+export async function pinRun(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  runId: string,
+  pinned: boolean,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<boolean | null> {
+  const headers = { ...authHeaders(token), 'content-type': 'application/json' }
+  let response: Response
+  try {
+    response = await fetch(`${normalizeBaseUrl(baseUrl)}/runs/${encodeURIComponent(runId)}/pin`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pinned }),
+      signal,
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new RunnerError(RUNNER_UNREACHABLE_MESSAGE, 'unreachable', undefined, error)
+  }
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw new RunnerError(await readErrorMessage(response), 'http', response.status)
+  }
+  return pinned
+}
+
 export async function getRun(
   baseUrl: string = DEFAULT_RUNNER_URL,
   runId: string,

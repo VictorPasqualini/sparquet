@@ -112,6 +112,11 @@ roles ship with the runner:
 | `operator` | Run what already exists and read the results. Cannot edit. |
 | `viewer` | Read the library and the history. Changes nothing. |
 
+`editor` holds `workspace:*`, so a couple of actions sit deliberately outside that
+family: **`runner:Configure`** — moving the library to another directory decides
+where this runner writes on its host, which is an administrator's call, not an
+editor's. `admin` holds `*` and gets it for free.
+
 Those four are rewritten on every start, so fixing a policy in code fixes it in
 every installation — which is also why they cannot be edited. **Custom roles** are
 written in the interface (**Settings → Access & IAM → Roles**) and are never
@@ -321,7 +326,13 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_FREE_MONTHLY` | `40` | Writes a team gets for free each calendar month (UTC). Does not accumulate. |
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
-| `SPARQUET_STUDIO_WORKSPACE` | `sparquet-workspace/` at the repo root | Directory the Studio library is stored in, as real JSON files. This is what you commit. |
+| `SPARQUET_STUDIO_WORKSPACE` | unset | Pins the library directory. Set it and the interface may not change it — a deployment that decides centrally decides centrally. Unset, the runner uses what was chosen in Settings, falling back to the per-user default. |
+| `SPARQUET_HOME` | `%APPDATA%\Sparquet` on Windows, `$XDG_DATA_HOME/sparquet` (or `~/.local/share/sparquet`) elsewhere | Per-user data directory. Holds `studio.json` and, unless told otherwise, `workspace/` — the library. |
+| `SPARQUET_STUDIO_HISTORY_PURGE` | on | `off`/`0`/`false`/`no` stops the runner from applying retention on its own. `POST /runs/purge` still works. |
+| `SPARQUET_STUDIO_HISTORY_DETAIL_DAYS` | `30` | After this many days a run loses its logs, its steps and its stored JSON, and keeps its row. |
+| `SPARQUET_STUDIO_HISTORY_MAX_DAYS` | `365` | After this many days the run row itself goes — but only with `SPARQUET_STUDIO_HISTORY_DELETE` on. |
+| `SPARQUET_STUDIO_HISTORY_KEEP_RUNS` | `10` | The newest N executions of each Job and each Pipeline are never expired, however old they are. |
+| `SPARQUET_STUDIO_HISTORY_DELETE` | unset (thin only) | `on`/`1`/`true`/`yes` lets the second stage delete run rows. Off, history thins but never shrinks in row count. |
 
 ## Endpoints
 
@@ -360,9 +371,15 @@ not allowed).
   "limit": 50,
   "dry_run": false,
   "run_as": "victor",
-  "launched": "manual"
+  "launched": "manual",
+  "tags": ["ad-hoc"]
 }
 ```
+
+`tags` is optional and **adds to** what the catalog already knows: the runner
+looks up the tags of the Job, its Pipeline and its Workflow and bills the run
+under all of them together, so a scheduled or scripted run is attributed without
+the caller having to know anything. Same field on `POST /run/flow`.
 
 Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
 
@@ -490,7 +507,8 @@ fetch `/runs/{id}` for the nested detail.
 
 Each row carries `run_as` and `launched` alongside the status and the timings, so
 a list of runs answers *who* and *how* without a second request. Both are `null`
-on runs recorded before those columns existed.
+on runs recorded before those columns existed. `pinned` says whether retention has
+been told to keep this execution forever.
 
 ### `GET /runs/{run_id}`
 
@@ -504,6 +522,86 @@ holding `{"inputs": [...], "outputs": [...]}`, where each entry is
 `join`, `output`, or `validation:report` / `validation:valid` / `validation:invalid`
 for the quality sinks. It is `null` when the configuration named no dataset, or on
 a run recorded before lineage existed.
+
+### `POST /runs/{run_id}/pin`
+
+Body `{"pinned": true}` keeps that execution forever: retention skips a pinned run
+whatever its age. `{"pinned": false}` puts it back within reach. Answers
+`{"run_id", "pinned"}`, `404` when the runner does not hold the run. Requires
+`history:Pin`.
+
+### `POST /runs/purge`
+
+Applies the retention policy now, instead of waiting for the daily pass. Requires
+`history:Purge`. `?dry_run=true` counts exactly what would go and touches nothing —
+worth doing first, since the second stage deletes rows for good.
+
+Retention runs in two stages, both driven by the environment variables above:
+
+1. **Thin** — past `DETAIL_DAYS`, a run drops its log lines, its step rows and the
+   copy of the JSON it ran. The run row survives with its status, its timings, its
+   row counts and the `config_hash`, so success rates and durations still plot and
+   two executions can still be compared by fingerprint.
+2. **Delete** — past `MAX_DAYS`, and only with `HISTORY_DELETE` on, the row goes too.
+
+Two things are never expired by either stage: a **pinned** run, and the newest
+`KEEP_RUNS` executions of each Job and each Pipeline — a Job that runs once a
+quarter must not open on an empty screen. The credit ledger is a separate database
+and is never touched, so purging history never rewrites what was billed.
+
+The answer reports `runs_thinned`, `runs_deleted`, `logs_deleted`, `steps_deleted`,
+`configs_dropped`, `rows_removed`, `vacuumed` and the `policy` that was applied.
+`VACUUM` only runs when enough came out to be worth rewriting the file; without it
+SQLite keeps the freed pages.
+
+### `POST /runs/ingest`
+
+Records a run this runner never executed. Requires `history:Ingest`.
+
+The framework runs anywhere and depends on nothing, which is exactly why the runs
+that matter most — the nightly job on Databricks, the DAG on Airflow, a
+`sparquet.cli` call on a VM — used to leave no trace in any history. Point the
+framework at this endpoint and they land here like any other execution: same steps,
+same logs, same screens.
+
+On the machine that runs the pipeline:
+
+```bash
+export SPARQUET_HISTORY_URL="http://127.0.0.1:8765/runs/ingest"
+export SPARQUET_HISTORY_TOKEN="$SPARQUET_STUDIO_TOKEN"
+export SPARQUET_HISTORY_JOB_ID="j-orders"      # which Job in the library this is
+export SPARQUET_HISTORY_RUN_AS="airflow"
+python -m sparquet run orders.json
+```
+
+Nothing is sent unless `SPARQUET_HISTORY_URL` is set, and the framework sends
+**once, at the end of the run** — one request per execution, not one per step. A
+four-hour job appears when it finishes, with every step and every log line it
+produced. Failures are reported too: that is the run a reader most wants. See
+`sparquet/observability/history.py` for the full list of variables and for
+registering a sink in code instead.
+
+The body is the document that module produces (`{"schema": "sparquet.run/1", "run":
+{...}, "records": [...]}`); anything else is refused with `400` rather than stored
+as a run that says the wrong thing. Records are replayed through the same step
+tracker and stored through the same log writer a local run uses, capped at 5000 per
+submission. The answer is `{"pipeline_run_id", "job_run_id", "records",
+"duration_ms"}`.
+
+Two things differ from a local run, both on purpose:
+
+- it is marked `launched: "external"`, so a reader can tell what this runner
+  executed from what it was merely told about;
+- timings come from the document, not from the clock here — otherwise the whole
+  history of a nightly job would sit at the hour its report arrived.
+
+An external run consumes **no credits** on this runner: the compute was not ours.
+
+> **Security.** The token is a password — whoever holds it writes into this
+> history. The runner binds to `127.0.0.1` because it executes arbitrary Spark;
+> publishing it on a network to collect history exposes everything else it can do
+> along with it. To receive runs from other machines, put a reverse proxy in front
+> that accepts **only** this route, over TLS, and leave the runner closed.
 
 ### `GET /job-runs/{job_run_id}/logs`
 
@@ -679,6 +777,73 @@ the run detail in Studio shows.
 A run refused for lack of credits answers **402** with the message naming the
 grant endpoint. Nothing is written to the history for it — it never started.
 
+### `GET /credits/usage`
+
+`?group_by=workflow|user|team|job|tag&period=YYYY-MM&account_id=...` — the month's
+spending read along one dimension. Grouping by anything else answers **400**: the
+value picks the query, so only those five are accepted.
+
+```json
+{ "period": "2026-08", "group_by": "workflow", "scope": "t1",
+  "total": { "writes": 12, "charged": 3, "waived": 9, "runs": 5 },
+  "overlapping": false,
+  "groups": [{ "key": "w1", "label": "Vendas", "writes": 8, "charged": 2,
+               "waived": 6, "runs": 3, "last_at": "2026-08-28T19:02:11Z" }] }
+```
+
+Your own team is always readable; `account_id` pointing at somebody else's, or
+omitting the scope to read the whole runner, needs `credits:Read` and answers
+**403** without it — rather than quietly answering about yourself.
+
+The account is the **team**; `workflow` and `user` are ways of reading its
+invoice, not payers. Workflow names are resolved at read time from the history
+catalog, so renaming a workflow relabels every past month too. A row whose key is
+`null` is reported as unattributed, never dropped — runs charged before the
+attribution existed still add up to the total.
+
+`group_by=tag` is the one dimension that does **not** partition the month, and
+`overlapping` is `true` only for it: a run wearing `finance` and `nightly` is
+counted in full under both, so the rows add up to more than `total`. `total` is
+computed independently and always counts each entry once. The row with a `null`
+key is the untagged spending, and it is omitted when there is none.
+
+Tags are frozen on the ledger entry when the run is charged, taken from the Job,
+its Pipeline and its Workflow together (`effective_tags`), plus anything the
+caller passed as `tags` on `POST /run` or `POST /run/flow`. Retagging a Job
+changes what it costs from the next run on and rewrites nothing already billed —
+a closed month stays the month that was invoiced.
+
+### `GET /credits/timeline`
+
+`?months=6&account_id=...` — one row per month, oldest first, so a screen can
+draw the series instead of a single total. `months` is clamped to 1–36. Months
+with no spending are present as zeros rather than missing, because a gap would
+change the shape of the chart. Same scope rule as `/credits/usage`.
+
+```json
+{ "scope": "t1",
+  "periods": [{ "period": "2026-07", "writes": 0, "charged": 0, "waived": 0, "runs": 0 },
+              { "period": "2026-08", "writes": 12, "charged": 3, "waived": 9, "runs": 5 }] }
+```
+
+### `GET /audit`
+
+`?limit=&actor_id=&resource=&outcome=&action=&since=` — the trail of state-changing
+requests the runner accepted or refused, newest first. Needs `iam:ReadAudit`.
+
+```json
+[{ "id": "a1", "at": "2026-08-29T14:03:11Z", "actor": "ana", "actor_id": "u1",
+   "team": "platform", "roles": ["admin"], "action": "iam:CreateUser",
+   "method": "POST", "path": "/auth/users", "resource": "u2",
+   "outcome": "allowed", "status": 200, "detail": { "username": "bruno" },
+   "ip": "127.0.0.1" }]
+```
+
+`action` accepts a `iam:*`-style prefix. A refused request is recorded with
+`outcome: "denied"` and whatever identity it had — including none, which is
+exactly the row worth reading. Bodies are never stored: `detail` holds only the
+few named fields that say what changed.
+
 ### `GET /capabilities`
 
 Live registries read from the engines and factories, so custom types registered
@@ -736,12 +901,67 @@ version wrote it, whether the examples were seeded — kept in `.studio/meta.jso
 Body for `PUT`: `{ "value": <anything JSON> }`. They travel with the workspace so
 a second checkout does not re-seed or re-migrate a library that is current.
 
-All five require the `X-Sparquet-Token` header.
+### `GET /workspace/root`
+
+Where the library is, and why it is there. Needs `workspace:Read`.
+
+```json
+{
+  "root": "/home/ana/.local/share/sparquet/workspace",
+  "source": "default",
+  "default": "/home/ana/.local/share/sparquet/workspace",
+  "settings_file": "/home/ana/.local/share/sparquet/studio.json",
+  "writable": true,
+  "inside_source_tree": false,
+  "locked": false
+}
+```
+
+`source` is the reason, strongest first: `env` (`SPARQUET_STUDIO_WORKSPACE` — then
+`locked` is true and the interface may not change it), `settings` (chosen in the
+interface), `legacy` (an older directory that already held a library, adopted so
+nobody loses one), `default` (the per-user directory). Somebody who cannot find
+their Jobs is almost always looking at a different directory than the runner is,
+which is why the reason is returned and not only the path.
+
+### `PUT /workspace/root`
+
+Points the runner at another directory. Needs **`runner:Configure`**, not
+`workspace:Write`: the built-in `editor` role holds `workspace:*`, and deciding
+where the runner writes on its host is an administrator's call.
+
+```json
+{ "root": "/srv/sparquet/library" }
+```
+
+`null` or an empty string clears the choice and goes back to the default. The
+answer is the same shape as `GET`. Refusals: `409` when the environment pinned
+it, `400` for a relative path, for a directory that cannot be created or written,
+and for **any path inside the runner's own source tree** — a checkout is code, it
+gets pulled, reset and deleted, and a library in one is lost to the first `git
+clean` or committed by accident long before that.
+
+Changing the root **copies nothing**. The store is rebound and the runner starts
+reading and writing the new place, which is what makes this the way to *adopt* a
+directory that already holds a library. Moving files is the operator's job: a
+half-finished copy with no way back is worse than a move nobody made.
+
+All seven require the `X-Sparquet-Token` header.
 
 ## Where the library is stored
 
+By default, in the per-user data directory — `%APPDATA%\Sparquet\workspace` on
+Windows, `$XDG_DATA_HOME/sparquet/workspace` (usually
+`~/.local/share/sparquet/workspace`) elsewhere. **Not** inside this checkout: a
+checkout is code, and a library living in one is lost to the first `git clean`.
+`PUT /workspace/root` points it anywhere else, and a `sparquet-workspace/` at the
+repository root that already holds a `.studio/` is still adopted, so an existing
+library keeps working — the runner logs a warning telling you to move it.
+
+Whatever the directory, it has the same shape:
+
 ```
-sparquet-workspace/
+<library root>/
   vendas/
     workflow.json               the Workflow, readable
     jobs/ingestao.json          the COMPILED pipeline — runnable as-is
@@ -757,8 +977,10 @@ sparquet-workspace/
 The point of the split: the top of the tree is what a person reviews in a pull
 request, and `sparquet run vendas/jobs/ingestao.json` runs exactly the file they
 read. `.studio/` is the editor's own state — canvas positions, parameters, the
-things the framework has no use for. Both are committed; the directory is the
-library, and a second machine opening the same checkout sees the same one.
+things the framework has no use for. Both belong under version control — of the
+library, which is the user's repository and not this one. Point a second machine
+at the same directory (a checkout, a shared volume, a synced folder) and it opens
+the same library.
 
 Browser storage (IndexedDB, then localStorage) stays behind this as a fallback
 for when the runner is not running. It is a cache, not the store.
@@ -788,6 +1010,15 @@ each point at a Job. The same Job can be a stage of several Pipelines, can appea
 twice in one, and can be run on its own without belonging to any. So the relation
 lives in `pipeline_stage (pipeline_id, stage_id, job_id, stage_index)`, keyed by
 stage rather than by job. Every other edge above is a plain foreign key.
+
+A Workflow, a Pipeline and a Job each carry **tags**, in `catalog_tag (kind,
+record_id, tag)`. They are what Billing groups by, and they are inherited
+downwards: a run's tags are its Job's, its Pipeline's and its Workflow's unioned,
+most specific first. Tagging the Workflow is the cheap way to tag everything
+inside it. A tag is trimmed, capped at 40 characters and deduplicated
+case-insensitively, at most 20 per record — the same rules as `src/lib/tags.ts`
+in the Studio, because a `Prod` stored apart from a `prod` would split a month's
+spending for a reason invisible on the screen.
 
 The catalog is written by `PUT /workspace/...`: saving a record in the editor
 mirrors it here. Rows are never deleted, only marked with `deleted_at` — a run

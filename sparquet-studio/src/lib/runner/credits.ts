@@ -14,6 +14,11 @@ import type {
   CreditStatus,
   CreditUsage,
   RunCharge,
+  SpendBreakdown,
+  SpendGroup,
+  SpendGroupBy,
+  SpendPeriod,
+  SpendTimeline,
 } from '@/types/credits'
 
 import {
@@ -112,6 +117,7 @@ function toAccount(value: unknown): CreditAccount {
     freeMonthly: asNumber(record.free_monthly),
     freeRemaining: asNumber(record.free_remaining),
     available: asNumber(record.available),
+    held: asNumber(record.held),
     createdAt: asNullableString(record.created_at),
     updatedAt: asNullableString(record.updated_at),
   }
@@ -160,6 +166,22 @@ function toEntry(value: unknown): CreditEntry {
     target: asNullableString(record.target),
     jobName: asNullableString(record.job_name),
     note: asNullableString(record.note),
+    workflowId: asNullableString(record.workflow_id),
+    actor: asNullableString(record.actor),
+    tags: Array.isArray(record.tags) ? record.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+  }
+}
+
+function toGroup(value: unknown): SpendGroup {
+  const record = isRecord(value) ? value : {}
+  return {
+    key: asNullableString(record.key),
+    label: asNullableString(record.label),
+    writes: asNumber(record.writes),
+    charged: asNumber(record.charged),
+    waived: asNumber(record.waived),
+    runs: asNumber(record.runs),
+    lastAt: asNullableString(record.last_at),
   }
 }
 
@@ -177,6 +199,81 @@ export async function getMyCredits(
     creditsPerWrite: asNumber(record.credits_per_write, 1),
     freeMonthly: asNumber(record.free_monthly),
     usage: toUsage(record.usage),
+  }
+}
+
+/**
+ * A month of spending, grouped by team, user, workflow, job or tag.
+ *
+ * Your own team is always readable; the whole runner needs `credits:Read`, and
+ * asking for somebody else's account without it is refused rather than quietly
+ * answered about yourself.
+ */
+export async function getSpendBreakdown(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  options: { groupBy?: SpendGroupBy; period?: string; accountId?: string } = {},
+  token?: string,
+  signal?: AbortSignal,
+): Promise<SpendBreakdown> {
+  const params = new URLSearchParams()
+  params.set('group_by', options.groupBy ?? 'workflow')
+  if (options.period) params.set('period', options.period)
+  if (options.accountId) params.set('account_id', options.accountId)
+  const payload = await request(
+    baseUrl,
+    `/credits/usage?${params.toString()}`,
+    { method: 'GET' },
+    token,
+    signal,
+  )
+  const record = isRecord(payload) ? payload : {}
+  return {
+    period: asString(record.period),
+    groupBy: (asString(record.group_by, 'workflow') as SpendGroupBy),
+    scope: asString(record.scope, 'all'),
+    total: toGroup(record.total),
+    groups: Array.isArray(record.groups) ? record.groups.map(toGroup) : [],
+    overlapping: record.overlapping === true,
+  }
+}
+
+/**
+ * Spending month by month, oldest first.
+ *
+ * One month says how much; only the series says whether that is normal, which is
+ * the question somebody looking at a bill actually has.
+ */
+export async function getSpendTimeline(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  options: { months?: number; accountId?: string } = {},
+  token?: string,
+  signal?: AbortSignal,
+): Promise<SpendTimeline> {
+  const params = new URLSearchParams()
+  params.set('months', String(options.months ?? 6))
+  if (options.accountId) params.set('account_id', options.accountId)
+  const payload = await request(
+    baseUrl,
+    `/credits/timeline?${params.toString()}`,
+    { method: 'GET' },
+    token,
+    signal,
+  )
+  const record = isRecord(payload) ? payload : {}
+  return {
+    scope: asString(record.scope, 'all'),
+    periods: Array.isArray(record.periods) ? record.periods.map(toPeriod) : [],
+  }
+}
+
+function toPeriod(value: unknown): SpendPeriod {
+  const record = isRecord(value) ? value : {}
+  return {
+    period: asString(record.period),
+    writes: asNumber(record.writes),
+    charged: asNumber(record.charged),
+    waived: asNumber(record.waived),
+    runs: asNumber(record.runs),
   }
 }
 

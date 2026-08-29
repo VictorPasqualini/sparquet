@@ -63,8 +63,9 @@ Capacidades já no código, com testes e entrada no catálogo do Studio:
   (colunas/tipos); `ValidationResult` ganhou `severity`/`metric_value`/`check_name`;
   relatório enriquecido; severidade `warn` não aborta.
 - ✅ **Broadcast join**: param `broadcast` no `join` (map-side, sem shuffle).
-- ✅ **Métricas por output**: `PipelineResult.output_metrics` + contagem antes da
-  escrita (`rows_written` = soma por destino). É também o que o billing do Studio
+- ✅ **Métricas por output**: `PipelineResult.output_metrics` (`rows_written` = soma
+  por destino), lido do contador que a própria escrita apura — sem `count()` extra;
+  ver `sparquet/core/write_metrics.py` e o benchmark no CHANGELOG 0.7.0. É também o que o billing do Studio
   conta como escrita bem-sucedida (§9.3) — sem isso a cobrança por escrita não teria
   fonte.
 - ✅ **Renome**: validação `custom_sql` → **`sql`**. **Removido**: alias `add_column`
@@ -128,6 +129,22 @@ muda a API Python.
   (`src/lib/storage/db.ts` + `remote.ts`) — e uma biblioteca que só existia no
   navegador é empurrada uma única vez para um workspace vazio. Fonte da verdade: o
   arquivo; o navegador virou cache de quando o runner não está no ar.
+- ✅ **O produto não escreve dentro do próprio código-fonte.** Um checkout é código:
+  ele é puxado, resetado e apagado, então uma biblioteca dentro dele morre no primeiro
+  `git clean` — ou é commitada por engano muito antes disso. O default virou o
+  diretório de dados do usuário (`%APPDATA%\Sparquet\workspace` no Windows,
+  `$XDG_DATA_HOME/sparquet/workspace` no resto; `SPARQUET_HOME` sobrescreve), e
+  `GET`/`PUT /workspace/root` deixam escolher outro pela interface (Settings → Local
+  runner → *Library location*). Precedência: `SPARQUET_STUDIO_WORKSPACE` (deployment
+  decide, a interface não sobrepõe — `409` + `locked`) › escolha salva em
+  `studio.json` › `sparquet-workspace/` antigo **que já tenha um `.studio/`**, adotado
+  para ninguém perder biblioteca › default. Trocar a raiz **não copia nada**: adotar um
+  diretório que já tem biblioteca é o caso de uso, e uma cópia pela metade sem volta é
+  pior do que uma mudança que ninguém fez. Recusas: caminho relativo, diretório que não
+  dá para criar ou escrever, e qualquer caminho dentro do código-fonte. A ação é
+  `runner:Configure`, de propósito fora de `workspace:*` — o papel `editor` tem
+  `workspace:*`, e decidir onde o runner escreve na máquina é decisão de administrador.
+  `spark-warehouse/` e `sparquet-workspace/` saíram do git.
 
 O que é execução, histórico, IAM e billing está em §9, com o que ainda falta em cada
 um logo abaixo do que já existe.
@@ -389,11 +406,40 @@ arbitrária**: tudo aqui é, no fim, postura de segurança e de operação. Ele 
 
 Pendente aqui:
 
-- [ ] **Retenção / rotação do SQLite de histórico** — hoje cresce sem limite (o teto de
-      3000 linhas é por execução, não do arquivo). Ver também §9.4.
-- [ ] **Histórico de execução fora do Studio** — `sparquet.cli`, job agendado,
-      Databricks: nada disso aparece no histórico, que só existe quando o runner do
-      Studio é quem executa.
+- ✅ **Retenção / rotação do SQLite de histórico** — expurgo em dois estágios, aplicado
+      pelo runner uma vez por dia e sob demanda em `POST /runs/purge` (com `dry_run`).
+      Passados `DETAIL_DAYS` (30) a execução perde logs, steps e a cópia do JSON, mas
+      **mantém a linha** com status, tempos, contagens e `config_hash` — série histórica
+      e comparação por impressão digital continuam de pé. Passados `MAX_DAYS` (365) a
+      linha some, e só com `SPARQUET_STUDIO_HISTORY_DELETE` ligado. Nada expira duas
+      coisas: execução fixada (`pinned`, marcada no histórico, ação IAM `history:Pin`) e
+      as `KEEP_RUNS` (10) mais recentes de cada Job e de cada Pipeline. O ledger de
+      créditos é outro banco e não é tocado — expurgar histórico nunca reescreve o que
+      foi cobrado. `VACUUM` só quando saiu volume que justifique reescrever o arquivo.
+- ✅ **Histórico de execução fora do Studio** — o framework roda em qualquer lugar sem
+      depender de nada, e era justamente por isso que as execuções que mais importam
+      (job noturno no Databricks, DAG no Airflow, `sparquet.cli` numa VM) não deixavam
+      rastro nenhum. Agora o framework reporta as próprias execuções
+      (`sparquet/observability/`) e elas aparecem no histórico como qualquer outra:
+      mesmas etapas, mesmos logs, mesmas telas.
+
+      Desligado por padrão e de graça quando desligado: sem `SPARQUET_HISTORY_URL` (e
+      sem sink registrado em código) nada é instanciado e `Pipeline.run` não muda.
+      Ligado, a execução é recolhida dos registros estruturados que o framework **já
+      emite** e enviada **uma vez, no fim** — uma requisição por execução, não uma por
+      etapa — como um documento JSON (`schema: "sparquet.run/1"`) por `urllib` da
+      biblioteca padrão, sem dependência nova. Falha também é enviada, que é a execução
+      que mais interessa. Enviar nunca afeta o pipeline: receptor fora do ar, token
+      errado ou rede caída viram `warning` e o mesmo `PipelineResult`.
+
+      Do lado do runner, `POST /runs/ingest` (ação IAM `history:Ingest`) reproduz os
+      registros pelo **mesmo** `StepTracker` e pelo mesmo gravador de log de uma
+      execução local — um caminho só, sem risco de as duas divergirem. A execução fica
+      marcada `launched="external"` (quem lê distingue o que este runner executou do que
+      apenas lhe contaram), os tempos vêm do documento e não do relógio daqui, e ela não
+      consome crédito: o processamento não foi nosso. Identidade
+      (`SPARQUET_HISTORY_JOB_ID`/`_WORKFLOW_ID`/`_PIPELINE_ID`/`_RUN_AS`/`_TAGS`) e
+      `Sparquet.register_history_sink(sink)` completam a configuração. Framework 0.7.0.
 
 ### 9.2 IAM — identidade e permissão
 
@@ -465,10 +511,12 @@ Pendente aqui:
 
 Pendente aqui:
 
-- [ ] **Log de auditoria** — quem mudou o quê e quando (usuário criado, papel alterado,
-      equipe trocada, crédito concedido, código de recuperação emitido). O histórico
-      registra *execução*, não *alteração*; hoje a única trilha de uma mudança de
-      permissão é o estado final no SQLite.
+- ✅ **Log de auditoria** — `server/audit.py` + middleware: toda requisição que muda
+      estado vira uma linha com quem, o quê, sobre qual recurso e com que desfecho —
+      inclusive as **recusadas**, que são as que interessam ler. Filtros por ator,
+      recurso, desfecho, prefixo de ação (`iam:*`) e data em `GET /audit`, atrás de
+      `iam:ReadAudit`; corpo de requisição nunca é gravado, só os campos nomeados. Na
+      interface: **Access & IAM › Audit log**.
 - [ ] **SSO / OIDC** e senha gerenciada fora do runner — para instalação corporativa,
       onde criar mais um usuário/senha local é justamente o que não se quer.
 - [ ] **Expiração e rotação de sessão por política** — hoje é só
@@ -522,6 +570,21 @@ Modelo atual, implementado em `server/credits.py` (SQLite próprio em
 - ✅ Ações `credits:Read` / `credits:Manage`; rotas `/credits/me`, `/credits`,
   `/credits/{id}/ledger`, `/credits/{id}/grant`; `credits_enforced` no `/health`.
   Verificado em `server/test_credits.py` e `src/lib/runner/credits.test.ts`.
+- ✅ **Tags como dimensão de rateio** — Workflow, Pipeline e Job carregam tags
+  (`catalog_tag` no banco do histórico, editor `TagsPopover` nas três telas) e a cobrança
+  congela no lançamento a união das tags do Job, do seu Pipeline e do seu Workflow
+  (`effective_tags`), mais o que o chamador mandar em `tags` no `POST /run`. Congelar é o
+  que preserva a fatura: retaguear um Job muda o que ele custa **daqui para frente** e não
+  reescreve mês fechado. Marcar o Workflow marca tudo que está dentro — repetir o centro
+  de custo em quarenta Jobs garante que um fique de fora e apareça sem tag na fatura.
+  Tags são a **única** dimensão que não particiona o mês: um run com duas tags conta
+  inteiro nas duas, então as linhas somam mais que o total — daí `totals()` contar cada
+  lançamento uma vez e a resposta trazer `overlapping` para a tela poder dizer isso.
+- ✅ **Tela de análise, não só extrato** — Billing agora abre com seis meses em barras
+  (`SpendTrend`, `GET /credits/timeline`), onde a barra é também o seletor do mês, e o
+  rateio (`SpendBreakdown`) lê o mês escolhido por Workflow, Job, **Tag**, usuário ou
+  equipe, em lista ordenada com barra proporcional ao maior — não à soma, que deixaria
+  toda barra invisível com vinte linhas. Sem biblioteca de gráfico.
 
 Pendente aqui:
 
@@ -546,16 +609,24 @@ Pendente aqui:
 - [ ] **Preço por tamanho** — toda escrita remota custa igual, independentemente de
       gravar dez linhas ou dez bilhões. O caminho natural é ponderar por duração ou por
       linhas escritas, dados que o histórico já tem (`rows_written`, duração por step).
-- [ ] **Reserva antes de executar, com estorno** — hoje é checagem mínima na entrada +
-      débito no fim. Uma reserva do custo estimado (e estorno quando o cluster recusa o
-      run) evita duas execuções paralelas gastarem o mesmo saldo.
+- ✅ **Reserva antes de executar, com estorno** — o run segura o custo estimado antes
+      de começar e liquida no fim (`reserve` → `settle`/`release`). `available` desconta
+      o que está preso, então duas execuções paralelas não gastam o mesmo saldo; a
+      liberação é idempotente e uma queda do runner deixa reserva órfã, varrida por
+      `release_stale()` na subida.
 - [ ] **Conciliação com o custo real do cluster** — o crédito é unidade interna, sem
       relação com o que a nuvem cobrou pelo mesmo run.
 - [ ] **Cobrar execução que não passa pelo runner** — `sparquet.cli`, job agendado,
       Databricks: hoje é invisível para o razão. Sem isso, "conta da equipe" é a conta
       *do que rodou pelo Studio*.
-- [ ] **Conta por Workflow** — além de por equipe, para rateio interno entre projetos da
-      mesma equipe.
+- ✅ **Rateio por Workflow, usuário e Job** — resolvido **sem** conta por Workflow:
+      quem paga continua sendo a equipe, e o Workflow virou *dimensão de leitura*. Cada
+      lançamento do razão carrega `workflow_id` e `actor`, e `GET /credits/usage`
+      agrupa por equipe, usuário, workflow ou job. A decisão é deliberada: um Workflow
+      é uma pasta — ele é renomeado e muda de equipe —, então um orçamento preso a ele
+      quebraria no dia em que alguém arrastasse um Job para fora. O nome do Workflow é
+      resolvido na leitura, a partir do catálogo do histórico, de modo que renomear
+      reetiqueta também as faturas passadas. Na interface: **Billing › Spending**.
 
 ### 9.4 Monitoramento e observabilidade
 
@@ -567,9 +638,10 @@ Pendente aqui:
       (OpenTelemetry/Prometheus — duração, linhas lidas/escritas, taxa de falha, por
       Job/etapa), traço distribuído por execução, alerta (run falhou, run não rodou,
       duração fora da faixa, queda de volume), painel de saúde do conjunto de Jobs (não
-      de um por vez), retenção/rotação do SQLite de histórico, e o mesmo caminho valendo
-      para execução fora do Studio (`sparquet.cli`, Databricks, EMR) — hoje o histórico
-      só existe quando o runner do Studio é quem executa. Ver §5 (lineage) e §6 (métricas
+      de um por vez), e o mesmo caminho valendo
+      para execução fora do Studio — esta última parte está resolvida em §9.1
+      (`sparquet/observability/` + `POST /runs/ingest`), e o que falta aqui é o resto:
+      exportação de métricas, traço, alerta e painel. Ver §5 (lineage) e §6 (métricas
       por etapa), que são pré-requisitos parciais.
 
 ### 9.5 Catálogo de dados
@@ -584,6 +656,25 @@ Pendente aqui:
       runner, consumível pelo Studio e pela IA como contexto) ou integração com um
       existente (Unity Catalog, DataHub, OpenMetadata) — e, se próprio, se ele também
       alimenta a paleta do Studio com fontes já conhecidas.
+
+### 9.6 Biblioteca e arquivos
+
+- [ ] **Apontar um estágio do Pipeline para um arquivo JSON existente.** Hoje uma caixa
+      do Pipeline referencia um Job da biblioteca, e o Job é o dono do arquivo. Falta o
+      caminho inverso: apontar a caixa para um `.json` que já existe no disco — gerado
+      por outro time, versionado em outro repositório, escrito à mão — e executá-lo sem
+      importar para dentro da biblioteca. Desenho proposto: o estágio ganha uma origem
+      alternativa (`{ "source": "file", "path": "vendas/jobs/ingestao.json" }`, relativa
+      à raiz da biblioteca), o runner resolve na hora de executar, e o Studio mostra o
+      JSON em modo leitura com o linter rodando em cima — editar continua sendo pelo
+      Job. Pontos a decidir antes: (a) caminho relativo à raiz **sempre**, para não
+      vazar caminho absoluto de uma máquina para outra e para manter a recusa de
+      escapar da raiz que `workspace.py` já faz; (b) o que a execução registra no
+      histórico quando não há `job.id` — provavelmente um Job sintético identificado
+      pelo caminho, senão o catálogo fica com órfão; (c) o que acontece quando o arquivo
+      some ou deixa de compilar — falhar no lint do Pipeline, antes de rodar, não no
+      meio da execução; (d) se o mesmo mecanismo vale para um Workflow inteiro
+      (montar a biblioteca a partir de um diretório) ou só para estágio.
 
 ---
 
@@ -662,8 +753,14 @@ Restante, na ordem do plano:
       Os itens (a) e (b) são unitários e baratos (o catálogo e o compilador já estão em
       memória no teste); (c) e (d) pedem provider dublê. Chamada real a provider fica
       atrás de env var, nunca na execução default.
-- [ ] **Semântica de `on_failure`** — que `fail` aborta **antes** de qualquer escrita e
-      antes do relatório é promessa de segurança de dado, e nada verifica.
+- ✅ **Semântica de `on_failure`** — 13 testes em `tests/validation/test_on_failure.py`,
+      sem Spark: `fail` (o default, inclusive quando a chave está ausente) aborta sem
+      escrever **nada** — nem os destinos nem o relatório, porque o engine levanta antes
+      de o pipeline chegar lá — e volta como `PipelineResult(success=False)` com as
+      falhas em `error`, nunca como exceção; `warn` e `skip` seguem e escrevem tudo, com
+      os resultados falhos ainda no objeto; validação com `skip` **não** liga
+      `PipelineResult.skipped`, que significa outra coisa (`stop_if_empty`); e resultado
+      de **severidade** `warn` nunca aborta, nem sob `fail`.
 - [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
       CLAUDE.md já é a lista de casos.
 - [ ] **Camada HTTP do runner** (`sparquet-studio/server/main.py`) — os módulos de apoio

@@ -577,6 +577,7 @@ describe('run step status', () => {
       error: null,
       runAs: null,
       launched: 'manual',
+      pinned: false,
       jobs,
     }
   }

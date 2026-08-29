@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { CreditsBadge } from '@/components/credits/CreditsBadge'
 import { PipelineRunViewBanner, showPipelineRun } from '@/components/history/PipelineRunViewBanner'
 import { RunsBrowser } from '@/components/history/RunsBrowser'
 import {
@@ -35,14 +36,19 @@ import {
   type WorkspaceTab,
 } from '@/components/layout/WorkspaceTabs'
 import { PipelineCanvas } from '@/components/pipeline/PipelineCanvas'
+import { TagsPopover } from '@/components/library/TagsPopover'
 import { PipelineRunPanel } from '@/components/pipeline/PipelineRunPanel'
 import { StagePicker } from '@/components/pipeline/StagePicker'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
 import { resolvePipeline, stageRowPosition, type ResolvedPipeline } from '@/lib/pipeline'
 import { getPipeline } from '@/lib/storage/db'
+import { collectTags } from '@/lib/tags'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
-import { usePipelineEditorStore } from '@/store/pipelineEditor'
+import {
+  usePipelineEditorStore,
+  type PipelineWorkspaceView,
+} from '@/store/pipelineEditor'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 import type { Pipeline, ValidationIssue } from '@/types/studio'
@@ -170,9 +176,7 @@ function PipelineWorkbench() {
   )
 }
 
-type PipelineView = 'flow' | 'runs'
-
-const PIPELINE_TABS: WorkspaceTab<PipelineView>[] = [
+const PIPELINE_TABS: WorkspaceTab<PipelineWorkspaceView>[] = [
   { id: 'flow', label: 'Flow', icon: Workflow },
   { id: 'runs', label: 'Runs', icon: HistoryIcon },
 ]
@@ -187,7 +191,9 @@ const PIPELINE_TABS: WorkspaceTab<PipelineView>[] = [
  * The canvas stays mounted across tabs so React Flow keeps the viewport.
  */
 function PipelineWorkspace({ resolved }: { resolved: ResolvedPipeline }) {
-  const [view, setView] = useState<PipelineView>('flow')
+  // In the store, so the run panel can send the user here from the side.
+  const view = usePipelineEditorStore((state) => state.workspaceView)
+  const setView = usePipelineEditorStore((state) => state.setWorkspaceView)
   const navigate = useNavigate()
 
   const pipeline = usePipelineEditorStore((state) => state.pipeline)
@@ -299,6 +305,9 @@ function PipelineTopBar({
   const past = usePipelineEditorStore((state) => state.past.length)
   const future = usePipelineEditorStore((state) => state.future.length)
   const updatePipelineMeta = useLibraryStore((state) => state.updatePipelineMeta)
+  const knownTags = useLibraryStore((state) =>
+    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
+  )
 
   const [name, setName] = useState(pipeline?.name ?? '')
   useEffect(() => setName(pipeline?.name ?? ''), [pipeline?.name])
@@ -311,6 +320,12 @@ function PipelineTopBar({
     }
     void updatePipelineMeta(pipeline.id, { name: trimmed })
     usePipelineEditorStore.setState({ pipeline: { ...pipeline, name: trimmed } })
+  }
+
+  const commitTags = (tags: string[]) => {
+    if (!pipeline) return
+    void updatePipelineMeta(pipeline.id, { tags })
+    usePipelineEditorStore.setState({ pipeline: { ...pipeline, tags } })
   }
 
   return (
@@ -336,6 +351,13 @@ function PipelineTopBar({
         />
       </div>
 
+      <TagsPopover
+        tags={pipeline?.tags ?? []}
+        onChange={commitTags}
+        suggestions={knownTags}
+        subject={pipeline?.name ?? 'this pipeline'}
+      />
+
       <div className="flex items-center gap-1">
         <Tooltip content="Undo">
           <IconButton label="Undo" onClick={undo} disabled={past === 0} size="sm">
@@ -358,6 +380,8 @@ function PipelineTopBar({
           </IconButton>
         </Tooltip>
       </div>
+
+      <CreditsBadge linkToBilling={false} />
 
       <div className="mx-1 h-6 w-px bg-line" />
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pyspark.sql import DataFrame, SparkSession
@@ -8,6 +9,8 @@ from pyspark.sql import functions as F
 
 from sparquet.core.config import OutputConfig, PipelineConfig
 from sparquet.core.context import SparkContextManager
+from sparquet.core.write_metrics import WriteMetrics
+from sparquet.observability import history
 from sparquet.io.factory import ReaderFactory, WriterFactory
 from sparquet.transform.base import PipelineStop
 from sparquet.transform.engine import TransformationEngine
@@ -20,16 +23,22 @@ from sparquet.utils.logger import flush_deferred_warnings, logger
 class OutputMetrics:
     """Métricas de escrita de um destino individual.
 
-    `rows_written` é contado no df **já transformado e projetado** de cada output,
-    logo antes da escrita — reflete o que aquele destino realmente recebeu (e não o
-    df principal), então é exato mesmo quando o output tem `transformations` que
-    mudam o número de linhas.
+    `rows_written` é o que **aquele destino** recebeu (e não o df principal), então é
+    exato mesmo quando o output tem `transformations` próprias que mudam o número de
+    linhas.
+
+    O número vem do job da escrita, que já conta as linhas enquanto grava
+    (`rows_from="write_metrics"`, ver `sparquet.core.write_metrics`). Quando o
+    formato não publica essa métrica — JDBC, por exemplo — cai para um `count()`
+    explícito no df projetado, antes da escrita (`rows_from="count"`). Os dois
+    caminhos dão o mesmo número; o primeiro não custa uma action a mais.
     """
 
     format: str
     path: str
     mode: str
     rows_written: int
+    rows_from: str = "write_metrics"
 
 
 @dataclass
@@ -126,6 +135,23 @@ class Pipeline:
         return cls(PipelineConfig.from_dict(data))
 
     def run(self) -> PipelineResult:
+        """Executa o pipeline e devolve o resultado. Nunca levanta exceção.
+
+        Quando há histórico externo configurado (ver `sparquet.observability`), a
+        execução é recolhida e publicada aqui, depois de o resultado estar pronto —
+        inclusive quando ela falha, que é justamente o caso que interessa observar.
+        Sem histórico configurado, `recorder_for` devolve `None` e este método é o
+        `_execute` de sempre.
+        """
+        recorder = history.recorder_for(self.config.name)
+        if recorder is None:
+            return self._execute()
+        with recorder:
+            result = self._execute()
+        recorder.publish(result, datetime.now(timezone.utc).isoformat())
+        return result
+
+    def _execute(self) -> PipelineResult:
         log = logger.bind(pipeline=self.config.name)
         log.info("Pipeline started")
 
@@ -444,6 +470,9 @@ class Pipeline:
     ) -> List[OutputMetrics]:
         metrics: List[OutputMetrics] = []
         total = len(self.config.outputs)
+        # Lê o contador que a própria escrita apura, em vez de gastar um count()
+        # por destino. Ver sparquet/core/write_metrics.py.
+        write_metrics = WriteMetrics(spark)
         for index, output in enumerate(self.config.outputs):
             # Marcador de etapa (scope="output") para o Studio pintar o status do
             # nó de destino ao vivo. Ver TransformationEngine.apply(top_level=True).
@@ -460,9 +489,6 @@ class Pipeline:
                     output_df, output.transformations
                 )
             output_df = self._project_columns(output_df, output)
-            # Conta o df final deste destino ANTES de escrever — reflete exatamente
-            # o que é gravado aqui, mesmo com transformações de output que mudam linhas.
-            rows_written = output_df.count()
             log.info(
                 "Writing output",
                 format=output.format,
@@ -470,13 +496,21 @@ class Pipeline:
                 mode=output.mode,
                 columns=output.columns or "todas",
                 transformations=len(output.transformations),
-                rows=rows_written,
             )
-            WriterFactory.create(spark, output).write(output_df)
+            writer = WriterFactory.create(spark, output)
+            rows_written = write_metrics.measure(lambda: writer.write(output_df))
+            rows_from = "write_metrics"
+            if rows_written is None:
+                # O formato não publicou métrica de escrita. Conta explicitamente:
+                # um número errado aqui contaminaria relatório, histórico e cobrança,
+                # e o df já está materializado pela escrita que acabou de rodar.
+                rows_written = output_df.count()
+                rows_from = "count"
             log.info(
                 "Output written",
                 scope="output", index=index, total=total, step=True,
                 format=output.format, path=output.path, rows=rows_written,
+                rows_from=rows_from,
             )
             metrics.append(
                 OutputMetrics(
@@ -484,6 +518,7 @@ class Pipeline:
                     path=output.path,
                     mode=output.mode,
                     rows_written=rows_written,
+                    rows_from=rows_from,
                 )
             )
         return metrics

@@ -47,7 +47,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -66,6 +66,9 @@ _VERSION_PATTERN = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
 
 
 # ---------------------------------------------------------------- bootstrap
+
+
+_log = logging.getLogger("sparquet_studio.server")
 
 
 def _framework_root() -> Path:
@@ -125,6 +128,7 @@ history = _load_sibling_module("history")
 workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
 credits = _load_sibling_module("credits")
+audit = _load_sibling_module("audit")
 
 
 # ------------------------------------------------------------------ models
@@ -146,6 +150,10 @@ class RunRequest(BaseModel):
     # `run_as` is a claim: absent, the account the runner runs under is recorded.
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Labels to bill this run under, on top of whatever the Job, its Pipeline and
+    #: its Workflow already carry in the catalog. For a caller whose Job the
+    #: Studio library has never seen: a script can tag its own runs.
+    tags: Optional[List[str]] = None
 
 
 class FlowStageRequest(BaseModel):
@@ -174,6 +182,9 @@ class RunFlowRequest(BaseModel):
     name: Optional[str] = None
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Labels for the whole flow, added to what the catalog already says about the
+    #: Pipeline, its Workflow and each stage's Job.
+    tags: Optional[List[str]] = None
 
 
 class ValidateRequest(BaseModel):
@@ -654,13 +665,52 @@ _HISTORY_DB_PATH = Path(
 )
 _history: Any = history.SQLiteExecutionRepository(_HISTORY_DB_PATH)
 
-# Where the library lives as files. Defaults to a directory next to the framework so
-# it is inside the repository the user already versions; point the env var somewhere
-# else (a shared checkout, a mounted volume) to move the whole library with it.
-_WORKSPACE_ROOT = Path(
-    os.getenv("SPARQUET_STUDIO_WORKSPACE") or (_framework_root() / "sparquet-workspace")
-).expanduser()
+#: How often the retention policy is applied on its own. Once a day is enough for
+#: a rule expressed in days, and it never runs on the execution path — a purge
+#: rewrites the database, which is not something to do while a run is streaming.
+_PURGE_EVERY_SECONDS = 24 * 60 * 60
+
+
+def _purge_history_periodically() -> None:
+    """Applies the retention policy at start-up and once a day after that.
+
+    Failures are logged and swallowed: a database that could not be trimmed is a
+    disk-space problem, not a reason for the runner to stop serving.
+    """
+    while True:
+        try:
+            report = _history.purge(history.RetentionPolicy.from_env())
+            if report.rows_removed or report.runs_thinned:
+                _log.info(
+                    "History purge: %s runs thinned, %s deleted, %s rows removed%s.",
+                    report.runs_thinned, report.runs_deleted, report.rows_removed,
+                    ", file rewritten" if report.vacuumed else "",
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("History purge failed: %s", exc)
+        time.sleep(_PURGE_EVERY_SECONDS)
+
+
+# Where the library lives as files. The runner never writes inside its own source
+# tree: a checkout is code, and a library kept in one is lost to the first
+# `git clean` and committed by accident before that. So the default is the
+# platform's per-user data directory, `SPARQUET_STUDIO_WORKSPACE` wins over
+# everything for a deployment that decides centrally, and in between sits
+# whatever somebody chose in the interface. A directory left over from the old
+# default is adopted rather than abandoned — see `workspace.resolve_root`.
+_LEGACY_WORKSPACE = _framework_root() / "sparquet-workspace"
+_WORKSPACE_LOCATION = workspace.resolve_root(_LEGACY_WORKSPACE)
+_WORKSPACE_ROOT = _WORKSPACE_LOCATION.root
 _workspace: Any = workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+
+if _WORKSPACE_LOCATION.source == "legacy":
+    _log.warning(
+        "The library is still inside the source tree, at %s. It works, but a "
+        "checkout is not a safe place for it: move the directory somewhere of "
+        "your own and point SPARQUET_STUDIO_WORKSPACE at it, or choose the new "
+        "location in Settings.",
+        _WORKSPACE_ROOT,
+    )
 
 
 CANCELLED_ERROR = "Cancelled from Studio while it was running."
@@ -779,6 +829,27 @@ def _ensure_catalog(
                 )
     except Exception:  # pragma: no cover - bookkeeping must never fail a run
         pass
+
+
+def _run_tags(
+    *, workflow_id: Optional[str] = None, pipeline_id: Optional[str] = None,
+    job_id: Optional[str] = None, extra: Optional[List[str]] = None,
+) -> List[str]:
+    """The labels this run is billed under.
+
+    Read from the catalog at run time rather than taken from the request: the
+    tags belong to the record, so what a run costs is attributed by what the
+    library says today, not by what a client remembered to send. `extra` is for
+    the caller the library has never heard of — a script tagging its own run.
+    """
+    tags = list(extra or [])
+    try:
+        tags += _history.effective_tags(
+            workflow_id=workflow_id, pipeline_id=pipeline_id, job_id=job_id
+        )
+    except Exception:  # pragma: no cover - billing labels are not worth a run
+        _log.warning("Could not read the tags for this run from the catalog.")
+    return history.normalize_tags(tags)
 
 
 def _lineage(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -974,9 +1045,11 @@ def current_principal(request: Request) -> Any:
         principal = _auth.resolve_session(token)
         if principal is None:
             raise HTTPException(status_code=401, detail=SESSION_EXPIRED_HELP)
+        request.state.principal = principal
         return principal
     if _auth.has_users():
         raise HTTPException(status_code=401, detail=LOGIN_REQUIRED_HELP)
+    request.state.principal = auth.TOKEN_PRINCIPAL
     return auth.TOKEN_PRINCIPAL
 
 
@@ -1010,17 +1083,47 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
 
 _credits = credits.CreditStore()
 
+# A hold belongs to a run in flight, and a run in flight belonged to the process
+# that took it. This process is starting, so anything still open was left by a
+# crash or a restart: give it back rather than let an account stay poorer for a
+# run that never finished.
+_credits.release_stale()
+
 NO_CREDITS_STATUS = 402
 
 
-def _admit_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
-    """Refuse, before Spark is started, a team that cannot pay for a single write.
+def _admit_execution(
+    principal: Any, pipeline: Dict[str, Any], *, job_name: Optional[str] = None
+) -> Any:
+    """Hold what the run declares it will cost, before Spark is started.
 
-    This is all that can honestly be checked up front: nobody knows yet how many
-    destinations the run will manage to write. What it does buy is that a team
-    with nothing left never starts a cluster it cannot pay for. Whether the target
-    is local — and therefore free — is read from the configuration rather than
-    from the request, so a caller cannot declare their own run free.
+    The configuration says how many destinations it intends to write, and that
+    much is reserved: a team that cannot cover its own declaration is refused here
+    rather than halfway through a cluster hour. The hold is not a charge — what
+    the run really cost is settled at the end and the rest comes back. Whether the
+    target is local, and therefore free, is read from the configuration rather
+    than from the request, so a caller cannot declare their own run free.
+    """
+    account_id, username = credits.account_for(principal)
+    try:
+        return _credits.reserve(
+            account_id, credits.target_of(pipeline),
+            credits.declared_writes(pipeline),
+            username=username, job_name=job_name,
+        )
+    except credits.InsufficientCredits as error:
+        raise HTTPException(status_code=NO_CREDITS_STATUS, detail=str(error)) from error
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _precheck_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
+    """Refuse a flow whose team has nothing available, without holding anything.
+
+    A flow reserves per stage, as each one starts: holding for the whole flow up
+    front would make a five-Job Pipeline unaffordable for a team that can pay for
+    every one of them in turn. This is the cheap front-door check that keeps a
+    flow with an empty account from starting a cluster at all.
     """
     account_id, username = credits.account_for(principal)
     try:
@@ -1031,10 +1134,27 @@ def _admit_execution(principal: Any, pipeline: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+def _release_reservation(reservation: Any) -> None:
+    """Give a hold back when the run is over, whichever way it ended.
+
+    Called from the `finally` that releases the run lock, so a run that raised, or
+    was cancelled, or never wrote anything, does not leave credits promised to
+    nobody. Releasing twice is a no-op, which is what makes it safe to also let
+    `settle` release on the normal path.
+    """
+    if reservation is None:
+        return
+    try:
+        _credits.release(reservation)
+    except credits.CreditError as error:  # pragma: no cover - defensive
+        _log.warning("Could not release the credit reservation: %s", error)
+
+
 def _charge_execution(
     principal: Any, pipeline: Dict[str, Any], writes: int, *,
     job_name: Optional[str] = None, job_run_id: Optional[str] = None,
-    pipeline_run_id: Optional[str] = None,
+    pipeline_run_id: Optional[str] = None, reservation: Any = None,
+    workflow_id: Optional[str] = None, tags: Optional[List[str]] = None,
 ) -> Any:
     """Charge one credit per destination the run actually wrote.
 
@@ -1051,9 +1171,12 @@ def _charge_execution(
     """
     account_id, username = credits.account_for(principal)
     try:
-        return _credits.charge(
-            account_id, credits.target_of(pipeline), writes, username=username,
-            job_run_id=job_run_id, pipeline_run_id=pipeline_run_id, job_name=job_name,
+        return _credits.settle(
+            reservation, credits.target_of(pipeline), writes, account_id=account_id,
+            username=username, job_run_id=job_run_id,
+            pipeline_run_id=pipeline_run_id, job_name=job_name,
+            workflow_id=workflow_id, actor=credits.actor_for(principal),
+            tags=tags,
         )
     except credits.CreditError as error:  # pragma: no cover - defensive
         _log.warning("Could not charge execution credits: %s", error)
@@ -1146,6 +1269,70 @@ app = FastAPI(
     version=SERVICE_VERSION,
     description="Executes Sparquet pipelines locally. Never expose this publicly.",
 )
+
+_audit = audit.AuditStore()
+
+#: Methods that change something. Reads are recorded only when they are refused —
+#: a log of every GET is a log nobody reads.
+_WRITING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def audit_detail(request: Request, **fields: Any) -> None:
+    """Let a handler say *what* it changed, in words the log can show.
+
+    The middleware knows the route and the outcome but not the meaning: that a
+    PATCH on `/auth/users/u3` demoted somebody is something only the handler
+    knows. Never pass a password, a token or a pipeline body — see `audit.py`.
+    """
+    existing = getattr(request.state, "audit_detail", None) or {}
+    existing.update(fields)
+    request.state.audit_detail = existing
+
+
+@app.middleware("http")
+async def _audit_middleware(request: Request, call_next: Callable) -> Any:
+    response = await call_next(request)
+    path = request.url.path
+    if audit.is_quiet(path):
+        return response
+    status = response.status_code
+    writing = request.method.upper() in _WRITING_METHODS
+    refused = status in (401, 403, 402)
+    if not writing and not refused:
+        return response
+
+    principal = getattr(request.state, "principal", None)
+    if principal is None:
+        # Refused before any dependency resolved an identity: the request still
+        # gets an entry, because an unauthenticated probe is the event most worth
+        # having. Resolving the session here is a read, and a cheap one.
+        token = _session_token(request)
+        principal = _auth.resolve_session(token) if token else None
+
+    if status >= 500:
+        outcome = audit.FAILED
+    elif refused:
+        outcome = audit.DENIED
+    else:
+        outcome = audit.ALLOWED
+
+    _audit.record(
+        actor=getattr(principal, "username", None) or "anonymous",
+        actor_id=getattr(principal, "user_id", None),
+        team=getattr(principal, "team_name", None),
+        team_id=getattr(principal, "team_id", None),
+        roles=list(getattr(principal, "roles", []) or []),
+        action=audit.action_for(request.method, path),
+        method=request.method.upper(),
+        path=path,
+        resource=getattr(request.state, "audit_resource", None),
+        outcome=outcome,
+        status=status,
+        detail=getattr(request.state, "audit_detail", None),
+        ip=request.client.host if request.client else None,
+    )
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -1250,7 +1437,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     # not happen, and the lock has to go back or the runner stays busy over a
     # refusal. What it will actually cost is only known once it has run.
     try:
-        _admit_execution(principal, body.pipeline)
+        reservation = _admit_execution(
+            principal, body.pipeline, job_name=body.job_name or name
+        )
     except HTTPException:
         _RUN_LOCK.release()
         raise
@@ -1278,6 +1467,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
         cancelled = _ACTIVE_RUN.cancelled
         _ACTIVE_RUN.end()
         _RUN_LOCK.release()
+        # The run is over however it ended: the hold goes back now, and what the
+        # writes really cost is taken below.
+        _release_reservation(reservation)
 
     # Only the framework's own records exist here: this endpoint captures no JVM
     # stderr and no stdout — those are streamed, and only `/run/stream` opens them.
@@ -1308,7 +1500,11 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     response.credits = _charge_out(_charge_execution(
         principal, body.pipeline, len(response.output_metrics),
         job_name=body.job_name or name, job_run_id=job_run_id,
-        pipeline_run_id=pipeline_run_id,
+        pipeline_run_id=pipeline_run_id, reservation=reservation,
+        workflow_id=body.workflow_id,
+        tags=_run_tags(
+            workflow_id=body.workflow_id, job_id=body.job_id, extra=body.tags
+        ),
     ))
     return response
 
@@ -1383,7 +1579,9 @@ def run_stream(
         )
 
     try:
-        _admit_execution(principal, body.pipeline)
+        reservation = _admit_execution(
+            principal, body.pipeline, job_name=body.job_name or name
+        )
     except HTTPException:
         _RUN_LOCK.release()
         raise
@@ -1472,7 +1670,12 @@ def run_stream(
                 response.credits = _charge_out(_charge_execution(
                     principal, body.pipeline, len(response.output_metrics),
                     job_name=body.job_name or name, job_run_id=job_run_id,
-                    pipeline_run_id=pipeline_run_id,
+                    pipeline_run_id=pipeline_run_id, reservation=reservation,
+                    workflow_id=body.workflow_id,
+                    tags=_run_tags(
+                        workflow_id=body.workflow_id, job_id=body.job_id,
+                        extra=body.tags,
+                    ),
                 ))
                 yield _sse("result", response.model_dump())
             else:
@@ -1506,6 +1709,7 @@ def run_stream(
             recorder.flush()
             _ACTIVE_RUN.end()
             _RUN_LOCK.release()
+            _release_reservation(reservation)
 
     return StreamingResponse(
         _stream(),
@@ -1541,10 +1745,10 @@ def run_flow_stream(
     if not body.stages:
         raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
 
-    # One admission for the flow, against its first stage: a Pipeline whose team
-    # has nothing left should not start at all. Each stage is charged for its own
-    # writes as it finishes.
-    _admit_execution(principal, body.stages[0].pipeline)
+    # One check for the flow, against its first stage: a Pipeline whose team has
+    # nothing available should not start at all. Nothing is held here — each stage
+    # reserves what it declares as it starts, and settles as it finishes.
+    _precheck_execution(principal, body.stages[0].pipeline)
 
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
@@ -1597,7 +1801,10 @@ def run_flow_stream(
                 # rest are recorded as SKIPPED, so a flow that runs out of credit
                 # at stage four has really run three and the ledger says so.
                 try:
-                    _admit_execution(principal, stage.pipeline)
+                    stage_hold = _admit_execution(
+                        principal, stage.pipeline, job_name=stage.name
+                    )
+                    holds.append(stage_hold)
                 except HTTPException as refusal:
                     box["error"] = str(refusal.detail)
                     _history.skip_job_run(
@@ -1668,7 +1875,12 @@ def run_flow_stream(
                 charge = _charge_out(_charge_execution(
                     principal, stage.pipeline, len(response.output_metrics),
                     job_name=stage.name, job_run_id=job_run_id,
-                    pipeline_run_id=pipeline_run_id,
+                    pipeline_run_id=pipeline_run_id, reservation=stage_hold,
+                    workflow_id=body.workflow_id,
+                    tags=_run_tags(
+                        workflow_id=body.workflow_id, pipeline_id=body.pipeline_id,
+                        job_id=stage.job_id, extra=body.tags,
+                    ),
                 ))
                 payload = {
                     "index": index,
@@ -1790,6 +2002,11 @@ def run_flow_stream(
             recorder.flush()
             _ACTIVE_RUN.end()
             _RUN_LOCK.release()
+            # A stage that raised, or a client that hung up between stages, leaves
+            # its hold open. Releasing is idempotent, so the ones already settled
+            # cost nothing here.
+            for hold in holds:
+                _release_reservation(hold)
 
     return StreamingResponse(
         _stream(),
@@ -1859,6 +2076,8 @@ class PipelineRunOut(BaseModel):
     # Who it ran as, and how it was started: "manual", "scheduled" or "api".
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Kept forever: retention skips this run whatever its age.
+    pinned: bool = False
     jobs: List[JobRunOut] = Field(default_factory=list)
 
 
@@ -1919,7 +2138,85 @@ def get_run(run_id: str) -> PipelineRunOut:
     return _pipeline_run_out(run, charges)
 
 
-_log = logging.getLogger("sparquet_studio.server")
+class PinRequest(BaseModel):
+    pinned: bool = True
+
+
+class PinResponse(BaseModel):
+    run_id: str
+    pinned: bool
+
+
+@app.post(
+    "/runs/{run_id}/pin",
+    response_model=PinResponse,
+    dependencies=[Depends(requires("history:Pin"))],
+)
+def pin_run(run_id: str, body: PinRequest) -> PinResponse:
+    """Keeps one execution forever. Retention expires history by age; this is how
+    the run of an incident survives it."""
+    if not _history.set_pinned(run_id, body.pinned):
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    return PinResponse(run_id=run_id, pinned=body.pinned)
+
+
+class PurgeResponse(BaseModel):
+    dry_run: bool
+    runs_thinned: int
+    runs_deleted: int
+    logs_deleted: int
+    steps_deleted: int
+    configs_dropped: int
+    rows_removed: int
+    vacuumed: bool
+    policy: Dict[str, Any]
+
+
+@app.post(
+    "/runs/purge",
+    response_model=PurgeResponse,
+    dependencies=[Depends(requires("history:Purge"))],
+)
+def purge_runs(dry_run: bool = False) -> PurgeResponse:
+    """Applies the retention policy now. `dry_run=true` answers with exactly what
+    would go and touches nothing — worth doing first, since the second stage
+    deletes rows for good."""
+    policy = history.RetentionPolicy.from_env()
+    report = _history.purge(policy, dry_run=dry_run)
+    return PurgeResponse(**report.as_dict(), policy=vars(policy))
+
+
+class RunIngestResponse(BaseModel):
+    pipeline_run_id: str
+    job_run_id: str
+    records: int
+    duration_ms: int
+
+
+@app.post(
+    "/runs/ingest",
+    response_model=RunIngestResponse,
+    dependencies=[Depends(requires("history:Ingest"))],
+)
+def ingest_run(document: Dict[str, Any] = Body(...)) -> RunIngestResponse:
+    """Records a run that happened somewhere else.
+
+    The framework runs anywhere and depends on nothing, which is exactly why the
+    runs that matter most — the nightly job on Databricks, the DAG on Airflow —
+    used to leave no trace here at all. With `SPARQUET_HISTORY_URL` pointed at this
+    endpoint, the framework reports itself and those runs read back like any other:
+    same steps, same logs, same screens. They are marked `launched="external"`, so
+    a reader can always tell what this runner executed from what it merely heard
+    about, and they consume no credits here — the compute was not ours.
+
+    The document is what `sparquet.observability.history` produces; anything else
+    is refused with 400 rather than stored as a run that says the wrong thing.
+    """
+    try:
+        recorded = history.ingest_run(_history, document)
+    except history.IngestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return RunIngestResponse(**recorded)
 
 
 # --------------------------------------------------------------- workspace
@@ -1973,21 +2270,22 @@ def _mirror_catalog(doc: Any) -> None:
     name = record.get("name")
     description = record.get("description")
     try:
+        tags = history.normalize_tags(record.get("tags"))
         if doc.kind == workspace.WORKFLOW:
             _history.upsert_workflow(
-                doc.id, name=name, description=description, path=doc.path
+                doc.id, name=name, description=description, path=doc.path, tags=tags
             )
         elif doc.kind == workspace.JOB:
             _history.upsert_job(
                 doc.id, workflow_id=record.get("workflowId"), name=name,
-                description=description, path=doc.path,
+                description=description, path=doc.path, tags=tags,
             )
         elif doc.kind == workspace.PIPELINE:
             stages = record.get("stages")
             _history.upsert_pipeline(
                 doc.id, workflow_id=record.get("workflowId"), name=name,
                 description=description, path=doc.path,
-                stages=stages if isinstance(stages, list) else None,
+                stages=stages if isinstance(stages, list) else None, tags=tags,
             )
     except Exception:  # pragma: no cover - indexing is bookkeeping, not the save
         _log.warning("Could not index %s %s in the catalog.", doc.kind, doc.id)
@@ -2011,6 +2309,139 @@ def get_workspace() -> WorkspaceSnapshotOut:
         pipelines=[_workspace_doc_out(doc) for doc in snapshot.pipelines],
         meta=snapshot.meta,
     )
+
+
+class WorkspaceRootOut(BaseModel):
+    """Where the library is, and why it is there."""
+
+    root: str
+    #: `env`, `settings`, `legacy` or `default` — see `workspace.resolve_root`.
+    source: str
+    #: Where a library goes when nobody has said otherwise, so the interface can
+    #: offer it back as the way to undo a choice.
+    default: str
+    #: The file a choice is remembered in.
+    settings_file: str
+    writable: bool
+    #: True while the library is still sitting inside the runner's own source
+    #: tree. It works, and it is not where it belongs.
+    inside_source_tree: bool
+    #: True when `SPARQUET_STUDIO_WORKSPACE` is set, which nothing here may
+    #: override: a deployment that decides centrally decides centrally.
+    locked: bool
+
+
+class WorkspaceRootRequest(BaseModel):
+    """`root: null` goes back to the default rather than choosing it explicitly,
+    so a library that later moves with the platform follows it."""
+
+    root: Optional[str] = None
+
+
+def _workspace_root_out() -> WorkspaceRootOut:
+    root = Path(_WORKSPACE_ROOT)
+    return WorkspaceRootOut(
+        root=str(root),
+        source=_WORKSPACE_LOCATION.source,
+        default=str(workspace.default_root()),
+        settings_file=str(workspace.settings_path()),
+        writable=os.access(root, os.W_OK),
+        inside_source_tree=_is_inside(root, _framework_root()),
+        locked=bool(os.getenv("SPARQUET_STUDIO_WORKSPACE")),
+    )
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+@app.get(
+    "/workspace/root",
+    response_model=WorkspaceRootOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def get_workspace_root() -> WorkspaceRootOut:
+    """Where this runner keeps the JSON files.
+
+    Somebody who cannot find their Jobs is nearly always looking at a different
+    directory than the runner is, so the answer names the path *and* the reason
+    it is that one.
+    """
+    return _workspace_root_out()
+
+
+@app.put(
+    "/workspace/root",
+    response_model=WorkspaceRootOut,
+    dependencies=[Depends(requires("runner:Configure"))],
+)
+def put_workspace_root(body: WorkspaceRootRequest) -> WorkspaceRootOut:
+    """Moves the library to another directory, from now on and after a restart.
+
+    Nothing is copied. The runner starts reading and writing the new place, which
+    is what makes this the way to *adopt* a directory that already holds a
+    library — a shared checkout, a synced folder, a mounted volume — rather than
+    a way to relocate one. Moving the files is the operator's job, and doing it
+    for them would mean a copy that half-fails somewhere with no way back.
+    """
+    global _WORKSPACE_LOCATION, _WORKSPACE_ROOT, _workspace
+
+    if os.getenv("SPARQUET_STUDIO_WORKSPACE"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "SPARQUET_STUDIO_WORKSPACE decides where the library lives on this "
+                "runner. Change the variable and restart."
+            ),
+        )
+
+    chosen = (body.root or "").strip()
+    if chosen:
+        target = Path(chosen).expanduser()
+        if not target.is_absolute():
+            raise HTTPException(
+                status_code=400,
+                detail="Give an absolute path: a relative one would depend on where the runner was started.",
+            )
+        # The one place it must not go. A checkout is code — pulled, reset and
+        # deleted — and a library inside one is lost to the first `git clean`.
+        if _is_inside(target, _framework_root()):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "That is inside the runner's own source tree. Choose a directory "
+                    "of your own: a checkout gets reset and deleted, and it would take "
+                    "the library with it."
+                ),
+            )
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"That directory cannot be created: {exc}"
+            ) from exc
+        if not os.access(target, os.W_OK):
+            raise HTTPException(status_code=400, detail="That directory is not writable.")
+        root, source = workspace.remember_root(target), "settings"
+    else:
+        workspace.write_setting("workspace", None)
+        location = workspace.resolve_root(_LEGACY_WORKSPACE)
+        root, source = location.root, location.source
+
+    try:
+        store = workspace.FileWorkspaceStore(root)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"That directory cannot be used: {exc}") from exc
+
+    _workspace = store
+    _WORKSPACE_ROOT = store.root
+    _WORKSPACE_LOCATION = workspace.Location(store.root, source)
+    _log.info("The library is now read from %s (%s).", store.root, source)
+    return _workspace_root_out()
 
 
 class WorkspaceMetaRequest(BaseModel):
@@ -2365,8 +2796,11 @@ class AccountOut(BaseModel):
     free_monthly: int = 0
     free_remaining: int = 0
     #: What could be spent right now: the rest of this month's allowance plus the
-    #: granted balance.
+    #: granted balance, minus whatever runs in flight are holding.
     available: int = 0
+    #: Reserved by runs that have not finished. Promised, not spent — a hold that
+    #: nobody settles comes back at the next restart.
+    held: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -2407,6 +2841,60 @@ class LedgerEntryOut(BaseModel):
     target: Optional[str] = None
     job_name: Optional[str] = None
     note: Optional[str] = None
+    #: Where the spending happened and who caused it. The account still pays; these
+    #: are what let one invoice be read by workflow and by person.
+    workflow_id: Optional[str] = None
+    actor: Optional[str] = None
+    #: The labels the run carried when it was charged, frozen on the entry.
+    tags: List[str] = Field(default_factory=list)
+
+
+class UsageGroupOut(BaseModel):
+    """One row of a bill: what a team, a person, a workflow or a job spent.
+
+    `key` is null for spending that has no such dimension - a run started from a
+    script belongs to no workflow, a Job nobody labelled has no tag. It is reported
+    rather than dropped, so nothing is silently missing from the bill.
+
+    By team, user, workflow or job the rows partition the month and add up to
+    `total`. By tag they do not: a run wearing two labels is counted in full under
+    each, which is what makes the question "what does finance cost me" answerable.
+    """
+
+    key: Optional[str] = None
+    label: Optional[str] = None
+    writes: int = 0
+    charged: int = 0
+    waived: int = 0
+    runs: int = 0
+    last_at: Optional[str] = None
+
+
+class UsageBreakdownOut(BaseModel):
+    period: str
+    group_by: str
+    #: Whether this is the whole runner or a single account. A caller without
+    #: `credits:Read` only ever sees their own team.
+    scope: str
+    total: UsageGroupOut
+    groups: List[UsageGroupOut] = Field(default_factory=list)
+    #: True when a run can appear in more than one row, which is the case for
+    #: tags and for nothing else. The rows then add up to more than `total`, and
+    #: an interface that draws them as shares of a whole has to say so.
+    overlapping: bool = False
+
+
+class UsagePeriodOut(BaseModel):
+    period: str
+    writes: int = 0
+    charged: int = 0
+    waived: int = 0
+    runs: int = 0
+
+
+class UsageTimelineOut(BaseModel):
+    scope: str
+    periods: List[UsagePeriodOut] = Field(default_factory=list)
 
 
 class GrantRequest(BaseModel):
@@ -2419,6 +2907,23 @@ class RoleOut(BaseModel):
     description: str
     statements: List[Dict[str, Any]] = Field(default_factory=list)
     custom: bool = False
+
+
+class AuditEventOut(BaseModel):
+    id: str
+    at: str
+    actor: str
+    action: str
+    method: str
+    path: str
+    outcome: str
+    actor_id: Optional[str] = None
+    team: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    resource: Optional[str] = None
+    status: Optional[int] = None
+    detail: Optional[Dict[str, Any]] = None
+    ip: Optional[str] = None
 
 
 def _principal_out(principal: Any) -> PrincipalOut:
@@ -2459,9 +2964,26 @@ def _account_out(account: Any) -> AccountOut:
         id=account.id, username=account.username, balance=account.balance,
         spent=account.spent, period=account.period, free_used=account.free_used,
         free_monthly=account.free_monthly, free_remaining=account.free_remaining,
-        available=account.available, created_at=account.created_at,
+        available=account.available, held=account.held, created_at=account.created_at,
         updated_at=account.updated_at,
     )
+
+
+def _catalog_names() -> Dict[str, str]:
+    """Workflow ids to their names, for a bill that reads in words.
+
+    The ledger stores the id and nothing else: a workflow that is renamed should be
+    renamed on every invoice it ever appeared on, which a copy taken at charge time
+    would not do. A workflow the catalog has never heard of keeps its id.
+    """
+    try:
+        return {
+            record.id: record.name
+            for record in _history.list_catalog(include_deleted=True)
+            if record.kind == "workflow" and record.name
+        }
+    except Exception:  # pragma: no cover - a bill is not worth failing over
+        return {}
 
 
 def _entry_out(entry: Any) -> LedgerEntryOut:
@@ -2472,6 +2994,8 @@ def _entry_out(entry: Any) -> LedgerEntryOut:
         free_amount=entry.free_amount, shortfall=entry.shortfall, period=entry.period,
         job_run_id=entry.job_run_id, pipeline_run_id=entry.pipeline_run_id,
         target=entry.target, job_name=entry.job_name, note=entry.note,
+        workflow_id=entry.workflow_id, actor=entry.actor,
+        tags=list(getattr(entry, "tags", []) or []),
     )
 
 
@@ -2680,7 +3204,7 @@ def list_users() -> List[UserOut]:
     response_model=UserOut,
     dependencies=[Depends(requires("iam:ManageUsers"))],
 )
-def create_user(body: CreateUserRequest) -> UserOut:
+def create_user(request: Request, body: CreateUserRequest) -> UserOut:
     """Creates a user.
 
     The first one is the moment this runner stops being token-only: until it
@@ -2695,6 +3219,10 @@ def create_user(body: CreateUserRequest) -> UserOut:
         )
     except auth.AuthError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    audit_detail(
+        request, created=user.username, roles=list(user.roles), team=user.team_name
+    )
+    request.state.audit_resource = f"user/{user.id}"
     return _user_out(user)
 
 
@@ -2703,7 +3231,8 @@ def create_user(body: CreateUserRequest) -> UserOut:
     response_model=UserOut,
     dependencies=[Depends(requires("iam:ManageUsers"))],
 )
-def update_user(user_id: str, body: UpdateUserRequest) -> UserOut:
+def update_user(request: Request, user_id: str, body: UpdateUserRequest) -> UserOut:
+    before = _auth.get_user(user_id)
     try:
         if body.roles is not None:
             _auth.set_roles(user_id, body.roles)
@@ -2716,6 +3245,19 @@ def update_user(user_id: str, body: UpdateUserRequest) -> UserOut:
     user = _auth.get_user(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="No such user.")
+    request.state.audit_resource = f"user/{user_id}"
+    changed: Dict[str, Any] = {"user": user.username}
+    if body.roles is not None:
+        changed["roles"] = {
+            "from": list(getattr(before, "roles", []) or []), "to": list(user.roles)
+        }
+    if body.disabled is not None:
+        changed["disabled"] = bool(body.disabled)
+    if body.team is not None:
+        changed["team"] = {
+            "from": getattr(before, "team_name", None), "to": user.team_name
+        }
+    audit_detail(request, **changed)
     return _user_out(user)
 
 
@@ -2818,6 +3360,37 @@ def delete_user(user_id: str) -> Dict[str, bool]:
 # --------------------------------------------------------------------- credits
 
 
+@app.get("/audit", response_model=List[AuditEventOut])
+def list_audit(
+    limit: int = 100,
+    actor_id: Optional[str] = None,
+    resource: Optional[str] = None,
+    outcome: Optional[str] = None,
+    action: Optional[str] = None,
+    since: Optional[str] = None,
+    _: Any = Depends(requires("iam:ReadAudit")),
+) -> List[AuditEventOut]:
+    """The audit log, newest first.
+
+    `action` accepts a service wildcard (`iam:*`), which is how the interface asks
+    for "everything that touched access" without knowing every verb.
+    """
+    events = _audit.list(
+        limit=limit, actor_id=actor_id, resource=resource,
+        outcome=outcome, action=action, since=since,
+    )
+    return [
+        AuditEventOut(
+            id=event.id, at=event.at, actor=event.actor, actor_id=event.actor_id,
+            team=event.team, roles=event.roles, action=event.action,
+            method=event.method, path=event.path, resource=event.resource,
+            outcome=event.outcome, status=event.status, detail=event.detail,
+            ip=event.ip,
+        )
+        for event in events
+    ]
+
+
 @app.get("/credits/me", response_model=CreditsOut)
 def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
     """Your own balance. No permission needed: knowing what you may spend is part
@@ -2830,6 +3403,85 @@ def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
         credits_per_write=credits.credits_per_write(),
         free_monthly=credits.free_monthly(),
         usage=UsageOut(**_credits.usage(account_id)),
+    )
+
+
+@app.get("/credits/usage", response_model=UsageBreakdownOut)
+def credit_usage(
+    group_by: str = "workflow",
+    period: Optional[str] = None,
+    account_id: Optional[str] = None,
+    principal: Any = Depends(current_principal),
+) -> UsageBreakdownOut:
+    """A month of spending, grouped by team, user, workflow or job.
+
+    Scope follows the same rule as the ledger: your own team is always readable,
+    the whole runner needs `credits:Read`. A caller without it asking for another
+    account is not told a different total - it is refused, because a bill that
+    quietly answers about somebody else is worse than one that answers nothing.
+    """
+    own, _ = credits.account_for(principal)
+    everyone = principal is not None and principal.allows("credits:Read")
+    if account_id and account_id != own and not everyone:
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's spending needs credits:Read.",
+        )
+    scoped = account_id or (None if everyone else own)
+    try:
+        groups = _credits.breakdown(
+            group_by=group_by, period=period, account_id=scoped
+        )
+    except credits.CreditError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    names = _catalog_names() if group_by == "workflow" else {}
+    rows = [
+        UsageGroupOut(**{**row, "label": names.get(str(row["key"]), row["label"])})
+        if row["key"] else UsageGroupOut(**row)
+        for row in groups
+    ]
+    # Counted from the entries rather than summed from the rows: by tag a run
+    # appears under each of its labels, and a total that added those up would
+    # tell the reader the month cost more than it did.
+    total = _credits.totals(period=period, account_id=scoped)
+    return UsageBreakdownOut(
+        period=period or credits.current_period(),
+        group_by=group_by,
+        scope="all" if scoped is None else scoped,
+        total=UsageGroupOut(key=None, label="Total", **total),
+        groups=rows,
+        overlapping=group_by == "tag",
+    )
+
+
+@app.get("/credits/timeline", response_model=UsageTimelineOut)
+def credit_timeline(
+    months: int = 6,
+    account_id: Optional[str] = None,
+    principal: Any = Depends(current_principal),
+) -> UsageTimelineOut:
+    """Spending month by month, oldest first.
+
+    One month says how much; the series says whether that is normal, which is the
+    question somebody looking at a bill actually has. Scope follows the same rule
+    as the rest of billing: your own team always, the whole runner with
+    `credits:Read`.
+    """
+    own, _ = credits.account_for(principal)
+    everyone = principal is not None and principal.allows("credits:Read")
+    if account_id and account_id != own and not everyone:
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's spending needs credits:Read.",
+        )
+    scoped = account_id or (None if everyone else own)
+    return UsageTimelineOut(
+        scope="all" if scoped is None else scoped,
+        periods=[
+            UsagePeriodOut(**row)
+            for row in _credits.usage_timeline(months=months, account_id=scoped)
+        ],
     )
 
 
@@ -2902,6 +3554,15 @@ def cancel_run(run_id: str) -> CancelResponse:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+# Started last, once `_log` and the whole module exist: the first purge runs
+# immediately, on a daemon thread, so it never delays a request or survives a
+# shutdown. `SPARQUET_STUDIO_HISTORY_PURGE=off` leaves the database untouched.
+if history.RetentionPolicy.enabled():
+    threading.Thread(
+        target=_purge_history_periodically, name="history-purge", daemon=True
+    ).start()
 
 
 if __name__ == "__main__":

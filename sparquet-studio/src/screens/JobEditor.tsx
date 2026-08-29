@@ -30,10 +30,12 @@ import {
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { CreditsBadge } from '@/components/credits/CreditsBadge'
 import { JobCanvas } from '@/components/canvas/JobCanvas'
 import { RunsBrowser } from '@/components/history/RunsBrowser'
 import { RunViewBanner } from '@/components/history/RunViewBanner'
 import { CommandPalette } from '@/components/layout/CommandPalette'
+import { TagsPopover } from '@/components/library/TagsPopover'
 import {
   WorkspaceTabs,
   workspacePanelId,
@@ -47,10 +49,11 @@ import { JobSettingsPanel } from '@/components/panels/JobSettingsPanel'
 import { NodePalette } from '@/components/panels/NodePalette'
 import { RunPanel } from '@/components/panels/RunPanel'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
+import { collectTags } from '@/lib/tags'
 import { relativeTime } from '@/lib/utils/format'
 import { cn } from '@/lib/utils/cn'
 import { getJob } from '@/lib/storage/db'
-import { useEditorStore, type PanelId } from '@/store/editor'
+import { useEditorStore, type PanelId, type WorkspaceView } from '@/store/editor'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 import type { Job } from '@/types/studio'
@@ -71,7 +74,6 @@ const SIDE_PANELS: {
   { id: 'inspector', label: 'Inspector', tab: 'Inspector', icon: SlidersHorizontal, shortcut: 'I' },
   { id: 'settings', label: 'Job settings', tab: 'Job', icon: Settings2, shortcut: '⌘,' },
   { id: 'ai', label: 'AI assistant', tab: 'AI', icon: Bot, shortcut: '⌘/' },
-  { id: 'json', label: 'JSON', tab: 'JSON', icon: Braces, shortcut: '⌘J' },
   { id: 'run', label: 'Run', tab: 'Run', icon: Play, shortcut: '⌘⏎' },
   { id: 'issues', label: 'Issues', tab: 'Issues', icon: ListChecks, shortcut: '⌘E' },
 ]
@@ -156,8 +158,6 @@ export function JobEditor() {
   )
 }
 
-type WorkspaceView = 'flow' | 'json' | 'runs'
-
 const WORKSPACE_TABS: WorkspaceTab<WorkspaceView>[] = [
   { id: 'flow', label: 'Flow', icon: Workflow },
   { id: 'json', label: 'JSON', icon: Braces },
@@ -166,7 +166,8 @@ const WORKSPACE_TABS: WorkspaceTab<WorkspaceView>[] = [
 
 /**
  * The middle of the editor: the flow, the JSON behind it, and the executions it
- * has had.
+ * has had. This is the only place the JSON is shown — a second Monaco on the same
+ * model path shares it, and closing either one blanked the other.
  *
  * The canvas stays mounted across tabs — React Flow holds the viewport, and
  * remounting it would throw away where the user was looking. The other two are
@@ -174,7 +175,10 @@ const WORKSPACE_TABS: WorkspaceTab<WorkspaceView>[] = [
  * it is asked for rather than poll behind a tab nobody is on.
  */
 function JobWorkspace() {
-  const [view, setView] = useState<WorkspaceView>('flow')
+  // In the store, not in this component: ⌘J and the command palette open the JSON
+  // from outside the workspace.
+  const view = useEditorStore((state) => state.workspaceView)
+  const setView = useEditorStore((state) => state.setWorkspaceView)
 
   const job = useEditorStore((state) => state.job)
   const run = useEditorStore((state) => state.run)
@@ -285,6 +289,9 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
   const activePanel = useEditorStore((state) => state.activePanel)
   const togglePanel = useEditorStore((state) => state.togglePanel)
   const updateJobMeta = useLibraryStore((state) => state.updateJobMeta)
+  const knownTags = useLibraryStore((state) =>
+    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
+  )
 
   const [name, setName] = useState(job?.name ?? '')
   useEffect(() => setName(job?.name ?? ''), [job?.name])
@@ -297,6 +304,12 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
     }
     void updateJobMeta(job.id, { name: trimmed })
     useEditorStore.setState({ job: { ...job, name: trimmed } })
+  }
+
+  const commitTags = (tags: string[]) => {
+    if (!job) return
+    void updateJobMeta(job.id, { tags })
+    useEditorStore.setState({ job: { ...job, tags } })
   }
 
   return (
@@ -322,6 +335,13 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
         />
       </div>
 
+      <TagsPopover
+        tags={job?.tags ?? []}
+        onChange={commitTags}
+        suggestions={knownTags}
+        subject={job?.name ?? 'this job'}
+      />
+
       <div className="flex items-center gap-1">
         <Tooltip content="Undo" shortcut="⌘Z">
           <IconButton label="Undo" onClick={undo} disabled={past === 0} size="sm">
@@ -339,6 +359,8 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
           </IconButton>
         </Tooltip>
       </div>
+
+      <CreditsBadge linkToBilling={false} />
 
       <div className="mx-1 h-6 w-px bg-line" />
 
@@ -502,17 +524,6 @@ function SidePanel() {
         {activePanel === 'inspector' && <Inspector />}
         {activePanel === 'settings' && <JobSettingsPanel />}
         {activePanel === 'ai' && <AiPanel />}
-        {activePanel === 'json' && (
-          <Suspense
-            fallback={
-              <div className="flex flex-1 items-center justify-center">
-                <Spinner />
-              </div>
-            }
-          >
-            <JsonPanel />
-          </Suspense>
-        )}
         {activePanel === 'run' && <RunPanel />}
         {activePanel === 'issues' && <IssuesPanel />}
       </div>
@@ -600,7 +611,8 @@ function EditorShortcuts() {
       }
       if (mod && event.key.toLowerCase() === 'j') {
         event.preventDefault()
-        togglePanel('json')
+        const state = useEditorStore.getState()
+        state.setWorkspaceView(state.workspaceView === 'json' ? 'flow' : 'json')
         return
       }
       if (mod && event.key.toLowerCase() === 'e') {

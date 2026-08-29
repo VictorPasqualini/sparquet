@@ -12,7 +12,6 @@ import {
   Bot,
   CircleCheck,
   Copy,
-  Coins,
   Database,
   Download,
   ExternalLink,
@@ -23,15 +22,23 @@ import {
   Moon,
   Palette,
   Plug,
+  RotateCcw,
   ShieldAlert,
-  ShieldCheck,
   Sun,
   Terminal,
   Trash2,
   Upload,
   type LucideIcon,
 } from 'lucide-react'
-import { useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactNode,
+} from 'react'
 import { toast } from 'sonner'
 
 import {
@@ -47,22 +54,21 @@ import {
   Toggle,
 } from '@/components/ui'
 import { sendAiRequest } from '@/lib/ai/client'
-import { AccessPanel } from '@/components/auth/AccessPanel'
-import { RolesPanel } from '@/components/auth/RolesPanel'
-import { TeamsPanel } from '@/components/auth/TeamsPanel'
-import { CreditsPanel } from '@/components/credits/CreditsPanel'
 import { AI_PROVIDER_INFO } from '@/lib/ai/providers'
 import {
   checkRunnerHealth,
   RUNNER_INSTALL_COMMAND,
   RUNNER_START_COMMAND,
 } from '@/lib/runner/client'
+import { getWorkspaceRoot, setWorkspaceRoot } from '@/lib/runner/workspaceRoot'
 import { clearAll, exportAll, importAll } from '@/lib/storage/db'
 import { cn } from '@/lib/utils/cn'
 import { copyText, downloadText } from '@/lib/utils/download'
+import { useAuthStore } from '@/store/auth'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore, type CanvasPreferences, type Theme } from '@/store/settings'
 import type { AiProviderId } from '@/types/ai'
+import type { WorkspaceLocation } from '@/types/workspace'
 
 /** Matches the `version` field of package.json. */
 const STUDIO_VERSION = '0.1.0'
@@ -76,7 +82,7 @@ const PROBE_TIMEOUT_MS = 20_000
 const INSTALL_COMMAND = RUNNER_INSTALL_COMMAND
 const START_COMMAND = RUNNER_START_COMMAND
 
-type SectionId = 'appearance' | 'ai' | 'runner' | 'access' | 'billing' | 'data' | 'about'
+type SectionId = 'appearance' | 'ai' | 'runner' | 'data' | 'about'
 
 interface SectionMeta {
   id: SectionId
@@ -107,21 +113,6 @@ const SECTIONS: SectionMeta[] = [
     title: 'Local runner',
     description: 'Optional bridge that executes pipelines against Spark on your machine.',
     icon: Terminal,
-  },
-  {
-    id: 'access',
-    label: 'Access & IAM',
-    title: 'Access & IAM',
-    description:
-      'Who can sign in to this runner, which team they belong to, and what each role permits.',
-    icon: ShieldCheck,
-  },
-  {
-    id: 'billing',
-    label: 'Billing',
-    title: 'Billing',
-    description: 'Execution credits: what this team has, what it has spent, and on what.',
-    icon: Coins,
   },
   {
     id: 'data',
@@ -213,8 +204,6 @@ export function Settings() {
           <AppearanceSection />
           <AiSection />
           <RunnerSection />
-          <AccessSection />
-          <BillingSection />
           <DataSection />
           <AboutSection />
         </div>
@@ -739,6 +728,8 @@ function RunnerSection() {
         />
       </Field>
 
+      <LibraryLocationField />
+
       <div className="flex flex-wrap items-center gap-3">
         <Button
           variant="secondary"
@@ -801,6 +792,176 @@ function RunnerSection() {
   )
 }
 
+/**
+ * Where the runner keeps the library.
+ *
+ * The JSON files are the user's own work, so they do not live inside the
+ * runner's checkout: a checkout gets pulled, reset and deleted, and a library in
+ * one is lost to the first `git clean` — or committed by accident long before
+ * that. The runner defaults to the platform's per-user data directory, and this
+ * is where somebody points it at a shared folder, a synced drive or a mounted
+ * volume instead.
+ *
+ * Changing it copies nothing. Rebinding is the point: adopting a directory that
+ * already holds a library is the common case, and a half-finished copy with no
+ * way back is worse than a move nobody made.
+ */
+function LibraryLocationField() {
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const can = useAuthStore((state) => state.can)
+  const reloadLibrary = useLibraryStore((state) => state.load)
+
+  const rootId = useId()
+  const [location, setLocation] = useState<WorkspaceLocation | null>(null)
+  const [draft, setDraft] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [failure, setFailure] = useState('')
+
+  const adopt = useCallback((next: WorkspaceLocation) => {
+    setLocation(next)
+    setDraft(next.root)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    getWorkspaceRoot(runnerUrl.trim(), runnerToken)
+      .then((next) => {
+        if (cancelled) return
+        adopt(next)
+        setFailure('')
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        setLocation(null)
+        setFailure(messageOf(error))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [adopt, runnerToken, runnerUrl])
+
+  async function save(root: string | null) {
+    setSaving(true)
+    try {
+      adopt(await setWorkspaceRoot(runnerUrl.trim(), root, runnerToken))
+      setFailure('')
+      // The library on screen came from the old directory; nothing was copied.
+      await reloadLibrary()
+      toast.success(root ? 'The runner reads this directory now.' : 'Back to the default directory.')
+    } catch (error) {
+      toast.error(messageOf(error))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const locked = location?.locked ?? false
+  const allowed = can('runner:Configure') && !locked
+  const changed = location !== null && draft.trim() !== location.root
+
+  return (
+    <Field
+      label="Library location"
+      htmlFor={rootId}
+      help="The directory the runner reads and writes your Jobs, Pipelines and Workflows in. Changing it copies nothing — the runner simply starts using the new directory, which is how you adopt one that already holds a library."
+    >
+      {loading ? (
+        <p className="flex items-center gap-2 text-2xs text-content-subtle">
+          <Spinner className="h-3 w-3" /> Asking the runner where it keeps the library…
+        </p>
+      ) : failure ? (
+        <p className="text-2xs leading-relaxed text-content-subtle">{failure}</p>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              id={rootId}
+              mono
+              spellCheck={false}
+              className="min-w-0 flex-1"
+              value={draft}
+              readOnly={!allowed}
+              placeholder={location?.default}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={saving}
+              disabled={!allowed || !changed || draft.trim().length === 0}
+              onClick={() => void save(draft.trim())}
+            >
+              Use this directory
+            </Button>
+            {location !== null && location.source !== 'default' && (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<RotateCcw className="h-3.5 w-3.5" />}
+                disabled={!allowed || saving}
+                onClick={() => void save(null)}
+              >
+                Default
+              </Button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-2xs text-content-subtle">
+            <Badge tone={location?.insideSourceTree ? 'warning' : 'neutral'}>
+              {LOCATION_SOURCE[location?.source ?? 'default']}
+            </Badge>
+            {location !== null && !location.writable && (
+              <Badge tone="warning">Not writable</Badge>
+            )}
+            <span>
+              Settings file:{' '}
+              <code className="font-mono">{location?.settingsFile}</code>
+            </span>
+          </div>
+
+          {locked && (
+            <p className="text-2xs leading-relaxed text-content-subtle">
+              <code className="font-mono">SPARQUET_STUDIO_WORKSPACE</code> fixes this path.
+              A deployment that decides centrally decides centrally — unset it and restart
+              the runner to choose from here.
+            </p>
+          )}
+
+          {!locked && !can('runner:Configure') && (
+            <p className="text-2xs leading-relaxed text-content-subtle">
+              Moving the library needs <code className="font-mono">runner:Configure</code>.
+              It sits outside <code className="font-mono">workspace:*</code> on purpose:
+              where the runner writes on its host is an administrator's call.
+            </p>
+          )}
+
+          {location?.insideSourceTree && (
+            <Note icon={<AlertTriangle className="h-3.5 w-3.5 text-state-warning" />} tone="warning">
+              Your library is inside the runner's own source tree. That directory is code —
+              it gets pulled, reset and deleted — so move the files to a directory of your
+              own and point the runner at it here. Nothing is copied for you.
+            </Note>
+          )}
+        </div>
+      )}
+    </Field>
+  )
+}
+
+/** What each reason means, in the words somebody reading a path needs. */
+const LOCATION_SOURCE: Record<WorkspaceLocation['source'], string> = {
+  env: 'Fixed by the environment',
+  settings: 'Chosen here',
+  legacy: 'Older directory, still in use',
+  default: 'Default for this machine',
+}
+
 /* ----------------------------------------------------------------- data */
 
 type ImportMode = 'merge' | 'replace'
@@ -810,24 +971,6 @@ interface ImportCandidate {
   bundle: unknown
   workflows: number
   jobs: number
-}
-
-function AccessSection() {
-  return (
-    <Section meta={SECTION.access}>
-      <AccessPanel />
-      <TeamsPanel />
-      <RolesPanel />
-    </Section>
-  )
-}
-
-function BillingSection() {
-  return (
-    <Section meta={SECTION.billing}>
-      <CreditsPanel />
-    </Section>
-  )
 }
 
 function DataSection() {

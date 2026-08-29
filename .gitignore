@@ -51,3 +51,13 @@ examples/output/
 # para nao pegar modulos internos legitimos como sparquet/io/_formats.py.
 /_*.py
 /_*.mjs
+
+# Metastore que o Spark cria sozinho em master local (spark.sql.warehouse.dir
+# default). E cache de execucao, nao fonte: se apagar, o Spark recria.
+spark-warehouse/
+
+# Biblioteca do Studio. O produto nao escreve dentro do proprio codigo-fonte: o
+# default agora e o diretorio de dados do usuario (%APPDATA%\Sparquet no Windows,
+# $XDG_DATA_HOME/sparquet no resto), e a pasta abaixo so sobrevive como local
+# antigo, adotado automaticamente por quem ja tinha uma biblioteca ali.
+sparquet-workspace/

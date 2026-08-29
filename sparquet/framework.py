@@ -12,6 +12,7 @@ from sparquet.utils.includes import resolve_includes
 from sparquet.core.context import SparkContextManager
 from sparquet.core.pipeline import Pipeline, PipelineResult
 from sparquet.io.factory import ReaderFactory, WriterFactory
+from sparquet.observability.history import HistorySink, register_sink as register_history_sink
 from sparquet.io.base import BaseReader, BaseWriter
 from sparquet.transform.base import BaseTransformation
 from sparquet.transform.engine import TransformationEngine
@@ -132,6 +133,16 @@ class Sparquet:
     ) -> None:
         """Registra um validator customizado disponível via JSON."""
         self._validation_engine.register(name, validator_cls)
+
+    def register_history_sink(self, sink: HistorySink) -> None:
+        """Passa a receber o histórico de toda execução deste processo.
+
+        Alternativa em código a `SPARQUET_HISTORY_URL`, para quem já tem onde
+        guardar telemetria e não quer uma variável de ambiente a mais. Vale para
+        todas as execuções, não só para as desta instância — como os demais
+        registries. Ver `sparquet.observability.history`.
+        """
+        register_history_sink(sink)
 
     # ------------------------------------------------------------------
     # Ciclo de vida

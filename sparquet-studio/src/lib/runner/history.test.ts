@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_RUNNER_URL, isRunnerError, RUNNER_TOKEN_HEADER, RunnerError } from '@/lib/runner/client'
-import { getJobRunConfig, getJobRunLogs, getRun, listRuns } from '@/lib/runner/history'
+import { getJobRunConfig, getJobRunLogs, getRun, listRuns, pinRun } from '@/lib/runner/history'
 
 const fetchMock = vi.fn()
 
@@ -95,6 +95,7 @@ describe('listRuns', () => {
         error: null,
         runAs: null,
         launched: null,
+        pinned: false,
         jobs: [],
       },
     ])
@@ -403,5 +404,50 @@ describe('getJobRunConfig', () => {
     fetchMock.mockResolvedValue(jsonResponse({ detail: 'Unknown job run.' }, 404))
 
     await expect(getJobRunConfig(DEFAULT_RUNNER_URL, 'gone')).resolves.toBeNull()
+  })
+})
+
+describe('pinRun', () => {
+  it('asks the runner to keep an execution forever', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ run_id: 'run-1', pinned: true }))
+
+    await expect(pinRun(DEFAULT_RUNNER_URL, 'run 1', true, 'secret')).resolves.toBe(true)
+
+    const [url, init] = lastCall()
+    expect(url).toBe(`${DEFAULT_RUNNER_URL}/runs/run%201/pin`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ pinned: true })
+    expect((init.headers as Record<string, string>)[RUNNER_TOKEN_HEADER]).toBe('secret')
+  })
+
+  it('unpins, which puts the execution back within reach of retention', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ run_id: 'run-1', pinned: false }))
+
+    await expect(pinRun(DEFAULT_RUNNER_URL, 'run-1', false)).resolves.toBe(false)
+
+    expect(JSON.parse(String(lastCall()[1].body))).toEqual({ pinned: false })
+  })
+
+  it('reads an execution the runner does not know as absent, not as a failure', async () => {
+    // Retention may already have removed it, which is not an error worth showing.
+    fetchMock.mockResolvedValue(jsonResponse({ detail: 'Execution not found.' }, 404))
+
+    await expect(pinRun(DEFAULT_RUNNER_URL, 'gone', true)).resolves.toBeNull()
+  })
+
+  it('surfaces a refusal, since the pin silently not happening is worse', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ detail: 'Requires history:Pin.' }, 403))
+
+    await expect(pinRun(DEFAULT_RUNNER_URL, 'run-1', true)).rejects.toSatisfy(
+      (error: unknown) => isRunnerError(error) && error.status === 403,
+    )
+  })
+
+  it('reports an unreachable runner as such', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    await expect(pinRun(DEFAULT_RUNNER_URL, 'run-1', true)).rejects.toSatisfy(
+      (error: unknown) => isRunnerError(error) && error.kind === 'unreachable',
+    )
   })
 })

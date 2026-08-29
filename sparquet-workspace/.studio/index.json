@@ -1,7 +1,0 @@
-{
-  "job:31yf102vUX": "teste/jobs/txt-to-csv-quality.json",
-  "job:eOm7lP8-le": "teste/jobs/ingestion-with-data-quality.json",
-  "pipeline:du_0MJkIK4": "teste/pipelines/teste-pipeline.json",
-  "pipeline:rxR0lL4LK2": "teste/pipelines/teste.json",
-  "workflow:JuZqOPDGSB": "teste/workflow.json"
-}
