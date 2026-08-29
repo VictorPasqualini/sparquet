@@ -11,8 +11,11 @@ Cada conector cai em um de três grupos:
   **sem jar extra**  `xml` e `binary` rodam com o que vem no pyspark.
   **um jar**         `avro`, `delta`, `iceberg` e `hudi` precisam de um pacote
                      Maven; nada mais.
-  **um serviço**     JDBC, Kafka, Mongo, Cassandra, Elasticsearch/OpenSearch
-                     precisam de um servidor de pé (ver `services.py`).
+  **um serviço**     Kafka, Mongo, Cassandra, Elasticsearch/OpenSearch e os
+                     bancos JDBC de verdade precisam de um servidor de pé (ver
+                     `services.py` e o `docker-compose.yml` ao lado). O caminho
+                     JDBC em si é exercitado sem serviço nenhum, com H2 dentro
+                     da própria JVM — `test_jdbc_spark.py`.
   **só nuvem**       BigQuery, Snowflake, Redshift, DynamoDB. Não são
                      reproduzíveis aqui e continuam cobertos por montagem.
 
@@ -20,6 +23,7 @@ Como rodar:
 
     SPARQUET_IT=1 python tests/io/integration/test_files_spark.py
     SPARQUET_IT=1 python tests/io/integration/test_lakehouse_spark.py
+    SPARQUET_IT=1 python tests/io/integration/test_jdbc_spark.py
 
 Sem `SPARQUET_IT=1` os testes são **pulados**: a primeira execução baixa dezenas
 de MB de jar do Maven Central, e uma suíte de unidade não pode depender de rede.
@@ -58,6 +62,9 @@ _PACKAGES: Dict[str, str] = {
     # delta-spark 4.3.x é a linha compilada contra o Spark 4.1 (4.4 já é 4.2).
     "delta": "io.delta:delta-spark_2.13:4.3.1",
     "iceberg": "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
+    # H2 roda dentro da própria JVM: é o único banco que exercita o caminho
+    # JDBC de verdade sem subir serviço nenhum.
+    "h2": "com.h2database:h2:2.3.232",
 }
 
 
@@ -68,11 +75,22 @@ def package_for(connector: str) -> str:
 
 
 def _packages() -> str:
-    return ",".join(
+    """Os pacotes que a sessão carrega.
+
+    Os de `_PACKAGES` entram sempre — são baratos e valem para qualquer máquina.
+    Os de serviço entram **só quando o serviço está de pé**: cada coordenada é
+    uma resolução no Maven na criação da sessão, e quem não subiu container
+    nenhum não deve pagar por driver de banco que não vai usar.
+    """
+    from services import packages_for_reachable
+
+    coordenadas = [
         coordinate
         for connector in _PACKAGES
         if (coordinate := package_for(connector))
-    )
+    ]
+    coordenadas.extend(packages_for_reachable())
+    return ",".join(coordenadas)
 
 
 def _ivy_caches() -> list:

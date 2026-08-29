@@ -129,7 +129,7 @@ to do with file formats.
 
 | Format | Status | Pinned by |
 |---|:---:|---|
-| `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle` | ✅ | URL built from `host`+`database`, explicit `url` precedence, `query` over `dbtable`, write mode, missing-URL error |
+| `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle` | ✅ | URL built from `host`+`database`, explicit `url` precedence, `query` over `dbtable`, write mode, missing-URL error. The shared read/write path is also [executed for real](../tests/io/integration/test_jdbc_spark.py) against H2 in the same JVM: the table is created, values and nulls come back, `append` adds, `overwrite` replaces, `truncate` keeps the table, `query` replaces `dbtable`. What stays unproven is each vendor's dialect — that needs the service tier |
 | `bigquery` | ✅ | load path vs write table, `query` option |
 | `snowflake` | ✅ | `dbtable` and format name |
 | `redshift` | ✅ | `dbtable` (a missing `tempdir` is not asserted) |
@@ -155,10 +155,29 @@ effect when the session is created and `SparkSession` is a per-process singleton
 
     SPARQUET_IT=1 python tests/io/integration/test_files_spark.py
     SPARQUET_IT=1 python tests/io/integration/test_lakehouse_spark.py
+    SPARQUET_IT=1 python tests/io/integration/test_jdbc_spark.py
 
 The gate opens on `SPARQUET_IT=1`, and also on its own once every jar is already in
 the ivy cache — so the suite never downloads by surprise and, once it has run, keeps
 running offline. Without the gate every test skips with the reason printed.
+
+The JDBC path is in this tier and not the next one because H2 runs inside the
+Spark JVM: a file, no server, no container. The connector under test is named
+`postgresql`, with `url` and `driver` given explicitly, and that is not a disguise —
+all five database connectors are the same `JdbcReader`/`JdbcWriter` plus a dialect
+that only picks a default driver, a default port and a URL shape. Everything the file
+asserts is the shared code. Everything it cannot assert is the dialect.
+
+For the connectors that genuinely need a server — Kafka, MongoDB, Cassandra,
+Elasticsearch, OpenSearch and the real databases — `services.py` and the
+`docker-compose.yml` beside it are in place, and no test has been written against them
+yet. A service test skips unless its port answers, with the reason naming the compose
+service to start, so the tier costs nothing on a machine without Docker. A connector's
+jar joins the session only while its service is reachable, because every coordinate in
+`spark.jars.packages` is resolved at session creation and nobody should download a
+Cassandra connector to test Avro. The Spark-4 compatible versions of the connectors
+that carry Spark code (Cassandra, Elasticsearch, OpenSearch, Mongo) are marked in
+`services.py` as unverified — that is the first thing to settle when the tier is used.
 
 Two things about the harness are worth knowing before extending it. The `spark` block
 goes through the `Sparquet` **constructor**, not the JSON, because the JSON block
