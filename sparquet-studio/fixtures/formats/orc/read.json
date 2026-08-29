@@ -1,0 +1,16 @@
+{
+  "name": "formatos-orc-leitura",
+  "description": "Le de volta o que a etapa anterior gravou em orc.",
+  "input": {
+    "format": "orc",
+    "path": "{dir}/out-orc"
+  },
+  "output": {
+    "format": "csv",
+    "path": "{dir}/back-orc",
+    "mode": "overwrite",
+    "options": {
+      "header": "true"
+    }
+  }
+}

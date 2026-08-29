@@ -1,0 +1,16 @@
+{
+  "name": "formatos-txt-leitura",
+  "description": "Le de volta o que a etapa anterior gravou em txt.",
+  "input": {
+    "format": "txt",
+    "path": "{dir}/out-txt"
+  },
+  "output": {
+    "format": "csv",
+    "path": "{dir}/back-txt",
+    "mode": "overwrite",
+    "options": {
+      "header": "true"
+    }
+  }
+}

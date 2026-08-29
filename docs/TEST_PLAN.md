@@ -67,7 +67,7 @@ with the same two layers: `tests/test_cola_lib.py` (25 pure) and
 | Write metrics (`rows_written`) | — | 17 (11 Spark-free on metric selection, 6 against real Spark) |
 | External execution history | — | 34 (Spark-free) on the framework side, 16 on the runner |
 | Studio | — | 502 tests + 21 smoke checks |
-| Runner service (`server/`) | — | 355 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 36, replaceable pieces 12, library files 28) |
+| Runner service (`server/`) | — | 363 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 36, replaceable pieces 12, library files 28, formats executed 8) |
 
 Two findings worth stating plainly, because they are the reason this document exists:
 
@@ -231,10 +231,11 @@ Two capabilities in this layer *are* pinned, both added in framework 0.7.0:
 
 ## 7. Studio
 
-The Studio is the best-covered part of the project (518 unit tests, 21 smoke checks in
-a real Chrome, and 355 `unittest` tests on the runner: 92 on the history database, 64 on
-identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution routes and
-61 on the workspace and the files in it). What is pinned, and what is not:
+The Studio is the best-covered part of the project (531 unit tests, 21 smoke checks in
+a real Chrome, and 363 `unittest` tests on the runner: 92 on the history database, 64 on
+identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution routes,
+61 on the workspace and the files in it, and 8 that actually execute the six native
+formats through the runner). What is pinned, and what is not:
 
 | Area | Status | Notes |
 |---|:---:|---|
@@ -264,6 +265,7 @@ identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution r
 | Canvas / nodes / inspector | ◐ | node previews, handles and connection guards are pinned; the interactive canvas is covered by the smoke script rather than unit tests |
 | Workspace tabs and the Runs browser | ⬜ | the Flow/JSON/Runs switch, the runs table and the run-detail dialog (its **Details** tab: job id, job run id, run as, launched, timestamps, duration, status, lineage) are React with no unit test. What they read is pinned — `runView.ts`, `history.ts`, `lineage_of` above — so the gap is the rendering, not the data |
 | The `targets` field UI | ⬜ | the JSON widget renders and its `validate` mirrors the library's refusals — no test asserts the inspector shows those messages |
+| The formats, executed through the Studio | ✅ | 8 `unittest` tests on Spark (`server/test_formats_studio_spark.py`) plus 13 vitest, over one shared set of fixtures (`sparquet-studio/fixtures/formats/`, a `write.json` and a `read.json` for `parquet`, `orc`, `json`, `csv`, `txt` and `view`). The gap they close: the compiler round trip proved a JSON survives the canvas and the framework tests proved the formats work, but nothing proved a JSON the **Studio** produced actually runs on the runner. Now the same file is pinned twice — the Studio opens and compiles it back unchanged, and the runner writes real files and reads the rows back through `_resolve_staged_files` and `_execute_run`, the code `/run` and `/run/flow/stream` call. Also pinned: the field with quotes and a comma comes back whole (the RFC 4180 dialect), a `view` hands data to the next stage without touching disk, the preview honours the Studio's `limit` and not the pipeline's, and a run over a path that does not exist reports `error` instead of raising. Skipped, never failed, without pyspark or a JVM |
 | A stage that runs a file | ✅ | 28 `unittest` tests (`server/test_library_files.py`) plus 16 vitest (`lib/runner/libraryFiles.ts`, and the file stages in `lib/pipeline/pipeline.test.ts`). The rule they protect: a Pipeline stage may run a JSON the Studio never wrote, and the **file stays the source** — nothing is imported, nothing is cached, so an edit made outside the Studio is what the next run executes. Pinned — the listing offers only runnable files (the editor's own `.studio/`, hidden files and the half-written `.tmp-*.json` of a save in flight are excluded), a path is always relative to the library root and comes back with forward slashes, a Windows separator and a leading slash read the same file, and the refusals: missing, not JSON, not a JSON *object*, `..`, an absolute path (detail says "relative"). On the flow: a file-backed stage resolves before anything is charged or started, naming both a `pipeline` and a `path` — or neither — is a `422` that says **which** stage, and a missing file is a `400` rather than a Pipeline that dies halfway with earlier stages already written. On the client: the box carries no job and is not treated as broken, it is named after the file, it orders and cycles like any other stage, and the request sends `path` instead of a compiled pipeline |
 | Runner service (`server/main.py`) | ◐ | what a run authorizes is now pinned (see *Scope of the execution routes*), but there is still **no test over HTTP**: token auth, the origin allow-list, the SSE event sequence, the per-stage status of `/run/flow/stream`, and the `requires(...)` dependency that maps each route to an action (the evaluator behind it is pinned — see *Identity and permissions* — but no test asserts that `PUT /workspace` is the route demanding `workspace:Write`). The execution-history side-effects of these endpoints (`server/history.py`) are covered — see the row above. FastAPI's `TestClient` would cover all of it without Spark, and the only thing in the way is the dependency: starlette answers `RuntimeError: The starlette.testclient module requires the httpx2 package to be installed.`, and `httpx` is not in this environment — which is why `test_run_scope.py` calls the helpers directly instead |
 

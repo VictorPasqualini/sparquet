@@ -1,0 +1,16 @@
+{
+  "name": "formatos-view-leitura",
+  "description": "Le de volta o que a etapa anterior gravou em view.",
+  "input": {
+    "format": "view",
+    "path": "formatos_round_trip"
+  },
+  "output": {
+    "format": "csv",
+    "path": "{dir}/back-view",
+    "mode": "overwrite",
+    "options": {
+      "header": "true"
+    }
+  }
+}
