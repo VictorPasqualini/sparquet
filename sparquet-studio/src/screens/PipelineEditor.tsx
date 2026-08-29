@@ -36,11 +36,13 @@ import {
   type WorkspaceTab,
 } from '@/components/layout/WorkspaceTabs'
 import { PipelineCanvas } from '@/components/pipeline/PipelineCanvas'
+import { TagsPopover } from '@/components/library/TagsPopover'
 import { PipelineRunPanel } from '@/components/pipeline/PipelineRunPanel'
 import { StagePicker } from '@/components/pipeline/StagePicker'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
 import { resolvePipeline, stageRowPosition, type ResolvedPipeline } from '@/lib/pipeline'
 import { getPipeline } from '@/lib/storage/db'
+import { collectTags } from '@/lib/tags'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
 import {
@@ -303,6 +305,9 @@ function PipelineTopBar({
   const past = usePipelineEditorStore((state) => state.past.length)
   const future = usePipelineEditorStore((state) => state.future.length)
   const updatePipelineMeta = useLibraryStore((state) => state.updatePipelineMeta)
+  const knownTags = useLibraryStore((state) =>
+    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
+  )
 
   const [name, setName] = useState(pipeline?.name ?? '')
   useEffect(() => setName(pipeline?.name ?? ''), [pipeline?.name])
@@ -315,6 +320,12 @@ function PipelineTopBar({
     }
     void updatePipelineMeta(pipeline.id, { name: trimmed })
     usePipelineEditorStore.setState({ pipeline: { ...pipeline, name: trimmed } })
+  }
+
+  const commitTags = (tags: string[]) => {
+    if (!pipeline) return
+    void updatePipelineMeta(pipeline.id, { tags })
+    usePipelineEditorStore.setState({ pipeline: { ...pipeline, tags } })
   }
 
   return (
@@ -339,6 +350,13 @@ function PipelineTopBar({
           className="h-8 max-w-sm border-transparent bg-transparent px-2 text-sm font-medium hover:border-line focus:bg-surface-sunken"
         />
       </div>
+
+      <TagsPopover
+        tags={pipeline?.tags ?? []}
+        onChange={commitTags}
+        suggestions={knownTags}
+        subject={pipeline?.name ?? 'this pipeline'}
+      />
 
       <div className="flex items-center gap-1">
         <Tooltip content="Undo">

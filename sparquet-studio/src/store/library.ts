@@ -58,7 +58,7 @@ interface LibraryState {
   }) => Promise<Pipeline>
   updatePipelineMeta: (
     id: string,
-    patch: Partial<Pick<Pipeline, 'name' | 'description' | 'workflowId'>>,
+    patch: Partial<Pick<Pipeline, 'name' | 'description' | 'tags' | 'workflowId'>>,
   ) => Promise<void>
   deletePipeline: (id: string) => Promise<void>
   /** Called by the pipeline editor after a save, mirroring `upsertJob`. */
@@ -95,6 +95,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       name,
       description,
       accent,
+      tags: [],
       createdAt: now,
       updatedAt: now,
     }

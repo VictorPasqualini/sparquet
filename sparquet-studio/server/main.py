@@ -147,6 +147,10 @@ class RunRequest(BaseModel):
     # `run_as` is a claim: absent, the account the runner runs under is recorded.
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Labels to bill this run under, on top of whatever the Job, its Pipeline and
+    #: its Workflow already carry in the catalog. For a caller whose Job the
+    #: Studio library has never seen: a script can tag its own runs.
+    tags: Optional[List[str]] = None
 
 
 class FlowStageRequest(BaseModel):
@@ -175,6 +179,9 @@ class RunFlowRequest(BaseModel):
     name: Optional[str] = None
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Labels for the whole flow, added to what the catalog already says about the
+    #: Pipeline, its Workflow and each stage's Job.
+    tags: Optional[List[str]] = None
 
 
 class ValidateRequest(BaseModel):
@@ -808,6 +815,27 @@ def _ensure_catalog(
         pass
 
 
+def _run_tags(
+    *, workflow_id: Optional[str] = None, pipeline_id: Optional[str] = None,
+    job_id: Optional[str] = None, extra: Optional[List[str]] = None,
+) -> List[str]:
+    """The labels this run is billed under.
+
+    Read from the catalog at run time rather than taken from the request: the
+    tags belong to the record, so what a run costs is attributed by what the
+    library says today, not by what a client remembered to send. `extra` is for
+    the caller the library has never heard of — a script tagging its own run.
+    """
+    tags = list(extra or [])
+    try:
+        tags += _history.effective_tags(
+            workflow_id=workflow_id, pipeline_id=pipeline_id, job_id=job_id
+        )
+    except Exception:  # pragma: no cover - billing labels are not worth a run
+        _log.warning("Could not read the tags for this run from the catalog.")
+    return history.normalize_tags(tags)
+
+
 def _lineage(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) -> Optional[str]:
     """The datasets this JSON reads and writes, with `{param}` values resolved.
 
@@ -1110,7 +1138,7 @@ def _charge_execution(
     principal: Any, pipeline: Dict[str, Any], writes: int, *,
     job_name: Optional[str] = None, job_run_id: Optional[str] = None,
     pipeline_run_id: Optional[str] = None, reservation: Any = None,
-    workflow_id: Optional[str] = None,
+    workflow_id: Optional[str] = None, tags: Optional[List[str]] = None,
 ) -> Any:
     """Charge one credit per destination the run actually wrote.
 
@@ -1132,6 +1160,7 @@ def _charge_execution(
             username=username, job_run_id=job_run_id,
             pipeline_run_id=pipeline_run_id, job_name=job_name,
             workflow_id=workflow_id, actor=credits.actor_for(principal),
+            tags=tags,
         )
     except credits.CreditError as error:  # pragma: no cover - defensive
         _log.warning("Could not charge execution credits: %s", error)
@@ -1457,6 +1486,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
         job_name=body.job_name or name, job_run_id=job_run_id,
         pipeline_run_id=pipeline_run_id, reservation=reservation,
         workflow_id=body.workflow_id,
+        tags=_run_tags(
+            workflow_id=body.workflow_id, job_id=body.job_id, extra=body.tags
+        ),
     ))
     return response
 
@@ -1624,6 +1656,10 @@ def run_stream(
                     job_name=body.job_name or name, job_run_id=job_run_id,
                     pipeline_run_id=pipeline_run_id, reservation=reservation,
                     workflow_id=body.workflow_id,
+                    tags=_run_tags(
+                        workflow_id=body.workflow_id, job_id=body.job_id,
+                        extra=body.tags,
+                    ),
                 ))
                 yield _sse("result", response.model_dump())
             else:
@@ -1825,6 +1861,10 @@ def run_flow_stream(
                     job_name=stage.name, job_run_id=job_run_id,
                     pipeline_run_id=pipeline_run_id, reservation=stage_hold,
                     workflow_id=body.workflow_id,
+                    tags=_run_tags(
+                        workflow_id=body.workflow_id, pipeline_id=body.pipeline_id,
+                        job_id=stage.job_id, extra=body.tags,
+                    ),
                 ))
                 payload = {
                     "index": index,
@@ -2217,21 +2257,22 @@ def _mirror_catalog(doc: Any) -> None:
     name = record.get("name")
     description = record.get("description")
     try:
+        tags = history.normalize_tags(record.get("tags"))
         if doc.kind == workspace.WORKFLOW:
             _history.upsert_workflow(
-                doc.id, name=name, description=description, path=doc.path
+                doc.id, name=name, description=description, path=doc.path, tags=tags
             )
         elif doc.kind == workspace.JOB:
             _history.upsert_job(
                 doc.id, workflow_id=record.get("workflowId"), name=name,
-                description=description, path=doc.path,
+                description=description, path=doc.path, tags=tags,
             )
         elif doc.kind == workspace.PIPELINE:
             stages = record.get("stages")
             _history.upsert_pipeline(
                 doc.id, workflow_id=record.get("workflowId"), name=name,
                 description=description, path=doc.path,
-                stages=stages if isinstance(stages, list) else None,
+                stages=stages if isinstance(stages, list) else None, tags=tags,
             )
     except Exception:  # pragma: no cover - indexing is bookkeeping, not the save
         _log.warning("Could not index %s %s in the catalog.", doc.kind, doc.id)
@@ -2658,14 +2699,20 @@ class LedgerEntryOut(BaseModel):
     #: are what let one invoice be read by workflow and by person.
     workflow_id: Optional[str] = None
     actor: Optional[str] = None
+    #: The labels the run carried when it was charged, frozen on the entry.
+    tags: List[str] = Field(default_factory=list)
 
 
 class UsageGroupOut(BaseModel):
     """One row of a bill: what a team, a person, a workflow or a job spent.
 
     `key` is null for spending that has no such dimension - a run started from a
-    script belongs to no workflow. It is reported rather than dropped, so the rows
-    always add up to the month.
+    script belongs to no workflow, a Job nobody labelled has no tag. It is reported
+    rather than dropped, so nothing is silently missing from the bill.
+
+    By team, user, workflow or job the rows partition the month and add up to
+    `total`. By tag they do not: a run wearing two labels is counted in full under
+    each, which is what makes the question "what does finance cost me" answerable.
     """
 
     key: Optional[str] = None
@@ -2685,6 +2732,23 @@ class UsageBreakdownOut(BaseModel):
     scope: str
     total: UsageGroupOut
     groups: List[UsageGroupOut] = Field(default_factory=list)
+    #: True when a run can appear in more than one row, which is the case for
+    #: tags and for nothing else. The rows then add up to more than `total`, and
+    #: an interface that draws them as shares of a whole has to say so.
+    overlapping: bool = False
+
+
+class UsagePeriodOut(BaseModel):
+    period: str
+    writes: int = 0
+    charged: int = 0
+    waived: int = 0
+    runs: int = 0
+
+
+class UsageTimelineOut(BaseModel):
+    scope: str
+    periods: List[UsagePeriodOut] = Field(default_factory=list)
 
 
 class GrantRequest(BaseModel):
@@ -2785,6 +2849,7 @@ def _entry_out(entry: Any) -> LedgerEntryOut:
         job_run_id=entry.job_run_id, pipeline_run_id=entry.pipeline_run_id,
         target=entry.target, job_name=entry.job_name, note=entry.note,
         workflow_id=entry.workflow_id, actor=entry.actor,
+        tags=list(getattr(entry, "tags", []) or []),
     )
 
 
@@ -3230,18 +3295,47 @@ def credit_usage(
         if row["key"] else UsageGroupOut(**row)
         for row in groups
     ]
+    # Counted from the entries rather than summed from the rows: by tag a run
+    # appears under each of its labels, and a total that added those up would
+    # tell the reader the month cost more than it did.
+    total = _credits.totals(period=period, account_id=scoped)
     return UsageBreakdownOut(
         period=period or credits.current_period(),
         group_by=group_by,
         scope="all" if scoped is None else scoped,
-        total=UsageGroupOut(
-            key=None, label="Total",
-            writes=sum(row.writes for row in rows),
-            charged=sum(row.charged for row in rows),
-            waived=sum(row.waived for row in rows),
-            runs=sum(row.runs for row in rows),
-        ),
+        total=UsageGroupOut(key=None, label="Total", **total),
         groups=rows,
+        overlapping=group_by == "tag",
+    )
+
+
+@app.get("/credits/timeline", response_model=UsageTimelineOut)
+def credit_timeline(
+    months: int = 6,
+    account_id: Optional[str] = None,
+    principal: Any = Depends(current_principal),
+) -> UsageTimelineOut:
+    """Spending month by month, oldest first.
+
+    One month says how much; the series says whether that is normal, which is the
+    question somebody looking at a bill actually has. Scope follows the same rule
+    as the rest of billing: your own team always, the whole runner with
+    `credits:Read`.
+    """
+    own, _ = credits.account_for(principal)
+    everyone = principal is not None and principal.allows("credits:Read")
+    if account_id and account_id != own and not everyone:
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's spending needs credits:Read.",
+        )
+    scoped = account_id or (None if everyone else own)
+    return UsageTimelineOut(
+        scope="all" if scoped is None else scoped,
+        periods=[
+            UsagePeriodOut(**row)
+            for row in _credits.usage_timeline(months=months, account_id=scoped)
+        ],
     )
 
 

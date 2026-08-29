@@ -25,6 +25,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
 import { Badge, Button, Field, Input, Modal, Spinner } from '@/components/ui'
+import { monthName } from '@/lib/billing'
 import {
   getCreditLedger,
   getMyCredits,
@@ -43,15 +44,6 @@ function useRunner(): { url: string; token: string } {
   const url = useSettingsStore((state) => state.runnerUrl)
   const token = useSettingsStore((state) => state.runnerToken)
   return { url, token }
-}
-
-/** `2026-08` as `August 2026`, so the period reads as a month and not as an id. */
-function monthName(period: string): string {
-  const [year, month] = period.split('-')
-  const index = Number.parseInt(month ?? '', 10)
-  if (!year || !Number.isFinite(index) || index < 1 || index > 12) return period
-  const label = new Date(Date.UTC(2000, index - 1, 1)).toLocaleString(undefined, { month: 'long' })
-  return `${label} ${year}`
 }
 
 function Metric({

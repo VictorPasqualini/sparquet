@@ -554,6 +554,21 @@ Modelo atual, implementado em `server/credits.py` (SQLite próprio em
 - ✅ Ações `credits:Read` / `credits:Manage`; rotas `/credits/me`, `/credits`,
   `/credits/{id}/ledger`, `/credits/{id}/grant`; `credits_enforced` no `/health`.
   Verificado em `server/test_credits.py` e `src/lib/runner/credits.test.ts`.
+- ✅ **Tags como dimensão de rateio** — Workflow, Pipeline e Job carregam tags
+  (`catalog_tag` no banco do histórico, editor `TagsPopover` nas três telas) e a cobrança
+  congela no lançamento a união das tags do Job, do seu Pipeline e do seu Workflow
+  (`effective_tags`), mais o que o chamador mandar em `tags` no `POST /run`. Congelar é o
+  que preserva a fatura: retaguear um Job muda o que ele custa **daqui para frente** e não
+  reescreve mês fechado. Marcar o Workflow marca tudo que está dentro — repetir o centro
+  de custo em quarenta Jobs garante que um fique de fora e apareça sem tag na fatura.
+  Tags são a **única** dimensão que não particiona o mês: um run com duas tags conta
+  inteiro nas duas, então as linhas somam mais que o total — daí `totals()` contar cada
+  lançamento uma vez e a resposta trazer `overlapping` para a tela poder dizer isso.
+- ✅ **Tela de análise, não só extrato** — Billing agora abre com seis meses em barras
+  (`SpendTrend`, `GET /credits/timeline`), onde a barra é também o seletor do mês, e o
+  rateio (`SpendBreakdown`) lê o mês escolhido por Workflow, Job, **Tag**, usuário ou
+  equipe, em lista ordenada com barra proporcional ao maior — não à soma, que deixaria
+  toda barra invisível com vinte linhas. Sem biblioteca de gráfico.
 
 Pendente aqui:
 

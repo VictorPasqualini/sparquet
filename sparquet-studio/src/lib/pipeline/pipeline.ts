@@ -105,6 +105,7 @@ export function newPipeline(input: {
     description: input.description ?? '',
     stages: input.stages ?? [],
     links: input.links ?? [],
+    tags: [],
     createdAt: now,
     updatedAt: now,
     revision: 1,

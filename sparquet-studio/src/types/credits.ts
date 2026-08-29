@@ -93,15 +93,18 @@ export interface CreditEntry {
   workflowId: string | null
   /** Who ran it. Null when the caller was a shared runner token, which is nobody. */
   actor: string | null
+  /** The labels the run carried when it was charged, frozen on the entry: a Job
+   *  retagged later does not rewrite the months already billed. */
+  tags: string[]
 }
 
 /** How a month of spending can be sliced. The team always pays; this is only
  *  how its invoice is read back. */
-export type SpendGroupBy = 'team' | 'user' | 'workflow' | 'job'
+export type SpendGroupBy = 'team' | 'user' | 'workflow' | 'job' | 'tag'
 
 /** One line of a bill. `key` null is spending with no such dimension — a run
- *  from a script belongs to no workflow — reported rather than dropped, so the
- *  lines always add up to the month. */
+ *  from a script belongs to no workflow, a Job nobody labelled has no tag —
+ *  reported rather than dropped, so nothing is missing from the bill. */
 export interface SpendGroup {
   key: string | null
   label: string | null
@@ -120,4 +123,27 @@ export interface SpendBreakdown {
   scope: string
   total: SpendGroup
   groups: SpendGroup[]
+  /**
+   * True when one run can appear in several lines — the case for tags and for
+   * nothing else, since a run wearing two of them is counted in full under each.
+   * The lines then add up to more than `total`, and anything drawing them as
+   * shares of a whole has to say so.
+   */
+  overlapping: boolean
+}
+
+/** One month of the spending series. */
+export interface SpendPeriod {
+  period: string
+  writes: number
+  charged: number
+  waived: number
+  runs: number
+}
+
+/** Several months, oldest first. Months with no spending are present as zeros:
+ *  a gap would make the shape of the series lie. */
+export interface SpendTimeline {
+  scope: string
+  periods: SpendPeriod[]
 }

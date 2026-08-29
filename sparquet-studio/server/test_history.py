@@ -1026,6 +1026,100 @@ class CatalogTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.repo.soft_delete("dataset", "d1")
 
+class CatalogTagTest(unittest.TestCase):
+    """Tags on Workflows, Pipelines and Jobs, and what a run inherits from them."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = history.SQLiteExecutionRepository(
+            Path(self._tmp.name) / "history.sqlite3"
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_job_keeps_its_tags(self) -> None:
+        self.repo.upsert_job("j1", name="vendas", tags=["finance", "nightly"])
+        self.assertEqual(self.repo.tags_for("job", "j1"), ["finance", "nightly"])
+
+    def test_saving_again_replaces_them(self) -> None:
+        """The record's tags are what the last save said, never a merge — a tag
+        removed in the editor has to disappear from the bill going forward."""
+        self.repo.upsert_job("j1", tags=["finance"])
+        self.repo.upsert_job("j1", tags=["ops"])
+        self.assertEqual(self.repo.tags_for("job", "j1"), ["ops"])
+
+    def test_saving_without_tags_leaves_them_alone(self) -> None:
+        """`None` is "not mentioned"; an empty list is "no tags". A caller that
+        only renames a Job must not silently untag it."""
+        self.repo.upsert_job("j1", tags=["finance"])
+        self.repo.upsert_job("j1", name="vendas")
+        self.assertEqual(self.repo.tags_for("job", "j1"), ["finance"])
+        self.repo.upsert_job("j1", tags=[])
+        self.assertEqual(self.repo.tags_for("job", "j1"), [])
+
+    def test_a_run_inherits_the_workflow_tags(self) -> None:
+        """Repeating "cost centre: marketing" on forty Jobs guarantees one of them
+        ends up untagged on the invoice."""
+        self.repo.upsert_workflow("w1", tags=["marketing"])
+        self.repo.upsert_job("j1", workflow_id="w1", tags=["nightly"])
+        self.assertEqual(
+            self.repo.effective_tags(workflow_id="w1", job_id="j1"),
+            ["nightly", "marketing"],
+        )
+
+    def test_the_same_tag_twice_is_one_tag(self) -> None:
+        self.repo.upsert_workflow("w1", tags=["Finance"])
+        self.repo.upsert_job("j1", workflow_id="w1", tags=["finance"])
+        self.assertEqual(
+            self.repo.effective_tags(workflow_id="w1", job_id="j1"), ["finance"]
+        )
+
+    def test_a_stage_run_takes_the_pipeline_tags_too(self) -> None:
+        self.repo.upsert_workflow("w1", tags=["marketing"])
+        self.repo.upsert_pipeline("p1", workflow_id="w1", tags=["diario"])
+        self.repo.upsert_job("j1", workflow_id="w1", tags=["vendas"])
+        self.assertEqual(
+            self.repo.effective_tags(workflow_id="w1", pipeline_id="p1", job_id="j1"),
+            ["vendas", "diario", "marketing"],
+        )
+
+    def test_nothing_tagged_is_no_tags(self) -> None:
+        self.assertEqual(self.repo.effective_tags(job_id="j1"), [])
+        self.assertEqual(self.repo.effective_tags(), [])
+
+    def test_tags_come_back_with_the_catalog(self) -> None:
+        self.repo.upsert_workflow("w1", tags=["marketing"])
+        self.repo.upsert_job("j1", workflow_id="w1", tags=["nightly"])
+        found = {record.id: record.tags for record in self.repo.list_catalog()}
+        self.assertEqual(found["w1"], ["marketing"])
+        self.assertEqual(found["j1"], ["nightly"])
+
+    def test_junk_is_dropped_and_the_count_is_bounded(self) -> None:
+        self.repo.upsert_job("j1", tags=["  ", "", None, 7, "boa"])
+        self.assertEqual(self.repo.tags_for("job", "j1"), ["boa"])
+        self.repo.upsert_job(
+            "j2", tags=[f"tag-{index}" for index in range(history.MAX_TAGS + 10)]
+        )
+        self.assertEqual(len(self.repo.tags_for("job", "j2")), history.MAX_TAGS)
+
+    def test_a_tag_is_not_unbounded_text(self) -> None:
+        self.repo.upsert_job("j1", tags=["x" * 200])
+        self.assertEqual(len(self.repo.tags_for("job", "j1")[0]), history.MAX_TAG_LENGTH)
+
+    def test_an_unknown_kind_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            self.repo.tags_for("job; DROP TABLE catalog_tag", "j1")
+
+    def test_tags_in_use_are_listed_with_their_count(self) -> None:
+        self.repo.upsert_workflow("w1", tags=["marketing"])
+        self.repo.upsert_job("j1", tags=["marketing", "nightly"])
+        self.assertEqual(
+            self.repo.list_tags(),
+            [{"tag": "marketing", "records": 2}, {"tag": "nightly", "records": 1}],
+        )
+
+
 class IngestTest(unittest.TestCase):
     """Runs executed outside this runner (`ingest_run`).
 

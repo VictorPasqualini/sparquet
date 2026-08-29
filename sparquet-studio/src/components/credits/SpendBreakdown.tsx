@@ -1,21 +1,29 @@
 /**
- * A month of spending, sliced by team, by person, by workflow or by job.
+ * One month of spending, sliced by team, by person, by workflow, by job or by tag.
  *
  * The account is always a team — a workflow is a folder, it can be renamed and
  * moved, and a budget attached to one would break the day somebody dragged a job
  * out of it. So the team pays, and these are the dimensions its single invoice is
- * read back by: every run charge carries the workflow it belonged to and the
- * person who started it, and this is where those two are added up.
+ * read back by: every run charge carries the workflow it belonged to, the person
+ * who started it and the tags it wore, and this is where those are added up.
  *
  * `charged` is the whole cost of the month and `waived` the part the free
  * allowance absorbed — the same convention the rest of the credits UI uses, so a
  * team inside its allowance reads "12 credits, all free" rather than "0".
+ *
+ * Four of the five dimensions partition the month: each run belongs to exactly
+ * one team, one person, one workflow, one job, so the lines add up to the total.
+ * Tags do not — a run wearing `finance` and `nightly` is counted in full under
+ * both — which is the point of them and also why the bars are drawn against the
+ * biggest line rather than against the total, and why the screen says so out
+ * loud when the runner reports `overlapping`.
  */
 
-import { CalendarDays } from 'lucide-react'
+import { Layers } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Segmented, SectionTitle, Spinner } from '@/components/ui'
+import { monthName, shareOf } from '@/lib/billing'
 import { getSpendBreakdown } from '@/lib/runner/credits'
 import { cn } from '@/lib/utils/cn'
 import { useAuthStore } from '@/store/auth'
@@ -26,6 +34,7 @@ import type { SpendBreakdown as Breakdown, SpendGroupBy } from '@/types/credits'
 const GROUPS: { value: SpendGroupBy; label: string }[] = [
   { value: 'workflow', label: 'Workflow' },
   { value: 'job', label: 'Job' },
+  { value: 'tag', label: 'Tag' },
   { value: 'user', label: 'User' },
   { value: 'team', label: 'Team' },
 ]
@@ -34,55 +43,45 @@ const GROUPS: { value: SpendGroupBy; label: string }[] = [
 const UNATTRIBUTED: Record<SpendGroupBy, string> = {
   workflow: 'Outside any workflow',
   job: 'Unnamed job',
+  tag: 'Untagged',
   user: 'Shared runner token',
   team: 'No account',
 }
 
-const MONTHS_BACK = 6
+/** How many lines are shown before the rest is folded into one. */
+const VISIBLE = 8
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** `2026-08` as `August 2026`, so a period reads as a month and not as an id. */
-function monthName(period: string): string {
-  const [year, month] = period.split('-')
-  const index = Number.parseInt(month ?? '', 10)
-  if (!year || !Number.isFinite(index) || index < 1 || index > 12) return period
-  const label = new Date(Date.UTC(2000, index - 1, 1)).toLocaleString(undefined, {
-    month: 'long',
-  })
-  return `${label} ${year}`
+export interface SpendBreakdownProps {
+  /** The month to read. Owned by the screen, because the chart above selects it too. */
+  period: string
 }
 
-/** This month and the five before it, newest first. */
-function recentPeriods(): string[] {
-  const now = new Date()
-  return Array.from({ length: MONTHS_BACK }, (_, back) => {
-    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1))
-    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`
-  })
-}
-
-export function SpendBreakdown() {
+export function SpendBreakdown({ period }: SpendBreakdownProps) {
   const url = useSettingsStore((state) => state.runnerUrl)
   const token = useSettingsStore((state) => state.runnerToken)
   const can = useAuthStore((state) => state.can)
   const workflows = useLibraryStore((state) => state.workflows)
+  const jobs = useLibraryStore((state) => state.jobs)
 
-  const periods = useMemo(recentPeriods, [])
   const [groupBy, setGroupBy] = useState<SpendGroupBy>('workflow')
-  const [period, setPeriod] = useState(periods[0])
   const [data, setData] = useState<Breakdown | null>(null)
   const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const [failure, setFailure] = useState('')
 
-  // The runner only knows the workflows it has seen a run from. A workflow that
-  // exists in this browser and has never run should still read by name.
-  const localNames = useMemo(
-    () => new Map(workflows.map((workflow) => [workflow.id, workflow.name])),
-    [workflows],
-  )
+  // The runner only knows the records it has seen a run from, and it stores the
+  // name as it was then. A record that exists in this browser should read by the
+  // name it has now.
+  const localNames = useMemo(() => {
+    const names = new Map<string, string>()
+    for (const workflow of workflows) names.set(workflow.id, workflow.name)
+    for (const job of jobs) names.set(job.id, job.name)
+    return names
+  }, [jobs, workflows])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -101,35 +100,25 @@ export function SpendBreakdown() {
     void load()
   }, [load])
 
+  // A different dimension is a different list; leaving it expanded from the last
+  // one would open on a hidden scroll position.
+  useEffect(() => {
+    setExpanded(false)
+  }, [groupBy, period])
+
   const rows = data?.groups ?? []
   const peak = rows.reduce((most, row) => Math.max(most, row.charged), 0)
+  const shown = expanded ? rows : rows.slice(0, VISIBLE)
+  const hidden = rows.length - shown.length
+  const total = data?.total
   const scopeNote =
-    data?.scope === 'all'
-      ? 'Every account on this runner.'
-      : "Your own team's spending."
+    data?.scope === 'all' ? 'Every account on this runner.' : "Your own team's spending."
 
   return (
     <div className="space-y-3">
       <SectionTitle
         action={
-          <span className="flex items-center gap-1.5 text-2xs text-content-subtle">
-            <CalendarDays className="h-3 w-3" aria-hidden />
-            <select
-              value={period}
-              onChange={(event) => setPeriod(event.target.value)}
-              aria-label="Billing period"
-              className={cn(
-                'rounded-md border border-line bg-surface px-1.5 py-0.5 text-2xs text-content',
-                'focus:border-line-strong focus:outline-none',
-              )}
-            >
-              {periods.map((item) => (
-                <option key={item} value={item}>
-                  {monthName(item)}
-                </option>
-              ))}
-            </select>
-          </span>
+          <span className="text-2xs text-content-subtle">{monthName(period)}</span>
         }
       >
         Where the credits went
@@ -151,92 +140,101 @@ export function SpendBreakdown() {
         <p className="text-2xs leading-relaxed text-content-subtle">{failure}</p>
       ) : rows.length === 0 ? (
         <p className="rounded-lg border border-dashed border-line px-3 py-6 text-center text-2xs text-content-subtle">
-          Nothing was charged in {monthName(period)}. Local runs are free and never
-          show up here.
+          Nothing was charged in {monthName(period)}. Local runs are free and never show
+          up here.
         </p>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-line">
-          <table className="w-full text-left text-2xs">
-            <thead className="bg-surface-sunken text-content-subtle">
-              <tr>
-                <th className="px-3 py-2 font-medium">
-                  {GROUPS.find((item) => item.value === groupBy)?.label}
-                </th>
-                <th className="w-20 px-3 py-2 text-right font-medium">Runs</th>
-                <th className="w-20 px-3 py-2 text-right font-medium">Writes</th>
-                <th className="w-28 px-3 py-2 text-right font-medium">Credits</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const name =
-                  (row.key ? localNames.get(row.key) : null) ??
-                  row.label ??
-                  row.key ??
-                  UNATTRIBUTED[groupBy]
-                const share = peak > 0 ? Math.round((row.charged / peak) * 100) : 0
-                return (
-                  <tr key={row.key ?? '∅'} className="border-t border-line">
-                    <td className="min-w-0 px-3 py-2">
-                      <span
-                        className={cn(
-                          'block truncate',
-                          row.key ? 'text-content' : 'text-content-subtle italic',
-                        )}
-                        title={row.key ?? undefined}
-                      >
-                        {name}
-                      </span>
-                      <span className="mt-1 block h-1 overflow-hidden rounded-full bg-surface-sunken">
-                        <span
-                          className="block h-full bg-brand-500"
-                          style={{ width: `${share}%` }}
-                        />
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-content-subtle">
-                      {row.runs}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-content-subtle">
-                      {row.writes}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-content">
+        <>
+          <ul className="space-y-1.5">
+            {shown.map((row) => {
+              const name =
+                (row.key ? localNames.get(row.key) : null) ??
+                row.label ??
+                row.key ??
+                UNATTRIBUTED[groupBy]
+              const width = shareOf(row.charged, peak)
+              const free = shareOf(row.waived, Math.max(row.charged, 1))
+              return (
+                <li key={row.key ?? '∅'} className="space-y-1">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span
+                      className={cn(
+                        'min-w-0 truncate text-xs',
+                        row.key ? 'text-content' : 'italic text-content-subtle',
+                      )}
+                      title={row.key ?? undefined}
+                    >
+                      {name}
+                    </span>
+                    <span className="shrink-0 text-xs tabular-nums text-content">
                       {row.charged}
-                      {row.waived > 0 ? (
-                        <span className="ml-1 text-content-subtle">
-                          ({row.waived} free)
-                        </span>
-                      ) : null}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-            <tfoot className="border-t border-line bg-surface-sunken">
-              <tr>
-                <td className="px-3 py-2 text-content">Total</td>
-                <td className="px-3 py-2 text-right tabular-nums text-content-subtle">
-                  {data?.total.runs ?? 0}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-content-subtle">
-                  {data?.total.writes ?? 0}
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums text-content">
-                  {data?.total.charged ?? 0}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+                      <span className="ml-1 text-2xs text-content-subtle">
+                        {row.runs} {row.runs === 1 ? 'run' : 'runs'}
+                        {row.waived > 0 ? ` · ${row.waived} free` : ''}
+                      </span>
+                    </span>
+                  </div>
+                  <span
+                    className="block h-1.5 overflow-hidden rounded-full bg-surface-sunken"
+                    role="presentation"
+                  >
+                    <span
+                      className="flex h-full flex-row-reverse rounded-full bg-brand-500"
+                      style={{ width: `${width}%` }}
+                    >
+                      {/* The paid part is the solid end of the bar; what the
+                          allowance absorbed is the pale tail behind it. */}
+                      <span
+                        className="block h-full shrink-0 bg-brand-500/35"
+                        style={{ width: `${free}%` }}
+                      />
+                    </span>
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+
+          {hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="text-2xs text-content-muted underline-offset-2 hover:text-content hover:underline"
+            >
+              Show {hidden} more
+            </button>
+          )}
+
+          <div className="flex items-baseline justify-between gap-3 border-t border-line pt-2 text-xs">
+            <span className="text-content-muted">
+              Total for {monthName(period)}
+            </span>
+            <span className="tabular-nums text-content">
+              {total?.charged ?? 0}
+              <span className="ml-1 text-2xs text-content-subtle">
+                {total?.runs ?? 0} {total?.runs === 1 ? 'run' : 'runs'}
+                {(total?.waived ?? 0) > 0 ? ` · ${total?.waived} free` : ''}
+              </span>
+            </span>
+          </div>
+
+          {data?.overlapping && (
+            <p className="flex items-start gap-1.5 rounded-md bg-surface-sunken px-2.5 py-2 text-2xs leading-relaxed text-content-muted">
+              <Layers className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+              <span>
+                A run wearing two tags is counted in full under each, so these lines
+                add up to more than the total. That is deliberate: the question a tag
+                answers is what one label costs, not how a month divides.
+              </span>
+            </p>
+          )}
+        </>
       )}
 
       <p className="text-2xs leading-relaxed text-content-subtle">
         {scopeNote} The team is the account — a workflow can be renamed or moved
-        between teams, so it is a way of reading the bill rather than a payer of
-        its own.{' '}
-        {can('credits:Read')
-          ? ''
-          : 'Reading other teams needs credits:Read.'}
+        between teams, so it is a way of reading the bill rather than a payer of its
+        own. {can('credits:Read') ? '' : 'Reading other teams needs credits:Read.'}
       </p>
     </div>
   )

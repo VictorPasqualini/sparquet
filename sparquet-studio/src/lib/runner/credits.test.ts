@@ -196,6 +196,7 @@ describe('getCreditLedger', () => {
       note: null,
       workflowId: 'w1',
       actor: 'ana',
+      tags: [],
     })
     expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/credits/t1/ledger?limit=20`)
   })

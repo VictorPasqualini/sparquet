@@ -72,10 +72,10 @@ import sqlite3
 import threading
 import uuid
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 class CreditError(Exception):
@@ -170,6 +170,19 @@ def current_period(moment: Optional[datetime] = None) -> str:
     """
     now = moment or datetime.now(timezone.utc)
     return f"{now.year:04d}-{now.month:02d}"
+
+
+def recent_periods(months: int = 6, moment: Optional[datetime] = None) -> List[str]:
+    """The last `months` periods ending in the current one, oldest first."""
+    now = moment or datetime.now(timezone.utc)
+    year, month = now.year, now.month
+    out: List[str] = []
+    for _ in range(max(1, int(months))):
+        out.append(f"{year:04d}-{month:02d}")
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return list(reversed(out))
 
 
 # --------------------------------------------------------------- local or not
@@ -305,7 +318,47 @@ CREATE TABLE IF NOT EXISTS ledger (
 CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger(account_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ledger_job_run ON ledger(job_run_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_period ON ledger(period, reason);
+
+/* The tags that applied to the run this entry paid for, copied here at charge
+   time instead of being looked up in the catalog when the bill is read. An
+   invoice must not change: retagging a Job next month says what that Job costs
+   from now on, and rewrites nothing about the months already closed. */
+CREATE TABLE IF NOT EXISTS ledger_tag (
+  entry_id TEXT NOT NULL REFERENCES ledger(id),
+  tag TEXT NOT NULL,
+  PRIMARY KEY (entry_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_tag_tag ON ledger_tag(tag);
 """
+
+#: A tag is typed by a human, so it is bounded before it reaches the ledger.
+#: Same rules as the catalog's, repeated rather than imported: billing must not
+#: depend on the history module to keep its own rows sane.
+MAX_TAGS = 20
+MAX_TAG_LENGTH = 40
+
+
+def normalize_tags(values: Any) -> List[str]:
+    """Trimmed, deduplicated case-insensitively, bounded in size and in number."""
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        tag = value.strip()[:MAX_TAG_LENGTH].strip()
+        if not tag:
+            continue
+        key = tag.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+        if len(out) >= MAX_TAGS:
+            break
+    return out
+
 
 #: Columns added after the first release. Applied on every start to a database
 #: written before they existed, so an upgrade asks the operator for nothing.
@@ -386,6 +439,9 @@ class Entry:
     #: team — these are how one invoice is read back by workflow and by person.
     workflow_id: Optional[str] = None
     actor: Optional[str] = None
+    #: The labels that applied to the run when it was charged. Frozen here: what
+    #: this entry says stays true even after the Job is retagged.
+    tags: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -594,7 +650,7 @@ class CreditStore:
         account_id: Optional[str] = None, username: Optional[str] = None,
         job_run_id: Optional[str] = None, pipeline_run_id: Optional[str] = None,
         job_name: Optional[str] = None, workflow_id: Optional[str] = None,
-        actor: Optional[str] = None,
+        actor: Optional[str] = None, tags: Optional[Sequence[str]] = None,
     ) -> Charge:
         """Charge what the run really wrote and give back the rest of the hold.
 
@@ -610,7 +666,7 @@ class CreditStore:
         return self.charge(
             account, target, writes, username=username, job_run_id=job_run_id,
             pipeline_run_id=pipeline_run_id, job_name=job_name,
-            workflow_id=workflow_id, actor=actor,
+            workflow_id=workflow_id, actor=actor, tags=tags,
         )
 
     def release(
@@ -675,6 +731,7 @@ class CreditStore:
         username: Optional[str] = None, job_run_id: Optional[str] = None,
         pipeline_run_id: Optional[str] = None, job_name: Optional[str] = None,
         workflow_id: Optional[str] = None, actor: Optional[str] = None,
+        tags: Optional[Sequence[str]] = None,
     ) -> Charge:
         """Take the cost of the writes that succeeded, and record what happened.
 
@@ -735,7 +792,7 @@ class CreditStore:
                 pipeline_run_id=pipeline_run_id, target=target.label, job_name=job_name,
                 note=note, writes=writes, free_amount=from_free if gate else 0,
                 shortfall=shortfall, period=str(row["period"] or current_period()),
-                workflow_id=workflow_id, actor=actor,
+                workflow_id=workflow_id, actor=actor, tags=tags,
             )
             conn.commit()
         return Charge(
@@ -766,7 +823,7 @@ class CreditStore:
                 f"SELECT * FROM ledger {where} ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 tuple(params),
             ).fetchall()
-        return [self._entry_of(row) for row in rows]
+            return self._with_tags(conn, [self._entry_of(row) for row in rows])
 
     def entries_for_job_runs(self, job_run_ids: Iterable[str]) -> Dict[str, Entry]:
         """What each of these job runs was charged, keyed by job run id.
@@ -789,6 +846,7 @@ class CreditStore:
                 ).fetchall()
                 for row in rows:
                     found[row["job_run_id"]] = self._entry_of(row)
+            self._with_tags(conn, list(found.values()))
         return found
 
     def usage(self, account_id: str, period: Optional[str] = None) -> Dict[str, int]:
@@ -819,6 +877,9 @@ class CreditStore:
         "user": "actor",
         "workflow": "workflow_id",
         "job": "job_name",
+        # Not a column: tags are many per entry, so this one is a join. See
+        # `_breakdown_by_tag`, and mind that its rows overlap.
+        "tag": None,
     }
 
     def breakdown(
@@ -833,9 +894,13 @@ class CreditStore:
         that silently omits part of the spending is worse than an "unattributed"
         row that says so.
         """
-        column = self.GROUPS.get(group_by)
-        if column is None:
+        if group_by not in self.GROUPS:
             raise CreditError(f"Cannot group spending by {group_by!r}.")
+        if group_by == "tag":
+            return self._breakdown_by_tag(
+                period=period or current_period(), account_id=account_id
+            )
+        column = self.GROUPS[group_by]
         wanted = period or current_period()
         query = (
             f"SELECT {column} AS key, "
@@ -868,6 +933,126 @@ class CreditStore:
                 "waived": int(row["waived"]),
                 "runs": int(row["runs"]),
                 "last_at": row["last_at"],
+            })
+        return out
+
+    def totals(
+        self, *, period: Optional[str] = None, account_id: Optional[str] = None
+    ) -> Dict[str, int]:
+        """The month's real total, whatever it is being sliced by.
+
+        Every dimension but `tag` partitions the ledger, so a reader could add the
+        rows up and get here. Tags do not partition anything — a run wearing two
+        of them appears under both — so the total has to be counted once, from the
+        entries themselves, or the screen would claim the month cost twice what it
+        did.
+        """
+        wanted = period or current_period()
+        clauses = ["period = ?", "reason = ?"]
+        args: List[Any] = [wanted, REASON_RUN]
+        if account_id:
+            clauses.append("account_id = ?")
+            args.append(account_id)
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(writes), 0) AS writes, "
+                "       COALESCE(SUM(-amount), 0) AS charged, "
+                "       COALESCE(SUM(free_amount), 0) AS waived, "
+                "       COUNT(*) AS runs "
+                f"FROM ledger WHERE {' AND '.join(clauses)}",
+                tuple(args),
+            ).fetchone()
+        return {
+            "writes": int(row["writes"]), "charged": int(row["charged"]),
+            "waived": int(row["waived"]), "runs": int(row["runs"]),
+        }
+
+    def _breakdown_by_tag(
+        self, *, period: str, account_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """The same month sliced by tag, plus one row for what carries none.
+
+        Unlike every other dimension, **these rows overlap**: an entry tagged
+        both `finance` and `nightly` is counted in full under each, so the column
+        adds up to more than the invoice. That is what makes the slice useful —
+        "what does finance cost me" is a real question whose answer does not care
+        that the run was also nightly — but it is why the total shown to a reader
+        has to come from `usage()`, never from summing these rows.
+        """
+        scope = " AND l.account_id = ?" if account_id else ""
+        args: List[Any] = [period, REASON_RUN]
+        if account_id:
+            args.append(account_id)
+        aggregates = (
+            "COALESCE(SUM(l.writes), 0) AS writes, "
+            "COALESCE(SUM(-l.amount), 0) AS charged, "
+            "COALESCE(SUM(l.free_amount), 0) AS waived, "
+            "COUNT(*) AS runs, "
+            "MAX(l.created_at) AS last_at "
+        )
+        tagged = (
+            f"SELECT t.tag AS key, {aggregates}"
+            "FROM ledger l JOIN ledger_tag t ON t.entry_id = l.id "
+            f"WHERE l.period = ? AND l.reason = ?{scope} GROUP BY t.tag"
+        )
+        untagged = (
+            f"SELECT NULL AS key, {aggregates}"
+            "FROM ledger l "
+            f"WHERE l.period = ? AND l.reason = ?{scope} "
+            "AND NOT EXISTS (SELECT 1 FROM ledger_tag t WHERE t.entry_id = l.id) "
+            "HAVING COUNT(*) > 0"
+        )
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"{tagged} UNION ALL {untagged} ORDER BY charged DESC, writes DESC",
+                (*args, *args),
+            ).fetchall()
+        return [{
+            "key": row["key"],
+            "label": str(row["key"]) if row["key"] else None,
+            "writes": int(row["writes"]),
+            "charged": int(row["charged"]),
+            "waived": int(row["waived"]),
+            "runs": int(row["runs"]),
+            "last_at": row["last_at"],
+        } for row in rows]
+
+    def usage_timeline(
+        self, *, months: int = 6, account_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """One row per month, oldest first — the shape of the spending over time.
+
+        A single month answers "how much"; only the series answers "is this
+        normal", which is the question somebody staring at a bill actually has.
+        Months with no spending are present with zeros, so a gap reads as a quiet
+        month instead of disappearing and making the line lie.
+        """
+        months = max(1, min(int(months), 36))
+        clauses = ["reason = ?"]
+        args: List[Any] = [REASON_RUN]
+        if account_id:
+            clauses.append("account_id = ?")
+            args.append(account_id)
+        where = " AND ".join(clauses)
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT period, COALESCE(SUM(writes), 0) AS writes, "
+                "       COALESCE(SUM(-amount), 0) AS charged, "
+                "       COALESCE(SUM(free_amount), 0) AS waived, "
+                "       COUNT(*) AS runs "
+                f"FROM ledger WHERE {where} GROUP BY period",
+                tuple(args),
+            ).fetchall()
+        found = {str(row["period"] or ""): row for row in rows}
+        out: List[Dict[str, Any]] = []
+        for period in recent_periods(months):
+            row = found.get(period)
+            out.append({
+                "period": period,
+                "writes": int(row["writes"]) if row else 0,
+                "charged": int(row["charged"]) if row else 0,
+                "waived": int(row["waived"]) if row else 0,
+                "runs": int(row["runs"]) if row else 0,
             })
         return out
 
@@ -916,6 +1101,7 @@ class CreditStore:
         job_name: Optional[str] = None, note: Optional[str] = None, writes: int = 0,
         free_amount: int = 0, shortfall: int = 0, period: Optional[str] = None,
         workflow_id: Optional[str] = None, actor: Optional[str] = None,
+        tags: Optional[Sequence[str]] = None,
     ) -> str:
         entry_id = uuid.uuid4().hex
         conn.execute(
@@ -930,7 +1116,33 @@ class CreditStore:
                 _now_iso(),
             ),
         )
+        for tag in normalize_tags(tags):
+            conn.execute(
+                "INSERT OR REPLACE INTO ledger_tag (entry_id, tag) VALUES (?, ?)",
+                (entry_id, tag),
+            )
         return entry_id
+
+    @staticmethod
+    def _with_tags(conn: sqlite3.Connection, entries: List[Entry]) -> List[Entry]:
+        """Fills `tags` for a page of entries in one query, not one query each."""
+        ids = [entry.id for entry in entries if entry.id]
+        if not ids:
+            return entries
+        by_entry: Dict[str, List[str]] = {}
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT entry_id, tag FROM ledger_tag WHERE entry_id IN ({placeholders}) "
+                "ORDER BY tag",
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                by_entry.setdefault(str(row["entry_id"]), []).append(str(row["tag"]))
+        for entry in entries:
+            entry.tags = by_entry.get(entry.id, [])
+        return entries
 
     @staticmethod
     def _account_of(row: sqlite3.Row) -> Account:

@@ -35,6 +35,7 @@ import { JobCanvas } from '@/components/canvas/JobCanvas'
 import { RunsBrowser } from '@/components/history/RunsBrowser'
 import { RunViewBanner } from '@/components/history/RunViewBanner'
 import { CommandPalette } from '@/components/layout/CommandPalette'
+import { TagsPopover } from '@/components/library/TagsPopover'
 import {
   WorkspaceTabs,
   workspacePanelId,
@@ -48,6 +49,7 @@ import { JobSettingsPanel } from '@/components/panels/JobSettingsPanel'
 import { NodePalette } from '@/components/panels/NodePalette'
 import { RunPanel } from '@/components/panels/RunPanel'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
+import { collectTags } from '@/lib/tags'
 import { relativeTime } from '@/lib/utils/format'
 import { cn } from '@/lib/utils/cn'
 import { getJob } from '@/lib/storage/db'
@@ -287,6 +289,9 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
   const activePanel = useEditorStore((state) => state.activePanel)
   const togglePanel = useEditorStore((state) => state.togglePanel)
   const updateJobMeta = useLibraryStore((state) => state.updateJobMeta)
+  const knownTags = useLibraryStore((state) =>
+    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
+  )
 
   const [name, setName] = useState(job?.name ?? '')
   useEffect(() => setName(job?.name ?? ''), [job?.name])
@@ -299,6 +304,12 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
     }
     void updateJobMeta(job.id, { name: trimmed })
     useEditorStore.setState({ job: { ...job, name: trimmed } })
+  }
+
+  const commitTags = (tags: string[]) => {
+    if (!job) return
+    void updateJobMeta(job.id, { tags })
+    useEditorStore.setState({ job: { ...job, tags } })
   }
 
   return (
@@ -323,6 +334,13 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
           className="h-8 max-w-sm border-transparent bg-transparent px-2 text-sm font-medium hover:border-line focus:bg-surface-sunken"
         />
       </div>
+
+      <TagsPopover
+        tags={job?.tags ?? []}
+        onChange={commitTags}
+        suggestions={knownTags}
+        subject={job?.name ?? 'this job'}
+      />
 
       <div className="flex items-center gap-1">
         <Tooltip content="Undo" shortcut="⌘Z">

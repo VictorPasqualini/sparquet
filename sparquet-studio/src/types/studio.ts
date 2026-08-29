@@ -236,6 +236,11 @@ export interface Workflow {
   description: string
   /** Tailwind-free accent token, resolved in the UI. */
   accent: WorkflowAccent
+  /**
+   * Labels for billing, inherited by everything inside this workflow. Optional
+   * because records written before tags existed have none — read it as `?? []`.
+   */
+  tags?: string[]
   createdAt: number
   updatedAt: number
 }
@@ -281,6 +286,9 @@ export interface Pipeline {
   description: string
   stages: PipelineStage[]
   links: PipelineLink[]
+  /** Labels for billing, added to the Workflow's and each stage Job's. Optional
+   * for the same reason `Workflow.tags` is: older records have none. */
+  tags?: string[]
   createdAt: number
   updatedAt: number
   /** Bumped by every persisted mutation, like `Job.revision`. */

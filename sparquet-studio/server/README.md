@@ -365,9 +365,15 @@ not allowed).
   "limit": 50,
   "dry_run": false,
   "run_as": "victor",
-  "launched": "manual"
+  "launched": "manual",
+  "tags": ["ad-hoc"]
 }
 ```
+
+`tags` is optional and **adds to** what the catalog already knows: the runner
+looks up the tags of the Job, its Pipeline and its Workflow and bills the run
+under all of them together, so a scheduled or scripted run is attributed without
+the caller having to know anything. Same field on `POST /run/flow`.
 
 Executes `Sparquet.run_from_dict(pipeline, params=params)`. Response:
 
@@ -767,13 +773,14 @@ grant endpoint. Nothing is written to the history for it — it never started.
 
 ### `GET /credits/usage`
 
-`?group_by=workflow|user|team|job&period=YYYY-MM&account_id=...` — the month's
+`?group_by=workflow|user|team|job|tag&period=YYYY-MM&account_id=...` — the month's
 spending read along one dimension. Grouping by anything else answers **400**: the
-column goes into the SQL, so only those four are accepted.
+value picks the query, so only those five are accepted.
 
 ```json
 { "period": "2026-08", "group_by": "workflow", "scope": "t1",
   "total": { "writes": 12, "charged": 3, "waived": 9, "runs": 5 },
+  "overlapping": false,
   "groups": [{ "key": "w1", "label": "Vendas", "writes": 8, "charged": 2,
                "waived": 6, "runs": 3, "last_at": "2026-08-28T19:02:11Z" }] }
 ```
@@ -787,6 +794,31 @@ invoice, not payers. Workflow names are resolved at read time from the history
 catalog, so renaming a workflow relabels every past month too. A row whose key is
 `null` is reported as unattributed, never dropped — runs charged before the
 attribution existed still add up to the total.
+
+`group_by=tag` is the one dimension that does **not** partition the month, and
+`overlapping` is `true` only for it: a run wearing `finance` and `nightly` is
+counted in full under both, so the rows add up to more than `total`. `total` is
+computed independently and always counts each entry once. The row with a `null`
+key is the untagged spending, and it is omitted when there is none.
+
+Tags are frozen on the ledger entry when the run is charged, taken from the Job,
+its Pipeline and its Workflow together (`effective_tags`), plus anything the
+caller passed as `tags` on `POST /run` or `POST /run/flow`. Retagging a Job
+changes what it costs from the next run on and rewrites nothing already billed —
+a closed month stays the month that was invoiced.
+
+### `GET /credits/timeline`
+
+`?months=6&account_id=...` — one row per month, oldest first, so a screen can
+draw the series instead of a single total. `months` is clamped to 1–36. Months
+with no spending are present as zeros rather than missing, because a gap would
+change the shape of the chart. Same scope rule as `/credits/usage`.
+
+```json
+{ "scope": "t1",
+  "periods": [{ "period": "2026-07", "writes": 0, "charged": 0, "waived": 0, "runs": 0 },
+              { "period": "2026-08", "writes": 12, "charged": 3, "waived": 9, "runs": 5 }] }
+```
 
 ### `GET /audit`
 
@@ -915,6 +947,15 @@ each point at a Job. The same Job can be a stage of several Pipelines, can appea
 twice in one, and can be run on its own without belonging to any. So the relation
 lives in `pipeline_stage (pipeline_id, stage_id, job_id, stage_index)`, keyed by
 stage rather than by job. Every other edge above is a plain foreign key.
+
+A Workflow, a Pipeline and a Job each carry **tags**, in `catalog_tag (kind,
+record_id, tag)`. They are what Billing groups by, and they are inherited
+downwards: a run's tags are its Job's, its Pipeline's and its Workflow's unioned,
+most specific first. Tagging the Workflow is the cheap way to tag everything
+inside it. A tag is trimmed, capped at 40 characters and deduplicated
+case-insensitively, at most 20 per record — the same rules as `src/lib/tags.ts`
+in the Studio, because a `Prod` stored apart from a `prod` would split a month's
+spending for a reason invisible on the screen.
 
 The catalog is written by `PUT /workspace/...`: saving a record in the editor
 mirrors it here. Rows are never deleted, only marked with `deleted_at` — a run

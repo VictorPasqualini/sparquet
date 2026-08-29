@@ -208,6 +208,10 @@ class CatalogRecord:
     #: the runs that name it keep pointing at something that exists.
     deleted_at: Optional[str] = None
     stages: List[Dict[str, Any]] = field(default_factory=list)
+    #: Free labels the user put on this record, to slice history and spending by
+    #: something the organisation cares about — a cost centre, a domain, an
+    #: environment. They belong to the record, not to the run.
+    tags: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------- retention
@@ -337,18 +341,30 @@ class ExecutionRepository(Protocol):
     def upsert_workflow(
         self, workflow_id: str, *, name: Optional[str] = None,
         description: Optional[str] = None, path: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> None: ...
 
     def upsert_job(
         self, job_id: str, *, workflow_id: Optional[str] = None, name: Optional[str] = None,
         description: Optional[str] = None, path: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> None: ...
 
     def upsert_pipeline(
         self, pipeline_id: str, *, workflow_id: Optional[str] = None,
         name: Optional[str] = None, description: Optional[str] = None,
         path: Optional[str] = None, stages: Optional[List[Dict[str, Any]]] = None,
+        tags: Optional[List[str]] = None,
     ) -> None: ...
+
+    def tags_for(self, kind: str, record_id: str) -> List[str]: ...
+
+    def effective_tags(
+        self, *, workflow_id: Optional[str] = None, pipeline_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> List[str]: ...
+
+    def list_tags(self) -> List[Dict[str, Any]]: ...
 
     def soft_delete(self, kind: str, record_id: str) -> None: ...
 
@@ -426,6 +442,39 @@ class ExecutionRepository(Protocol):
     ) -> "PurgeReport": ...
 
 
+#: A tag is a label a human types, so it is bounded here rather than trusted.
+MAX_TAGS = 20
+MAX_TAG_LENGTH = 40
+
+
+def normalize_tags(values: Any) -> List[str]:
+    """The tags as they will be stored: trimmed, deduplicated, bounded.
+
+    Deduplication is case-insensitive while the stored form keeps the case the
+    user typed. `Prod` and `prod` are one tag — two would split a bill in half
+    for a reason nobody would ever guess from the screen — but the label is
+    still shown the way it was written.
+    """
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        tag = value.strip()[:MAX_TAG_LENGTH].strip()
+        if not tag:
+            continue
+        key = tag.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tag)
+        if len(out) >= MAX_TAGS:
+            break
+    return out
+
+
 _CATALOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS workflow (
   id TEXT PRIMARY KEY,
@@ -473,6 +522,18 @@ CREATE TABLE IF NOT EXISTS pipeline_stage (
   PRIMARY KEY (pipeline_id, stage_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_stage_job ON pipeline_stage(job_id);
+
+/* Tags of a catalog record. One table for the three kinds because a tag is the
+   same thing on all of them, and `kind` in the key is what keeps a Job and a
+   Pipeline that happen to share an id apart. Rewritten wholesale on save, like
+   stages: the record's tags are what the last save said, never a merge. */
+CREATE TABLE IF NOT EXISTS catalog_tag (
+  kind TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (kind, record_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_tag_tag ON catalog_tag(tag);
 """
 
 _SCHEMA = """
@@ -740,31 +801,82 @@ class SQLiteExecutionRepository:
     def upsert_workflow(
         self, workflow_id: str, *, name: Optional[str] = None,
         description: Optional[str] = None, path: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> None:
         with self._lock, closing(self._connect()) as conn:
             self._upsert(conn, "workflow", workflow_id, None, name, description, path)
+            if tags is not None:
+                self._set_tags(conn, "workflow", workflow_id, tags)
             conn.commit()
 
     def upsert_job(
         self, job_id: str, *, workflow_id: Optional[str] = None, name: Optional[str] = None,
         description: Optional[str] = None, path: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> None:
         with self._lock, closing(self._connect()) as conn:
             self._ensure_workflow(conn, workflow_id)
             self._upsert(conn, "job", job_id, workflow_id, name, description, path)
+            if tags is not None:
+                self._set_tags(conn, "job", job_id, tags)
             conn.commit()
 
     def upsert_pipeline(
         self, pipeline_id: str, *, workflow_id: Optional[str] = None,
         name: Optional[str] = None, description: Optional[str] = None,
         path: Optional[str] = None, stages: Optional[List[Dict[str, Any]]] = None,
+        tags: Optional[List[str]] = None,
     ) -> None:
         with self._lock, closing(self._connect()) as conn:
             self._ensure_workflow(conn, workflow_id)
             self._upsert(conn, "pipeline", pipeline_id, workflow_id, name, description, path)
             if stages is not None:
                 self._set_stages(conn, pipeline_id, stages)
+            if tags is not None:
+                self._set_tags(conn, "pipeline", pipeline_id, tags)
             conn.commit()
+
+    def tags_for(self, kind: str, record_id: str) -> List[str]:
+        if kind not in ("workflow", "pipeline", "job"):
+            raise ValueError(f"Unknown catalog kind: {kind!r}")
+        with self._lock, closing(self._connect()) as conn:
+            return self._tags_for(conn, kind, record_id)
+
+    def effective_tags(
+        self, *, workflow_id: Optional[str] = None, pipeline_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> List[str]:
+        """Every tag that applies to a run: the Job's, plus what it inherits.
+
+        A tag on a Workflow applies to everything inside it — that is the point of
+        putting it there, and having to repeat "cost-centre: marketing" on forty
+        Jobs would guarantee that one of them ends up missing it and quietly
+        untagged on the invoice. The Job's own tags come first, since they are the
+        most specific.
+        """
+        out: List[str] = []
+        seen = set()
+        with self._lock, closing(self._connect()) as conn:
+            for kind, record_id in (
+                ("job", job_id), ("pipeline", pipeline_id), ("workflow", workflow_id)
+            ):
+                if not record_id:
+                    continue
+                for tag in self._tags_for(conn, kind, record_id):
+                    key = tag.casefold()
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(tag)
+        return out[:MAX_TAGS]
+
+    def list_tags(self) -> List[Dict[str, Any]]:
+        """Every tag in use, with how many records carry it. For a picker."""
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT tag, COUNT(*) AS records FROM catalog_tag "
+                "GROUP BY tag ORDER BY records DESC, tag"
+            ).fetchall()
+        return [{"tag": row["tag"], "records": int(row["records"])} for row in rows]
 
     def soft_delete(self, kind: str, record_id: str) -> None:
         """Marks a catalog record removed without dropping the row its runs point at."""
@@ -799,15 +911,22 @@ class SQLiteExecutionRepository:
             stages = conn.execute(
                 "SELECT * FROM pipeline_stage ORDER BY pipeline_id, stage_index"
             ).fetchall()
+            tag_rows = conn.execute(
+                "SELECT kind, record_id, tag FROM catalog_tag ORDER BY kind, record_id, tag"
+            ).fetchall()
         by_pipeline: Dict[str, List[Dict[str, Any]]] = {}
         for row in stages:
             by_pipeline.setdefault(row["pipeline_id"], []).append(
                 {"stage_id": row["stage_id"], "job_id": row["job_id"],
                  "stage_index": row["stage_index"]}
             )
+        by_record: Dict[tuple, List[str]] = {}
+        for row in tag_rows:
+            by_record.setdefault((row["kind"], row["record_id"]), []).append(row["tag"])
         for record in records:
             if record.kind == "pipeline":
                 record.stages = by_pipeline.get(record.id, [])
+            record.tags = by_record.get((record.kind, record.id), [])
         return records
 
     def ensure_run_targets(
@@ -901,6 +1020,28 @@ class SQLiteExecutionRepository:
                 "(pipeline_id, stage_id, job_id, stage_index) VALUES (?, ?, ?, ?)",
                 (pipeline_id, str(stage_id), str(job_id), index),
             )
+
+    @staticmethod
+    def _set_tags(
+        conn: sqlite3.Connection, kind: str, record_id: str, tags: Any
+    ) -> None:
+        conn.execute(
+            "DELETE FROM catalog_tag WHERE kind = ? AND record_id = ?", (kind, record_id)
+        )
+        for tag in normalize_tags(tags):
+            conn.execute(
+                "INSERT OR REPLACE INTO catalog_tag (kind, record_id, tag) "
+                "VALUES (?, ?, ?)",
+                (kind, record_id, tag),
+            )
+
+    @staticmethod
+    def _tags_for(conn: sqlite3.Connection, kind: str, record_id: str) -> List[str]:
+        rows = conn.execute(
+            "SELECT tag FROM catalog_tag WHERE kind = ? AND record_id = ? ORDER BY tag",
+            (kind, record_id),
+        ).fetchall()
+        return [str(row["tag"]) for row in rows]
 
     @staticmethod
     def _row_to_catalog(row: sqlite3.Row, kind: str) -> CatalogRecord:

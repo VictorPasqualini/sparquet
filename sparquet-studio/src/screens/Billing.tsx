@@ -10,14 +10,23 @@
  * between teams — a budget attached to one would break the day somebody dragged a
  * job out of it. So there is one payer and several ways of reading its invoice,
  * which is what the breakdown below is.
+ *
+ * The screen owns the month, because the trend chart and the breakdown are the
+ * same question asked at two zoom levels: the bars say which month is worth
+ * looking at, and clicking one is what points the breakdown at it.
  */
 
 import { Coins } from 'lucide-react'
+import { useState } from 'react'
 
 import { CreditsPanel } from '@/components/credits/CreditsPanel'
 import { SpendBreakdown } from '@/components/credits/SpendBreakdown'
+import { SpendTrend } from '@/components/credits/SpendTrend'
+import { currentPeriod } from '@/lib/billing'
 
 export function Billing() {
+  const [period, setPeriod] = useState(currentPeriod)
+
   return (
     <div className="mx-auto w-full max-w-5xl px-6 py-8 animate-fade-in">
       <header className="flex items-start gap-3">
@@ -38,7 +47,10 @@ export function Billing() {
           <CreditsPanel />
         </div>
         <div className="card space-y-5 p-5">
-          <SpendBreakdown />
+          <SpendTrend period={period} onSelect={setPeriod} />
+        </div>
+        <div className="card space-y-5 p-5">
+          <SpendBreakdown period={period} />
         </div>
       </div>
     </div>

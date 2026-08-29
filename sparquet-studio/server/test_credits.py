@@ -517,6 +517,152 @@ class LedgerTests(StoreTestCase):
         self.assertEqual(usage["waived"], 3)
 
 
+class TagTests(StoreTestCase):
+    """Billing by tag: labels frozen on the entry, and rows that overlap.
+
+    Tags are the one dimension that does not partition the ledger — a run wearing
+    two of them is counted under both — so what is protected here is that the
+    overlap is deliberate and that the month's total never inherits it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._enforce(True)
+        self._free(0)
+        self.store.grant("t1", 100, username="data")
+
+    def _run(self, writes, **kwargs):
+        return self.store.charge("t1", self._remote(), writes, **kwargs)
+
+    def _by_key(self, rows):
+        return {row["key"]: row["charged"] for row in rows}
+
+    def test_groups_by_tag(self):
+        self._run(2, job_name="vendas", tags=["finance", "nightly"])
+        self._run(3, job_name="estoque", tags=["finance"])
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"finance": 5, "nightly": 2})
+
+    def test_a_run_counts_in_full_under_each_of_its_tags(self):
+        """The rows overlap on purpose: "what does finance cost me" does not care
+        that the run was also nightly."""
+        self._run(4, tags=["finance", "nightly"])
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"finance": 4, "nightly": 4})
+        self.assertEqual(sum(row["charged"] for row in rows), 8)
+        self.assertEqual(self.store.totals(account_id="t1")["charged"], 4)
+
+    def test_untagged_spending_is_its_own_row(self):
+        self._run(2, tags=["finance"])
+        self._run(3)
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"finance": 2, None: 3})
+
+    def test_a_month_with_no_tag_at_all_is_one_row(self):
+        self._run(3)
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["key"])
+
+    def test_an_empty_month_has_no_untagged_row(self):
+        self.assertEqual(self.store.breakdown(group_by="tag", account_id="t1"), [])
+
+    def test_the_tags_are_frozen_on_the_entry(self):
+        """Retagging a Job says what it costs from now on. A closed month does not
+        change because somebody renamed a cost centre."""
+        self._run(2, tags=["finance"])
+        entry = self.store.ledger(account_id="t1", limit=1)[0]
+        self.assertEqual(entry.tags, ["finance"])
+
+    def test_tags_are_deduplicated_case_insensitively(self):
+        """`Prod` and `prod` as two rows would split a bill for a reason nobody
+        could guess from the screen."""
+        self._run(2, tags=["Prod", "prod", " prod "])
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["key"], "Prod")
+
+    def test_junk_never_reaches_the_ledger(self):
+        self._run(2, tags=["  ", "", None, 7, "boa"])
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"boa": 2})
+
+    def test_the_number_of_tags_is_bounded(self):
+        self._run(2, tags=[f"tag-{index}" for index in range(credits.MAX_TAGS + 10)])
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(len(rows), credits.MAX_TAGS)
+
+    def test_another_account_is_not_in_the_slice(self):
+        self.store.grant("t2", 100, username="plataforma")
+        self._run(2, tags=["finance"])
+        self.store.charge("t2", self._remote(), 5, tags=["finance"])
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"finance": 2})
+        self.assertEqual(
+            self._by_key(self.store.breakdown(group_by="tag")), {"finance": 7}
+        )
+
+    def test_a_settled_run_carries_its_tags(self):
+        hold = self.store.reserve("t1", self._remote(), 2, username="data")
+        self.store.settle(
+            hold, self._remote(), 2, account_id="t1", tags=["finance"]
+        )
+        rows = self.store.breakdown(group_by="tag", account_id="t1")
+        self.assertEqual(self._by_key(rows), {"finance": 2})
+
+    def test_grants_are_not_tagged_spending(self):
+        self.store.grant("t1", 50, note="top-up")
+        self.assertEqual(self.store.breakdown(group_by="tag", account_id="t1"), [])
+
+
+class TotalsAndTimelineTests(StoreTestCase):
+    """The month's real total, and the series that says whether it is normal."""
+
+    def setUp(self):
+        super().setUp()
+        self._enforce(True)
+        self._free(0)
+        self.store.grant("t1", 100, username="data")
+
+    def test_totals_count_each_run_once(self):
+        self.store.charge("t1", self._remote(), 4, tags=["a", "b", "c"])
+        totals = self.store.totals(account_id="t1")
+        self.assertEqual(totals["charged"], 4)
+        self.assertEqual(totals["runs"], 1)
+        self.assertEqual(totals["writes"], 4)
+
+    def test_totals_of_the_whole_runner(self):
+        self.store.grant("t2", 100)
+        self.store.charge("t1", self._remote(), 2)
+        self.store.charge("t2", self._remote(), 3)
+        self.assertEqual(self.store.totals()["charged"], 5)
+        self.assertEqual(self.store.totals(account_id="t1")["charged"], 2)
+
+    def test_the_timeline_ends_in_the_current_month(self):
+        self.store.charge("t1", self._remote(), 2)
+        periods = self.store.usage_timeline(months=6, account_id="t1")
+        self.assertEqual(len(periods), 6)
+        self.assertEqual(periods[-1]["period"], credits.current_period())
+        self.assertEqual(periods[-1]["charged"], 2)
+
+    def test_a_quiet_month_is_a_zero_not_a_gap(self):
+        """A missing month would make the line lie about the shape of the
+        spending. It reads as zero, which is what it was."""
+        periods = self.store.usage_timeline(months=3, account_id="t1")
+        self.assertEqual([row["charged"] for row in periods], [0, 0, 0])
+        self.assertEqual(len({row["period"] for row in periods}), 3)
+
+    def test_the_series_is_oldest_first(self):
+        periods = self.store.usage_timeline(months=4)
+        self.assertEqual([row["period"] for row in periods], sorted(
+            row["period"] for row in periods
+        ))
+
+    def test_the_length_is_bounded(self):
+        self.assertEqual(len(self.store.usage_timeline(months=999)), 36)
+        self.assertEqual(len(self.store.usage_timeline(months=0)), 1)
+
+
 class PrincipalTests(unittest.TestCase):
     class _Principal:
         def __init__(self, username, user_id=None, team_id=None, team_name=None,
