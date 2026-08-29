@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import history
@@ -479,6 +480,240 @@ class HistoryRepositoryTest(unittest.TestCase):
                 "no-such-job-run", "transform", 0, "filter",
                 status=history.RUNNING, timestamp="2026-01-01T00:00:00Z",
             )
+
+
+class RetentionTest(unittest.TestCase):
+    """Two-stage expiry: a run first loses its detail, and only much later its row.
+
+    Every run here is backdated with SQL, since `create_pipeline_run` stamps the
+    current time and the whole feature is about age.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "history.sqlite3"
+        self.repo = history.SQLiteExecutionRepository(self.path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *, days_ago: int, job_id: str = "j1", lines: int = 2) -> tuple:
+        """One executed run, aged `days_ago` days: a job run with a config, one
+        step and some log lines."""
+        run_id = self.repo.create_pipeline_run(
+            kind="job", workflow_id="w1", pipeline_id=None, job_id=job_id, name=job_id,
+        )
+        job_run_id = self.repo.create_job_run(
+            run_id, job_id=job_id, name=job_id, stage_index=0,
+            config_hash="sha256:abc", config='{"name": "x"}',
+        )
+        step = self.repo.create_step_run(
+            job_run_id, "input", 0, "csv", status=history.RUNNING,
+            timestamp="2026-01-01T00:00:00Z",
+        )
+        self.repo.finish_step_run(
+            step, status=history.SUCCESS, timestamp="2026-01-01T00:00:01Z",
+            error_message=None, error_details=None,
+        )
+        self.repo.append_logs(job_run_id, [_log(f"line {i}") for i in range(lines)])
+        self.repo.finish_job_run(
+            job_run_id, status=history.SUCCESS, duration_ms=10, error=None,
+            rows_read=100, rows_written=90,
+        )
+        self.repo.finish_pipeline_run(
+            run_id, status=history.SUCCESS, duration_ms=10, error=None
+        )
+        self._age(run_id, days_ago)
+        return run_id, job_run_id
+
+    def _age(self, run_id: str, days: int) -> None:
+        when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.execute("UPDATE pipeline_run SET started_at = ? WHERE id = ?", (when, run_id))
+            conn.commit()
+
+    def _rows(self, table: str) -> int:
+        with closing(sqlite3.connect(self.path)) as conn:
+            return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    POLICY = history.RetentionPolicy(detail_days=30, max_days=365, keep_runs=0)
+
+    def test_a_recent_run_is_left_alone(self) -> None:
+        run_id, job_run_id = self._run(days_ago=3)
+        report = self.repo.purge(self.POLICY)
+        self.assertEqual(report.runs_thinned, 0)
+        self.assertEqual(self.repo.count_logs(job_run_id), 2)
+        self.assertIsNotNone(self.repo.get_pipeline_run(run_id))
+
+    def test_an_old_run_loses_its_detail_and_keeps_itself(self) -> None:
+        """The point of the first stage: what a time series needs survives, what
+        nobody opens after a month does not."""
+        run_id, job_run_id = self._run(days_ago=90)
+
+        report = self.repo.purge(self.POLICY)
+
+        self.assertEqual(report.runs_thinned, 1)
+        self.assertEqual(report.logs_deleted, 2)
+        self.assertEqual(report.steps_deleted, 1)
+        self.assertEqual(report.configs_dropped, 1)
+        self.assertEqual(self.repo.count_logs(job_run_id), 0)
+        self.assertEqual(self._rows("step_run"), 0)
+
+        run = self.repo.get_pipeline_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run.status, history.SUCCESS)
+        self.assertEqual(run.jobs[0].rows_written, 90)
+        stored = self.repo.job_config(job_run_id)
+        self.assertIsNone(stored.config)
+        self.assertEqual(stored.config_hash, "sha256:abc")
+
+    def test_thinning_alone_never_removes_the_run(self) -> None:
+        """`delete` is off by default: losing the fact that something ran at all
+        is the operator's decision, not a default."""
+        run_id, _ = self._run(days_ago=900)
+        report = self.repo.purge(self.POLICY)
+        self.assertEqual(report.runs_deleted, 0)
+        self.assertIsNotNone(self.repo.get_pipeline_run(run_id))
+
+    def test_the_second_stage_removes_the_row_when_it_is_turned_on(self) -> None:
+        old, _ = self._run(days_ago=900)
+        middle, middle_job = self._run(days_ago=90)
+
+        report = self.repo.purge(
+            history.RetentionPolicy(detail_days=30, max_days=365, keep_runs=0, delete=True)
+        )
+
+        self.assertEqual(report.runs_deleted, 1)
+        self.assertEqual(report.runs_thinned, 1)   # the 90-day one, counted once
+        self.assertIsNone(self.repo.get_pipeline_run(old))
+        self.assertIsNotNone(self.repo.get_pipeline_run(middle))
+        self.assertEqual(self._rows("job_run"), 1)
+        self.assertEqual(self.repo.count_logs(middle_job), 0)
+
+    def test_a_pinned_run_survives_both_stages(self) -> None:
+        """A run someone marked as the execution of an incident has to outlive
+        any age rule."""
+        run_id, job_run_id = self._run(days_ago=900)
+        self.assertTrue(self.repo.set_pinned(run_id, True))
+
+        report = self.repo.purge(
+            history.RetentionPolicy(detail_days=30, max_days=365, keep_runs=0, delete=True)
+        )
+
+        self.assertEqual((report.runs_thinned, report.runs_deleted), (0, 0))
+        self.assertEqual(self.repo.count_logs(job_run_id), 2)
+        self.assertTrue(self.repo.get_pipeline_run(run_id).pinned)
+
+    def test_unpinning_puts_a_run_back_in_reach(self) -> None:
+        run_id, _ = self._run(days_ago=900)
+        self.repo.set_pinned(run_id, True)
+        self.repo.set_pinned(run_id, False)
+        self.assertEqual(self.repo.purge(self.POLICY).runs_thinned, 1)
+
+    def test_pinning_a_run_that_does_not_exist_says_so(self) -> None:
+        self.assertFalse(self.repo.set_pinned("nope", True))
+
+    def test_the_newest_runs_of_a_job_are_kept_however_old(self) -> None:
+        """A Job that runs once a month would otherwise lose its entire history
+        and open on an empty screen."""
+        for days in (400, 500, 600):
+            self._run(days_ago=days)
+
+        report = self.repo.purge(
+            history.RetentionPolicy(detail_days=30, max_days=365, keep_runs=2, delete=True)
+        )
+
+        self.assertEqual(report.runs_deleted, 1)
+        kept = self.repo.list_pipeline_runs(job_id="j1")
+        self.assertEqual(len(kept), 2)
+        # The two that were kept are the newest, and they kept their detail too.
+        self.assertEqual(report.runs_thinned, 0)
+        newest = self.repo.get_pipeline_run(kept[0].id)
+        self.assertEqual(self.repo.count_logs(newest.jobs[0].id), 2)
+
+    def test_each_job_keeps_its_own_newest_runs(self) -> None:
+        """The window is per Job, not global: a busy Job must not push a quiet
+        one's history out."""
+        for days in (400, 410, 420):
+            self._run(days_ago=days, job_id="busy")
+        quiet, _ = self._run(days_ago=800, job_id="quiet")
+
+        self.repo.purge(
+            history.RetentionPolicy(detail_days=30, max_days=365, keep_runs=1, delete=True)
+        )
+
+        self.assertIsNotNone(self.repo.get_pipeline_run(quiet))
+        self.assertEqual(len(self.repo.list_pipeline_runs(job_id="busy")), 1)
+
+    def test_a_dry_run_counts_exactly_what_it_would_remove_and_removes_nothing(self) -> None:
+        _, job_run_id = self._run(days_ago=90)
+        old, _ = self._run(days_ago=900)
+
+        policy = history.RetentionPolicy(
+            detail_days=30, max_days=365, keep_runs=0, delete=True
+        )
+        preview = self.repo.purge(policy, dry_run=True)
+
+        self.assertTrue(preview.dry_run)
+        self.assertEqual(self.repo.count_logs(job_run_id), 2)
+        self.assertIsNotNone(self.repo.get_pipeline_run(old))
+
+        applied = self.repo.purge(policy)
+        self.assertEqual(
+            (applied.runs_thinned, applied.runs_deleted, applied.logs_deleted),
+            (preview.runs_thinned, preview.runs_deleted, preview.logs_deleted),
+        )
+
+    def test_purging_an_empty_history_is_a_no_op(self) -> None:
+        report = self.repo.purge(self.POLICY)
+        self.assertEqual(report.rows_removed, 0)
+        self.assertFalse(report.vacuumed)
+
+    def test_the_file_is_rewritten_only_when_enough_came_out(self) -> None:
+        """VACUUM copies the whole database; it is not worth doing for a handful
+        of log lines, and without it SQLite never gives the pages back."""
+        self._run(days_ago=90, lines=5)
+        small = self.repo.purge(self.POLICY)
+        self.assertFalse(small.vacuumed)
+
+        self._run(days_ago=90, lines=40)
+        big = self.repo.purge(
+            history.RetentionPolicy(detail_days=30, max_days=365, keep_runs=0, vacuum_after=10)
+        )
+        self.assertTrue(big.vacuumed)
+
+
+class RetentionPolicyTest(unittest.TestCase):
+    def test_the_defaults_are_the_documented_ones(self) -> None:
+        policy = history.RetentionPolicy.from_env({})
+        self.assertEqual(
+            (policy.detail_days, policy.max_days, policy.keep_runs, policy.delete),
+            (30, 365, 10, False),
+        )
+        self.assertTrue(history.RetentionPolicy.enabled({}))
+
+    def test_the_environment_overrides_each_number(self) -> None:
+        policy = history.RetentionPolicy.from_env({
+            "SPARQUET_STUDIO_HISTORY_DETAIL_DAYS": "7",
+            "SPARQUET_STUDIO_HISTORY_MAX_DAYS": "60",
+            "SPARQUET_STUDIO_HISTORY_KEEP_RUNS": "3",
+            "SPARQUET_STUDIO_HISTORY_DELETE": "on",
+        })
+        self.assertEqual(
+            (policy.detail_days, policy.max_days, policy.keep_runs, policy.delete),
+            (7, 60, 3, True),
+        )
+
+    def test_a_value_that_does_not_parse_falls_back_instead_of_stopping_the_runner(self) -> None:
+        policy = history.RetentionPolicy.from_env({
+            "SPARQUET_STUDIO_HISTORY_DETAIL_DAYS": "thirty",
+            "SPARQUET_STUDIO_HISTORY_KEEP_RUNS": "-4",
+        })
+        self.assertEqual((policy.detail_days, policy.keep_runs), (30, 10))
+
+    def test_the_purge_can_be_turned_off_entirely(self) -> None:
+        self.assertFalse(history.RetentionPolicy.enabled({"SPARQUET_STUDIO_HISTORY_PURGE": "off"}))
+        self.assertTrue(history.RetentionPolicy.enabled({"SPARQUET_STUDIO_HISTORY_PURGE": ""}))
 
 
 class LineageTest(unittest.TestCase):

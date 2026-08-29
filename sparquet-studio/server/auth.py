@@ -188,6 +188,8 @@ ACTIONS: Dict[str, str] = {
     "run:Cancel": "Stop a run that is in progress.",
     "run:Validate": "Check a JSON without running it.",
     "history:Read": "Read past executions, their steps, logs and configuration.",
+    "history:Pin": "Mark a run as kept forever, so retention never expires it.",
+    "history:Purge": "Apply the retention policy by hand, deleting old history.",
     "iam:ReadUsers": "See who has access, in which teams and with which roles.",
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
     "iam:ManageRoles": "Create and edit roles, and choose the actions each one allows.",
@@ -222,7 +224,10 @@ BUILTIN_ROLES: Dict[str, Role] = {
         statements=[
             {
                 "effect": "allow",
-                "actions": ["workspace:*", "run:*", "history:Read", "credits:Read"],
+                "actions": [
+                    "workspace:*", "run:*", "history:Read", "history:Pin",
+                    "credits:Read",
+                ],
                 "resources": ["*"],
             }
         ],
@@ -239,6 +244,7 @@ BUILTIN_ROLES: Dict[str, Role] = {
                     "run:Cancel",
                     "run:Validate",
                     "history:Read",
+                    "history:Pin",
                 ],
                 "resources": ["*"],
             }

@@ -655,6 +655,32 @@ _HISTORY_DB_PATH = Path(
 )
 _history: Any = history.SQLiteExecutionRepository(_HISTORY_DB_PATH)
 
+#: How often the retention policy is applied on its own. Once a day is enough for
+#: a rule expressed in days, and it never runs on the execution path — a purge
+#: rewrites the database, which is not something to do while a run is streaming.
+_PURGE_EVERY_SECONDS = 24 * 60 * 60
+
+
+def _purge_history_periodically() -> None:
+    """Applies the retention policy at start-up and once a day after that.
+
+    Failures are logged and swallowed: a database that could not be trimmed is a
+    disk-space problem, not a reason for the runner to stop serving.
+    """
+    while True:
+        try:
+            report = _history.purge(history.RetentionPolicy.from_env())
+            if report.rows_removed or report.runs_thinned:
+                _log.info(
+                    "History purge: %s runs thinned, %s deleted, %s rows removed%s.",
+                    report.runs_thinned, report.runs_deleted, report.rows_removed,
+                    ", file rewritten" if report.vacuumed else "",
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("History purge failed: %s", exc)
+        time.sleep(_PURGE_EVERY_SECONDS)
+
+
 # Where the library lives as files. Defaults to a directory next to the framework so
 # it is inside the repository the user already versions; point the env var somewhere
 # else (a shared checkout, a mounted volume) to move the whole library with it.
@@ -1994,6 +2020,8 @@ class PipelineRunOut(BaseModel):
     # Who it ran as, and how it was started: "manual", "scheduled" or "api".
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Kept forever: retention skips this run whatever its age.
+    pinned: bool = False
     jobs: List[JobRunOut] = Field(default_factory=list)
 
 
@@ -2052,6 +2080,54 @@ def get_run(run_id: str) -> PipelineRunOut:
     # twenty Jobs would otherwise be twenty queries for twenty small rows.
     charges = _credits.entries_for_job_runs([job.id for job in run.jobs])
     return _pipeline_run_out(run, charges)
+
+
+class PinRequest(BaseModel):
+    pinned: bool = True
+
+
+class PinResponse(BaseModel):
+    run_id: str
+    pinned: bool
+
+
+@app.post(
+    "/runs/{run_id}/pin",
+    response_model=PinResponse,
+    dependencies=[Depends(requires("history:Pin"))],
+)
+def pin_run(run_id: str, body: PinRequest) -> PinResponse:
+    """Keeps one execution forever. Retention expires history by age; this is how
+    the run of an incident survives it."""
+    if not _history.set_pinned(run_id, body.pinned):
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    return PinResponse(run_id=run_id, pinned=body.pinned)
+
+
+class PurgeResponse(BaseModel):
+    dry_run: bool
+    runs_thinned: int
+    runs_deleted: int
+    logs_deleted: int
+    steps_deleted: int
+    configs_dropped: int
+    rows_removed: int
+    vacuumed: bool
+    policy: Dict[str, Any]
+
+
+@app.post(
+    "/runs/purge",
+    response_model=PurgeResponse,
+    dependencies=[Depends(requires("history:Purge"))],
+)
+def purge_runs(dry_run: bool = False) -> PurgeResponse:
+    """Applies the retention policy now. `dry_run=true` answers with exactly what
+    would go and touches nothing — worth doing first, since the second stage
+    deletes rows for good."""
+    policy = history.RetentionPolicy.from_env()
+    report = _history.purge(policy, dry_run=dry_run)
+    return PurgeResponse(**report.as_dict(), policy=vars(policy))
 
 
 _log = logging.getLogger("sparquet_studio.server")
@@ -3205,6 +3281,15 @@ def cancel_run(run_id: str) -> CancelResponse:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+# Started last, once `_log` and the whole module exist: the first purge runs
+# immediately, on a daemon thread, so it never delays a request or survives a
+# shutdown. `SPARQUET_STUDIO_HISTORY_PURGE=off` leaves the database untouched.
+if history.RetentionPolicy.enabled():
+    threading.Thread(
+        target=_purge_history_periodically, name="history-purge", daemon=True
+    ).start()
 
 
 if __name__ == "__main__":

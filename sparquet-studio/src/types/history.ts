@@ -162,6 +162,11 @@ export interface PipelineRunRecord {
   runAs: string | null
   /** How it started: a person pressed Run, a timer fired, or the API was called. */
   launched: 'manual' | 'scheduled' | 'api' | null
+  /**
+   * Kept forever. The runner expires history by age; a pinned run is skipped
+   * whatever its age, which is how the execution of an incident survives.
+   */
+  pinned: boolean
   /** Populated only on `getRun` — a list row never carries the nested detail. */
   jobs: JobRunRecord[]
 }

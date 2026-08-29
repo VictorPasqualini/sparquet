@@ -16,7 +16,7 @@
  * panel now links here instead.
  */
 
-import { History as HistoryIcon, PanelRight, RefreshCw } from 'lucide-react'
+import { History as HistoryIcon, PanelRight, Pin, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { RunDetailDialog } from '@/components/history/RunDetailDialog'
@@ -353,6 +353,11 @@ export function RunsBrowser({
         }
         viewActionLabel={viewActionLabel}
         viewingJobRunId={viewingJobRunId}
+        onPinnedChange={(id, pinned) =>
+          setRuns((current) =>
+            current.map((run) => (run.id === id ? { ...run, pinned } : run)),
+          )
+        }
       />
     </div>
   )
@@ -412,6 +417,14 @@ function RunRow({
           {run.id}
         </button>
         {onCanvas && <Badge tone="brand" className="ml-2">on canvas</Badge>}
+        {run.pinned && (
+          <span
+            className="ml-1.5 inline-flex align-text-top text-content-subtle"
+            title="Kept forever — retention will not expire this execution"
+          >
+            <Pin className="h-3 w-3" aria-label="Kept forever" />
+          </span>
+        )}
         {run.error && (
           <p
             className={cn(

@@ -322,6 +322,11 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
 | `SPARQUET_STUDIO_WORKSPACE` | `sparquet-workspace/` at the repo root | Directory the Studio library is stored in, as real JSON files. This is what you commit. |
+| `SPARQUET_STUDIO_HISTORY_PURGE` | on | `off`/`0`/`false`/`no` stops the runner from applying retention on its own. `POST /runs/purge` still works. |
+| `SPARQUET_STUDIO_HISTORY_DETAIL_DAYS` | `30` | After this many days a run loses its logs, its steps and its stored JSON, and keeps its row. |
+| `SPARQUET_STUDIO_HISTORY_MAX_DAYS` | `365` | After this many days the run row itself goes — but only with `SPARQUET_STUDIO_HISTORY_DELETE` on. |
+| `SPARQUET_STUDIO_HISTORY_KEEP_RUNS` | `10` | The newest N executions of each Job and each Pipeline are never expired, however old they are. |
+| `SPARQUET_STUDIO_HISTORY_DELETE` | unset (thin only) | `on`/`1`/`true`/`yes` lets the second stage delete run rows. Off, history thins but never shrinks in row count. |
 
 ## Endpoints
 
@@ -490,7 +495,8 @@ fetch `/runs/{id}` for the nested detail.
 
 Each row carries `run_as` and `launched` alongside the status and the timings, so
 a list of runs answers *who* and *how* without a second request. Both are `null`
-on runs recorded before those columns existed.
+on runs recorded before those columns existed. `pinned` says whether retention has
+been told to keep this execution forever.
 
 ### `GET /runs/{run_id}`
 
@@ -504,6 +510,37 @@ holding `{"inputs": [...], "outputs": [...]}`, where each entry is
 `join`, `output`, or `validation:report` / `validation:valid` / `validation:invalid`
 for the quality sinks. It is `null` when the configuration named no dataset, or on
 a run recorded before lineage existed.
+
+### `POST /runs/{run_id}/pin`
+
+Body `{"pinned": true}` keeps that execution forever: retention skips a pinned run
+whatever its age. `{"pinned": false}` puts it back within reach. Answers
+`{"run_id", "pinned"}`, `404` when the runner does not hold the run. Requires
+`history:Pin`.
+
+### `POST /runs/purge`
+
+Applies the retention policy now, instead of waiting for the daily pass. Requires
+`history:Purge`. `?dry_run=true` counts exactly what would go and touches nothing —
+worth doing first, since the second stage deletes rows for good.
+
+Retention runs in two stages, both driven by the environment variables above:
+
+1. **Thin** — past `DETAIL_DAYS`, a run drops its log lines, its step rows and the
+   copy of the JSON it ran. The run row survives with its status, its timings, its
+   row counts and the `config_hash`, so success rates and durations still plot and
+   two executions can still be compared by fingerprint.
+2. **Delete** — past `MAX_DAYS`, and only with `HISTORY_DELETE` on, the row goes too.
+
+Two things are never expired by either stage: a **pinned** run, and the newest
+`KEEP_RUNS` executions of each Job and each Pipeline — a Job that runs once a
+quarter must not open on an empty screen. The credit ledger is a separate database
+and is never touched, so purging history never rewrites what was billed.
+
+The answer reports `runs_thinned`, `runs_deleted`, `logs_deleted`, `steps_deleted`,
+`configs_dropped`, `rows_removed`, `vacuumed` and the `policy` that was applied.
+`VACUUM` only runs when enough came out to be worth rewriting the file; without it
+SQLite keeps the freed pages.
 
 ### `GET /job-runs/{job_run_id}/logs`
 

@@ -34,12 +34,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
@@ -175,6 +176,9 @@ class PipelineRun:
     # falling back to the account the runner process itself runs under.
     run_as: Optional[str] = None
     launched: Optional[str] = None
+    #: Marked by a person as worth keeping. Retention never touches a pinned run
+    #: — "this is the execution of the incident" has to outlive any age rule.
+    pinned: bool = False
     jobs: List[JobRun] = field(default_factory=list)
 
 
@@ -200,6 +204,125 @@ class CatalogRecord:
     #: the runs that name it keep pointing at something that exists.
     deleted_at: Optional[str] = None
     stages: List[Dict[str, Any]] = field(default_factory=list)
+
+
+# --------------------------------------------------------------------- retention
+
+
+#: How many ids go into one `IN (...)` clause. SQLite's parameter limit is far
+#: higher, but a purge of a year's runs should not build a query megabytes long.
+_CHUNK = 400
+
+
+def _chunks(items: List[str], size: int = _CHUNK):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+@dataclass(frozen=True)
+class RetentionPolicy:
+    """What the history keeps, and for how long.
+
+    The database grows very unevenly, which is why expiry happens in two stages
+    rather than one. Almost all the bytes are `run_log` (one row per logged line;
+    the 3000-line ceiling is *per execution*, not for the file) and
+    `job_run.config` (the whole JSON that ran, per execution). The execution row
+    itself — status, timings, rows read and written, lineage, who ran it — is
+    about 200 bytes and is exactly what a time series needs.
+
+    So:
+
+    - after `detail_days`, a run is **thinned**: its log lines, its step rows and
+      its stored configuration go, and the run stays, still reporting what it did
+      and still identified by `config_hash`.
+    - after `max_days`, the run row itself goes — but only when `delete` is on.
+      Losing the fact that something ran is the operator's call, not a default.
+
+    Two guards sit above the ages: a run marked `pinned` is never touched, and the
+    newest `keep_runs` executions of every Job and Pipeline are always kept, however
+    old, so a monthly Job does not open on an empty screen.
+
+    The credit ledger is never touched by any of this. It lives in its own
+    database file and references `job_run_id`: billing is a financial record, so
+    the detail of an execution may expire while the line that charged for it
+    stays.
+    """
+
+    detail_days: int = 30
+    max_days: int = 365
+    keep_runs: int = 10
+    #: Delete the run rows themselves once they pass `max_days`. Off by default:
+    #: thinning is reversible in its consequences (you lose detail), deleting is not.
+    delete: bool = False
+    #: Rows that have to come out before the file is rewritten. VACUUM copies the
+    #: whole database, so it is not worth doing for a handful of log lines.
+    vacuum_after: int = 1000
+
+    @classmethod
+    def from_env(cls, env: Optional[Dict[str, str]] = None) -> "RetentionPolicy":
+        """`SPARQUET_STUDIO_HISTORY_*`: `PURGE` (on|off, default on), `DETAIL_DAYS`,
+        `MAX_DAYS`, `KEEP_RUNS`, `DELETE` (on|off, default off). A value that does
+        not parse falls back to the default rather than stopping the runner from
+        starting."""
+        source = env if env is not None else os.environ
+
+        def number(name: str, fallback: int) -> int:
+            try:
+                value = int(str(source.get(f"SPARQUET_STUDIO_HISTORY_{name}", "")).strip())
+            except ValueError:
+                return fallback
+            return value if value >= 0 else fallback
+
+        return cls(
+            detail_days=number("DETAIL_DAYS", cls.detail_days),
+            max_days=number("MAX_DAYS", cls.max_days),
+            keep_runs=number("KEEP_RUNS", cls.keep_runs),
+            delete=_flag(source.get("SPARQUET_STUDIO_HISTORY_DELETE"), False),
+        )
+
+    @staticmethod
+    def enabled(env: Optional[Dict[str, str]] = None) -> bool:
+        """Whether the runner runs the purge on its own at all. `off` leaves the
+        database exactly as it is; `POST /runs/purge` still works by hand."""
+        source = env if env is not None else os.environ
+        return _flag(source.get("SPARQUET_STUDIO_HISTORY_PURGE"), True)
+
+
+def _flag(value: Optional[str], fallback: bool) -> bool:
+    if value is None or not str(value).strip():
+        return fallback
+    return str(value).strip().lower() in ("1", "on", "true", "yes")
+
+
+@dataclass
+class PurgeReport:
+    """What a purge did, or would do when `dry_run`."""
+
+    dry_run: bool = False
+    #: Runs that kept their row and lost their detail.
+    runs_thinned: int = 0
+    #: Runs whose row went too.
+    runs_deleted: int = 0
+    logs_deleted: int = 0
+    steps_deleted: int = 0
+    configs_dropped: int = 0
+    vacuumed: bool = False
+
+    @property
+    def rows_removed(self) -> int:
+        return self.logs_deleted + self.steps_deleted + self.runs_deleted
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "runs_thinned": self.runs_thinned,
+            "runs_deleted": self.runs_deleted,
+            "logs_deleted": self.logs_deleted,
+            "steps_deleted": self.steps_deleted,
+            "configs_dropped": self.configs_dropped,
+            "rows_removed": self.rows_removed,
+            "vacuumed": self.vacuumed,
+        }
 
 
 # --------------------------------------------------------------------- repository
@@ -287,6 +410,13 @@ class ExecutionRepository(Protocol):
     ) -> List[PipelineRun]: ...
 
     def get_pipeline_run(self, run_id: str) -> Optional[PipelineRun]: ...
+
+    def set_pinned(self, run_id: str, pinned: bool) -> bool: ...
+
+    def purge(
+        self, policy: "RetentionPolicy", *, dry_run: bool = False,
+        now: Optional[datetime] = None,
+    ) -> "PurgeReport": ...
 
 
 _CATALOG_SCHEMA = """
@@ -417,7 +547,7 @@ nullable: `ALTER TABLE ... ADD COLUMN` fills the existing rows with NULL, and a
 run recorded before the column existed genuinely has nothing to put there."""
 _LATER_COLUMNS = {
     "step_run": ("role", "details"),
-    "pipeline_run": ("run_as", "launched"),
+    "pipeline_run": ("run_as", "launched", "pinned"),
     "job_run": ("lineage", "config_hash", "config"),
 }
 
@@ -1069,6 +1199,160 @@ class SQLiteExecutionRepository:
             run.jobs = jobs
             return run
 
+    # ---- retention -----------------------------------------------------------
+
+    def set_pinned(self, run_id: str, pinned: bool) -> bool:
+        """Marks a run as never-purge, or unmarks it. False when there is no such run."""
+        with self._lock, closing(self._connect()) as conn:
+            cursor = conn.execute(
+                "UPDATE pipeline_run SET pinned = ? WHERE id = ?",
+                (1 if pinned else 0, run_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def purge(
+        self, policy: "RetentionPolicy", *, dry_run: bool = False,
+        now: Optional[datetime] = None,
+    ) -> "PurgeReport":
+        """Applies the retention policy. See `RetentionPolicy` for the rules.
+
+        `dry_run` counts exactly what would go and touches nothing, which is what
+        `POST /runs/purge?dry_run=true` answers with.
+        """
+        moment = now or datetime.now(timezone.utc)
+        thin_before = (moment - timedelta(days=policy.detail_days)).isoformat()
+        delete_before = (moment - timedelta(days=policy.max_days)).isoformat()
+
+        with self._lock, closing(self._connect()) as conn:
+            protected = self._protected_runs(conn, policy.keep_runs)
+            thin_ids = self._runs_older_than(conn, thin_before, protected)
+            delete_ids = (
+                self._runs_older_than(conn, delete_before, protected)
+                if policy.delete else []
+            )
+            # A run that is being deleted outright is not also "thinned": counting
+            # it twice would make the report claim more work than was done.
+            thin_ids = [run_id for run_id in thin_ids if run_id not in set(delete_ids)]
+
+            logs = self._count_children(conn, "run_log", thin_ids + delete_ids)
+            steps = self._count_children(conn, "step_run", thin_ids + delete_ids)
+            configs = self._count_configs(conn, thin_ids)
+            report = PurgeReport(
+                dry_run=dry_run, runs_thinned=len(thin_ids),
+                runs_deleted=len(delete_ids), logs_deleted=logs,
+                steps_deleted=steps, configs_dropped=configs,
+            )
+            if dry_run or not (thin_ids or delete_ids):
+                return report
+
+            for chunk in _chunks(thin_ids + delete_ids):
+                marks = ",".join("?" * len(chunk))
+                conn.execute(
+                    f"DELETE FROM run_log WHERE job_run_id IN "
+                    f"(SELECT id FROM job_run WHERE pipeline_run_id IN ({marks}))",
+                    chunk,
+                )
+                conn.execute(
+                    f"DELETE FROM step_run WHERE job_run_id IN "
+                    f"(SELECT id FROM job_run WHERE pipeline_run_id IN ({marks}))",
+                    chunk,
+                )
+            for chunk in _chunks(thin_ids):
+                marks = ",".join("?" * len(chunk))
+                # The fingerprint stays: it is what tells two runs of an edited Job
+                # apart, and it costs 71 bytes against the whole JSON.
+                conn.execute(
+                    f"UPDATE job_run SET config = NULL WHERE config IS NOT NULL "
+                    f"AND pipeline_run_id IN ({marks})",
+                    chunk,
+                )
+            for chunk in _chunks(delete_ids):
+                marks = ",".join("?" * len(chunk))
+                conn.execute(f"DELETE FROM job_run WHERE pipeline_run_id IN ({marks})", chunk)
+                conn.execute(f"DELETE FROM pipeline_run WHERE id IN ({marks})", chunk)
+            conn.commit()
+
+            # SQLite does not hand freed pages back to the filesystem on its own:
+            # without this the file stops growing but never shrinks. It rewrites
+            # the whole database, so it runs only when enough came out to be worth
+            # it — and never inside a transaction, hence the commit above.
+            if report.rows_removed >= policy.vacuum_after:
+                conn.execute("VACUUM")
+                report.vacuumed = True
+        return report
+
+    @staticmethod
+    def _protected_runs(conn: sqlite3.Connection, keep_runs: int) -> set:
+        """The runs no age rule may touch: the pinned ones, and the newest
+        `keep_runs` of every Job and every Pipeline.
+
+        The second half is what keeps a monthly Job from opening on an empty
+        screen: by any age rule alone, a Job that runs twelve times a year loses
+        its whole history and looks like it never ran.
+        """
+        pinned = {
+            row["id"] for row in conn.execute(
+                "SELECT id FROM pipeline_run WHERE pinned = 1"
+            )
+        }
+        if keep_runs <= 0:
+            return pinned
+        recent = {
+            row["id"] for row in conn.execute(
+                """
+                SELECT id FROM (
+                  SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(pipeline_id, job_id, '')
+                    ORDER BY started_at DESC, id DESC
+                  ) AS position
+                  FROM pipeline_run
+                ) WHERE position <= ?
+                """,
+                (keep_runs,),
+            )
+        }
+        return pinned | recent
+
+    @staticmethod
+    def _runs_older_than(
+        conn: sqlite3.Connection, before: str, protected: set
+    ) -> List[str]:
+        rows = conn.execute(
+            "SELECT id FROM pipeline_run WHERE started_at IS NOT NULL "
+            "AND started_at < ? ORDER BY started_at",
+            (before,),
+        ).fetchall()
+        return [row["id"] for row in rows if row["id"] not in protected]
+
+    @staticmethod
+    def _count_children(
+        conn: sqlite3.Connection, table: str, run_ids: List[str]
+    ) -> int:
+        total = 0
+        for chunk in _chunks(run_ids):
+            marks = ",".join("?" * len(chunk))
+            row = conn.execute(
+                f"SELECT COUNT(*) AS total FROM {table} WHERE job_run_id IN "
+                f"(SELECT id FROM job_run WHERE pipeline_run_id IN ({marks}))",
+                chunk,
+            ).fetchone()
+            total += int(row["total"])
+        return total
+
+    @staticmethod
+    def _count_configs(conn: sqlite3.Connection, run_ids: List[str]) -> int:
+        total = 0
+        for chunk in _chunks(run_ids):
+            marks = ",".join("?" * len(chunk))
+            row = conn.execute(
+                f"SELECT COUNT(*) AS total FROM job_run WHERE config IS NOT NULL "
+                f"AND pipeline_run_id IN ({marks})",
+                chunk,
+            ).fetchone()
+            total += int(row["total"])
+        return total
+
     @staticmethod
     def _row_to_pipeline_run(row: sqlite3.Row) -> PipelineRun:
         return PipelineRun(
@@ -1077,6 +1361,7 @@ class SQLiteExecutionRepository:
             status=row["status"], started_at=row["started_at"],
             finished_at=row["finished_at"], duration_ms=row["duration_ms"],
             error=row["error"], run_as=row["run_as"], launched=row["launched"],
+            pinned=bool(_column(row, "pinned")),
         )
 
     @staticmethod

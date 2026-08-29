@@ -43,6 +43,7 @@ function pipelineRun(overrides: Partial<PipelineRunRecord> = {}): PipelineRunRec
     error: null,
     runAs: null,
     launched: 'manual',
+    pinned: false,
     jobs: [jobRun()],
     ...overrides,
   }

@@ -389,8 +389,16 @@ arbitrária**: tudo aqui é, no fim, postura de segurança e de operação. Ele 
 
 Pendente aqui:
 
-- [ ] **Retenção / rotação do SQLite de histórico** — hoje cresce sem limite (o teto de
-      3000 linhas é por execução, não do arquivo). Ver também §9.4.
+- ✅ **Retenção / rotação do SQLite de histórico** — expurgo em dois estágios, aplicado
+      pelo runner uma vez por dia e sob demanda em `POST /runs/purge` (com `dry_run`).
+      Passados `DETAIL_DAYS` (30) a execução perde logs, steps e a cópia do JSON, mas
+      **mantém a linha** com status, tempos, contagens e `config_hash` — série histórica
+      e comparação por impressão digital continuam de pé. Passados `MAX_DAYS` (365) a
+      linha some, e só com `SPARQUET_STUDIO_HISTORY_DELETE` ligado. Nada expira duas
+      coisas: execução fixada (`pinned`, marcada no histórico, ação IAM `history:Pin`) e
+      as `KEEP_RUNS` (10) mais recentes de cada Job e de cada Pipeline. O ledger de
+      créditos é outro banco e não é tocado — expurgar histórico nunca reescreve o que
+      foi cobrado. `VACUUM` só quando saiu volume que justifique reescrever o arquivo.
 - [ ] **Histórico de execução fora do Studio** — `sparquet.cli`, job agendado,
       Databricks: nada disso aparece no histórico, que só existe quando o runner do
       Studio é quem executa.
@@ -577,7 +585,7 @@ Pendente aqui:
       (OpenTelemetry/Prometheus — duração, linhas lidas/escritas, taxa de falha, por
       Job/etapa), traço distribuído por execução, alerta (run falhou, run não rodou,
       duração fora da faixa, queda de volume), painel de saúde do conjunto de Jobs (não
-      de um por vez), retenção/rotação do SQLite de histórico, e o mesmo caminho valendo
+      de um por vez), e o mesmo caminho valendo
       para execução fora do Studio (`sparquet.cli`, Databricks, EMR) — hoje o histórico
       só existe quando o runner do Studio é quem executa. Ver §5 (lineage) e §6 (métricas
       por etapa), que são pré-requisitos parciais.

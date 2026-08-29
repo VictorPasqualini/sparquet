@@ -50,6 +50,7 @@ function pipelineRun(jobs: JobRunRecord[]): PipelineRunRecord {
     error: 'Stage 2 failed',
     runAs: null,
     launched: 'manual',
+    pinned: false,
     jobs,
   }
 }

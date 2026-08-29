@@ -7,15 +7,15 @@
  * logs each get the room they need.
  */
 
-import { Eye, Info, ListTree, ScrollText } from 'lucide-react'
+import { Eye, Info, ListTree, Pin, ScrollText } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { RunLogViewer, type RunLogSource } from '@/components/history/RunLogViewer'
 import { StatusIcon, formatTimestamp, statusTone } from '@/components/history/status'
-import { Badge, Button, ErrorCard, Modal, Segmented, Spinner } from '@/components/ui'
+import { Badge, Button, ErrorCard, IconButton, Modal, Segmented, Spinner } from '@/components/ui'
 import { isRunnerError } from '@/lib/runner/client'
 import { isErrorText, sameErrorText } from '@/lib/runner/errorText'
-import { getJobRunConfig, getRun } from '@/lib/runner/history'
+import { getJobRunConfig, getRun, pinRun } from '@/lib/runner/history'
 import { normalizeStepScope, stepDetails, stepName } from '@/lib/runner/stepNodes'
 import { cn } from '@/lib/utils/cn'
 import { formatCount, formatDuration, plural } from '@/lib/utils/format'
@@ -43,6 +43,8 @@ export interface RunDetailDialogProps {
   viewActionLabel?: string
   /** The job execution already on the canvas, so the action can say so. */
   viewingJobRunId?: string | null
+  /** Lets the list behind the dialog show the new pin state without a reload. */
+  onPinnedChange?: (runId: string, pinned: boolean) => void
 }
 
 export function RunDetailDialog({
@@ -55,12 +57,38 @@ export function RunDetailDialog({
   onViewJobRun,
   viewActionLabel = 'View on canvas',
   viewingJobRunId,
+  onPinnedChange,
 }: RunDetailDialogProps) {
   const [run, setRun] = useState<PipelineRunRecord | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedJobRunId, setSelectedJobRunId] = useState<string | null>(null)
   const [tab, setTab] = useState<DetailTab>('steps')
+  const [pinning, setPinning] = useState(false)
+
+  /**
+   * Keeps this execution forever, or lets go of it again.
+   *
+   * The runner expires history by age, which is right for the thousands of runs
+   * nobody will open again and wrong for the one that explains an incident. This
+   * is how that one is kept: retention skips a pinned run whatever its age.
+   */
+  const togglePin = () => {
+    if (!run || pinning) return
+    const next = !run.pinned
+    setPinning(true)
+    pinRun(runnerUrl, run.id, next, runnerToken)
+      .then((result) => {
+        // Null means the runner no longer knows this run — nothing to pin.
+        if (result === null) return
+        setRun((current) => (current ? { ...current, pinned: next } : current))
+        onPinnedChange?.(run.id, next)
+      })
+      .catch((err: unknown) => {
+        setError(isRunnerError(err) ? err.message : 'Failed to change this execution.')
+      })
+      .finally(() => setPinning(false))
+  }
 
   useEffect(() => {
     if (!open || !runId) return
@@ -159,6 +187,20 @@ export function RunDetailDialog({
               <span>·</span>
               <span>{formatDuration(run.durationMs ?? undefined)}</span>
               <span className="ml-auto font-mono">{run.id}</span>
+              <IconButton
+                size="xs"
+                variant="ghost"
+                active={run.pinned}
+                disabled={pinning}
+                onClick={togglePin}
+                label={
+                  run.pinned
+                    ? 'Kept forever — click to let retention expire it'
+                    : 'Keep forever, so retention never expires it'
+                }
+              >
+                <Pin />
+              </IconButton>
             </div>
 
             {showRunError && run.error && (
