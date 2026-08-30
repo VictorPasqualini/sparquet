@@ -380,6 +380,39 @@ _VALID_JOIN_TYPES = {
     "anti", "leftanti", "left_anti",
 }
 
+#: Joins que devolvem só as colunas do lado esquerdo — não há o que desambiguar.
+_SO_LADO_ESQUERDO = {
+    "semi", "leftsemi", "left_semi",
+    "anti", "leftanti", "left_anti",
+}
+
+
+def _fonte(params: dict, transformacao: str) -> dict:
+    """A configuração da segunda fonte, em `input`.
+
+    `input` é o nome atual, o mesmo do bloco de entrada do pipeline — a fonte de
+    um join é uma entrada como qualquer outra, e chamá-la de outra coisa era uma
+    palavra a mais para aprender. `with` era esse nome e continua aceito, para
+    não quebrar JSON já escrito.
+    """
+    source = params.get("input", params.get("with"))
+    if source is None:
+        raise ValueError(
+            f"{transformacao}: falta 'input' com a segunda fonte (formato + path). "
+            "'with' e aceito como nome antigo."
+        )
+    return source
+
+
+def _nome_livre(base: str, usados: set) -> str:
+    """`nome` → `nome_r`, e `nome_r2`, `nome_r3`… se o anterior já existir."""
+    candidato = f"{base}_r"
+    n = 1
+    while candidato in usados:
+        n += 1
+        candidato = f"{base}_r{n}"
+    return candidato
+
 
 class JoinTransformation(BaseTransformation):
     """Joins the main DataFrame with a second source.
@@ -388,17 +421,21 @@ class JoinTransformation(BaseTransformation):
     semi/leftsemi, anti/leftanti and their underscore variants.
 
     The left DataFrame is aliased as 'l' and the right as 'r', so SQL
-    expressions in 'on' and in downstream transformations can use l.campo
-    and r.campo to disambiguate columns.
+    expressions in 'on' can use l.campo and r.campo to disambiguate columns.
+
+    Columns present on both sides are renamed on the right with a '_r' suffix
+    ('nome' and 'nome_r'), so the result never carries two columns with the same
+    name. See `_desambiguar`.
 
     JSON params:
-      with                 – source config (format + path + options)
+      input                – source config (format + path + options). 'with' is
+                             still accepted as the old name for this key.
       on                   – column name, list of column names, or SQL expression
                              (SQL expressions containing spaces use l./r. aliases)
       how                  – join type (default: inner)
       broadcast            – dica de broadcast (map-side) join: espalha o lado pequeno
                              em todos os executors e evita o shuffle do lado grande.
-                             true / "right" → broadcast do lado direito (o `with`, ex:
+                             true / "right" → broadcast do lado direito (o `input`, ex:
                              dimensão/lookup pequeno); "left" → broadcast do principal;
                              false / ausente → sem dica (o Spark decide por tamanho).
       with_transformations – list of transformations applied to the right-side
@@ -406,18 +443,18 @@ class JoinTransformation(BaseTransformation):
 
     Examples:
       { "type": "join",
-        "with": { "format": "parquet", "path": "/ref/products" },
+        "input": { "format": "parquet", "path": "/ref/products" },
         "on": "product_id",
         "how": "leftanti" }
 
       { "type": "join",
-        "with": { "format": "delta", "path": "ref.dim_produto" },
+        "input": { "format": "delta", "path": "ref.dim_produto" },
         "on": "produto_id",
         "how": "left",
         "broadcast": true }
 
       { "type": "join",
-        "with": { "format": "delta", "path": "catalog.schema.contratos" },
+        "input": { "format": "delta", "path": "catalog.schema.contratos" },
         "with_transformations": [
           { "type": "filter", "condition": "status = 1" },
           { "type": "select", "columns": ["id", "nome"] }
@@ -429,10 +466,11 @@ class JoinTransformation(BaseTransformation):
     def apply(self, df: DataFrame) -> DataFrame:
         from sparquet.io.factory import ReaderFactory
 
-        source_cfg = InputConfig.from_dict(self.config.params["with"])
+        params = self.config.params
+        source_cfg = InputConfig.from_dict(_fonte(params, "join"))
         other = ReaderFactory.create(df.sparkSession, source_cfg).read()
 
-        raw_transforms = self.config.params.get("with_transformations", [])
+        raw_transforms = params.get("with_transformations", [])
         if raw_transforms:
             from sparquet.core.config import TransformationConfig
             from sparquet.transform.engine import TransformationEngine
@@ -442,8 +480,8 @@ class JoinTransformation(BaseTransformation):
             cfgs = [TransformationConfig.from_dict(t) for t in raw_transforms]
             other = engine.apply(other, cfgs)
 
-        on = self.config.params["on"]
-        how: str = self.config.params.get("how", "inner").lower()
+        on = params["on"]
+        how: str = params.get("how", "inner").lower()
 
         if how not in _VALID_JOIN_TYPES:
             raise ValueError(
@@ -464,8 +502,58 @@ class JoinTransformation(BaseTransformation):
 
         # String with spaces → SQL expression (supports l.campo / r.campo)
         if isinstance(on, str) and " " in on:
-            return left.join(right, F.expr(on), how)
-        return left.join(right, on, how)
+            joined = left.join(right, F.expr(on), how)
+            chaves: list[str] = []
+        else:
+            joined = left.join(right, on, how)
+            # Com `on` por nome o Spark já funde a chave numa coluna só: ela não
+            # é ambígua e não deve ser renomeada.
+            chaves = [on] if isinstance(on, str) else list(on)
+
+        return self._desambiguar(joined, df, other, how, chaves)
+
+    @staticmethod
+    def _desambiguar(
+        joined: DataFrame,
+        left: DataFrame,
+        right: DataFrame,
+        how: str,
+        chaves: list[str],
+    ) -> DataFrame:
+        """Garante nomes únicos no resultado, renomeando o lado direito.
+
+        Um join entre fontes que compartilham nomes de coluna — o caso normal num
+        self join — devolvia duas colunas `nome`, e qualquer transformação
+        seguinte que citasse `nome` falhava com `AMBIGUOUS_REFERENCE`. Aqui as
+        repetidas do lado direito viram `nome_r` (`_r2`, `_r3`… se já existir),
+        na mesma linha do alias `r` que o join usa.
+
+        A projeção é montada DEPOIS do join, sobre os aliases `l`/`r`, para não
+        interferir na condição do `on`: um `on` escrito à mão cita `r.nome`, e
+        renomear antes de juntar tiraria essa referência do lugar.
+
+        Quando não há nome repetido o DataFrame volta como estava — o caso comum
+        não paga nada, nem em plano nem em comportamento.
+        """
+        if how in _SO_LADO_ESQUERDO:
+            return joined
+
+        repetidas = [c for c in right.columns if c in left.columns and c not in chaves]
+        if not repetidas:
+            return joined
+
+        usados = set(left.columns) | set(chaves)
+        projecao = [F.col(f"`{k}`") for k in chaves]
+        for c in left.columns:
+            if c not in chaves:
+                projecao.append(F.col(f"l.`{c}`").alias(c))
+        for c in right.columns:
+            if c in chaves:
+                continue
+            nome = c if c not in repetidas else _nome_livre(c, usados)
+            usados.add(nome)
+            projecao.append(F.col(f"r.`{c}`").alias(nome))
+        return joined.select(*projecao)
 
     def _broadcast_side(self) -> str:
         """Normaliza o param 'broadcast' → "left" | "right" | "" (sem dica)."""
@@ -575,19 +663,20 @@ class UnionTransformation(BaseTransformation):
     """Appends rows from a second source to the main DataFrame.
 
     JSON params:
-      with                  – source config (format + path + options)
+      input                 – source config (format + path + options). 'with' is
+                              still accepted as the old name for this key.
       allow_missing_columns – fill missing columns with null (default: false)
 
     Example:
       { "type": "union",
-        "with": { "format": "parquet", "path": "/data/extra_orders" },
+        "input": { "format": "parquet", "path": "/data/extra_orders" },
         "allow_missing_columns": true }
     """
 
     def apply(self, df: DataFrame) -> DataFrame:
         from sparquet.io.factory import ReaderFactory
 
-        source_cfg = InputConfig.from_dict(self.config.params["with"])
+        source_cfg = InputConfig.from_dict(_fonte(self.config.params, "union"))
         other = ReaderFactory.create(df.sparkSession, source_cfg).read()
 
         if self.config.params.get("allow_missing_columns", False):

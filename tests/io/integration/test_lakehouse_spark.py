@@ -126,6 +126,161 @@ class DeltaTest(unittest.TestCase):
         # Quem o merge não tocou continua como estava.
         self.assertEqual(por_id["2"]["nome"], harness.SEED_ROWS[1][1])
 
+    def test_merge_apaga_a_linha_que_a_origem_marcou_como_excluida(self) -> None:
+        """`delete_when`: o CDC de exclusao. A origem TRAZ a linha apagada, com uma
+        marca; sem esta clausula ela seria atualizada e nunca sairia da tabela."""
+        directory = (harness.WORK / "delta-merge-delete").as_posix()
+
+        harness.run(
+            {
+                "name": "it-delta-del-base",
+                "input": harness.seed_input(),
+                "output": {"format": "delta", "path": directory, "mode": "overwrite"},
+            }
+        )
+        # A origem tem uma coluna a mais, `op`, que decide o destino da linha. O
+        # UPDATE do Delta so mexe nas colunas listadas, entao a marca pode vir
+        # junto sem sujar a tabela.
+        origem = harness.work_dir("delta-del-origem") / "cdc.csv"
+        origem.write_text(
+            "id,nome,valor,op\n1,ignorado,0.0,D\n2,atualizado,4.2,U\n",
+            encoding="utf-8",
+        )
+        resultado = harness.run(
+            {
+                "name": "it-delta-del",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "delta",
+                    "path": directory,
+                    "mode": "merge",
+                    "options": {"merge_keys": ["id"], "delete_when": "S.op = 'D'"},
+                },
+            }
+        )
+        self.assertTrue(resultado.success, msg=resultado.error)
+
+        por_id = self._ler("delta-del", directory)
+        # id=1 saiu, id=2 foi atualizado, id=3 nao foi tocado.
+        self.assertEqual(set(por_id), {"2", "3"})
+        self.assertEqual(por_id["2"]["nome"], "atualizado")
+
+    def test_merge_escrito_a_mao_roda_as_clausulas_na_ordem_dada(self) -> None:
+        """A forma explicita: `on` e `actions` passam crus para o SQL. O que so
+        aparece aqui e que o comando montado e aceito pelo Delta — o teste de
+        montagem trava o texto, nao o dialeto — e que um UPDATE parcial mexe so
+        nas colunas listadas, deixando o resto da linha como estava."""
+        directory = (harness.WORK / "delta-merge-actions").as_posix()
+
+        harness.run(
+            {
+                "name": "it-delta-actions-base",
+                "input": harness.seed_input(),
+                "output": {"format": "delta", "path": directory, "mode": "overwrite"},
+            }
+        )
+        origem = harness.work_dir("delta-actions-origem") / "cdc.csv"
+        origem.write_text(
+            "id,nome,valor,op\n1,ignorado,9.9,D\n2,renomeado,9.9,U\n9,novo,7.5,I\n",
+            encoding="utf-8",
+        )
+        resultado = harness.run(
+            {
+                "name": "it-delta-actions",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "delta",
+                    "path": directory,
+                    "mode": "merge",
+                    "options": {
+                        "on": "S.id = T.id",
+                        "actions": [
+                            "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+                            "WHEN MATCHED THEN UPDATE SET T.nome = S.nome",
+                            "WHEN NOT MATCHED THEN INSERT (id, nome, valor) "
+                            "VALUES (S.id, S.nome, S.valor)",
+                        ],
+                    },
+                },
+            }
+        )
+        self.assertTrue(resultado.success, msg=resultado.error)
+
+        por_id = self._ler("delta-actions", directory)
+        # id=1 saiu pelo DELETE, id=9 entrou pelo INSERT, id=3 nao foi tocado.
+        self.assertEqual(set(por_id), {"2", "3", "9"})
+        # O UPDATE listou so `nome`: o valor original de id=2 continua la.
+        self.assertEqual(por_id["2"]["nome"], "renomeado")
+        self.assertEqual(por_id["2"]["valor"], "-0.25")
+        self.assertEqual(por_id["9"]["nome"], "novo")
+
+    def test_merge_apaga_o_que_a_origem_nao_trouxe(self) -> None:
+        """`delete_not_matched_by_source`: sincroniza o destino com um snapshot
+        COMPLETO da origem. Contra uma carga incremental isto apagaria tudo o que
+        aquela carga nao repetiu — por isso fica desligado por default."""
+        directory = (harness.WORK / "delta-merge-sync").as_posix()
+
+        harness.run(
+            {
+                "name": "it-delta-sync-base",
+                "input": harness.seed_input(),
+                "output": {"format": "delta", "path": directory, "mode": "overwrite"},
+            }
+        )
+        # O snapshot tem 1 e 3; o 2, que sumiu da origem, deve sair do destino.
+        origem = harness.work_dir("delta-sync-origem") / "snapshot.csv"
+        origem.write_text(
+            "id,nome,valor\n1,alpha,1.5\n3,chegou,7.0\n", encoding="utf-8"
+        )
+        resultado = harness.run(
+            {
+                "name": "it-delta-sync",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "delta",
+                    "path": directory,
+                    "mode": "merge",
+                    "options": {
+                        "merge_keys": ["id"],
+                        "delete_not_matched_by_source": True,
+                    },
+                },
+            }
+        )
+        self.assertTrue(resultado.success, msg=resultado.error)
+
+        por_id = self._ler("delta-sync", directory)
+        self.assertEqual(set(por_id), {"1", "3"})
+        self.assertEqual(por_id["3"]["nome"], "chegou")
+
+    def _ler(self, rotulo: str, directory: str) -> dict:
+        """Le a tabela de volta como CSV e devolve as linhas por id."""
+        harness.run(
+            {
+                "name": "it-" + rotulo + "-leitura",
+                "input": {"format": "delta", "path": directory},
+                "output": {
+                    "format": "csv",
+                    "path": (harness.WORK / ("back-" + rotulo)).as_posix(),
+                    "mode": "overwrite",
+                    "options": {"header": "true"},
+                },
+            }
+        )
+        return {linha["id"]: linha for linha in harness.rows_back(rotulo)}
+
     def test_merge_sem_merge_keys_falha_dizendo_o_que_falta(self) -> None:
         directory = (harness.WORK / "delta-merge-sem-chave").as_posix()
 
@@ -344,6 +499,101 @@ class IcebergTest(unittest.TestCase):
         self.assertEqual(set(por_id), {"1", "2", "3", "9"})
         self.assertEqual(por_id["1"]["nome"], "atualizado")
         self.assertEqual(por_id["9"]["nome"], "novo")
+
+    def test_merge_apaga_a_linha_que_a_origem_marcou_como_excluida(self) -> None:
+        """Mesmo CDC do Delta. A diferenca esta em como cada um trata a coluna de
+        controle: o Delta lista as colunas do destino no UPDATE, o Iceberg usa
+        `UPDATE SET *`. Este teste trava que a marca `op`, que o destino nao tem,
+        atravessa o `UPDATE SET *` sem quebrar e sem virar coluna da tabela."""
+        tabela = "local.db.merge_delete"
+
+        harness.run(
+            {
+                "name": "it-iceberg-del-base",
+                "input": harness.seed_input(),
+                "output": {"format": "iceberg", "path": tabela, "mode": "overwrite"},
+            }
+        )
+        origem = harness.work_dir("iceberg-del-origem") / "cdc.csv"
+        origem.write_text(
+            "id,nome,valor,op\n1,ignorado,0.0,D\n2,atualizado,4.2,U\n",
+            encoding="utf-8",
+        )
+        resultado = harness.run(
+            {
+                "name": "it-iceberg-del",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "iceberg",
+                    "path": tabela,
+                    "mode": "merge",
+                    "options": {"merge_keys": ["id"], "delete_when": "S.op = 'D'"},
+                },
+            }
+        )
+        self.assertTrue(resultado.success, msg=resultado.error)
+
+        por_id = self._ler("iceberg-del", tabela)
+        self.assertEqual(set(por_id), {"2", "3"})
+        self.assertEqual(por_id["2"]["nome"], "atualizado")
+
+    def test_merge_apaga_o_que_a_origem_nao_trouxe(self) -> None:
+        tabela = "local.db.merge_sync"
+
+        harness.run(
+            {
+                "name": "it-iceberg-sync-base",
+                "input": harness.seed_input(),
+                "output": {"format": "iceberg", "path": tabela, "mode": "overwrite"},
+            }
+        )
+        origem = harness.work_dir("iceberg-sync-origem") / "snapshot.csv"
+        origem.write_text(
+            "id,nome,valor\n1,alpha,1.5\n3,chegou,7.0\n", encoding="utf-8"
+        )
+        resultado = harness.run(
+            {
+                "name": "it-iceberg-sync",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "iceberg",
+                    "path": tabela,
+                    "mode": "merge",
+                    "options": {
+                        "merge_keys": ["id"],
+                        "delete_not_matched_by_source": True,
+                    },
+                },
+            }
+        )
+        self.assertTrue(resultado.success, msg=resultado.error)
+
+        por_id = self._ler("iceberg-sync", tabela)
+        self.assertEqual(set(por_id), {"1", "3"})
+        self.assertEqual(por_id["3"]["nome"], "chegou")
+
+    def _ler(self, rotulo: str, tabela: str) -> dict:
+        harness.run(
+            {
+                "name": "it-" + rotulo + "-leitura",
+                "input": {"format": "iceberg", "path": tabela},
+                "output": {
+                    "format": "csv",
+                    "path": (harness.WORK / ("back-" + rotulo)).as_posix(),
+                    "mode": "overwrite",
+                    "options": {"header": "true"},
+                },
+            }
+        )
+        return {linha["id"]: linha for linha in harness.rows_back(rotulo)}
 
     def test_particao_na_criacao_nao_muda_o_que_volta(self) -> None:
         tabela = "local.db.particionada"

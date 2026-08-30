@@ -47,7 +47,7 @@ describe('describeJob', () => {
           { type: 'select', columns: ['id', 'total'] },
           {
             type: 'join',
-            with: { format: 'delta', path: '/lake/dim/customers' },
+            input: { format: 'delta', path: '/lake/dim/customers' },
             on: 'id',
             how: 'left',
           },

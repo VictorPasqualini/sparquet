@@ -245,7 +245,8 @@ function importTransformation(
   const params: JsonRecord = {}
   for (const [key, value] of Object.entries(entry)) {
     if (key === 'type' || key === 'skip_if_false') continue
-    if (hasSideInput && (key === 'with' || key === 'with_transformations')) continue
+    if (hasSideInput && (key === 'input' || key === 'with' || key === 'with_transformations'))
+      continue
     params[key] = jsonClone(value)
   }
 
@@ -253,7 +254,12 @@ function importTransformation(
   ctx.nodes.push(node)
 
   if (hasSideInput) {
-    const sideData = readSourceData(entry.with, ctx.issues, `The \`${type}\` second source`)
+    // `with` was this key's old name; JSON written before the rename still opens.
+    const sideData = readSourceData(
+      entry.input ?? entry.with,
+      ctx.issues,
+      `The \`${type}\` second source`,
+    )
     const sideSource = makeSourceNode(sideData)
     ctx.nodes.push(sideSource)
 

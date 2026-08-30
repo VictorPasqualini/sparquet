@@ -137,7 +137,7 @@ export const TEMPLATES: JobTemplate[] = [
         { type: 'collect', column: 'customer_id', as: 'active_customers' },
         {
           type: 'join',
-          with: { format: 'delta', path: 'sales.bronze_customer_events' },
+          input: { format: 'delta', path: 'sales.bronze_customer_events' },
           with_transformations: [
             { type: 'filter', condition: 'customer_id IN ({{active_customers}})' },
             { type: 'select', columns: ['customer_id', 'credit_score', 'segment'] },
@@ -374,7 +374,7 @@ export const TEMPLATES: JobTemplate[] = [
         },
         {
           type: 'union',
-          with: {
+          input: {
             format: 'csv',
             path: '/data/landing/orders_us',
             options: { sep: ',', header: 'true', inferSchema: 'false' },
@@ -423,7 +423,7 @@ export const TEMPLATES: JobTemplate[] = [
         { type: 'collect', column: 'customer_id', as: 'staged_customers' },
         {
           type: 'join',
-          with: { format: 'delta', path: 'crm.dim_customer' },
+          input: { format: 'delta', path: 'crm.dim_customer' },
           with_transformations: [
             { type: 'filter', condition: 'customer_id IN ({{staged_customers}})' },
             { type: 'select', columns: ['customer_id', 'customer_name', 'account_manager'] },
@@ -572,7 +572,7 @@ export const TEMPLATES: JobTemplate[] = [
         {
           type: 'join',
           skip_if_false: '{enrich_customer}',
-          with: { format: 'delta', path: 'sales.dim_customer' },
+          input: { format: 'delta', path: 'sales.dim_customer' },
           with_transformations: [{ type: 'select', columns: ['customer_id', 'customer_tier'] }],
           on: 'customer_id',
           how: 'left',

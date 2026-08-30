@@ -242,7 +242,7 @@ describe('round trip', () => {
         { type: 'collect', column: 'customer_id', as: 'active_customers' },
         {
           type: 'join',
-          with: { format: 'delta', path: 'sales.bronze_events' },
+          input: { format: 'delta', path: 'sales.bronze_events' },
           with_transformations: [
             { type: 'filter', condition: 'customer_id IN ({{active_customers}})' },
             { type: 'select', columns: ['customer_id', 'score'] },
@@ -270,7 +270,7 @@ describe('round trip', () => {
       transformations: [
         {
           type: 'union',
-          with: { format: 'parquet', path: '/data/history' },
+          input: { format: 'parquet', path: '/data/history' },
           allow_missing_columns: true,
         },
       ],
@@ -279,7 +279,8 @@ describe('round trip', () => {
 
     const compiled = expectRoundTrip(pipeline)
     const union = compiled.transformations?.[0] as Record<string, unknown>
-    expect(union.with).toEqual({ format: 'parquet', path: '/data/history' })
+    expect(union.input).toEqual({ format: 'parquet', path: '/data/history' })
+    expect(union.with).toBeUndefined()
     expect(union.with_transformations).toBeUndefined()
     expect(union.allow_missing_columns).toBe(true)
   })
@@ -1092,7 +1093,7 @@ describe('pipelineToGraph', () => {
       transformations: [
         {
           type: 'union',
-          with: { format: 'csv', path: '/other' },
+          with: { format: 'csv', path: '/other' },  // the old key, still read on import
           with_transformations: [{ type: 'select', columns: ['id'] }],
         },
       ],
@@ -1110,7 +1111,7 @@ describe('pipelineToGraph', () => {
     const compiled = compileGraph(imported.graph, imported.settings)
     expect(errorsOf(compiled.issues)).toEqual([])
     const union = compiled.pipeline?.transformations?.[0] as Record<string, unknown>
-    expect(union.with).toEqual({ format: 'csv', path: '/other' })
+    expect(union.input).toEqual({ format: 'csv', path: '/other' })
     expect(union.with_transformations).toBeUndefined()
   })
 

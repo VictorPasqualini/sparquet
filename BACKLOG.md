@@ -202,16 +202,15 @@ Pendentes / candidatos:
       Quem precisa da sessão antes de executar usa a propriedade `Sparquet.spark`.
       `tests/io/integration/harness.py` passa o bloco pelo JSON e é a prova disso.
 
-- [ ] **`mode: merge` não apaga** — o SQL montado por `DeltaWriter._merge` e
-      `IcebergWriter._merge` tem só `WHEN MATCHED THEN UPDATE` e
-      `WHEN NOT MATCHED THEN INSERT`. Não há como expressar `WHEN MATCHED THEN DELETE`
-      (linha marcada como excluída na origem) nem
-      `WHEN NOT MATCHED BY SOURCE THEN DELETE` (sincronizar o alvo com um snapshot
-      completo da origem) — os dois casos normais de CDC. Hoje, apagar exige SQL fora
-      do framework. Proposta: duas opções em `output.options`, `delete_when` (condição
-      sobre a origem, vira `WHEN MATCHED AND <cond> THEN DELETE` antes do UPDATE) e
-      `delete_not_matched_by_source` (booleano). Precisa entrar junto no catálogo do
-      Studio e nas docs do `sparquet-web`.
+- ✅ **`mode: merge` apaga** — `sparquet/io/merge.py` monta as cláusulas de DELETE e
+      `DeltaWriter._merge`/`IcebergWriter._merge` as inserem no SQL. Duas opções em
+      `output.options`: `delete_when` (condição sobre a origem, vira
+      `WHEN MATCHED AND <cond> THEN DELETE` **antes** do UPDATE, porque a primeira
+      cláusula que casa vence) e `delete_not_matched_by_source` (`true` ou uma condição
+      sobre `T.`, vira `WHEN NOT MATCHED BY SOURCE THEN DELETE` — só correto contra um
+      snapshot completo da origem). No Delta o UPDATE/INSERT passou a listar só as
+      colunas que o destino já tem, então a coluna de controle do CDC pode vir junto sem
+      quebrar a resolução. Catálogo do Studio atualizado; falta o PR no `sparquet-web`.
 
 - [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
       (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
@@ -342,7 +341,13 @@ separação ao evoluir.
       "shared/spark-lakehouse.json"}`. Serve também para `output` e `validations`
       repetidos entre pipelines. Precisa de entrada no catálogo do Studio (o editor tem
       que entender arquivo compartilhado) e de doc no `sparquet-web`.
-- [ ] **`$include` aninhado** — hoje não suportado (um nível só).
+- ✅ **`$include` aninhado** — `sparquet/utils/includes.py` expande em profundidade: um
+      arquivo incluído pode conter novos `$include`, e o caminho deles é relativo ao
+      **arquivo que os escreveu**, não ao pipeline principal (mover uma pasta de includes
+      inteira não obriga a reescrever os caminhos de dentro). Ciclo (A inclui B que inclui
+      A) levanta `ValueError` com o percurso (`a.json -> b.json -> a.json`) em vez de
+      estourar a pilha; cadeia acima de 20 níveis é recusada. Coberto em
+      `tests/utils/test_template_includes.py`.
 - [ ] **Catálogo de erros** — mensagens de erro padronizadas e acionáveis
       (transformação desconhecida, coluna inexistente, etc.).
 
@@ -390,6 +395,32 @@ arbitrária**: tudo aqui é, no fim, postura de segurança e de operação. Ele 
 
 ### 9.1 Execução, histórico e canvas
 
+- [ ] **`input_view` pelo Studio** — hoje `input_view` só existe como **argumento Python**
+  (`Sparquet(input_view=...)`, `run(...)`, `run_from_dict(...)`, `sparquet/framework.py:49`),
+  nunca como chave do JSON. O Studio compila JSON e o runner chama
+  `framework.run_from_dict(body.pipeline, params=...)` (`server/main.py:1554`) sem esse
+  argumento, então não há como chegar lá pelo editor. **Impacto no framework** (as duas
+  primeiras linhas mexem no contrato do JSON):
+
+  1. `PipelineConfig` ganha o campo `input_view: Optional[Union[str, Dict[str, Any]]] = None`
+     (`sparquet/core/config.py:253`) e `from_dict` passa a lê-lo. É chave nova no JSON —
+     precisa de doc em `docs/PIPELINE_SCHEMA.md` e no `sparquet-web` (EN/PT/ES).
+  2. `Pipeline.__init__` (`sparquet/core/pipeline.py:113`) hoje recebe o valor só por
+     argumento. Passa a cair para o do config quando o argumento for `None` — **precedência
+     argumento > JSON**, igual à de `columns`/`input_df`, para que quem usa como lib não
+     perca o controle. Nada quebra: JSON sem a chave continua com o comportamento atual.
+  3. CLI ganha o caminho de graça (passa por `from_dict`); a API Python continua igual.
+  4. Studio: campo no catálogo do nó de input (`src/catalog/`), `compileGraph` emitindo e
+     `pipelineToGraph` lendo de volta — **o round-trip é o risco real**: chave que o
+     compilador não conhece some ao reabrir o Job no canvas, e o usuário perde a
+     configuração sem aviso. O teste de round-trip tem que cobrir.
+  5. Opcional, e só depois de 1–4: expor também como **opção de execução** no diálogo de
+     run (`run_from_dict(..., input_view=...)`), para experimentar sem gravar no Job. Sozinha
+     essa opção não serve — o valor não ficaria no JSON, e a mesma conf rodada pela CLI se
+     comportaria diferente.
+
+  Custo estimado: pequeno no framework (um campo e uma precedência), médio no Studio
+  (catálogo + compilador nos dois sentidos + round-trip).
 - ✅ **Histórico de execuções** — `PipelineRun`/`JobRun`/`StepRun` persistidos em SQLite
   (`server/history.py`, `ExecutionRepository`), sobrevivem a reiniciar o app.
   `GET /runs` (lista) e `GET /runs/{id}` (detalhe) servem o `ExecutionHistoryPanel` no
@@ -817,8 +848,17 @@ Restante, na ordem do plano:
       os resultados falhos ainda no objeto; validação com `skip` **não** liga
       `PipelineResult.skipped`, que significa outra coisa (`stop_if_empty`); e resultado
       de **severidade** `warn` nunca aborta, nem sob `fail`.
-- [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
-      CLAUDE.md já é a lista de casos.
+- ✅ **`apply_template` e `$include`** — 20 testes em
+      `tests/utils/test_template_includes.py`, sem Spark: a tabela de formatação
+      (texto, número, `bool` como `"true"`/`""`, lista de texto com aspas, lista de
+      número sem, lista vazia falsy), o primeiro item decidindo a lista inteira, chave
+      ausente ficando literal, o padrão `\w+`, a interpolação crua, e a separação entre
+      `{param}` e o `{{var}}` de runtime (`apply_template("{{var}}", {"var": "x"})` devolve
+      `"{{var}}"` — as duas sintaxes não colidem mais, os lookarounds em `_PARAM` excluem a
+      chave dupla). Do `$include`: objeto, lista expandida na ordem, `params` valendo dentro
+      do incluído, caminho relativo a quem escreveu o include, aninhamento, ciclo com o
+      percurso na mensagem, `FileNotFoundError` nomeando o arquivo, e o limite que resta —
+      só vale em `transformations`.
 - [ ] **Camada HTTP do runner** (`sparquet-studio/server/main.py`) — os módulos de apoio
       já têm teste (`history.py`, `auth.py`, `workspace.py`, `credits.py`) e o escopo de
       execução também (`test_run_scope.py`), mas a **camada HTTP em si não tem nenhum**:
@@ -829,8 +869,12 @@ Restante, na ordem do plano:
       conf arbitrária, e a postura de segurança dele quebra em silêncio. `TestClient` do
       FastAPI cobre sem Spark — **exige `httpx` no ambiente de teste**, que hoje não
       está instalado (foi o que impediu de já fechar esta lacuna).
-- [ ] **`mode: merge`** (Delta e Iceberg) — precisa do `delta-spark`, então vai num
-      arquivo que se pula quando o jar falta.
+- ✅ **`mode: merge`** (Delta e Iceberg) — em
+      `tests/io/integration/test_lakehouse_spark.py`, com jar de verdade e pulando-se
+      sozinho quando ele falta: upsert (atualiza o que casa, insere o que não casa),
+      `merge_keys` ausente falhando antes de qualquer chamada Spark, e os dois DELETEs
+      (`delete_when` sobre um CSV de CDC com coluna `op`, `delete_not_matched_by_source`
+      sobre um snapshot). 14 testes no arquivo.
 - [ ] **Orquestração do `Pipeline`** — `input_df`, `columns`, `input_view`, projeção por
       output, `transformations` por output, `PipelineResult` nunca levantando exceção.
 - [ ] **`opensearch`** — conector próprio (opções `opensearch.*`), nunca afirmado, ao

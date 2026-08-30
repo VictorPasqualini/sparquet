@@ -106,8 +106,8 @@ formats that need nothing but Spark — see
 |---|:---:|:---:|:---:|---|
 | `parquet` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows survive, `partition_by` gives the column back. [Write modes pinned](../tests/test_write_modes_spark.py): `overwrite` replaces, `append` adds, `error` fails naming the path, `ignore` leaves the data untouched, `compression: gzip` changes the file extension and still reads back, and a partition directory read on its own returns only its rows |
 | `csv` | ✓ | ✓ | ◐ | [dialect pinned](../tests/test_csv_dialect_spark.py) (RFC 4180 quoting, both ways), [round-trip pinned](../tests/test_formats_roundtrip_spark.py) with `header`, and [`compression`/`partition_by` pinned](../tests/test_write_modes_spark.py). Missing: `sep`/`encoding` defaults, `inferSchema` off |
-| `delta` | ✓ | ✓ | ✅ | [path-vs-table heuristic pinned](../tests/io/test_delta_path.py) and [run against a real jar](../tests/io/integration/test_lakehouse_spark.py): round trip by physical path, `append` adding to what was there, `mode: merge` updating one row and inserting another while leaving a third alone, the missing-`merge_keys` refusal, `versionAsOf` still returning the pre-overwrite state, and `replaceWhere` swapping a single partition while the others stay put |
-| `iceberg` | ✓ | ✓ | ✅ | [run against a real jar](../tests/io/integration/test_lakehouse_spark.py) on a hadoop catalog: round trip by catalog identifier — the writer now **creates the table** with `saveAsTable`, which is what a first load needs — `append`, `mode: merge` updating and inserting, and `partition_by` at creation |
+| `delta` | ✓ | ✓ | ✅ | [path-vs-table heuristic pinned](../tests/io/test_delta_path.py) and [run against a real jar](../tests/io/integration/test_lakehouse_spark.py): round trip by physical path, `append` adding to what was there, `mode: merge` updating one row and inserting another while leaving a third alone, the missing-`merge_keys` refusal, both DELETE branches (`delete_when` over a CDC file carrying an `op` flag, `delete_not_matched_by_source` over a full snapshot), the hand-written form (`on` + `actions`) running its three clauses in order — delete the flagged row, update only the listed column, insert the new one — `versionAsOf` still returning the pre-overwrite state, and `replaceWhere` swapping a single partition while the others stay put |
+| `iceberg` | ✓ | ✓ | ✅ | [run against a real jar](../tests/io/integration/test_lakehouse_spark.py) on a hadoop catalog: round trip by catalog identifier — the writer now **creates the table** with `saveAsTable`, which is what a first load needs — `append`, `mode: merge` updating and inserting, both DELETE branches, and `partition_by` at creation |
 | `txt` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): single `value` column, lines back in the order written |
 | `view` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): session and `global` scope, the latter readable with and without the `global_temp.` prefix. Missing: the auto-cache being what stops a re-read |
 | `json` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): values and columns back whole, a null still null and not `""`, plus [`compression`/`partition_by`](../tests/test_write_modes_spark.py). Missing: `multiLine` |
@@ -203,7 +203,7 @@ that one Spark session serves the whole file: build a DataFrame with
 | `select` | high | plain names **and** SQL expressions with an alias (`to_json(payload) AS value`) |
 | `with_column` | high | `column`+`expression`, the `columns` map, and that a later entry sees an earlier one |
 | `struct` | high | dot-path auto-nesting, nested maps, and the two mixed |
-| `join` | high | `on` as string / list / SQL with `l.`/`r.`, `broadcast`, `with_transformations` applied to the right side only |
+| `join` | ✅ | [10 tests](../tests/transform/test_join_spark.py): `input` as the right-side key with `with` still accepted and a ValueError naming the missing one; and the deduplication — a name on both sides renamed `<name>_r` on the right (`_r2` when taken), the key merged by the list form of `on` but disambiguated by the SQL form, a no-op when nothing repeats, semi/anti adding no column, and `with_transformations` renaming by hand instead. Still open: `broadcast` |
 | `group_by` | high | SQL agg expressions with aliases, `pivot` with and without an explicit value list |
 | `sql` | high | `view_name` registration and that the view does not leak |
 | `filter`, `drop`, `rename`, `cast` | medium | the obvious mapping, plus `cast` type aliases |
@@ -248,12 +248,14 @@ biggest hole in the table.
 
 ## 6. Pipeline orchestration and the library API
 
-Nothing in this section is pinned. It is the layer users touch first.
+The two rewriting steps are pinned; the rest of the entry points are not. It is the
+layer users touch first.
 
 | Capability | The property that needs pinning |
 |---|---|
-| `apply_template` (`params`) | every row of the formatting table: `str`/`int`, `True` → `"true"`, `False` → `""`, list of strings → `'a', 'b'`, list of numbers, empty list → `""`, unmatched key stays literal |
-| `resolve_includes` (`$include`) | single object and list, path relative to the main JSON, template applied before the parse |
+| `merge_sql` (MERGE INTO) | ✅ [22 tests](../tests/io/test_merge_sql.py), no Spark: the `ON` built from `merge_keys` with the extra condition parenthesised, a hand-written `on` taking over, the refusal naming both routes when neither is given; the DELETE clauses and the order that makes them work (the CDC delete before the unconditional UPDATE, `NOT MATCHED BY SOURCE` last); and the explicit form — `actions` replacing the defaults **and** the declarative deletes, whitespace normalised, a clause not starting with `WHEN` refused, and an unconditional clause placed before another of its group refused as unreachable, with `NOT MATCHED BY SOURCE` not read as `NOT MATCHED` |
+| `apply_template` (`params`) | ✅ [20 tests](../tests/utils/test_template_includes.py): every row of the formatting table (`str`/`int`, `True` → `"true"`, `False` → `""`, list of strings → `'a', 'b'`, list of numbers, empty list → `""`), the first item deciding the whole list, an unmatched key staying literal, the `\w+` key pattern, raw interpolation, and the separation from the runtime `{{var}}` — `apply_template("{{var}}", {"var": "x"})` returns `"{{var}}"`, so a param named after a runtime variable no longer rewrites the reference before the engine sees it |
+| `resolve_includes` (`$include`) | ✅ same file: single object, list expanded in order, `params` applied inside the included file at every level, an include nested inside an include, its path relative to the file that wrote it, a cycle raising with the route it took, the same file twice side by side **not** being a cycle, `FileNotFoundError` naming the path, and the limit that remains — only honoured inside `transformations` |
 | `fw.run(input_df=...)` | the `input` block is ignored and `result.output_df` is filled |
 | `fw.run(columns=...)` | literal columns injected **before** the transformations |
 | `fw.run(input_view=...)` | string form and `{"name","type"}`; a following `join`/`sql` sees the view without re-reading |
@@ -356,13 +358,13 @@ Ranked by (risk it covers) ÷ (effort to write), highest first:
 4. **The transformation families in the high-priority rows of §4** — `select`,
    `with_column`, `struct`, `join`, `group_by`, `sql`, plus `collect` + `{{var}}` and
    `stop_if_empty`.
-5. **Template and `$include`** — pure, fast, and the formatting table in CLAUDE.md is a
-   ready-made list of cases.
+5. ~~**Template and `$include`**~~ — done:
+   [`tests/utils/test_template_includes.py`](../tests/utils/test_template_includes.py).
 6. **Runner service** — FastAPI's `TestClient` covers auth, the origin allow-list and
    the SSE sequence without Spark (mock the pipeline run).
-7. **`mode: merge`** for Delta and Iceberg — needs `delta-spark`, so it goes in a file
-   that skips when the jar is absent.
+7. ~~**`mode: merge`** for Delta and Iceberg~~ — done, deletes included, in
+   [`tests/io/integration/test_lakehouse_spark.py`](../tests/io/integration/test_lakehouse_spark.py).
 8. **Container-backed integration** for the connectors, opt-in via env var.
 
-Items 1–5 are all self-contained: each is one file, no harness work, and each one turns
+The remaining items 4 and 6 are self-contained: each is one file, no harness work, and each one turns
 a whole family of ⬜ into ✅.
