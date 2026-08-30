@@ -9,7 +9,9 @@ export type {
 } from '@/lib/pipeline/describe'
 
 export {
+  fileStageName,
   linkRejection,
+  newFileStage,
   newPipeline,
   newLink,
   newStage,

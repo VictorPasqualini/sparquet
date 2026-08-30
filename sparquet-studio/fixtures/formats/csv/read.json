@@ -1,0 +1,20 @@
+{
+  "name": "formatos-csv-leitura",
+  "description": "Le de volta o que a etapa anterior gravou em csv.",
+  "input": {
+    "format": "csv",
+    "path": "{dir}/out-csv",
+    "options": {
+      "header": "true",
+      "inferSchema": "true"
+    }
+  },
+  "output": {
+    "format": "csv",
+    "path": "{dir}/back-csv",
+    "mode": "overwrite",
+    "options": {
+      "header": "true"
+    }
+  }
+}

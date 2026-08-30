@@ -1148,6 +1148,33 @@ describe('pipelineToGraph', () => {
 /* ----------------------------------------------------------- real configs */
 
 /**
+ * The fixtures the Spark test executes for real (`fixtures/formats/`, six
+ * formats, a write and a read each). They are the only configs in the project
+ * that are pinned on both sides: this test says the Studio can open and compile
+ * them back unchanged, and `server/test_formats_studio_spark.py` says the runner
+ * really runs them. Neither half is worth much alone — a JSON that round-trips
+ * perfectly and does not run is still broken.
+ */
+describe('the executed format fixtures', () => {
+  const dir = fileURLToPath(new URL('../../../fixtures/formats/', import.meta.url))
+  const formats = readdirSync(dir).sort()
+
+  it('finds the six native formats', () => {
+    expect(formats).toEqual(['csv', 'json', 'orc', 'parquet', 'txt', 'view'])
+  })
+
+  for (const format of formats) {
+    for (const half of ['write.json', 'read.json']) {
+      it(`round-trips ${format}/${half}`, () => {
+        const original: unknown = JSON.parse(readFileSync(`${dir}${format}/${half}`, 'utf8'))
+        const compiled = expectRoundTrip(original)
+        expect(JSON.parse(serializePipeline(compiled))).toEqual(compiled)
+      })
+    }
+  }
+})
+
+/**
  * Discovered, not listed: every `examples/*.json` the framework ships is
  * round-tripped. A hardcoded list rots in both directions — a new example goes
  * untested, and a deleted one turns into six unreadable ENOENTs instead of one

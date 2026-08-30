@@ -67,7 +67,7 @@ with the same two layers: `tests/test_cola_lib.py` (25 pure) and
 | Write metrics (`rows_written`) | — | 17 (11 Spark-free on metric selection, 6 against real Spark) |
 | External execution history | — | 34 (Spark-free) on the framework side, 16 on the runner |
 | Studio | — | 502 tests + 21 smoke checks |
-| Runner service (`server/`) | — | 312 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 33) |
+| Runner service (`server/`) | — | 363 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 36, replaceable pieces 12, library files 28, formats executed 8) |
 
 Two findings worth stating plainly, because they are the reason this document exists:
 
@@ -104,17 +104,17 @@ formats that need nothing but Spark — see
 
 | Format | Read | Write | Status | What is missing |
 |---|:---:|:---:|:---:|---|
-| `parquet` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows survive, `partition_by` gives the column back. Missing: `append`/`error`/`ignore` write modes |
-| `csv` | ✓ | ✓ | ◐ | [dialect pinned](../tests/test_csv_dialect_spark.py) (RFC 4180 quoting, both ways) and [round-trip pinned](../tests/test_formats_roundtrip_spark.py) with `header`. Missing: `sep`/`encoding` defaults, `inferSchema` off |
-| `delta` | ✓ | ✓ | ◐ | [path-vs-table heuristic pinned](../tests/io/test_delta_path.py). Missing: `mode: merge` (keys + extra condition), time travel options |
-| `iceberg` | ✓ | ✓ | ⬜ | `MERGE INTO`, catalog identifier handling |
+| `parquet` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows survive, `partition_by` gives the column back. [Write modes pinned](../tests/test_write_modes_spark.py): `overwrite` replaces, `append` adds, `error` fails naming the path, `ignore` leaves the data untouched, `compression: gzip` changes the file extension and still reads back, and a partition directory read on its own returns only its rows |
+| `csv` | ✓ | ✓ | ◐ | [dialect pinned](../tests/test_csv_dialect_spark.py) (RFC 4180 quoting, both ways), [round-trip pinned](../tests/test_formats_roundtrip_spark.py) with `header`, and [`compression`/`partition_by` pinned](../tests/test_write_modes_spark.py). Missing: `sep`/`encoding` defaults, `inferSchema` off |
+| `delta` | ✓ | ✓ | ✅ | [path-vs-table heuristic pinned](../tests/io/test_delta_path.py) and [run against a real jar](../tests/io/integration/test_lakehouse_spark.py): round trip by physical path, `append` adding to what was there, `mode: merge` updating one row and inserting another while leaving a third alone, the missing-`merge_keys` refusal, `versionAsOf` still returning the pre-overwrite state, and `replaceWhere` swapping a single partition while the others stay put |
+| `iceberg` | ✓ | ✓ | ✅ | [run against a real jar](../tests/io/integration/test_lakehouse_spark.py) on a hadoop catalog: round trip by catalog identifier — the writer now **creates the table** with `saveAsTable`, which is what a first load needs — `append`, `mode: merge` updating and inserting, and `partition_by` at creation |
 | `txt` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): single `value` column, lines back in the order written |
 | `view` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): session and `global` scope, the latter readable with and without the `global_temp.` prefix. Missing: the auto-cache being what stops a re-read |
-| `json` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): values and columns back whole, a null still null and not `""`. Missing: `multiLine` |
-| `orc` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows identical |
-| `avro` | ✓ | ✓ | ⬜ | format string and `avroSchema` (jar not needed to assert the builder call) |
-| `xml` | ✓ | ✓ | ⬜ | `rowTag` required-ness |
-| `binary` | ✓ | — | ⬜ | read-only refusal on write, the four columns it yields |
+| `json` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): values and columns back whole, a null still null and not `""`, plus [`compression`/`partition_by`](../tests/test_write_modes_spark.py). Missing: `multiLine` |
+| `orc` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows identical, and `compression: zlib` [changing the file it writes](../tests/test_write_modes_spark.py) |
+| `avro` | ✓ | ✓ | ✅ | [run against a real jar](../tests/io/integration/test_files_spark.py): round trip keeping values and nulls, `compression` as a JSON option, `partition_by` giving every row and the column back |
+| `xml` | ✓ | ✓ | ✅ | [run on real files](../tests/io/integration/test_files_spark.py): round trip with `rowTag`/`rootTag`, the silent failure mode — a wrong `rowTag` succeeds with zero rows — `append` adding a second file to the same directory, and `compression: gzip` writing `.gz` that the reader opens with no extra option |
+| `binary` | ✓ | — | ◐ | [run on real files](../tests/io/integration/test_files_spark.py): `path`/`length` for a whole file, `pathGlobFilter` deciding what is read, and the bytes coming back identical. Missing: the read-only refusal on write |
 | `hudi` | ✓ | ✓ | ⬜ | `hoodie.*` options passthrough |
 
 Local Spark covers `parquet`, `csv`, `json`, `orc`, `txt` and `view` with no extra
@@ -129,7 +129,7 @@ to do with file formats.
 
 | Format | Status | Pinned by |
 |---|:---:|---|
-| `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle` | ✅ | URL built from `host`+`database`, explicit `url` precedence, `query` over `dbtable`, write mode, missing-URL error |
+| `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle` | ✅ | URL built from `host`+`database`, explicit `url` precedence, `query` over `dbtable`, write mode, missing-URL error. The shared read/write path is also [executed for real](../tests/io/integration/test_jdbc_spark.py) against H2 in the same JVM: the table is created, values and nulls come back, `append` adds, `overwrite` replaces, `truncate` keeps the table, `query` replaces `dbtable`. What stays unproven is each vendor's dialect — that needs the service tier |
 | `bigquery` | ✅ | load path vs write table, `query` option |
 | `snowflake` | ✅ | `dbtable` and format name |
 | `redshift` | ✅ | `dbtable` (a missing `tempdir` is not asserted) |
@@ -144,6 +144,50 @@ An integration tier against containers (Postgres, MySQL, Mongo, Cassandra,
 Elasticsearch, Kafka all have official images) is worth having eventually, but it
 belongs behind an opt-in env var — never in the default `python tests/...` run, which
 must stay a second long and offline.
+
+### The integration tier that exists today
+
+`tests/io/integration/` holds the connectors that need a jar but no service, sharing
+one `harness.py`: `avro`, `delta` and `iceberg` pull their jars through
+`spark.jars.packages`, while `xml` and `binaryFile` are built into Spark 4 and need
+nothing. One session serves the whole tier, because `spark.jars.packages` only takes
+effect when the session is created and `SparkSession` is a per-process singleton.
+The harness declares those packages in the pipeline JSON, the same way a user
+would — which makes this tier the standing proof that the JSON `spark` block
+reaches session creation. It only started working once `Sparquet.__init__` stopped
+creating the session ahead of the config it was supposed to honour.
+
+    SPARQUET_IT=1 python tests/io/integration/test_files_spark.py
+    SPARQUET_IT=1 python tests/io/integration/test_lakehouse_spark.py
+    SPARQUET_IT=1 python tests/io/integration/test_jdbc_spark.py
+
+The gate opens on `SPARQUET_IT=1`, and also on its own once every jar is already in
+the ivy cache — so the suite never downloads by surprise and, once it has run, keeps
+running offline. Without the gate every test skips with the reason printed.
+
+The JDBC path is in this tier and not the next one because H2 runs inside the
+Spark JVM: a file, no server, no container. The connector under test is named
+`postgresql`, with `url` and `driver` given explicitly, and that is not a disguise —
+all five database connectors are the same `JdbcReader`/`JdbcWriter` plus a dialect
+that only picks a default driver, a default port and a URL shape. Everything the file
+asserts is the shared code. Everything it cannot assert is the dialect.
+
+For the connectors that genuinely need a server — Kafka, MongoDB, Cassandra,
+Elasticsearch, OpenSearch and the real databases — `services.py` and the
+`docker-compose.yml` beside it are in place, and no test has been written against them
+yet. A service test skips unless its port answers, with the reason naming the compose
+service to start, so the tier costs nothing on a machine without Docker. A connector's
+jar joins the session only while its service is reachable, because every coordinate in
+`spark.jars.packages` is resolved at session creation and nobody should download a
+Cassandra connector to test Avro. The Spark-4 compatible versions of the connectors
+that carry Spark code (Cassandra, Elasticsearch, OpenSearch, Mongo) are marked in
+`services.py` as unverified — that is the first thing to settle when the tier is used.
+
+Two things about the harness are worth knowing before extending it. The `spark` block
+goes through the `Sparquet` **constructor**, not the JSON, because the JSON block
+never reaches session creation (`BACKLOG.md` §4) — when that is fixed the harness
+should move the block back into the JSON, where a user would put it. And the ivy cache
+lives in `~/.ivy2.5.2` on Spark 4 (`~/.ivy2` on 3.x); both are checked.
 
 ---
 
@@ -231,10 +275,11 @@ Two capabilities in this layer *are* pinned, both added in framework 0.7.0:
 
 ## 7. Studio
 
-The Studio is the best-covered part of the project (502 unit tests, 21 smoke checks in
-a real Chrome, and 312 `unittest` tests on the runner: 92 on the history database, 64 on
-identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution routes and
-33 on the workspace). What is pinned, and what is not:
+The Studio is the best-covered part of the project (531 unit tests, 21 smoke checks in
+a real Chrome, and 363 `unittest` tests on the runner: 92 on the history database, 64 on
+identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution routes,
+61 on the workspace and the files in it, and 8 that actually execute the six native
+formats through the runner). What is pinned, and what is not:
 
 | Area | Status | Notes |
 |---|:---:|---|
@@ -250,7 +295,8 @@ identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution r
 | External run history (`POST /runs/ingest`) | ✅ | 16 `unittest` tests on `ingest_run`: a run executed elsewhere read back exactly like a local one — the same steps (through the same `StepTracker`), the same logs (through the same writer), the same detail screen — plus the two things that must differ: `launched="external"`, and timings taken from the document rather than from the clock here, since a nightly job must not appear at the hour its report arrived. A failed run keeps its error and fails whatever step it died in; `skipped` is not a failure; the catalog rows are created for a machine that never saw this Studio; and everything a stranger can put in the payload is bounded — an unknown schema, a document with no run and outright junk are refused, a row count that is not a number is dropped rather than stored, records that are not objects are ignored, and one submission cannot write more than `MAX_INGEST_RECORDS` rows |
 | Catalog (what exists) | ✅ | 9 of the server tests cover the half of the database that holds the records rather than the runs: the foreign keys actually enforced, a Job attached to its Workflow, a Job saved before its Workflow still landing under it, `pipeline_stage` carrying the Job↔Pipeline relation in order, the same Job twice in one Pipeline (which is why the junction is keyed by stage), a re-save replacing the stages, a soft-deleted Workflow hiding its children, and a deleted Job whose executions stay readable |
 | Workspace (the files) | ✅ | 10 `unittest` tests on `server/workspace.py`: the readable tree named after the Workflow, a Job file holding the **compiled** pipeline and not the Studio record, a record surviving a round trip, a rename moving the file instead of leaving a second copy, renaming a Workflow moving everything under it, the snapshot, delete removing both files, `.studio/meta.json` surviving a reopen, and the two refusals (unknown kind, an id that could escape the root) · client: 12 tests on `lib/storage/remote.ts` — reads served from the boot snapshot, meta keys mapped back, the runner being absent or too old read as "unavailable" rather than as an error, the token on every call, a refused write kept out of the cache, a Job compiled on the way out, meta routed to its own endpoint, and the migration backup deliberately never written to disk |
-| Where the library lives | ✅ | 11 `unittest` tests on `server/workspace.py` and 12 on `/workspace/root` (`test_workspace_root.py`), plus 11 vitest on `lib/runner/workspaceRoot.ts`. The rule they protect: the product does not write inside its own source tree. Pinned — the default is the per-user data directory and not the checkout, resolving the root creates nothing, `SPARQUET_STUDIO_WORKSPACE` beats a choice made in the interface and cannot be overridden from it (`409`, `locked`), a choice survives a restart, the setting lives outside the directory it points at, a corrupt settings file reads as absent, an older `sparquet-workspace/` **holding a `.studio/`** is adopted while an empty one is not, clearing returns to the default, and the refusals: a relative path, a directory that cannot be created, and any path inside the source tree (`400`, detail says "source tree"). Also that `runner:Configure` exists and is **not** granted to `editor`, which holds `workspace:*` |
+| Where the library lives | ✅ | 11 `unittest` tests on `server/workspace.py` and 15 on `/workspace/root` (`test_workspace_root.py`), plus 11 vitest on `lib/runner/workspaceRoot.ts`. The rule they protect: the product does not write inside its own source tree. Pinned — the default is the per-user data directory and not the checkout, resolving the root creates nothing, `SPARQUET_STUDIO_WORKSPACE` beats a choice made in the interface and cannot be overridden from it (`409`, `locked`), a choice survives a restart, the setting lives outside the directory it points at, a corrupt settings file reads as absent, an older `sparquet-workspace/` **holding a `.studio/`** is adopted while an empty one is not, clearing returns to the default, and the refusals: a relative path, a directory that cannot be created, and any path inside the source tree (`400`, detail says "source tree"). Also that `runner:Configure` exists and is **not** granted to `editor`, which holds `workspace:*`. And, when a deployment injects a store of its own, the answer says `provider`, reports whatever that store calls itself, is `locked`, and refuses to be moved from the interface (`409`) |
+| Replaceable pieces (credits, identity, library) | ✅ | 12 `unittest` tests on `server/providers.py` (`test_providers.py`). The slot mechanism that keeps the hosted service from becoming a fork: with nothing configured each slot builds its local default and `describe()` says `local`; a configured `module:factory` replaces it and is reported by name; slots are answered independently; a blank variable reads as unconfigured. And the refusals, which are the point — a reference with no colon, a module that cannot be imported, an attribute that is missing or not callable, and a factory that raises are all `ProviderError` and **never** a fall back to the local default, because a hosted runner quietly on SQLite would put every tenant's ledger and every tenant's identity in one file on one disk |
 | Config version | ✅ | server: 10 tests on `history.config_version()` and the column it feeds — formatting and key order do not change the fingerprint, an edited step does, list order counts, the JSON reads back whole, two runs of an edited Job are told apart, an oversized configuration is still identified by its hash, a run recorded before the column reads as unknown rather than as wrong · client: 3 tests on `getJobRunConfig` (the version read back, the hash kept when the JSON was not, `404` → `null`) |
 | Identity and permissions | ✅ | 64 `unittest` tests on `server/auth.py`: the policy evaluator (default deny, service-scoped wildcards, `deny` beating `allow` in either order, resource scoping that does not cross the kind, what each built-in role promises, garbage granting nothing), passwords (never stored as themselves, salted, an unreadable hash is not a way in, too-short refused), and the store (login, a wrong password and an unknown user failing identically, a disabled account, sessions unreadable in the database file, logout, expiry, disabling and password changes cutting live sessions, and the last-administrator guard on all three of demote/disable/delete) · 11 of them on password recovery: a code sets a new password, works exactly once, issuing a second one kills the first, an expired code and an unknown code both refused, a disabled account cannot be recovered into, the code is not stored as itself (asserted against the raw database bytes), redeeming ends the account's open sessions, a password below the minimum is refused **without** burning the code, no code is minted for a user that does not exist, and `find_user` is case-insensitive · 9 of them on **custom roles**: a role written in the interface grants what it says, a built-in name cannot be taken over, a built-in role refuses both edit and delete, a duplicate name is refused, editing a role changes what its holders may do without them logging in again, a role still held by a user *or by a team* cannot be deleted, a malformed statement is refused at write time rather than ignored at evaluation time, and a custom role survives a restart still flagged `custom` (which is what keeps the start-up rewrite of the built-ins from eating it) · 11 on **teams**: everybody lands in the default team, a team can be addressed by name, a duplicate name is refused, a team's roles are *added* to the ones a person holds, a personal `deny` still beats a team `allow`, moving somebody changes who pays from then on, deleting a team moves its members back into the default one, the default team cannot be deleted, a team's roles can be changed after the fact and take effect on the next request, and an unknown team is refused · client: 3 tests on `lib/auth/client.ts` (the minted code mapped, the redeem body, and the refusal surfaced as-is — it never says which half was wrong) |
 | Execution credits | ✅ | 71 `unittest` tests on `server/credits.py`, in eight groups. What a run costs: a `local` master is free, `yarn`/`spark://`/`k8s://` cost, `spark.remote` wins over a local master sitting next to it, a master nested in `configs` is found, a runner inside Databricks charges regardless of the master, and a malformed `spark` block does not crash the charge. **What a run is charged for**: one credit per successful write, so a Job writing three destinations costs three and **a run that failed before writing costs nothing**; the count comes from `output_metrics`, and a run with no writes at all writes no ledger row. **The free monthly allowance**: 40 writes a month are waived before any granted balance is touched, the period is `YYYY-MM` in UTC so it resets by itself, what is left does not accumulate into the next month, a run that spans the allowance pays only for the part above it, and while the runner only meters, the allowance is not burned either. Enforcement: a team that cannot pay for a single write is refused at admission with 402, a charge larger than the balance does not go negative but records a `shortfall`, and two teams never spend each other's balance. Accounts: created lazily on first sight, `SPARQUET_STUDIO_CREDITS_INITIAL` honoured, a rename keeps the same account, a negative grant takes credits back, a grant that would go below zero is refused, a grant of zero is refused. Ledger: order, the fields a run entry carries (`writes`, `free_amount`, `shortfall`, `job_run_id`, `pipeline_run_id`), `applied` distinguishing metered from charged. Principals: **the team**, not the person — moving somebody to another team changes who pays from then on and leaves the entries already written where they are — or the literal `token` account on a runner with no users · client: 9 tests on `lib/runner/credits.ts` — the balance and enforcement flags mapped, a metering-only runner read as one credit per write, the accounts list (and a malformed answer read as empty), the ledger's limit in the query string, a metered row kept distinguishable, the grant body including a null note, and `isOutOfCredits` true for 402 and for nothing else · **reservation**: a run holds what it may cost before it starts and settles afterwards, so two runs cannot spend the same credit twice; a release is idempotent, a crash leaves a stale hold that start-up sweeps, and `available` subtracts what is held · **the invoice read along a dimension** (`breakdown`): grouped by workflow, by user, by job or by team, scoped to one account or to the whole runner, with grants excluded, another month empty, what the allowance covered reported apart from what was charged, rows with no attribution reported rather than dropped, and an unknown `group_by` refused — the column is interpolated into the SQL, so `"account_id; DROP TABLE ledger"` raising is a test of its own |
@@ -263,6 +309,8 @@ identity, 89 on credits, 18 on the audit log, 16 on the scope of the execution r
 | Canvas / nodes / inspector | ◐ | node previews, handles and connection guards are pinned; the interactive canvas is covered by the smoke script rather than unit tests |
 | Workspace tabs and the Runs browser | ⬜ | the Flow/JSON/Runs switch, the runs table and the run-detail dialog (its **Details** tab: job id, job run id, run as, launched, timestamps, duration, status, lineage) are React with no unit test. What they read is pinned — `runView.ts`, `history.ts`, `lineage_of` above — so the gap is the rendering, not the data |
 | The `targets` field UI | ⬜ | the JSON widget renders and its `validate` mirrors the library's refusals — no test asserts the inspector shows those messages |
+| The formats, executed through the Studio | ✅ | 8 `unittest` tests on Spark (`server/test_formats_studio_spark.py`) plus 13 vitest, over one shared set of fixtures (`sparquet-studio/fixtures/formats/`, a `write.json` and a `read.json` for `parquet`, `orc`, `json`, `csv`, `txt` and `view`). The gap they close: the compiler round trip proved a JSON survives the canvas and the framework tests proved the formats work, but nothing proved a JSON the **Studio** produced actually runs on the runner. Now the same file is pinned twice — the Studio opens and compiles it back unchanged, and the runner writes real files and reads the rows back through `_resolve_staged_files` and `_execute_run`, the code `/run` and `/run/flow/stream` call. Also pinned: the field with quotes and a comma comes back whole (the RFC 4180 dialect), a `view` hands data to the next stage without touching disk, the preview honours the Studio's `limit` and not the pipeline's, and a run over a path that does not exist reports `error` instead of raising. Skipped, never failed, without pyspark or a JVM |
+| A stage that runs a file | ✅ | 28 `unittest` tests (`server/test_library_files.py`) plus 16 vitest (`lib/runner/libraryFiles.ts`, and the file stages in `lib/pipeline/pipeline.test.ts`). The rule they protect: a Pipeline stage may run a JSON the Studio never wrote, and the **file stays the source** — nothing is imported, nothing is cached, so an edit made outside the Studio is what the next run executes. Pinned — the listing offers only runnable files (the editor's own `.studio/`, hidden files and the half-written `.tmp-*.json` of a save in flight are excluded), a path is always relative to the library root and comes back with forward slashes, a Windows separator and a leading slash read the same file, and the refusals: missing, not JSON, not a JSON *object*, `..`, an absolute path (detail says "relative"). On the flow: a file-backed stage resolves before anything is charged or started, naming both a `pipeline` and a `path` — or neither — is a `422` that says **which** stage, and a missing file is a `400` rather than a Pipeline that dies halfway with earlier stages already written. On the client: the box carries no job and is not treated as broken, it is named after the file, it orders and cycles like any other stage, and the request sends `path` instead of a compiled pipeline |
 | Runner service (`server/main.py`) | ◐ | what a run authorizes is now pinned (see *Scope of the execution routes*), but there is still **no test over HTTP**: token auth, the origin allow-list, the SSE event sequence, the per-stage status of `/run/flow/stream`, and the `requires(...)` dependency that maps each route to an action (the evaluator behind it is pinned — see *Identity and permissions* — but no test asserts that `PUT /workspace` is the route demanding `workspace:Write`). The execution-history side-effects of these endpoints (`server/history.py`) are covered — see the row above. FastAPI's `TestClient` would cover all of it without Spark, and the only thing in the way is the dependency: starlette answers `RuntimeError: The starlette.testclient module requires the httpx2 package to be installed.`, and `httpx` is not in this environment — which is why `test_run_scope.py` calls the helpers directly instead |
 
 The runner service is the gap that matters most here — it is the only component that

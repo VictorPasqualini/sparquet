@@ -1,9 +1,11 @@
 import { nanoid } from 'nanoid'
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 
 import { autoLayout, pipelineToGraph } from '@/lib/compiler'
 import { newPipeline, newLink, newStage, stageRowPosition } from '@/lib/pipeline'
 import { inferParams } from '@/lib/params'
+import { collectTags } from '@/lib/tags'
 import * as db from '@/lib/storage/db'
 import type {
   Pipeline,
@@ -234,6 +236,22 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         : [...state.pipelines, pipeline],
     })),
 }))
+
+/**
+ * Every tag already in use, most used first — what the tag pickers offer.
+ *
+ * The selector derives a brand-new array on every call, and a plain selector is
+ * compared by identity: React would see a different snapshot on each render and
+ * loop until it gives up with "Maximum update depth exceeded". `useShallow`
+ * compares the entries instead, so the hook only re-renders when the tags
+ * actually change. It lives here, next to the store, because all three screens
+ * that offer tags need the same list.
+ */
+export function useKnownTags(): string[] {
+  return useLibraryStore(
+    useShallow((state) => collectTags([...state.jobs, ...state.pipelines, ...state.workflows])),
+  )
+}
 
 /** Turns a display name into a safe `name` value for the pipeline JSON. */
 export function slugify(value: string): string {

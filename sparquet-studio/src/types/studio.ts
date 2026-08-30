@@ -250,15 +250,28 @@ export interface Workflow {
 /**
  * One stage of a pipeline.
  *
- * A stage REFERENCES a job by id — it never copies its pipeline JSON — so
- * editing the job immediately changes what the stage runs, and a deleted
- * job leaves a reference the canvas reports as broken instead of silently
- * running stale JSON.
+ * A stage REFERENCES what it runs — it never copies the JSON — so editing the
+ * source immediately changes what the stage runs, and a source that disappears
+ * leaves a reference the canvas reports as broken instead of silently running
+ * stale JSON. There are two kinds of reference, and a stage has exactly one:
+ *
+ * - `jobId` — a Job in this library. The Studio compiles it at run time.
+ * - `path` — a `.json` file in the library, relative to its root. The Studio
+ *   does not compile it: the file is what runs, read by the runner at the moment
+ *   the stage starts. This is how a Pipeline runs a JSON another team owns, a
+ *   script generated, or somebody wrote by hand.
  */
 export interface PipelineStage {
   /** Stable stage id: the React Flow node id, and the stage id sent to the runner. */
   id: string
+  /** The Job this stage runs. Empty when the stage runs a `path` instead. */
   jobId: string
+  /**
+   * A `.json` in the library, relative to its root, when this stage runs a file
+   * rather than a Job. Always relative: an absolute path names a directory that
+   * exists on one machine, and the Pipeline would stop working on the next one.
+   */
+  path?: string
   /**
    * Canvas position. Kept as a plain pair rather than React Flow's `XYPosition`
    * so the persisted record never depends on the canvas library.

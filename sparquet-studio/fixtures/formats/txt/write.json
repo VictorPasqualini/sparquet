@@ -1,0 +1,25 @@
+{
+  "name": "formatos-txt-escrita",
+  "description": "Escreve uma coluna de texto em txt. Metade de ida do round-trip executado.",
+  "input": {
+    "format": "csv",
+    "path": "{dir}/seed.csv",
+    "options": {
+      "header": "true",
+      "inferSchema": "true"
+    }
+  },
+  "transformations": [
+    {
+      "type": "select",
+      "columns": [
+        "nome"
+      ]
+    }
+  ],
+  "output": {
+    "format": "txt",
+    "path": "{dir}/out-txt",
+    "mode": "overwrite"
+  }
+}

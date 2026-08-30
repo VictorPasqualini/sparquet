@@ -129,6 +129,7 @@ workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
 credits = _load_sibling_module("credits")
 audit = _load_sibling_module("audit")
+providers = _load_sibling_module("providers")
 
 
 # ------------------------------------------------------------------ models
@@ -157,11 +158,29 @@ class RunRequest(BaseModel):
 
 
 class FlowStageRequest(BaseModel):
-    """One JSON of a composed flow — a pipeline that is a stage of a larger job."""
+    """One JSON of a composed flow — a pipeline that is a stage of a larger job.
+
+    A stage names its JSON one of two ways, and exactly one:
+
+    * `pipeline` — the compiled config, sent inline. This is what a stage backed
+      by a Studio Job does: the Job is the source, the Studio compiles it, and
+      the file on disk is that same JSON written out.
+    * `path` — a file **in the library**, relative to its root. The file is the
+      source: nothing is imported, and it is read at the moment the stage runs,
+      so an edit made outside the Studio takes effect on the next run. This is
+      how a Pipeline points at a JSON another team owns, a script generated, or
+      somebody wrote by hand.
+
+    The path is relative on purpose. An absolute one would name a directory that
+    exists on one machine, and a Pipeline that runs on the author's laptop and
+    silently stops running anywhere else is worse than one that never ran.
+    """
 
     id: str
     name: Optional[str] = None
-    pipeline: Dict[str, Any]
+    pipeline: Dict[str, Any] = Field(default_factory=dict)
+    #: A `.json` in the library, relative to its root, read when the stage runs.
+    path: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     job_id: Optional[str] = None
 
@@ -280,6 +299,11 @@ class HealthResponse(BaseModel):
     # Whether a balance actually gates execution. False still meters: the ledger
     # records every remote Job either way. See `credits.py`.
     credits_enforced: bool = False
+    # Which implementation is answering each replaceable slot — `"local"` for the
+    # SQLite-and-files default, otherwise the `module:factory` that was injected.
+    # An operator debugging a hosted runner should not have to infer this from
+    # behaviour. See `providers.py`.
+    providers: Dict[str, str] = Field(default_factory=dict)
 
 
 class CapabilitiesResponse(BaseModel):
@@ -701,7 +725,12 @@ def _purge_history_periodically() -> None:
 _LEGACY_WORKSPACE = _framework_root() / "sparquet-workspace"
 _WORKSPACE_LOCATION = workspace.resolve_root(_LEGACY_WORKSPACE)
 _WORKSPACE_ROOT = _WORKSPACE_LOCATION.root
-_workspace: Any = workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+# The third slot. The local store is real files on disk — the point of the
+# product, since a Job is meant to be reviewable in a pull request — and a
+# hosted deployment puts the same documents in object storage.
+_workspace: workspace.WorkspaceStore = providers.load(
+    "workspace", lambda: workspace.FileWorkspaceStore(_WORKSPACE_ROOT)
+)
 
 if _WORKSPACE_LOCATION.source == "legacy":
     _log.warning(
@@ -1007,7 +1036,10 @@ def require_token(request: Request) -> None:
 
 # ------------------------------------------------------------------ identity
 
-_auth = auth.AuthStore()
+# Identity is a slot: the local backend is usernames and password hashes in
+# SQLite, and a deployment that arrives with an identity provider names its own
+# factory instead. See `providers.py` for why a failure here is fatal.
+_auth: auth.IdentityStore = providers.load("auth", auth.AuthStore)
 
 LOGIN_REQUIRED_HELP = (
     "This runner has users, so the shared token is no longer enough on its own. "
@@ -1081,7 +1113,9 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
 
 # --------------------------------------------------------------------- credits
 
-_credits = credits.CreditStore()
+# Same slot mechanism as identity: SQLite here, Postgres and a payment gateway
+# in a hosted deployment, the routes below unchanged either way.
+_credits: credits.CreditLedger = providers.load("credits", credits.CreditStore)
 
 # A hold belongs to a run in flight, and a run in flight belonged to the process
 # that took it. This process is starting, so anything still open was left by a
@@ -1354,6 +1388,7 @@ def health() -> HealthResponse:
         framework_version=version,
         login_required=_auth.has_users(),
         credits_enforced=credits.enforced(),
+        providers=providers.describe(),
     )
 
 
@@ -1718,6 +1753,37 @@ def run_stream(
     )
 
 
+def _resolve_staged_files(stages: List[FlowStageRequest]) -> None:
+    """Turns every `path` stage into an inline `pipeline`, in place.
+
+    Reading happens here, once, for the whole flow: everything downstream —
+    charging, lineage, the config stored with the run — is written against
+    `stage.pipeline`, and a stage that read its file late would be a stage the
+    history recorded as running something it never saw.
+    """
+    for index, stage in enumerate(stages, start=1):
+        named = (stage.path or "").strip()
+        if named and stage.pipeline:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Stage {index} names both a file and an inline pipeline. "
+                    "It runs one or the other."
+                ),
+            )
+        if not named:
+            if not stage.pipeline:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Stage {index} has neither a pipeline nor a file to run.",
+                )
+            continue
+        try:
+            stage.pipeline = _workspace.read_file(named)
+        except workspace.WorkspaceError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.post("/run/flow/stream")
 def run_flow_stream(
     body: RunFlowRequest, principal: Any = Depends(current_principal)
@@ -1744,6 +1810,11 @@ def run_flow_stream(
 
     if not body.stages:
         raise HTTPException(status_code=422, detail="A flow needs at least one stage.")
+
+    # Before anything is charged, locked or started: a stage that points at a file
+    # gets that file read now, so a missing or unparseable one is a 400 naming it
+    # rather than a flow that dies halfway with earlier stages already written.
+    _resolve_staged_files(body.stages)
 
     # One check for the flow, against its first stage: a Pipeline whose team has
     # nothing available should not start at all. Nothing is held here — each stage
@@ -2315,7 +2386,9 @@ class WorkspaceRootOut(BaseModel):
     """Where the library is, and why it is there."""
 
     root: str
-    #: `env`, `settings`, `legacy` or `default` — see `workspace.resolve_root`.
+    #: `env`, `settings`, `legacy` or `default` — see `workspace.resolve_root` —
+    #: or `provider`, when a deployment injected a store of its own and none of
+    #: those apply because there is no local directory to name.
     source: str
     #: Where a library goes when nobody has said otherwise, so the interface can
     #: offer it back as the way to undo a choice.
@@ -2326,8 +2399,9 @@ class WorkspaceRootOut(BaseModel):
     #: True while the library is still sitting inside the runner's own source
     #: tree. It works, and it is not where it belongs.
     inside_source_tree: bool
-    #: True when `SPARQUET_STUDIO_WORKSPACE` is set, which nothing here may
-    #: override: a deployment that decides centrally decides centrally.
+    #: True when the deployment decided — `SPARQUET_STUDIO_WORKSPACE`, or an
+    #: injected store — and nothing here may override it: a deployment that
+    #: decides centrally decides centrally.
     locked: bool
 
 
@@ -2339,6 +2413,21 @@ class WorkspaceRootRequest(BaseModel):
 
 
 def _workspace_root_out() -> WorkspaceRootOut:
+    injected = providers.configured("workspace")
+    if injected:
+        # A store that is not a directory on this disk. There is no local path to
+        # report and nothing here can move it, so the answer says where the
+        # records actually are and that the choice was not made here.
+        described = _workspace.describe()
+        return WorkspaceRootOut(
+            root=str(described.get("root") or described.get("kind") or injected),
+            source="provider",
+            default=str(workspace.default_root()),
+            settings_file=str(workspace.settings_path()),
+            writable=described.get("writable", True) is not False,
+            inside_source_tree=False,
+            locked=True,
+        )
     root = Path(_WORKSPACE_ROOT)
     return WorkspaceRootOut(
         root=str(root),
@@ -2389,6 +2478,17 @@ def put_workspace_root(body: WorkspaceRootRequest) -> WorkspaceRootOut:
     for them would mean a copy that half-fails somewhere with no way back.
     """
     global _WORKSPACE_LOCATION, _WORKSPACE_ROOT, _workspace
+
+    injected = providers.configured("workspace")
+    if injected:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This runner stores the library through {injected}, not in a "
+                "directory of its own. Where the records live is a decision of the "
+                "deployment, not of this screen."
+            ),
+        )
 
     if os.getenv("SPARQUET_STUDIO_WORKSPACE"):
         raise HTTPException(
@@ -2442,6 +2542,62 @@ def put_workspace_root(body: WorkspaceRootRequest) -> WorkspaceRootOut:
     _WORKSPACE_LOCATION = workspace.Location(store.root, source)
     _log.info("The library is now read from %s (%s).", store.root, source)
     return _workspace_root_out()
+
+
+class LibraryFileOut(BaseModel):
+    """One runnable JSON in the library. `path` is always relative to its root."""
+
+    path: str
+    name: str
+    size: int
+    modified: float
+
+
+class LibraryFilesOut(BaseModel):
+    root: str
+    files: List[LibraryFileOut]
+
+
+class LibraryFileContentOut(BaseModel):
+    path: str
+    #: The JSON as it is on disk, uncompiled and unmodified.
+    pipeline: Dict[str, Any]
+
+
+@app.get(
+    "/workspace/files",
+    response_model=LibraryFilesOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def list_library_files() -> LibraryFilesOut:
+    """Every runnable JSON in the library, so a Pipeline stage can point at one.
+
+    The whole tree, not only what the Studio wrote — a file another team owns, a
+    script generated or somebody hand-wrote is exactly the case for this. The
+    editor's own state under `.studio/` is not listed: it is not something to run.
+    """
+    return LibraryFilesOut(
+        root=str(_WORKSPACE_ROOT),
+        files=[LibraryFileOut(**item.to_json()) for item in _workspace.list_files()],
+    )
+
+
+@app.get(
+    "/workspace/files/{path:path}",
+    response_model=LibraryFileContentOut,
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def read_library_file(path: str) -> LibraryFileContentOut:
+    """The JSON at a relative path, as it is on disk.
+
+    Studio reads it to show and lint what a file-backed stage would run. It is
+    **not** cached: the file is the source of truth, and what is shown has to be
+    what the next run will execute.
+    """
+    try:
+        return LibraryFileContentOut(path=path, pipeline=_workspace.read_file(path))
+    except workspace.WorkspaceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 class WorkspaceMetaRequest(BaseModel):

@@ -1,7 +1,14 @@
 name: CI
 
-# Testes em cada push/PR na main. São os mesmos testes puros do portão de release
-# (sem Java/Spark real), rodados numa matriz de versões de Python.
+# Every push/PR on main. Three layers, cheapest first:
+#   test         pure Python on a matrix of versions — no Java, no network
+#   integration  one job with a real JVM: the connectors that need an actual jar
+#   studio       typecheck, lint and unit tests of the visual editor
+#
+# A red integration job does not block the pure layer and vice versa
+# (`fail-fast: false` inside the matrix, separate jobs outside it): knowing that
+# the framework is fine and only the Iceberg jar broke is worth more than a
+# single red X.
 
 on:
   push:
@@ -9,8 +16,14 @@ on:
   pull_request:
     branches: [main]
 
+# A second push to the same branch makes the first run pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -22,11 +35,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e .
+
+      - name: Import the package the way a user does
+        # Catches a broken import chain (a module renamed, a dependency dropped
+        # from pyproject) even if every test happens to skip itself.
+        run: python -c "import sparquet; from sparquet import Sparquet; print(sparquet.__version__)"
 
       - name: Unit tests
         env:
@@ -36,10 +56,115 @@ jobs:
           # a deleted one fails loudly instead of silently dropping out of coverage.
           # Files that need a real SparkSession skip themselves when there is no Java,
           # so this job stays green without provisioning one.
+          set -o pipefail
+          files=$(find tests -name 'test_*.py' -not -path '*/integration/*' | sort)
+          count=$(echo "$files" | grep -c . || true)
+          if [ "$count" -lt 5 ]; then
+            # Discovery returning (almost) nothing means the layout moved and this
+            # job would pass by testing nothing at all. That is the failure mode a
+            # test suite must never have.
+            echo "::error::test discovery found $count files — expected the whole suite"
+            exit 1
+          fi
+          echo "running $count test files"
           fail=0
-          for f in $(find tests -name 'test_*.py' | sort); do
+          for f in $files; do
             echo "::group::$f"
-            python "$f" || fail=1
+            python "$f" 2>&1 | tee "/tmp/$(basename "$f").log" || fail=1
+            echo "::endgroup::"
+          done
+          # Skips are legitimate here (no JVM), but silent ones hide a suite that
+          # stopped testing anything. Print them so the count is visible in the log.
+          # `|| true`: with a JVM on the runner nothing skips, and a grep that
+          # matches nothing would take the whole step down under `set -e`.
+          skipped=$(grep -ho 'skipped=[0-9]*' /tmp/*.log 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}' || true)
+          echo "### Python ${{ matrix.python-version }}: $count files, ${skipped:-0} skipped tests" >> "$GITHUB_STEP_SUMMARY"
+          exit $fail
+
+  integration:
+    name: Connectors with a real jar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Pinned on purpose. A connector jar is compiled against one Spark line
+      # and breaks on the next with a binary incompatibility, so the pyspark
+      # version has to match the coordinates in the harness. Unpinned, this job
+      # installed a newer Spark and the Iceberg tests died with
+      # `IncompatibleClassChangeError`. Move both together.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pyspark==4.1.1"
+
+      # The jars come from Maven Central on the first run only. Ivy's cache
+      # directory changed with Spark 4 (~/.ivy2.5.2); both are cached so the
+      # workflow keeps working if the pinned pyspark moves back to the 3.x line.
+      - name: Cache the Spark jars
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ivy2.5.2
+            ~/.ivy2
+          key: ivy-${{ runner.os }}-4.1.1-${{ hashFiles('tests/io/integration/harness.py') }}
+          restore-keys: ivy-${{ runner.os }}-4.1.1-
+
+      - name: Integration tests
+        env:
+          PYTHONPATH: .
+          # Explicit: without it the harness only opens the gate when every jar is
+          # already cached, which would make a cache miss silently skip everything.
+          SPARQUET_IT: "1"
+        run: |
+          set -o pipefail
+          # A tier that skips is a green job proving nothing, and the gate skips
+          # on a Spark/jar mismatch. Say so and fail instead.
+          python -c "import sys; sys.path.insert(0, 'tests/io/integration'); import harness; print('pyspark', harness.spark_version()); sys.exit(harness.skip_reason() or 0)"
+          fail=0
+          for f in $(find tests/io/integration -name 'test_*.py' | sort); do
+            echo "::group::$f"
+            # The JVM stack frames are dropped and the tail is generous: a
+            # truncated failure report is a job that fails without saying why.
+            python -u "$f" 2>&1 | grep -vE '^\s+at |^\s+\.\.\. [0-9]+ more$' | tail -150 || fail=1
             echo "::endgroup::"
           done
           exit $fail
+
+  studio:
+    name: Studio
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sparquet-studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sparquet-studio/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test

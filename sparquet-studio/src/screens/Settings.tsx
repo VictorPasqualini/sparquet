@@ -960,6 +960,7 @@ const LOCATION_SOURCE: Record<WorkspaceLocation['source'], string> = {
   settings: 'Chosen here',
   legacy: 'Older directory, still in use',
   default: 'Default for this machine',
+  provider: 'Managed by this deployment',
 }
 
 /* ----------------------------------------------------------------- data */

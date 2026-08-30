@@ -10,10 +10,13 @@
  * two stages can share no path at all and still have to run in a fixed order
  * (e.g. a truncate before a load), so guessing would be the wrong answer.
  *
- * A stage stores only a `jobId`. The pipeline JSON is compiled from the
- * referenced job at run time, so a stage can never drift from the file it
- * points at — and a deleted job leaves a stage this module reports as
- * broken instead of a copy of stale JSON that still runs.
+ * A stage stores a reference, never a copy. Either a `jobId` — the pipeline JSON
+ * is compiled from that job at run time, so a stage can never drift from the file
+ * it points at, and a deleted job leaves a stage this module reports as broken
+ * instead of stale JSON that still runs — or a `path`, a `.json` in the library
+ * that the runner reads when the stage starts. A path-backed stage is NOT
+ * compiled here: the file is the source, it may have been written by anything,
+ * and the runner is the one that reads it.
  *
  * Pure: no React, no store, no IO.
  */
@@ -42,16 +45,24 @@ export interface ResolvedStage {
   /** `PipelineStage.id` — the canvas node id and the id the runner reports back. */
   id: string
   jobId: string
+  /** Set when this stage runs a file instead of a Job. Relative to the library root. */
+  path?: string
   position: { x: number; y: number }
   /** 1-based execution order. Stages in a cycle are numbered last. */
   order: number
-  /** `null` when the referenced job no longer exists. */
+  /** `null` when the referenced job no longer exists, and for a file-backed stage. */
   job: Job | null
-  /** The job name, or a placeholder when the reference is broken. */
+  /** The job name, the file name, or a placeholder when the reference is broken. */
   name: string
-  /** What the stage reads, writes and does. `null` for a broken reference. */
+  /**
+   * What the stage reads, writes and does. `null` for a broken reference — and
+   * for a file-backed stage, which is not compiled here.
+   */
   description: JobDescription | null
-  /** The pipeline this stage would run. `null` when it does not compile. */
+  /**
+   * The pipeline this stage would run. `null` when it does not compile, and for a
+   * file-backed stage: the runner reads the file, so there is nothing to compile.
+   */
   pipeline: PipelineSpec | null
 }
 
@@ -84,6 +95,25 @@ export function stageRowPosition(index: number): { x: number; y: number } {
 
 export function newStage(jobId: string, position: { x: number; y: number }): PipelineStage {
   return { id: `stage-${nanoid(6)}`, jobId, position }
+}
+
+/**
+ * A stage that runs a file in the library rather than a Job.
+ *
+ * `jobId` stays empty: there is no Job behind it, and inventing one would put a
+ * record in the library for a file the library does not own.
+ */
+export function newFileStage(
+  path: string,
+  position: { x: number; y: number },
+): PipelineStage {
+  return { id: `stage-${nanoid(6)}`, jobId: '', path, position }
+}
+
+/** The name to show for a file-backed stage: the file, without its directories. */
+export function fileStageName(path: string): string {
+  const leaf = path.split('/').filter(Boolean).pop() ?? path
+  return leaf.replace(/\.json$/i, '') || path
 }
 
 export function newLink(source: string, target: string): PipelineLink {
@@ -210,6 +240,18 @@ export function resolvePipeline(
   const issues: ValidationIssue[] = []
 
   const described = pipeline.stages.map((stage) => {
+    // A file-backed stage has nothing to compile here: the runner reads the file
+    // when the stage starts, which is the point — it may not have been written by
+    // the Studio at all.
+    if (stage.path) {
+      return {
+        stage,
+        job: null,
+        name: fileStageName(stage.path),
+        description: null,
+        pipeline: null,
+      }
+    }
     const job = byId.get(stage.jobId) ?? null
     if (!job) {
       return { stage, job, name: MISSING_STAGE_NAME, description: null, pipeline: null }
@@ -252,6 +294,7 @@ export function resolvePipeline(
     .map((entry) => ({
       id: entry.stage.id,
       jobId: entry.stage.jobId,
+      ...(entry.stage.path ? { path: entry.stage.path } : {}),
       position: entry.stage.position,
       order: orderById.get(entry.stage.id) ?? 0,
       job: entry.job,
@@ -271,6 +314,21 @@ export function resolvePipeline(
   }
 
   for (const stage of stages) {
+    // A file-backed stage is not checked against the library: whether the file is
+    // there, and whether it parses, is the runner's answer at run time — it reads
+    // the file, and it is the only side that can see it.
+    if (stage.path) {
+      if (inCycle.has(stage.id)) {
+        issues.push({
+          id: `pipeline-cycle-${stage.id}`,
+          severity: 'error',
+          nodeId: stage.id,
+          message: `"${stage.name}" is part of a loop, so it has no place in the order.`,
+          hint: 'Remove one of the links that closes the loop.',
+        })
+      }
+      continue
+    }
     if (!stage.job) {
       issues.push({
         id: `pipeline-missing-${stage.id}`,
@@ -320,13 +378,20 @@ export function resolvePipeline(
 
 /* --------------------------------------------------------------- run plan */
 
-/** One stage as the runner wants it: an id, a name and the compiled pipeline. */
+/**
+ * One stage as the runner wants it: an id, a name, and either the compiled
+ * pipeline or the library path to read. Exactly one of the two — the runner
+ * refuses both and refuses neither.
+ */
 export interface PipelineRunStage {
   id: string
   name: string
-  pipeline: PipelineSpec
+  /** The compiled JSON, for a stage backed by a Job. */
+  pipeline?: PipelineSpec
+  /** The file to read, for a stage backed by a path. Relative to the library root. */
+  path?: string
   params?: Record<string, string | number | boolean | string[]>
-  /** The Studio job this stage runs, so the persisted execution history can link back to it. */
+  /** The Studio job this stage runs, so the persisted execution history can link back to it. Empty for a file. */
   jobId: string
 }
 
@@ -362,6 +427,10 @@ export function planPipelineRun(resolved: ResolvedPipeline): PipelineRunPlan {
 
   const stages: PipelineRunStage[] = []
   for (const stage of resolved.stages) {
+    if (stage.path) {
+      stages.push({ id: stage.id, name: stage.name, path: stage.path, jobId: '' })
+      continue
+    }
     // `blockers` already guarantees both, but the compiler cannot know that.
     if (!stage.pipeline || !stage.job) continue
     const values = paramValues(stage.job.params)

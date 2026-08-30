@@ -41,15 +41,15 @@ import { PipelineRunPanel } from '@/components/pipeline/PipelineRunPanel'
 import { StagePicker } from '@/components/pipeline/StagePicker'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
 import { resolvePipeline, stageRowPosition, type ResolvedPipeline } from '@/lib/pipeline'
+import { listLibraryFiles, type LibraryFile } from '@/lib/runner/libraryFiles'
 import { getPipeline } from '@/lib/storage/db'
-import { collectTags } from '@/lib/tags'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
 import {
   usePipelineEditorStore,
   type PipelineWorkspaceView,
 } from '@/store/pipelineEditor'
-import { useLibraryStore } from '@/store/library'
+import { useKnownTags, useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 import type { Pipeline, ValidationIssue } from '@/types/studio'
 
@@ -109,6 +109,49 @@ export function PipelineEditor() {
   return <PipelineWorkbench />
 }
 
+/**
+ * The runnable JSON files in the library, read from the runner.
+ *
+ * Re-read on demand rather than watched: the list changes when somebody edits
+ * the directory, which the browser cannot see, so a refresh button is the honest
+ * affordance. `null` means "not read" — no runner, or it did not answer — which
+ * is different from an empty library and is shown differently.
+ */
+function useLibraryFiles(): {
+  files: LibraryFile[] | null
+  error: string | null
+  refresh: () => void
+} {
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const [files, setFiles] = useState<LibraryFile[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [nonce, setNonce] = useState(0)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        const listing = await listLibraryFiles(runnerUrl, runnerToken, controller.signal)
+        if (controller.signal.aborted) return
+        setFiles(listing.files)
+        setError(null)
+      } catch (caught) {
+        if (controller.signal.aborted) return
+        setFiles(null)
+        // A runner that is simply not running is the normal case here, not a
+        // failure worth a toast: the picker says so in place of the list.
+        setError(
+          caught instanceof Error && caught.name !== 'TypeError' ? caught.message : null,
+        )
+      }
+    })()
+    return () => controller.abort()
+  }, [runnerUrl, runnerToken, nonce])
+
+  return { files, error, refresh: () => setNonce((value) => value + 1) }
+}
+
 function PipelineWorkbench() {
   const navigate = useNavigate()
 
@@ -116,9 +159,11 @@ function PipelineWorkbench() {
   const stages = usePipelineEditorStore((state) => state.stages)
   const links = usePipelineEditorStore((state) => state.links)
   const addStage = usePipelineEditorStore((state) => state.addStage)
+  const addFileStage = usePipelineEditorStore((state) => state.addFileStage)
 
   const jobs = useLibraryStore((state) => state.jobs)
   const [showPanel, setShowPanel] = useState(true)
+  const libraryFiles = useLibraryFiles()
 
   const workflowJobs = useMemo(
     () => jobs.filter((job) => job.workflowId === pipeline?.workflowId),
@@ -137,7 +182,17 @@ function PipelineWorkbench() {
   const usage = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const stage of stages) {
+      if (!stage.jobId) continue
       counts[stage.jobId] = (counts[stage.jobId] ?? 0) + 1
+    }
+    return counts
+  }, [stages])
+
+  const fileUsage = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const stage of stages) {
+      if (!stage.path) continue
+      counts[stage.path] = (counts[stage.path] ?? 0) + 1
     }
     return counts
   }, [stages])
@@ -160,6 +215,11 @@ function PipelineWorkbench() {
               // Appending at the end of the row keeps the picker usable from the
               // keyboard, where there is no drop point to aim at.
               onAdd={(jobId) => addStage(jobId, stageRowPosition(stages.length))}
+              files={libraryFiles.files}
+              fileUsage={fileUsage}
+              onAddFile={(path) => addFileStage(path, stageRowPosition(stages.length))}
+              onRefreshFiles={libraryFiles.refresh}
+              filesError={libraryFiles.error}
             />
           </aside>
           <PipelineWorkspace resolved={resolved} />
@@ -305,9 +365,7 @@ function PipelineTopBar({
   const past = usePipelineEditorStore((state) => state.past.length)
   const future = usePipelineEditorStore((state) => state.future.length)
   const updatePipelineMeta = useLibraryStore((state) => state.updatePipelineMeta)
-  const knownTags = useLibraryStore((state) =>
-    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
-  )
+  const knownTags = useKnownTags()
 
   const [name, setName] = useState(pipeline?.name ?? '')
   useEffect(() => setName(pipeline?.name ?? ''), [pipeline?.name])

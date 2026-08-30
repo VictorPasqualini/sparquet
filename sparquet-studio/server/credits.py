@@ -75,7 +75,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 
 class CreditError(Exception):
@@ -490,6 +490,82 @@ class Charge:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+class CreditLedger(Protocol):
+    """What the runner needs from a ledger, and nothing more.
+
+    The local implementation below is SQLite on the operator's disk, which is the
+    right answer for one team on one machine. A hosted service needs Postgres with
+    per-tenant isolation and a payment gateway behind the same calls, and it gets
+    there by satisfying this protocol rather than by forking the runner — see
+    `providers.py`.
+
+    Two properties any implementation has to keep, because the routes depend on
+    them rather than on the storage:
+
+    - **`reserve` → `settle`/`release` is a pair.** A reservation that is never
+      settled has to expire on its own (`release_stale`), or a crashed run holds
+      credits forever.
+    - **What was charged is frozen at charge time.** The tags, the workflow and the
+      job name on an `Entry` are copies, not lookups: a Job renamed in March must
+      not rewrite February's invoice.
+    """
+
+    def account(self, account_id: str, username: Optional[str] = None) -> Account: ...
+
+    def list_accounts(self) -> List[Account]: ...
+
+    def grant(
+        self, account_id: str, amount: int, *, username: Optional[str] = None,
+        note: Optional[str] = None, reason: str = REASON_GRANT,
+    ) -> Account: ...
+
+    def precheck(
+        self, account_id: str, target: Target, *, username: Optional[str] = None
+    ) -> Account: ...
+
+    def reserve(
+        self, account_id: str, target: Target, writes: int, *,
+        username: Optional[str] = None, job_name: Optional[str] = None,
+        job_run_id: Optional[str] = None, pipeline_run_id: Optional[str] = None,
+    ) -> Reservation: ...
+
+    def settle(
+        self, reservation: Optional[Reservation], target: Target, writes: int, *,
+        account_id: Optional[str] = None, username: Optional[str] = None,
+        job_run_id: Optional[str] = None, pipeline_run_id: Optional[str] = None,
+        job_name: Optional[str] = None, workflow_id: Optional[str] = None,
+        actor: Optional[str] = None, tags: Optional[Sequence[str]] = None,
+    ) -> Charge: ...
+
+    def release(
+        self, reservation: Optional[Reservation], *, reason: str = "released"
+    ) -> int: ...
+
+    def release_stale(self) -> int: ...
+
+    def ledger(
+        self, account_id: Optional[str] = None, limit: int = 100,
+        *, period: Optional[str] = None,
+    ) -> List[Entry]: ...
+
+    def entries_for_job_runs(self, job_run_ids: Iterable[str]) -> Dict[str, Entry]: ...
+
+    def usage(self, account_id: str, period: Optional[str] = None) -> Dict[str, int]: ...
+
+    def breakdown(
+        self, *, group_by: str = "workflow", period: Optional[str] = None,
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]: ...
+
+    def totals(
+        self, *, period: Optional[str] = None, account_id: Optional[str] = None
+    ) -> Dict[str, int]: ...
+
+    def usage_timeline(
+        self, *, months: int = 6, account_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]: ...
 
 
 class CreditStore:

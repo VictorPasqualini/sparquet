@@ -182,6 +182,37 @@ Pendentes / candidatos:
 | `kinesis` | AWS Kinesis — via conector do provedor; é essencialmente **streaming** (ver §7) |
 | `excel` | nicho; via `spark-excel` |
 
+- [x] **`IcebergWriter` não cria a tabela** — a escrita usava
+      `df.write.format("iceberg").save(path)`, e no Spark 4 esse caminho exige que a
+      tabela **já exista**: apontar um output para uma tabela nova devolvia
+      `[TABLE_OR_VIEW_NOT_FOUND] The table or view db.x cannot be found`, sem criar
+      nada. Corrigido: quando o `path` é identificador de catálogo, a escrita usa
+      `saveAsTable`, que cria a tabela (com o `partition_by` declarado) na primeira
+      carga; caminho físico continua em `save`. A regra path-vs-tabela virou
+      `is_table_name` em `sparquet/io/base.py`, compartilhada com o `DeltaWriter`.
+      O `merge` numa tabela que ainda não existe grava tudo em vez de falhar.
+      Coberto por `tests/io/integration/test_lakehouse_spark.py` (`IcebergTest`).
+- [x] **O bloco `spark` do JSON não chega na criação da sessão** — `Sparquet.__init__`
+      chamava `SparkContextManager.get_or_create` com a config **do construtor**, antes
+      de `run_from_dict` ler o JSON; como a `SparkSession` é singleton de processo,
+      `spark.configs` do JSON era morto — em especial `spark.jars.packages`, ou seja,
+      **nenhum JSON conseguia pedir o jar de um conector**. Corrigido: o construtor não
+      cria mais a sessão; ela nasce na primeira execução, em `pipeline.py`, já com a
+      config do JSON (e com as do construtor por cima, via `_apply_spark_override`).
+      Quem precisa da sessão antes de executar usa a propriedade `Sparquet.spark`.
+      `tests/io/integration/harness.py` passa o bloco pelo JSON e é a prova disso.
+
+- [ ] **`mode: merge` não apaga** — o SQL montado por `DeltaWriter._merge` e
+      `IcebergWriter._merge` tem só `WHEN MATCHED THEN UPDATE` e
+      `WHEN NOT MATCHED THEN INSERT`. Não há como expressar `WHEN MATCHED THEN DELETE`
+      (linha marcada como excluída na origem) nem
+      `WHEN NOT MATCHED BY SOURCE THEN DELETE` (sincronizar o alvo com um snapshot
+      completo da origem) — os dois casos normais de CDC. Hoje, apagar exige SQL fora
+      do framework. Proposta: duas opções em `output.options`, `delete_when` (condição
+      sobre a origem, vira `WHEN MATCHED AND <cond> THEN DELETE` antes do UPDATE) e
+      `delete_not_matched_by_source` (booleano). Precisa entrar junto no catálogo do
+      Studio e nas docs do `sparquet-web`.
+
 - [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
       (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
       Falta um **helper de 1ª classe** para configurar chaves/roles por provedor de
@@ -299,6 +330,18 @@ separação ao evoluir.
       `sparquet_cola` é a ideia do SODA sem a dependência). O precedente sugere replicar,
       mas medir antes o esforço de um runner de asserção com `assertDataFrameEqual`
       (PySpark 3.5+) e comparação sem ordem.
+- [ ] **`$include` em qualquer nó do JSON** — hoje a diretiva só é expandida dentro de
+      `transformations` (`sparquet/utils/includes.py:26`); em qualquer outra chave ela é
+      ignorada em silêncio. O caso que motiva é o bloco `spark`: quem liga um conector
+      precisa repetir `spark.jars.packages`, `spark.sql.extensions` e as configs de
+      catálogo em **cada** JSON, porque via CLI (`Sparquet()` sem argumento) o JSON é o
+      único lugar de onde essas configs podem vir. Como lib já existe saída —
+      `Sparquet(spark={"configs": {...}})` vale para todas as execuções do processo — e
+      em cluster o lugar natural do jar é o `spark-defaults.conf`/`--packages`; falta o
+      caminho declarativo. Com a diretiva genérica: `"spark": {"$include":
+      "shared/spark-lakehouse.json"}`. Serve também para `output` e `validations`
+      repetidos entre pipelines. Precisa de entrada no catálogo do Studio (o editor tem
+      que entender arquivo compartilhado) e de doc no `sparquet-web`.
 - [ ] **`$include` aninhado** — hoje não suportado (um nível só).
 - [ ] **Catálogo de erros** — mensagens de erro padronizadas e acionáveis
       (transformação desconhecida, coluna inexistente, etc.).
@@ -659,22 +702,19 @@ Pendente aqui:
 
 ### 9.6 Biblioteca e arquivos
 
-- [ ] **Apontar um estágio do Pipeline para um arquivo JSON existente.** Hoje uma caixa
-      do Pipeline referencia um Job da biblioteca, e o Job é o dono do arquivo. Falta o
-      caminho inverso: apontar a caixa para um `.json` que já existe no disco — gerado
-      por outro time, versionado em outro repositório, escrito à mão — e executá-lo sem
-      importar para dentro da biblioteca. Desenho proposto: o estágio ganha uma origem
-      alternativa (`{ "source": "file", "path": "vendas/jobs/ingestao.json" }`, relativa
-      à raiz da biblioteca), o runner resolve na hora de executar, e o Studio mostra o
-      JSON em modo leitura com o linter rodando em cima — editar continua sendo pelo
-      Job. Pontos a decidir antes: (a) caminho relativo à raiz **sempre**, para não
-      vazar caminho absoluto de uma máquina para outra e para manter a recusa de
-      escapar da raiz que `workspace.py` já faz; (b) o que a execução registra no
-      histórico quando não há `job.id` — provavelmente um Job sintético identificado
-      pelo caminho, senão o catálogo fica com órfão; (c) o que acontece quando o arquivo
-      some ou deixa de compilar — falhar no lint do Pipeline, antes de rodar, não no
-      meio da execução; (d) se o mesmo mecanismo vale para um Workflow inteiro
-      (montar a biblioteca a partir de um diretório) ou só para estágio.
+- ✅ **Apontar um estágio do Pipeline para um arquivo JSON existente.** Uma caixa do
+      Pipeline nomeia *ou* um Job da biblioteca *ou* um `.json` que já existe — gerado
+      por outro time, versionado em outro repositório, escrito à mão — e o executa sem
+      importar. O estágio guarda `path`, relativo à raiz da biblioteca; o runner lê o
+      arquivo no momento em que o estágio começa, então nada é importado nem
+      cacheado e uma edição feita fora do Studio vale na execução seguinte. Endpoints
+      `GET /workspace/files` e `GET /workspace/files/{path}` (`workspace:Read`); a
+      resolução acontece **antes** de cobrar, travar ou executar, então arquivo que
+      falta é `400` e não Pipeline que morre no meio com estágios já escritos.
+      Caminho absoluto é recusado — nomeia um diretório que existe em uma máquina só.
+      Fica em aberto: (a) o histórico registra o estágio sem `job_id`, o que basta para
+      a linha do tempo mas deixa o catálogo sem dono do arquivo; (b) montar uma
+      biblioteca inteira a partir de um diretório, em vez de estágio a estágio.
 
 ---
 
@@ -687,6 +727,22 @@ Pendente aqui:
       `dependencies` (`sparquet-cola>=0.1.0`, sem cap — mantido retrocompatível) e é
       validado contra o pacote do PyPI; os shims `sparquet.validation.*` seguem
       reexportando dele.
+- ✅ **As três peças substituíveis do runner** — crédito, identidade e biblioteca são
+      *política*, não mecanismo: o runner aberto responde as três com SQLite e arquivos
+      no disco do operador, o que é certo para uma equipe numa máquina e errado para um
+      serviço hospedado. Em vez de fork, cada uma virou **slot**: um `Protocol` no módulo
+      dono (`credits.CreditLedger`, `auth.IdentityStore`, `workspace.WorkspaceStore`), a
+      classe local como default, e uma variável de ambiente nomeando a fábrica
+      alternativa (`SPARQUET_STUDIO_{CREDITS,AUTH,WORKSPACE}_PROVIDER`, no formato
+      `module:factory`). Carregador em `server/providers.py`; `GET /health` diz o que
+      carregou. **Provider configurado que falha de carregar derruba o processo** — cair
+      no default local calado colocaria o ledger e a identidade de todos os tenants num
+      arquivo só. Ver `sparquet-studio/server/README.md` → *Replaceable pieces*.
+- [ ] **`sparquet-cloud`** — o que só faz sentido hospedado (multi-tenancy real,
+      cobrança, identidade federada, execução gerenciada, segredos, agendamento,
+      observabilidade agregada, colaboração, IA com chave da plataforma, catálogo como
+      serviço) vive em repositório privado próprio (`../sparquet-cloud`), consumindo o
+      runner aberto pelos slots acima. Escopo e backlog lá, em `SCOPE.md` e `BACKLOG.md`.
 - [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
       (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
       mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pyspark.sql import DataFrame
 
-from sparquet.io.base import BaseReader, BaseWriter
+from sparquet.io.base import BaseReader, BaseWriter, is_table_name as _is_table_name
 
 
 class DeltaReader(BaseReader):
@@ -118,21 +118,3 @@ class DeltaWriter(BaseWriter):
                 INSERT ({insert_cols}) VALUES ({insert_vals})
         """
         df.sparkSession.sql(sql)
-
-
-def _is_table_name(path: str) -> bool:
-    """'catalog.schema.tabela' / 'schema.tabela' → True; qualquer path/URI → False.
-
-    Regra independente de scheme: um path físico ou URI sempre tem '/' (e URIs têm
-    ':'), enquanto um identificador de catálogo não tem nenhum dos dois. Assim todos
-    os schemes de object storage funcionam sem precisar enumerá-los — s3://, s3a://,
-    s3n://, gs://, abfss://, abfs://, wasbs://, wasb://, adl://, hdfs://, dbfs:/,
-    oss://, file:… — e caminhos relativos/Windows (./out.delta, C:/data/x) também são
-    tratados como path.
-
-    Ambiguidade residual: um nome pontuado sem barra nem ':' (ex.: 'out.delta') ainda
-    é lido como tabela — prefixe com './' ou '/' para forçar path.
-    """
-    if "/" in path or ":" in path:
-        return False
-    return "." in path

@@ -1,0 +1,23 @@
+{
+  "name": "formatos-orc-escrita",
+  "description": "Escreve o seed em orc. Metade de ida do round-trip executado.",
+  "input": {
+    "format": "csv",
+    "path": "{dir}/seed.csv",
+    "options": {
+      "header": "true",
+      "inferSchema": "true"
+    }
+  },
+  "transformations": [
+    {
+      "type": "filter",
+      "condition": "valor IS NULL OR valor > -1000"
+    }
+  ],
+  "output": {
+    "format": "orc",
+    "path": "{dir}/out-orc",
+    "mode": "overwrite"
+  }
+}

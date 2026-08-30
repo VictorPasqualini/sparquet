@@ -1,0 +1,17 @@
+{
+  "name": "formatos-view-escrita",
+  "description": "Registra o resultado como temp view — nao toca disco.",
+  "input": {
+    "format": "csv",
+    "path": "{dir}/seed.csv",
+    "options": {
+      "header": "true",
+      "inferSchema": "true"
+    }
+  },
+  "output": {
+    "format": "view",
+    "path": "formatos_round_trip",
+    "mode": "overwrite"
+  }
+}

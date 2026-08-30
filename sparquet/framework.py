@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, SparkSession
 
 from sparquet.core.config import PipelineConfig, SparkConfig
 from sparquet.utils.template import apply_template
@@ -54,7 +54,27 @@ class Sparquet:
         # Registra (e cacheia) o df de entrada como temp view em toda execução, para
         # permitir self-join / SQL sobre a entrada sem reler a base. Ver `run()`.
         self._input_view = input_view
-        SparkContextManager.get_or_create(self._spark_config)
+
+    # ------------------------------------------------------------------
+    # Sessão Spark
+    # ------------------------------------------------------------------
+
+    @property
+    def spark(self) -> SparkSession:
+        """A SparkSession, criada na primeira vez que alguém precisar dela.
+
+        A sessão **não** nasce no construtor de propósito. `spark.jars.packages`,
+        `spark.sql.extensions` e as configs de catálogo só valem no momento em que
+        a sessão é criada, e a `SparkSession` é singleton do processo: se o
+        construtor criasse a sessão, o bloco `spark` do JSON — lido só depois, em
+        `run`/`run_from_dict` — chegaria tarde demais e seria silenciosamente
+        ignorado. Na prática nenhum JSON conseguia pedir o jar de um conector.
+
+        Quem precisa da sessão antes de executar um pipeline (para montar um
+        DataFrame de entrada, por exemplo) usa esta propriedade; aí a config que
+        vale é a do construtor, que é a única conhecida naquele momento.
+        """
+        return SparkContextManager.get_or_create(self._spark_config)
 
     # ------------------------------------------------------------------
     # Execução de pipelines

@@ -1,0 +1,16 @@
+{
+  "name": "formatos-parquet-leitura",
+  "description": "Le de volta o que a etapa anterior gravou em parquet.",
+  "input": {
+    "format": "parquet",
+    "path": "{dir}/out-parquet"
+  },
+  "output": {
+    "format": "csv",
+    "path": "{dir}/back-parquet",
+    "mode": "overwrite",
+    "options": {
+      "header": "true"
+    }
+  }
+}

@@ -328,11 +328,58 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
 | `SPARQUET_STUDIO_WORKSPACE` | unset | Pins the library directory. Set it and the interface may not change it — a deployment that decides centrally decides centrally. Unset, the runner uses what was chosen in Settings, falling back to the per-user default. |
 | `SPARQUET_HOME` | `%APPDATA%\Sparquet` on Windows, `$XDG_DATA_HOME/sparquet` (or `~/.local/share/sparquet`) elsewhere | Per-user data directory. Holds `studio.json` and, unless told otherwise, `workspace/` — the library. |
+| `SPARQUET_STUDIO_CREDITS_PROVIDER` | unset (SQLite) | `module:factory` building the credit ledger instead of the local one. See **Replaceable pieces**. |
+| `SPARQUET_STUDIO_AUTH_PROVIDER` | unset (SQLite) | `module:factory` building the identity store instead of the local one. |
+| `SPARQUET_STUDIO_WORKSPACE_PROVIDER` | unset (files on disk) | `module:factory` building the library store instead of the local one. |
 | `SPARQUET_STUDIO_HISTORY_PURGE` | on | `off`/`0`/`false`/`no` stops the runner from applying retention on its own. `POST /runs/purge` still works. |
 | `SPARQUET_STUDIO_HISTORY_DETAIL_DAYS` | `30` | After this many days a run loses its logs, its steps and its stored JSON, and keeps its row. |
 | `SPARQUET_STUDIO_HISTORY_MAX_DAYS` | `365` | After this many days the run row itself goes — but only with `SPARQUET_STUDIO_HISTORY_DELETE` on. |
 | `SPARQUET_STUDIO_HISTORY_KEEP_RUNS` | `10` | The newest N executions of each Job and each Pipeline are never expired, however old they are. |
 | `SPARQUET_STUDIO_HISTORY_DELETE` | unset (thin only) | `on`/`1`/`true`/`yes` lets the second stage delete run rows. Off, history thins but never shrinks in row count. |
+
+## Replaceable pieces
+
+Three things this runner does are **policy, not mechanism**: where credits are
+kept, where identity is kept, and where the library is kept. The open runner
+answers all three with SQLite and files on the operator's own disk, which is the
+right answer for one team on one machine and the wrong one for a hosted service —
+a tenant's ledger cannot live in a file another tenant's process can open, and
+identity cannot be a password column when the customer arrives with an identity
+provider of their own.
+
+The wrong fix is a fork: it diverges on the first bug fixed on only one side, and
+from then on every feature is written twice. So each of the three is a **slot** —
+a `Protocol` in the module that owns it, the local class as the default, and an
+environment variable naming a factory to use instead.
+
+| Slot | Protocol | Local default | Variable |
+|---|---|---|---|
+| Credits | `credits.CreditLedger` | `credits.CreditStore` (SQLite) | `SPARQUET_STUDIO_CREDITS_PROVIDER` |
+| Identity | `auth.IdentityStore` | `auth.AuthStore` (SQLite) | `SPARQUET_STUDIO_AUTH_PROVIDER` |
+| Library | `workspace.WorkspaceStore` | `workspace.FileWorkspaceStore` (files) | `SPARQUET_STUDIO_WORKSPACE_PROVIDER` |
+
+```bash
+export SPARQUET_STUDIO_CREDITS_PROVIDER="sparquet_cloud.credits:build"
+export SPARQUET_STUDIO_AUTH_PROVIDER="sparquet_cloud.identity:build"
+export SPARQUET_STUDIO_WORKSPACE_PROVIDER="sparquet_cloud.library:build"
+```
+
+A factory takes no arguments and returns something satisfying the protocol.
+Anything importable works: the alternative is a package on the `PYTHONPATH`, not
+a patched copy of `main.py`. `GET /health` reports what was loaded.
+
+**A configured provider that fails to load stops the process.** Logging the
+failure and carrying on with the local default is exactly the wrong thing: a
+hosted runner that quietly falls back to SQLite puts every tenant's ledger and
+every tenant's identity in one file on one disk. That is a data isolation
+failure, not a degraded mode, and it must never be something an operator has to
+notice in a log.
+
+What an implementation owes beyond the method signatures is written on each
+protocol's docstring — that a reservation is settled or released and never left
+open, that what was charged is frozen at charge time, that `has_users()` is the
+switch between token-only and session mode, that `resolve_session()` is the whole
+authorization surface. Those are the promises the endpoints are written against.
 
 ## Endpoints
 
@@ -346,7 +393,8 @@ and deferred-warning buffer.
   "framework_version": "0.2.3",
   "auth_required": true,
   "login_required": false,
-  "credits_enforced": false
+  "credits_enforced": false,
+  "providers": { "credits": "local", "auth": "local", "workspace": "local" }
 }
 ```
 
@@ -357,7 +405,10 @@ runners older than 0.2.0, which accepted unauthenticated `/run` calls.
 `login_required` says whether this runner has users: `false` means the shared
 token is the identity, `true` means a session is needed on top of it.
 `credits_enforced` says whether a balance can refuse a run; `false` means credits
-are being counted but nothing is blocked.
+are being counted but nothing is blocked. `providers` names which implementation
+is answering each replaceable slot — `local` for the SQLite-and-files default,
+otherwise the `module:factory` that was injected; an operator debugging a hosted
+runner should not have to infer that from behaviour.
 
 ### `POST /run`
 
@@ -433,6 +484,15 @@ the same payload `/run` returns — or `error`.
 The `start` event names the ids the run was persisted under: `pipeline_run_id`
 addresses `/runs/{id}/cancel`, `job_run_id` addresses `/job-runs/{id}/logs`.
 
+Step markers come from the framework's own log, and what they report differs by
+kind: `input`, `validation` and `output` did touch data, but a `transformation`
+marker means the operation was **added to the plan**, not that rows went through
+it — Spark is lazy and nothing here forces an action to find out. So a
+transformation whose error only the executor can find is reported as succeeded,
+and the failure arrives on the next step that forces one. Reporting otherwise
+would mean a `count()` after every transformation, re-reading the input once per
+step.
+
 ### `POST /run/flow/stream`
 
 Runs several pipeline JSONs **in sequence** — a Studio **Pipeline**, where each Job
@@ -448,6 +508,22 @@ is one stage. Requires the token, same as `/run`. Server-Sent Events.
   "stop_on_error": true
 }
 ```
+
+A stage names **one** of two things: `pipeline`, the JSON to run inline, or
+`path`, a `.json` in the library relative to its root:
+
+```json
+{ "id": "s3", "name": "gold", "path": "vendas/jobs/gold.json" }
+```
+
+The runner reads that file when the flow starts — nothing is imported and nothing
+is cached, so an edit made outside the Studio takes effect on the next run, and
+the file stays the source. Both together, or neither, is a `422` naming the stage.
+A path that does not exist, is not JSON, or climbs out of the library root is a
+`400`, raised **before** anything is charged, locked or executed: a Pipeline that
+dies halfway with earlier stages already written is worse than one that never
+started. Paths are always relative — an absolute one names a directory that
+exists on exactly one machine.
 
 Stages arrive already ordered and share one SparkSession, so a stage hands data to
 the next through whatever it wrote — a path the next one reads, or a `view` output
@@ -920,7 +996,10 @@ Where the library is, and why it is there. Needs `workspace:Read`.
 `source` is the reason, strongest first: `env` (`SPARQUET_STUDIO_WORKSPACE` — then
 `locked` is true and the interface may not change it), `settings` (chosen in the
 interface), `legacy` (an older directory that already held a library, adopted so
-nobody loses one), `default` (the per-user directory). Somebody who cannot find
+nobody loses one), `default` (the per-user directory). A fifth value, `provider`,
+means the deployment injected a store of its own (see **Replaceable pieces**):
+there is no local directory, `root` is whatever that store calls itself, and
+`locked` is true. Somebody who cannot find
 their Jobs is almost always looking at a different directory than the runner is,
 which is why the reason is returned and not only the path.
 
@@ -935,8 +1014,8 @@ where the runner writes on its host is an administrator's call.
 ```
 
 `null` or an empty string clears the choice and goes back to the default. The
-answer is the same shape as `GET`. Refusals: `409` when the environment pinned
-it, `400` for a relative path, for a directory that cannot be created or written,
+answer is the same shape as `GET`. Refusals: `409` when the environment pinned it
+or a store was injected, `400` for a relative path, for a directory that cannot be created or written,
 and for **any path inside the runner's own source tree** — a checkout is code, it
 gets pulled, reset and deleted, and a library in one is lost to the first `git
 clean` or committed by accident long before that.
@@ -946,7 +1025,37 @@ reading and writing the new place, which is what makes this the way to *adopt* a
 directory that already holds a library. Moving files is the operator's job: a
 half-finished copy with no way back is worse than a move nobody made.
 
-All seven require the `X-Sparquet-Token` header.
+### `GET /workspace/files`
+
+Every runnable JSON in the library, for a stage that wants to point at a file
+rather than at a Job. Needs **`workspace:Read`**.
+
+```json
+{
+  "root": "/home/ana/.local/share/sparquet/workspace",
+  "files": [
+    { "path": "vendas/jobs/ingestao.json", "name": "ingestao",
+      "size": 812, "modified": 1756400000 }
+  ]
+}
+```
+
+Paths are relative to `root`, forward slashes on every platform. The editor's own
+state (`.studio/`), anything hidden, and the half-written `.tmp-*.json` of a save
+in flight are not listed: none of them is something to run.
+
+### `GET /workspace/files/{path}`
+
+The JSON at that path, **uncompiled** — exactly what is on disk:
+
+```json
+{ "path": "vendas/jobs/ingestao.json", "pipeline": { "name": "ingestao", "...": "..." } }
+```
+
+Needs `workspace:Read`. Same refusals as a staged path: `400` for a missing file,
+for something that is not a JSON object, and for a path that leaves the root.
+
+All nine require the `X-Sparquet-Token` header.
 
 ## Where the library is stored
 

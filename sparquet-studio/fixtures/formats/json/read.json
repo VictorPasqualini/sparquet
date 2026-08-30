@@ -1,0 +1,16 @@
+{
+  "name": "formatos-json-leitura",
+  "description": "Le de volta o que a etapa anterior gravou em json.",
+  "input": {
+    "format": "json",
+    "path": "{dir}/out-json"
+  },
+  "output": {
+    "format": "csv",
+    "path": "{dir}/back-json",
+    "mode": "overwrite",
+    "options": {
+      "header": "true"
+    }
+  }
+}
