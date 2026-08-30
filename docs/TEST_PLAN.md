@@ -104,16 +104,16 @@ formats that need nothing but Spark — see
 
 | Format | Read | Write | Status | What is missing |
 |---|:---:|:---:|:---:|---|
-| `parquet` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows survive, `partition_by` gives the column back. Missing: `append`/`error`/`ignore` write modes |
-| `csv` | ✓ | ✓ | ◐ | [dialect pinned](../tests/test_csv_dialect_spark.py) (RFC 4180 quoting, both ways) and [round-trip pinned](../tests/test_formats_roundtrip_spark.py) with `header`. Missing: `sep`/`encoding` defaults, `inferSchema` off |
-| `delta` | ✓ | ✓ | ✅ | [path-vs-table heuristic pinned](../tests/io/test_delta_path.py) and [run against a real jar](../tests/io/integration/test_lakehouse_spark.py): round trip by physical path, `append` adding to what was there, `mode: merge` updating one row and inserting another while leaving a third alone, the missing-`merge_keys` refusal, and `versionAsOf` still returning the pre-overwrite state |
-| `iceberg` | ✓ | ✓ | ⬜ | Tests are [written and switched off](../tests/io/integration/test_lakehouse_spark.py): the writer's `save()` cannot create the table, so writing to a new catalog identifier fails with `[TABLE_OR_VIEW_NOT_FOUND]`. See `BACKLOG.md` §4 — the `skip` comes off with the fix |
+| `parquet` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows survive, `partition_by` gives the column back. [Write modes pinned](../tests/test_write_modes_spark.py): `overwrite` replaces, `append` adds, `error` fails naming the path, `ignore` leaves the data untouched, `compression: gzip` changes the file extension and still reads back, and a partition directory read on its own returns only its rows |
+| `csv` | ✓ | ✓ | ◐ | [dialect pinned](../tests/test_csv_dialect_spark.py) (RFC 4180 quoting, both ways), [round-trip pinned](../tests/test_formats_roundtrip_spark.py) with `header`, and [`compression`/`partition_by` pinned](../tests/test_write_modes_spark.py). Missing: `sep`/`encoding` defaults, `inferSchema` off |
+| `delta` | ✓ | ✓ | ✅ | [path-vs-table heuristic pinned](../tests/io/test_delta_path.py) and [run against a real jar](../tests/io/integration/test_lakehouse_spark.py): round trip by physical path, `append` adding to what was there, `mode: merge` updating one row and inserting another while leaving a third alone, the missing-`merge_keys` refusal, `versionAsOf` still returning the pre-overwrite state, and `replaceWhere` swapping a single partition while the others stay put |
+| `iceberg` | ✓ | ✓ | ✅ | [run against a real jar](../tests/io/integration/test_lakehouse_spark.py) on a hadoop catalog: round trip by catalog identifier — the writer now **creates the table** with `saveAsTable`, which is what a first load needs — `append`, `mode: merge` updating and inserting, and `partition_by` at creation |
 | `txt` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): single `value` column, lines back in the order written |
 | `view` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): session and `global` scope, the latter readable with and without the `global_temp.` prefix. Missing: the auto-cache being what stops a re-read |
-| `json` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): values and columns back whole, a null still null and not `""`. Missing: `multiLine` |
-| `orc` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows identical |
+| `json` | ✓ | ✓ | ◐ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): values and columns back whole, a null still null and not `""`, plus [`compression`/`partition_by`](../tests/test_write_modes_spark.py). Missing: `multiLine` |
+| `orc` | ✓ | ✓ | ✅ | [round-trip pinned](../tests/test_formats_roundtrip_spark.py): schema and rows identical, and `compression: zlib` [changing the file it writes](../tests/test_write_modes_spark.py) |
 | `avro` | ✓ | ✓ | ✅ | [run against a real jar](../tests/io/integration/test_files_spark.py): round trip keeping values and nulls, `compression` as a JSON option, `partition_by` giving every row and the column back |
-| `xml` | ✓ | ✓ | ✅ | [run on real files](../tests/io/integration/test_files_spark.py): round trip with `rowTag`/`rootTag`, and the silent failure mode — a wrong `rowTag` succeeds with zero rows |
+| `xml` | ✓ | ✓ | ✅ | [run on real files](../tests/io/integration/test_files_spark.py): round trip with `rowTag`/`rootTag`, the silent failure mode — a wrong `rowTag` succeeds with zero rows — `append` adding a second file to the same directory, and `compression: gzip` writing `.gz` that the reader opens with no extra option |
 | `binary` | ✓ | — | ◐ | [run on real files](../tests/io/integration/test_files_spark.py): `path`/`length` for a whole file, `pathGlobFilter` deciding what is read, and the bytes coming back identical. Missing: the read-only refusal on write |
 | `hudi` | ✓ | ✓ | ⬜ | `hoodie.*` options passthrough |
 
@@ -152,6 +152,10 @@ one `harness.py`: `avro`, `delta` and `iceberg` pull their jars through
 `spark.jars.packages`, while `xml` and `binaryFile` are built into Spark 4 and need
 nothing. One session serves the whole tier, because `spark.jars.packages` only takes
 effect when the session is created and `SparkSession` is a per-process singleton.
+The harness declares those packages in the pipeline JSON, the same way a user
+would — which makes this tier the standing proof that the JSON `spark` block
+reaches session creation. It only started working once `Sparquet.__init__` stopped
+creating the session ahead of the config it was supposed to honour.
 
     SPARQUET_IT=1 python tests/io/integration/test_files_spark.py
     SPARQUET_IT=1 python tests/io/integration/test_lakehouse_spark.py

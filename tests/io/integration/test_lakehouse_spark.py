@@ -13,8 +13,8 @@ O que cada teste trava:
             sem metastore); `merge` com `merge_keys`; `partition_by` na criação.
 
 A referência muda de forma entre os dois de propósito: Delta aceita caminho e
-nome de tabela (`_is_table_name` decide), Iceberg só faz sentido com tabela de
-catálogo. Testar cada um pelo caminho que o usuário realmente usa vale mais do
+nome de tabela (`is_table_name` decide, em `sparquet/io/base.py`), Iceberg só faz
+sentido com tabela de catálogo — e o writer a cria quando não existe. Testar cada um pelo caminho que o usuário realmente usa vale mais do
 que uniformizar.
 
     SPARQUET_IT=1 python tests/io/integration/test_lakehouse_spark.py
@@ -191,27 +191,66 @@ class DeltaTest(unittest.TestCase):
         self.assertEqual(agora.rows_read, 1)
         self.assertEqual(antes.rows_read, len(harness.SEED_ROWS))
 
+    def test_particionar_e_substituir_uma_particao_com_replace_where(self) -> None:
+        """`replaceWhere` é o overwrite cirúrgico do Delta: troca só a partição
+        que a condição descreve e deixa as outras onde estão. Sem ele, corrigir
+        um dia de dado obriga a reescrever a tabela inteira."""
+        directory = (harness.WORK / "delta-particionado").as_posix()
 
-#: Por que a classe abaixo está desligada.
-#:
-#: `IcebergWriter.write` escreve com `df.write.format("iceberg").save(path)`, e
-#: no Spark 4 esse caminho **exige que a tabela já exista** — apontar um output
-#: para uma tabela nova devolve `[TABLE_OR_VIEW_NOT_FOUND]`, não cria nada. Foi
-#: medido: `save` numa tabela inexistente falha, `saveAsTable` cria e funciona
-#: (inclusive com `partitionBy`, `overwrite` repetido, `append` e `option`), e o
-#: `save` volta a funcionar depois que a tabela existe. A leitura por `load` está
-#: correta nos dois casos.
-#:
-#: Os testes ficam escritos porque descrevem o comportamento certo; a correção é
-#: no writer (usar `saveAsTable` quando o alvo é identificador de tabela, como o
-#: `DeltaWriter` já distingue em `_is_table_name`) e está registrada no
-#: `BACKLOG.md`. Quando ela entrar, some este `skip`.
-_ICEBERG_PENDENTE = (
-    "IcebergWriter usa save(), que não cria a tabela — ver BACKLOG.md §4"
-)
+        gravado = harness.run(
+            {
+                "name": "it-delta-particionado",
+                "input": harness.seed_input(),
+                "output": {
+                    "format": "delta",
+                    "path": directory,
+                    "mode": "overwrite",
+                    "partition_by": ["id"],
+                },
+            }
+        )
+        self.assertTrue(gravado.success, msg=gravado.error)
+
+        origem = harness.work_dir("delta-replace-origem") / "so-o-um.csv"
+        origem.write_text("id,nome,valor\n1,corrigido,7.7\n", encoding="utf-8")
+        substituido = harness.run(
+            {
+                "name": "it-delta-replace-where",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "delta",
+                    "path": directory,
+                    "mode": "overwrite",
+                    "partition_by": ["id"],
+                    "options": {"replaceWhere": "id = 1"},
+                },
+            }
+        )
+        self.assertTrue(substituido.success, msg=substituido.error)
+
+        harness.run(
+            {
+                "name": "it-delta-replace-leitura",
+                "input": {"format": "delta", "path": directory},
+                "output": {
+                    "format": "csv",
+                    "path": (harness.WORK / "back-delta-replace").as_posix(),
+                    "mode": "overwrite",
+                    "options": {"header": "true"},
+                },
+            }
+        )
+        por_id = {linha["id"]: linha for linha in harness.rows_back("delta-replace")}
+        # A partição 1 foi trocada; as outras duas continuam como a semente as deixou.
+        self.assertEqual(set(por_id), {"1", "2", "3"})
+        self.assertEqual(por_id["1"]["nome"], "corrigido")
+        self.assertEqual(por_id["2"]["nome"], harness.SEED_ROWS[1][1])
 
 
-@unittest.skip(_ICEBERG_PENDENTE)
 @harness.requires_integration
 class IcebergTest(unittest.TestCase):
     """Catálogo `local`, tipo hadoop — um diretório, sem metastore nem serviço."""

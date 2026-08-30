@@ -169,6 +169,89 @@ class XmlTest(unittest.TestCase):
         self.assertTrue(lido.success, msg=lido.error)
         self.assertEqual(lido.rows_read, 0)
 
+    def test_append_soma_no_mesmo_diretorio(self) -> None:
+        """`append` em XML não gera um arquivo inválido: cada escrita põe outro
+        arquivo com o mesmo `rootTag`, e a leitura soma os dois."""
+        directory = (harness.WORK / "xml-append").as_posix()
+        escrita = {
+            "format": "xml",
+            "path": directory,
+            "mode": "overwrite",
+            "options": {"rowTag": "registro", "rootTag": "registros"},
+        }
+
+        harness.run(
+            {"name": "it-xml-append-1", "input": harness.seed_input(), "output": escrita}
+        )
+        harness.run(
+            {
+                "name": "it-xml-append-2",
+                "input": harness.seed_input(),
+                "output": {**escrita, "mode": "append"},
+            }
+        )
+        lido = harness.run(
+            {
+                "name": "it-xml-append-leitura",
+                "input": {
+                    "format": "xml",
+                    "path": directory,
+                    "options": {"rowTag": "registro"},
+                },
+                "output": {"format": "view", "path": "it_xml_append"},
+            }
+        )
+
+        self.assertTrue(lido.success, msg=lido.error)
+        self.assertEqual(lido.rows_read, len(harness.SEED_ROWS) * 2)
+
+    def test_compressao_comprime_o_arquivo_e_a_leitura_descomprime_sozinha(self) -> None:
+        """XML comprimido é o caso normal em ingestão de terceiro: o arquivo sai
+        `.gz` e o reader não precisa de opção nenhuma para abrir."""
+        directory = harness.WORK / "xml-gzip"
+
+        gravado = harness.run(
+            {
+                "name": "it-xml-gzip",
+                "input": harness.seed_input(),
+                "output": {
+                    "format": "xml",
+                    "path": directory.as_posix(),
+                    "mode": "overwrite",
+                    "options": {
+                        "rowTag": "registro",
+                        "rootTag": "registros",
+                        "compression": "gzip",
+                    },
+                },
+            }
+        )
+        self.assertTrue(gravado.success, msg=gravado.error)
+
+        partes = [
+            arquivo.name
+            for arquivo in directory.iterdir()
+            if not arquivo.name.startswith((".", "_"))
+        ]
+        self.assertTrue(partes, "nada foi escrito")
+        self.assertTrue(
+            all(nome.endswith(".gz") for nome in partes),
+            f"esperava arquivos .gz, veio {partes}",
+        )
+
+        lido = harness.run(
+            {
+                "name": "it-xml-gzip-leitura",
+                "input": {
+                    "format": "xml",
+                    "path": directory.as_posix(),
+                    "options": {"rowTag": "registro"},
+                },
+                "output": {"format": "view", "path": "it_xml_gzip"},
+            }
+        )
+        self.assertEqual(lido.rows_read, len(harness.SEED_ROWS))
+
 
 @harness.requires_integration
 class BinaryTest(unittest.TestCase):

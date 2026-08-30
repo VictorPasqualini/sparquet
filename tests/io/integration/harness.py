@@ -249,17 +249,17 @@ def seed_input(path: Optional[Path] = None) -> Dict[str, object]:
 def run(spec: Dict[str, object]):
     """Executa um pipeline pelo framework, como a lib faria.
 
-    O bloco `spark` vai no **construtor**, não no JSON: `Sparquet.__init__` chama
-    `SparkContextManager.get_or_create` (framework.py:57), então a sessão já
-    existe quando `run_from_dict` lê o `spark` do JSON — e `spark.jars.packages`
-    só vale na criação. Ver `docs/BACKLOG.md`; enquanto o construtor for o único
-    caminho que funciona, é por ele que o teste passa os jars.
+    O bloco `spark` vai **no JSON**, que é o caminho do usuário: `Sparquet()` sem
+    argumento nenhum, e a sessão nasce na primeira execução já com
+    `spark.jars.packages` do JSON. Isto também é o teste dessa garantia — se a
+    sessão voltar a nascer no construtor, os jars não entram e todo este
+    diretório falha.
     """
     from sparquet import Sparquet
 
     payload = dict(spec)
     payload.setdefault("spark", spark_block())
-    return Sparquet(spark=spark_block()).run_from_dict(payload)
+    return Sparquet().run_from_dict(payload)
 
 
 def round_trip(

@@ -22,6 +22,42 @@ Notes on the history below:
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-29
+
+### Fixed
+
+- **The `spark` block in the JSON now reaches session creation.** `Sparquet.__init__`
+  used to build the SparkSession from the *constructor's* config, before `run` or
+  `run_from_dict` had read the JSON. Since `SparkSession` is a per-process singleton,
+  everything under `spark.configs` in the pipeline file was silently dropped — most
+  visibly `spark.jars.packages`, which means **no JSON could ask for a connector's
+  jar** (avro, delta, iceberg, kafka, the JDBC drivers). Through the CLI, where
+  `Sparquet()` takes no arguments, the JSON was the only place those configs could
+  come from at all. The session is now created on the first run, with the JSON config
+  already parsed and the constructor's config layered on top, exactly as
+  `_apply_spark_override` always intended. Code that needs the session before running
+  a pipeline uses the new `Sparquet.spark` property.
+
+- **`IcebergWriter` creates the table it writes to.** Writing went through
+  `df.write.format("iceberg").save(path)`, and on Spark 4 that path requires the table
+  to exist: pointing an output at a new catalog identifier failed with
+  `[TABLE_OR_VIEW_NOT_FOUND]` instead of creating anything, so the first load of any
+  Iceberg pipeline needed a `CREATE TABLE` issued by hand outside the framework. When
+  `path` is a catalog identifier the writer now uses `saveAsTable`, which creates the
+  table — honouring `partition_by` — and keeps working on the writes that follow; a
+  physical path still goes through `save`. `mode: merge` against a table that does not
+  exist yet writes the whole input instead of failing, which is the same state a merge
+  into an empty table would leave. The path-vs-table rule moved to `is_table_name` in
+  `sparquet/io/base.py`, shared with `DeltaWriter` instead of duplicated.
+
+### Notes
+
+- Both fixes change behaviour, not the JSON contract: a pipeline file that worked
+  keeps working. The one difference to be aware of is that `Sparquet()` no longer
+  starts a SparkSession by itself — the session appears on the first `run`, or on the
+  first read of `Sparquet.spark`.
+
+
 ## [0.7.0] — 2026-08-29
 
 ### Added
@@ -429,7 +465,8 @@ Published as `spark-framework`.
   validation engines, the extension registries (`register_*`), `PipelineResult`, the
   structured JSON logger and the CLI.
 
-[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.3.1...v0.5.0

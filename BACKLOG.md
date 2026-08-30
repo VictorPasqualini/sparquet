@@ -182,29 +182,36 @@ Pendentes / candidatos:
 | `kinesis` | AWS Kinesis — via conector do provedor; é essencialmente **streaming** (ver §7) |
 | `excel` | nicho; via `spark-excel` |
 
-- [ ] **`IcebergWriter` não cria a tabela** — a escrita usa
+- [x] **`IcebergWriter` não cria a tabela** — a escrita usava
       `df.write.format("iceberg").save(path)`, e no Spark 4 esse caminho exige que a
-      tabela **já exista**: apontar um output para uma tabela nova devolve
+      tabela **já exista**: apontar um output para uma tabela nova devolvia
       `[TABLE_OR_VIEW_NOT_FOUND] The table or view db.x cannot be found`, sem criar
-      nada. Medido com `iceberg-spark-runtime-4.0_2.13:1.11.0` e catálogo hadoop:
-      `save` em tabela inexistente falha; `saveAsTable` cria e funciona, inclusive com
-      `partitionBy`, `overwrite` repetido, `append` e `option`; `save` volta a
-      funcionar depois que a tabela existe; a leitura por `load` está correta nos dois
-      casos. Correção: distinguir identificador de tabela de caminho — o
-      `DeltaWriter` já faz isso em `_is_table_name` — e usar `saveAsTable` no primeiro
-      caso. Cobertura já escrita e desligada em
-      `tests/io/integration/test_lakehouse_spark.py` (`IcebergTest`); tirar o `skip`
-      junto com a correção.
-- [ ] **O bloco `spark` do JSON não chega na criação da sessão** — `Sparquet.__init__`
-      (`sparquet/framework.py:57`) chama `SparkContextManager.get_or_create` com a
-      config **do construtor**, antes de `run_from_dict` ler o JSON. `pipeline.py:160`
-      honraria `config.spark`, mas a `SparkSession` é singleton de processo e já
-      existe; `cli.py:33` faz `Sparquet()` sem argumento, então pela CLI o efeito é o
-      mesmo. Consequência prática: `spark.configs` do JSON é morto — em especial
-      `spark.jars.packages`, ou seja, **nenhum JSON consegue pedir o jar de um
-      conector** (avro, delta, iceberg, kafka, jdbc…). Correção: adiar a criação da
-      sessão para a primeira execução, quando a config do JSON já foi lida. Enquanto
-      não entra, `tests/io/integration/harness.py` passa o bloco pelo construtor.
+      nada. Corrigido: quando o `path` é identificador de catálogo, a escrita usa
+      `saveAsTable`, que cria a tabela (com o `partition_by` declarado) na primeira
+      carga; caminho físico continua em `save`. A regra path-vs-tabela virou
+      `is_table_name` em `sparquet/io/base.py`, compartilhada com o `DeltaWriter`.
+      O `merge` numa tabela que ainda não existe grava tudo em vez de falhar.
+      Coberto por `tests/io/integration/test_lakehouse_spark.py` (`IcebergTest`).
+- [x] **O bloco `spark` do JSON não chega na criação da sessão** — `Sparquet.__init__`
+      chamava `SparkContextManager.get_or_create` com a config **do construtor**, antes
+      de `run_from_dict` ler o JSON; como a `SparkSession` é singleton de processo,
+      `spark.configs` do JSON era morto — em especial `spark.jars.packages`, ou seja,
+      **nenhum JSON conseguia pedir o jar de um conector**. Corrigido: o construtor não
+      cria mais a sessão; ela nasce na primeira execução, em `pipeline.py`, já com a
+      config do JSON (e com as do construtor por cima, via `_apply_spark_override`).
+      Quem precisa da sessão antes de executar usa a propriedade `Sparquet.spark`.
+      `tests/io/integration/harness.py` passa o bloco pelo JSON e é a prova disso.
+
+- [ ] **`mode: merge` não apaga** — o SQL montado por `DeltaWriter._merge` e
+      `IcebergWriter._merge` tem só `WHEN MATCHED THEN UPDATE` e
+      `WHEN NOT MATCHED THEN INSERT`. Não há como expressar `WHEN MATCHED THEN DELETE`
+      (linha marcada como excluída na origem) nem
+      `WHEN NOT MATCHED BY SOURCE THEN DELETE` (sincronizar o alvo com um snapshot
+      completo da origem) — os dois casos normais de CDC. Hoje, apagar exige SQL fora
+      do framework. Proposta: duas opções em `output.options`, `delete_when` (condição
+      sobre a origem, vira `WHEN MATCHED AND <cond> THEN DELETE` antes do UPDATE) e
+      `delete_not_matched_by_source` (booleano). Precisa entrar junto no catálogo do
+      Studio e nas docs do `sparquet-web`.
 
 - [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
       (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
