@@ -1840,6 +1840,10 @@ def run_flow_stream(
 
     events: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
     box: Dict[str, Any] = {"stages": [], "error": None, "preview": None}
+    # The reservation each stage opens as it starts. The streaming body releases
+    # whatever is still open when the flow ends, so a stage that raised — or a
+    # client that hung up between stages — never leaves credit held.
+    holds: List[Any] = []
 
     def _cancel_remaining(from_index: int) -> None:
         """Every stage the cancel kept from running, recorded and announced."""
