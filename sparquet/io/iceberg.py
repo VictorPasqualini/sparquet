@@ -3,6 +3,13 @@ from __future__ import annotations
 from pyspark.sql import DataFrame
 
 from sparquet.io.base import BaseReader, BaseWriter, is_table_name
+from sparquet.io.merge import delete_clauses
+
+#: Chaves que configuram o MERGE e não são opções do writer Iceberg. Sem isto
+#: uma escrita comum repassaria `merge_keys` ao Spark como opção desconhecida —
+#: aceita em silêncio e sem efeito, que é a pior forma de errar.
+_MERGE_OPTIONS = ("merge_keys", "merge_condition", "delete_when",
+                  "delete_not_matched_by_source")
 
 
 class IcebergReader(BaseReader):
@@ -27,6 +34,12 @@ class IcebergWriter(BaseWriter):
 
     Modos via 'mode': overwrite, append e merge (upsert; requer 'merge_keys').
 
+    No merge, além de 'merge_keys' e 'merge_condition', duas opções apagam:
+    'delete_when' (condição sobre a origem; vira WHEN MATCHED AND <cond> THEN
+    DELETE) e 'delete_not_matched_by_source' (true ou condição sobre T; apaga o
+    que a origem não trouxe — só correto quando a origem é um snapshot completo).
+    Ver `sparquet/io/merge.py`.
+
     Quando 'path' é um identificador de catálogo ("catalogo.schema.tabela"), a
     escrita usa `saveAsTable`, que **cria a tabela se ela ainda não existir** —
     incluindo o particionamento de 'partition_by'. Isso importa porque o caminho
@@ -44,6 +57,8 @@ class IcebergWriter(BaseWriter):
 
         writer = df.write.format("iceberg").mode(self.config.mode)
         for key, value in self.config.options.items():
+            if key in _MERGE_OPTIONS:
+                continue
             writer = writer.option(key, value)
         if self.config.partition_by:
             writer = writer.partitionBy(*self.config.partition_by)
@@ -74,10 +89,14 @@ class IcebergWriter(BaseWriter):
         if extra:
             join_cond = f"({join_cond}) AND ({extra})"
 
+        matched_delete, not_matched_by_source = delete_clauses(self.config.options)
+
         self.spark.sql(f"""
             MERGE INTO {target} AS T
             USING _spark_fw_merge_src AS S
             ON {join_cond}
+            {matched_delete}
             WHEN MATCHED THEN UPDATE SET *
             WHEN NOT MATCHED THEN INSERT *
+            {not_matched_by_source}
         """)

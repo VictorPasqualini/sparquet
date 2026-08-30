@@ -202,16 +202,15 @@ Pendentes / candidatos:
       Quem precisa da sessão antes de executar usa a propriedade `Sparquet.spark`.
       `tests/io/integration/harness.py` passa o bloco pelo JSON e é a prova disso.
 
-- [ ] **`mode: merge` não apaga** — o SQL montado por `DeltaWriter._merge` e
-      `IcebergWriter._merge` tem só `WHEN MATCHED THEN UPDATE` e
-      `WHEN NOT MATCHED THEN INSERT`. Não há como expressar `WHEN MATCHED THEN DELETE`
-      (linha marcada como excluída na origem) nem
-      `WHEN NOT MATCHED BY SOURCE THEN DELETE` (sincronizar o alvo com um snapshot
-      completo da origem) — os dois casos normais de CDC. Hoje, apagar exige SQL fora
-      do framework. Proposta: duas opções em `output.options`, `delete_when` (condição
-      sobre a origem, vira `WHEN MATCHED AND <cond> THEN DELETE` antes do UPDATE) e
-      `delete_not_matched_by_source` (booleano). Precisa entrar junto no catálogo do
-      Studio e nas docs do `sparquet-web`.
+- ✅ **`mode: merge` apaga** — `sparquet/io/merge.py` monta as cláusulas de DELETE e
+      `DeltaWriter._merge`/`IcebergWriter._merge` as inserem no SQL. Duas opções em
+      `output.options`: `delete_when` (condição sobre a origem, vira
+      `WHEN MATCHED AND <cond> THEN DELETE` **antes** do UPDATE, porque a primeira
+      cláusula que casa vence) e `delete_not_matched_by_source` (`true` ou uma condição
+      sobre `T.`, vira `WHEN NOT MATCHED BY SOURCE THEN DELETE` — só correto contra um
+      snapshot completo da origem). No Delta o UPDATE/INSERT passou a listar só as
+      colunas que o destino já tem, então a coluna de controle do CDC pode vir junto sem
+      quebrar a resolução. Catálogo do Studio atualizado; falta o PR no `sparquet-web`.
 
 - [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
       (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
@@ -817,8 +816,16 @@ Restante, na ordem do plano:
       os resultados falhos ainda no objeto; validação com `skip` **não** liga
       `PipelineResult.skipped`, que significa outra coisa (`stop_if_empty`); e resultado
       de **severidade** `warn` nunca aborta, nem sob `fail`.
-- [ ] **`apply_template` e `$include`** — puros e rápidos; a tabela de formatação do
-      CLAUDE.md já é a lista de casos.
+- ✅ **`apply_template` e `$include`** — 20 testes em
+      `tests/utils/test_template_includes.py`, sem Spark: a tabela de formatação
+      (texto, número, `bool` como `"true"`/`""`, lista de texto com aspas, lista de
+      número sem, lista vazia falsy), o primeiro item decidindo a lista inteira, chave
+      ausente ficando literal, o padrão `\w+`, a interpolação crua, e a colisão real
+      entre `{param}` e o `{{var}}` de runtime (`apply_template("{{var}}", {"var": "x"})`
+      devolve `"{x}"` — nomes de param e de variável precisam ser distintos). Do
+      `$include`: objeto, lista expandida na ordem, `params` valendo dentro do incluído,
+      caminho relativo ao JSON principal, `FileNotFoundError` nomeando o arquivo, e os
+      dois limites — não é recursivo e só vale em `transformations`.
 - [ ] **Camada HTTP do runner** (`sparquet-studio/server/main.py`) — os módulos de apoio
       já têm teste (`history.py`, `auth.py`, `workspace.py`, `credits.py`) e o escopo de
       execução também (`test_run_scope.py`), mas a **camada HTTP em si não tem nenhum**:
@@ -829,8 +836,12 @@ Restante, na ordem do plano:
       conf arbitrária, e a postura de segurança dele quebra em silêncio. `TestClient` do
       FastAPI cobre sem Spark — **exige `httpx` no ambiente de teste**, que hoje não
       está instalado (foi o que impediu de já fechar esta lacuna).
-- [ ] **`mode: merge`** (Delta e Iceberg) — precisa do `delta-spark`, então vai num
-      arquivo que se pula quando o jar falta.
+- ✅ **`mode: merge`** (Delta e Iceberg) — em
+      `tests/io/integration/test_lakehouse_spark.py`, com jar de verdade e pulando-se
+      sozinho quando ele falta: upsert (atualiza o que casa, insere o que não casa),
+      `merge_keys` ausente falhando antes de qualquer chamada Spark, e os dois DELETEs
+      (`delete_when` sobre um CSV de CDC com coluna `op`, `delete_not_matched_by_source`
+      sobre um snapshot). 14 testes no arquivo.
 - [ ] **Orquestração do `Pipeline`** — `input_df`, `columns`, `input_view`, projeção por
       output, `transformations` por output, `PipelineResult` nunca levantando exceção.
 - [ ] **`opensearch`** — conector próprio (opções `opensearch.*`), nunca afirmado, ao

@@ -22,6 +22,44 @@ Notes on the history below:
 
 ## [Unreleased]
 
+### Added
+
+- **`mode: merge` can now delete.** The generated `MERGE INTO` had only
+  `WHEN MATCHED THEN UPDATE` and `WHEN NOT MATCHED THEN INSERT`, so the two ordinary CDC
+  cases had to be handled with SQL written outside the framework. Two new
+  `output.options`, shared by Delta and Iceberg:
+
+  - `delete_when` — a SQL condition over the source, for the case where the source
+    **carries** the deleted row with a flag on it. It becomes
+    `WHEN MATCHED AND (<condition>) THEN DELETE`, emitted **before** the `UPDATE` clause,
+    because in `MERGE INTO` the first matching clause wins.
+  - `delete_not_matched_by_source` — `true`, or a SQL condition over the target, for the
+    case where the source **no longer carries** the row. It becomes
+    `WHEN NOT MATCHED BY SOURCE THEN DELETE`. This is only correct against a **complete
+    snapshot** of the source: run against an incremental load it deletes everything that
+    load did not repeat, so it stays off by default.
+
+  ```json
+  "output": {
+    "format": "delta",
+    "path": "/lake/pedidos",
+    "mode": "merge",
+    "options": { "merge_keys": ["id"], "delete_when": "S.op = 'D'" }
+  }
+  ```
+
+### Changed
+
+- **The Delta merge writes only the columns the target already has.** `UPDATE SET` and
+  `INSERT` used to list every column of the incoming DataFrame, so a CDC source carrying
+  a control column the target does not have (the `op` flag `delete_when` reads) failed
+  with `DELTA_MERGE_UNRESOLVED_EXPRESSION`. Those columns are now left out of the write
+  instead. Iceberg keeps `UPDATE SET *` / `INSERT *`, which tolerates the extra source
+  column on its own.
+- **Merge options are no longer forwarded to Spark on the Iceberg writer.** `merge_keys`,
+  `merge_condition` and the two new delete options were passed through as writer options
+  on non-merge writes — silently, but wrongly. Delta already stripped them.
+
 ## [0.8.0] — 2026-08-29
 
 ### Fixed

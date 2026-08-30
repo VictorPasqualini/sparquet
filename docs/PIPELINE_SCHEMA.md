@@ -397,6 +397,16 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     "options": {
       "merge_keys": ["id"],
       "merge_condition": "T.deleted = FALSE",   // condição SQL extra — usa T./S.
+      // DELETE (opcional). Sem estas duas o merge só atualiza e insere.
+      "delete_when": "S.op = 'D'",              // a origem TRAZ a linha marcada como
+                                                // excluída; vira WHEN MATCHED AND (…)
+                                                // THEN DELETE, avaliado ANTES do UPDATE
+      "delete_not_matched_by_source": true,     // true, ou uma condição sobre T.;
+                                                // vira WHEN NOT MATCHED BY SOURCE THEN
+                                                // DELETE. Só use contra um snapshot
+                                                // COMPLETO da origem — numa carga
+                                                // incremental apaga tudo que ela não
+                                                // repetiu
       // Kafka:
       "bootstrap_servers": "broker:9092",
       "topic": "meu-topico",

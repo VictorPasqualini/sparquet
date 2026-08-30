@@ -67,6 +67,29 @@ const mergeConditionField: FieldSpec = {
   visibleWhen: visibleInMerge,
 }
 
+const deleteWhenField: FieldSpec = {
+  key: 'delete_when',
+  label: 'Delete when',
+  type: 'sql',
+  rows: 2,
+  placeholder: "S.op = 'D'",
+  help: 'A row the source marks as deleted. Becomes WHEN MATCHED AND <condition> THEN DELETE, evaluated before the UPDATE.',
+  docs: 'The CDC delete: the source *carries* the row with a flag (`op = "D"`, `deleted = true`) instead of leaving it out. The clause is placed before the UPDATE because the first matching clause wins — after it, the row would be updated and never removed.\n\nInjected raw into the generated MERGE, like the extra condition, so only well-formed predicates over T./S. columns are safe.',
+  visibleWhen: visibleInMerge,
+  group: 'advanced',
+}
+
+const deleteNotMatchedBySourceField: FieldSpec = {
+  key: 'delete_not_matched_by_source',
+  label: 'Delete rows the source did not bring',
+  type: 'text',
+  placeholder: 'true',
+  help: 'true, or a SQL condition over T. Becomes WHEN NOT MATCHED BY SOURCE THEN DELETE.',
+  docs: 'Only correct when the input is a **complete snapshot** of the set: it deletes from the target whatever the source did not carry. Against an incremental load it deletes everything that load did not repeat.\n\nPass `true` for all unmatched rows, or a predicate over `T.` to narrow it (for example `T.origem = "crm"` when the target holds more than one source).',
+  visibleWhen: visibleInMerge,
+  group: 'advanced',
+}
+
 export const FORMATS: FormatDef[] = [
   {
     id: 'parquet',
@@ -184,7 +207,7 @@ export const FORMATS: FormatDef[] = [
     canWrite: true,
     summary: 'Delta tables by catalog name or path, with time travel and MERGE upserts.',
     description:
-      'Reads and writes Delta Lake, auto-detecting whether the path is a catalog table name or a physical location, and implements upserts through a generated MERGE INTO statement.\n\nThe merge is a blind upsert: UPDATE on match, INSERT otherwise. There is no delete branch and no source de-duplication.',
+      'Reads and writes Delta Lake, auto-detecting whether the path is a catalog table name or a physical location, and implements upserts through a generated MERGE INTO statement.\n\nThe merge updates on match and inserts otherwise. Two options add deletes: `delete_when` for a row the source marks as deleted, and `delete_not_matched_by_source` for one the source no longer carries. There is still no source de-duplication.',
     pathLabel: 'Table or path',
     pathPlaceholder: 'catalog.schema.pedidos',
     pathHelp:
@@ -211,6 +234,8 @@ export const FORMATS: FormatDef[] = [
     writeOptions: [
       mergeKeysField('DeltaWriter'),
       mergeConditionField,
+      deleteWhenField,
+      deleteNotMatchedBySourceField,
       {
         key: 'mergeSchema',
         label: 'Merge schema',
@@ -257,7 +282,8 @@ export const FORMATS: FormatDef[] = [
       'Table-vs-path is scheme-agnostic: any value with "/" or ":" is a physical path (every object-storage scheme — s3://, s3a://, gs://, abfss://, wasb://, dbfs:/, … — plus relative and Windows paths). Only a dotted name with neither (e.g. "out.delta") is still read as a catalog table — prefix "./" to force a path.',
       'partition_by is ignored entirely on the merge path.',
       'The generated UPDATE SET covers every column except the merge keys — a DataFrame containing only key columns produces invalid MERGE SQL.',
-      'No delete branch and no source de-duplication: duplicated merge keys in the source raise Delta\'s "multiple source rows matched" error at runtime.',
+      'Deletes come from delete_when and delete_not_matched_by_source. There is still no source de-duplication: duplicated merge keys in the source raise Delta\'s "multiple source rows matched" error at runtime.',
+      'On merge, only the columns the target already has are written — a control column the source carries (an `op` flag read by delete_when) is left out of the UPDATE and the INSERT instead of failing to resolve.',
       'The merge registers the temp view _spark_fw_merge_src, the same name the Iceberg writer uses — two merge outputs in one pipeline share it.',
       'merge_condition is interpolated raw into the SQL statement; validate it as an expression over T./S. columns.',
       'The merge runs through spark.sql(), so the Delta SQL extensions must be enabled on the session.',
@@ -295,7 +321,7 @@ export const FORMATS: FormatDef[] = [
     canWrite: true,
     summary: 'Apache Iceberg tables through the Spark DSv2 connector, with MERGE upserts.',
     description:
-      'Reads and writes Iceberg tables, with an upsert path built on a generated MERGE INTO ... UPDATE SET * / INSERT *.\n\nUnlike Delta there is no path-vs-table heuristic: the value is handed to the connector as-is, and on merge it is interpolated straight into the SQL statement.',
+      'Reads and writes Iceberg tables, with an upsert path built on a generated MERGE INTO ... UPDATE SET * / INSERT *.\n\nThe merge updates on match and inserts otherwise. Two options add deletes: `delete_when` for a row the source marks as deleted, and `delete_not_matched_by_source` for one the source no longer carries.\n\nUnlike Delta there is no path-vs-table heuristic: the value is handed to the connector as-is, and on merge it is interpolated straight into the SQL statement.',
     pathLabel: 'Table identifier',
     pathPlaceholder: 'catalog.db.pedidos',
     pathHelp:
@@ -336,6 +362,8 @@ export const FORMATS: FormatDef[] = [
     writeOptions: [
       mergeKeysField('IcebergWriter'),
       mergeConditionField,
+      deleteWhenField,
+      deleteNotMatchedBySourceField,
       {
         key: 'write-format',
         label: 'Write format',
@@ -367,10 +395,9 @@ export const FORMATS: FormatDef[] = [
     gotchas: [
       'Merge mode requires merge_keys — an empty or absent list raises a ValueError.',
       'The mode is compared case-sensitively against "merge": "MERGE" skips the merge path and reaches df.write.mode("MERGE"), where Spark raises "Unknown save mode" — nothing is written and the run reports success=false (Delta lower-cases first). Always emit it lowercase.',
-      'On non-merge writes merge_keys and merge_condition are NOT stripped — they are forwarded to Spark as writer options, silently but wrongly.',
       'The merge target is string-interpolated with no quoting and no path fallback, so a filesystem path yields invalid MERGE SQL.',
-      'MERGE uses UPDATE SET * / INSERT *, so source and target schemas must line up — the auto-injected ingestion_ts column must exist in the target table.',
-      'No delete branch and no source de-duplication: duplicated merge keys raise a runtime error.',
+      'MERGE uses UPDATE SET * / INSERT *, so source and target schemas must line up — the auto-injected ingestion_ts column must exist in the target table. An extra source column the target lacks (an op flag read by delete_when) is tolerated and simply not written, but a column missing on the source side is not.',
+      'Deletes come from delete_when and delete_not_matched_by_source. There is still no source de-duplication: duplicated merge keys raise a runtime error.',
       'Registers the temp view _spark_fw_merge_src, the same name the Delta writer uses.',
       'Runs through spark.sql(), so the Iceberg session extensions and catalog must be configured.',
       'partition_by is ignored on merge, and on save it is only honored by the connector at table-creation time.',
