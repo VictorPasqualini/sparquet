@@ -43,14 +43,13 @@ import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
 import { resolvePipeline, stageRowPosition, type ResolvedPipeline } from '@/lib/pipeline'
 import { listLibraryFiles, type LibraryFile } from '@/lib/runner/libraryFiles'
 import { getPipeline } from '@/lib/storage/db'
-import { collectTags } from '@/lib/tags'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
 import {
   usePipelineEditorStore,
   type PipelineWorkspaceView,
 } from '@/store/pipelineEditor'
-import { useLibraryStore } from '@/store/library'
+import { useKnownTags, useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 import type { Pipeline, ValidationIssue } from '@/types/studio'
 
@@ -366,9 +365,7 @@ function PipelineTopBar({
   const past = usePipelineEditorStore((state) => state.past.length)
   const future = usePipelineEditorStore((state) => state.future.length)
   const updatePipelineMeta = useLibraryStore((state) => state.updatePipelineMeta)
-  const knownTags = useLibraryStore((state) =>
-    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
-  )
+  const knownTags = useKnownTags()
 
   const [name, setName] = useState(pipeline?.name ?? '')
   useEffect(() => setName(pipeline?.name ?? ''), [pipeline?.name])

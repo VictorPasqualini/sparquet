@@ -330,6 +330,18 @@ separação ao evoluir.
       `sparquet_cola` é a ideia do SODA sem a dependência). O precedente sugere replicar,
       mas medir antes o esforço de um runner de asserção com `assertDataFrameEqual`
       (PySpark 3.5+) e comparação sem ordem.
+- [ ] **`$include` em qualquer nó do JSON** — hoje a diretiva só é expandida dentro de
+      `transformations` (`sparquet/utils/includes.py:26`); em qualquer outra chave ela é
+      ignorada em silêncio. O caso que motiva é o bloco `spark`: quem liga um conector
+      precisa repetir `spark.jars.packages`, `spark.sql.extensions` e as configs de
+      catálogo em **cada** JSON, porque via CLI (`Sparquet()` sem argumento) o JSON é o
+      único lugar de onde essas configs podem vir. Como lib já existe saída —
+      `Sparquet(spark={"configs": {...}})` vale para todas as execuções do processo — e
+      em cluster o lugar natural do jar é o `spark-defaults.conf`/`--packages`; falta o
+      caminho declarativo. Com a diretiva genérica: `"spark": {"$include":
+      "shared/spark-lakehouse.json"}`. Serve também para `output` e `validations`
+      repetidos entre pipelines. Precisa de entrada no catálogo do Studio (o editor tem
+      que entender arquivo compartilhado) e de doc no `sparquet-web`.
 - [ ] **`$include` aninhado** — hoje não suportado (um nível só).
 - [ ] **Catálogo de erros** — mensagens de erro padronizadas e acionáveis
       (transformação desconhecida, coluna inexistente, etc.).

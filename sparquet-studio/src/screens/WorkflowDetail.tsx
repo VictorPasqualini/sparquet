@@ -43,11 +43,10 @@ import { TagsPopover } from '@/components/library/TagsPopover'
 import { TEMPLATES } from '@/data/templates'
 import { usePermission } from '@/lib/auth/usePermission'
 import { compileGraph, serializePipeline } from '@/lib/compiler'
-import { collectTags } from '@/lib/tags'
 import { cn } from '@/lib/utils/cn'
 import { downloadText } from '@/lib/utils/download'
 import { plural, relativeTime } from '@/lib/utils/format'
-import { slugify, useLibraryStore } from '@/store/library'
+import { slugify, useKnownTags, useLibraryStore } from '@/store/library'
 import {
   WORKFLOW_ACCENTS,
   type Pipeline,
@@ -79,9 +78,7 @@ export function WorkflowDetail() {
   const pipelines = useLibraryStore((state) => state.pipelines)
   const updateWorkflow = useLibraryStore((state) => state.updateWorkflow)
   const deleteWorkflow = useLibraryStore((state) => state.deleteWorkflow)
-  const knownTags = useLibraryStore((state) =>
-    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
-  )
+  const knownTags = useKnownTags()
   const duplicateJob = useLibraryStore((state) => state.duplicateJob)
   const deleteJob = useLibraryStore((state) => state.deleteJob)
   const deletePipeline = useLibraryStore((state) => state.deletePipeline)

@@ -49,12 +49,11 @@ import { JobSettingsPanel } from '@/components/panels/JobSettingsPanel'
 import { NodePalette } from '@/components/panels/NodePalette'
 import { RunPanel } from '@/components/panels/RunPanel'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
-import { collectTags } from '@/lib/tags'
 import { relativeTime } from '@/lib/utils/format'
 import { cn } from '@/lib/utils/cn'
 import { getJob } from '@/lib/storage/db'
 import { useEditorStore, type PanelId, type WorkspaceView } from '@/store/editor'
-import { useLibraryStore } from '@/store/library'
+import { useKnownTags, useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 import type { Job } from '@/types/studio'
 
@@ -289,9 +288,7 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
   const activePanel = useEditorStore((state) => state.activePanel)
   const togglePanel = useEditorStore((state) => state.togglePanel)
   const updateJobMeta = useLibraryStore((state) => state.updateJobMeta)
-  const knownTags = useLibraryStore((state) =>
-    collectTags([...state.jobs, ...state.pipelines, ...state.workflows]),
-  )
+  const knownTags = useKnownTags()
 
   const [name, setName] = useState(job?.name ?? '')
   useEffect(() => setName(job?.name ?? ''), [job?.name])
