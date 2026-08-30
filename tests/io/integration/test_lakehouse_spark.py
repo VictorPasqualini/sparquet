@@ -10,7 +10,7 @@ O que cada teste trava:
             `merge` atualiza a linha que existe e insere a que não existe;
             time travel devolve o estado anterior por `versionAsOf`.
   iceberg   ida e volta por tabela de catálogo (`local.db.x`, catálogo hadoop,
-            sem metastore); `merge` com `merge_keys`; `partition_by` na criação.
+            sem metastore); `merge` com `on` e `actions`; `partition_by` na criação.
 
 A referência muda de forma entre os dois de propósito: Delta aceita caminho e
 nome de tabela (`is_table_name` decide, em `sparquet/io/base.py`), Iceberg só faz
@@ -101,7 +101,13 @@ class DeltaTest(unittest.TestCase):
                     "format": "delta",
                     "path": directory,
                     "mode": "merge",
-                    "options": {"merge_keys": ["id"]},
+                    "options": {
+                        "on": "T.id = S.id",
+                        "actions": [
+                            "WHEN MATCHED THEN UPDATE SET *",
+                            "WHEN NOT MATCHED THEN INSERT *",
+                        ],
+                    },
                 },
             }
         )
@@ -127,8 +133,9 @@ class DeltaTest(unittest.TestCase):
         self.assertEqual(por_id["2"]["nome"], harness.SEED_ROWS[1][1])
 
     def test_merge_apaga_a_linha_que_a_origem_marcou_como_excluida(self) -> None:
-        """`delete_when`: o CDC de exclusao. A origem TRAZ a linha apagada, com uma
-        marca; sem esta clausula ela seria atualizada e nunca sairia da tabela."""
+        """O CDC de exclusao: a origem TRAZ a linha apagada, com uma marca. A
+        clausula `WHEN MATCHED AND ... THEN DELETE` tem de vir ANTES do UPDATE —
+        depois dele a linha seria atualizada e nunca sairia da tabela."""
         directory = (harness.WORK / "delta-merge-delete").as_posix()
 
         harness.run(
@@ -158,7 +165,15 @@ class DeltaTest(unittest.TestCase):
                     "format": "delta",
                     "path": directory,
                     "mode": "merge",
-                    "options": {"merge_keys": ["id"], "delete_when": "S.op = 'D'"},
+                    "options": {
+                        "on": "T.id = S.id",
+                        "actions": [
+                            "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+                            "WHEN MATCHED THEN UPDATE SET T.nome = S.nome, T.valor = S.valor",
+                            "WHEN NOT MATCHED THEN INSERT (id, nome, valor) "
+                            "VALUES (S.id, S.nome, S.valor)",
+                        ],
+                    },
                 },
             }
         )
@@ -223,9 +238,9 @@ class DeltaTest(unittest.TestCase):
         self.assertEqual(por_id["9"]["nome"], "novo")
 
     def test_merge_apaga_o_que_a_origem_nao_trouxe(self) -> None:
-        """`delete_not_matched_by_source`: sincroniza o destino com um snapshot
-        COMPLETO da origem. Contra uma carga incremental isto apagaria tudo o que
-        aquela carga nao repetiu — por isso fica desligado por default."""
+        """`WHEN NOT MATCHED BY SOURCE THEN DELETE`: sincroniza o destino com um
+        snapshot COMPLETO da origem. Contra uma carga incremental esta clausula
+        apagaria tudo o que aquela carga nao repetiu."""
         directory = (harness.WORK / "delta-merge-sync").as_posix()
 
         harness.run(
@@ -253,8 +268,12 @@ class DeltaTest(unittest.TestCase):
                     "path": directory,
                     "mode": "merge",
                     "options": {
-                        "merge_keys": ["id"],
-                        "delete_not_matched_by_source": True,
+                        "on": "T.id = S.id",
+                        "actions": [
+                            "WHEN MATCHED THEN UPDATE SET *",
+                            "WHEN NOT MATCHED THEN INSERT *",
+                            "WHEN NOT MATCHED BY SOURCE THEN DELETE",
+                        ],
                     },
                 },
             }
@@ -281,7 +300,7 @@ class DeltaTest(unittest.TestCase):
         )
         return {linha["id"]: linha for linha in harness.rows_back(rotulo)}
 
-    def test_merge_sem_merge_keys_falha_dizendo_o_que_falta(self) -> None:
+    def test_merge_sem_on_falha_dizendo_o_que_falta(self) -> None:
         directory = (harness.WORK / "delta-merge-sem-chave").as_posix()
 
         harness.run(
@@ -300,7 +319,7 @@ class DeltaTest(unittest.TestCase):
         )
 
         self.assertFalse(resultado.success)
-        self.assertIn("merge_keys", resultado.error or "")
+        self.assertIn("'on'", resultado.error or "")
 
     def test_time_travel_devolve_a_versao_anterior(self) -> None:
         """A promessa do formato: a versão 0 continua legível depois do overwrite."""
@@ -477,7 +496,13 @@ class IcebergTest(unittest.TestCase):
                     "format": "iceberg",
                     "path": tabela,
                     "mode": "merge",
-                    "options": {"merge_keys": ["id"]},
+                    "options": {
+                        "on": "T.id = S.id",
+                        "actions": [
+                            "WHEN MATCHED THEN UPDATE SET *",
+                            "WHEN NOT MATCHED THEN INSERT *",
+                        ],
+                    },
                 },
             }
         )
@@ -501,10 +526,10 @@ class IcebergTest(unittest.TestCase):
         self.assertEqual(por_id["9"]["nome"], "novo")
 
     def test_merge_apaga_a_linha_que_a_origem_marcou_como_excluida(self) -> None:
-        """Mesmo CDC do Delta. A diferenca esta em como cada um trata a coluna de
-        controle: o Delta lista as colunas do destino no UPDATE, o Iceberg usa
-        `UPDATE SET *`. Este teste trava que a marca `op`, que o destino nao tem,
-        atravessa o `UPDATE SET *` sem quebrar e sem virar coluna da tabela."""
+        """Mesmo CDC do Delta, escrito de outro jeito: la as colunas do destino
+        vao listadas no UPDATE, aqui cabe `UPDATE SET *`. Este teste trava que a
+        marca `op`, que o destino nao tem, atravessa o `*` do Iceberg sem quebrar
+        e sem virar coluna da tabela."""
         tabela = "local.db.merge_delete"
 
         harness.run(
@@ -531,7 +556,14 @@ class IcebergTest(unittest.TestCase):
                     "format": "iceberg",
                     "path": tabela,
                     "mode": "merge",
-                    "options": {"merge_keys": ["id"], "delete_when": "S.op = 'D'"},
+                    "options": {
+                        "on": "T.id = S.id",
+                        "actions": [
+                            "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+                            "WHEN MATCHED THEN UPDATE SET *",
+                            "WHEN NOT MATCHED THEN INSERT *",
+                        ],
+                    },
                 },
             }
         )
@@ -568,8 +600,12 @@ class IcebergTest(unittest.TestCase):
                     "path": tabela,
                     "mode": "merge",
                     "options": {
-                        "merge_keys": ["id"],
-                        "delete_not_matched_by_source": True,
+                        "on": "T.id = S.id",
+                        "actions": [
+                            "WHEN MATCHED THEN UPDATE SET *",
+                            "WHEN NOT MATCHED THEN INSERT *",
+                            "WHEN NOT MATCHED BY SOURCE THEN DELETE",
+                        ],
                     },
                 },
             }

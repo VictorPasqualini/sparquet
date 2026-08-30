@@ -141,8 +141,7 @@ function transformationStep(id: string, spec: TransformationSpec): JobStep {
     detail,
   })
 
-  // `input` is the current key for the second source; `with` is the old name.
-  const source = isRecord(spec.input) ? spec.input : isRecord(spec.with) ? spec.with : null
+  const source = isRecord(spec.input) ? spec.input : null
   const side = source ? asText(source.path) : ''
   if (side) {
     const how = asText(spec.how)

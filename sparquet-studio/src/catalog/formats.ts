@@ -42,77 +42,37 @@ const isMergeMode = (options: Record<string, unknown>): boolean =>
 const visibleInMerge = (options: Record<string, unknown>): boolean =>
   !('mode' in options) || isMergeMode(options)
 
-const mergeKeysField = (formatLabel: string): FieldSpec => ({
-  key: 'merge_keys',
-  label: 'Merge keys',
-  type: 'string-list',
+const mergeOnField = (formatLabel: string): FieldSpec => ({
+  key: 'on',
+  label: 'ON condition',
+  type: 'sql',
+  rows: 2,
   required: true,
-  placeholder: 'id',
-  help: `Builds the ON clause as T.<key> = S.<key>, AND-joined. ${formatLabel} raises a ValueError when merge mode has neither these keys nor a hand-written ON.`,
-  visibleWhen: (options) => visibleInMerge(options) && !options.on,
+  placeholder: 'T.id = S.id AND T.loja = S.loja',
+  help: `The whole match predicate, written as SQL over the aliases T. (target table) and S. (source DataFrame). ${formatLabel} raises a ValueError when merge mode has no ON.`,
+  docs: 'Same shape as a join `on` written as SQL, and it is the entire condition: every key of the match goes in here, joined with AND, plus whatever else narrows it — a range, a function over a column, an OR.\n\nInjected raw into the MERGE statement, so only well-formed SQL over T./S. columns is safe.',
+  visibleWhen: visibleInMerge,
   validate: (value, options) =>
-    isMergeMode(options) && !options.on && (!Array.isArray(value) || value.length === 0)
-      ? 'Merge mode requires at least one merge key, or an ON condition written by hand.'
+    isMergeMode(options) && !String(value ?? '').trim()
+      ? 'Merge mode requires an ON condition over T. (target) and S. (source).'
       : null,
 })
 
-const mergeConditionField: FieldSpec = {
-  key: 'merge_condition',
-  label: 'Extra merge condition',
-  type: 'sql',
-  rows: 2,
-  placeholder: 'T.deleted = false',
-  help: 'ANDed into the ON clause. Use the aliases T. (target table) and S. (source DataFrame).',
-  docs: 'Injected raw into the generated MERGE statement — no quoting or escaping is applied, so only well-formed SQL predicates over T./S. columns are safe here.',
-  visibleWhen: visibleInMerge,
-}
-
-const deleteWhenField: FieldSpec = {
-  key: 'delete_when',
-  label: 'Delete when',
-  type: 'sql',
-  rows: 2,
-  placeholder: "S.op = 'D'",
-  help: 'A row the source marks as deleted. Becomes WHEN MATCHED AND <condition> THEN DELETE, evaluated before the UPDATE.',
-  docs: 'The CDC delete: the source *carries* the row with a flag (`op = "D"`, `deleted = true`) instead of leaving it out. The clause is placed before the UPDATE because the first matching clause wins — after it, the row would be updated and never removed.\n\nInjected raw into the generated MERGE, like the extra condition, so only well-formed predicates over T./S. columns are safe.',
-  visibleWhen: visibleInMerge,
-  group: 'advanced',
-}
-
-const deleteNotMatchedBySourceField: FieldSpec = {
-  key: 'delete_not_matched_by_source',
-  label: 'Delete rows the source did not bring',
-  type: 'text',
-  placeholder: 'true',
-  help: 'true, or a SQL condition over T. Becomes WHEN NOT MATCHED BY SOURCE THEN DELETE.',
-  docs: 'Only correct when the input is a **complete snapshot** of the set: it deletes from the target whatever the source did not carry. Against an incremental load it deletes everything that load did not repeat.\n\nPass `true` for all unmatched rows, or a predicate over `T.` to narrow it (for example `T.origem = "crm"` when the target holds more than one source).',
-  visibleWhen: visibleInMerge,
-  group: 'advanced',
-}
-
-const mergeOnField: FieldSpec = {
-  key: 'on',
-  label: 'ON condition (written by hand)',
-  type: 'sql',
-  rows: 2,
-  placeholder: 'S.id = T.id AND S.loja = T.loja',
-  help: 'Replaces the ON built from the merge keys. Same shape as a join `on` written as SQL, with the aliases T. (target) and S. (source).',
-  docs: 'Takes over from `merge_keys` and the extra condition — write the whole predicate, including every key. Use it when the match is not a list of equalities: a range, a function over a column, an OR.\n\nInjected raw into the generated MERGE, so only well-formed SQL over T./S. columns is safe.',
-  visibleWhen: visibleInMerge,
-  group: 'advanced',
-}
-
-const mergeActionsField: FieldSpec = {
+const mergeActionsField = (formatLabel: string): FieldSpec => ({
   key: 'actions',
-  label: 'WHEN clauses (written by hand)',
+  label: 'WHEN clauses',
   type: 'sql-list',
   rows: 2,
-  placeholder: "WHEN MATCHED AND S.op = 'D' THEN DELETE",
-  help: 'Each entry is one full WHEN ... clause, emitted in the order given. Replaces the generated UPDATE/INSERT and both delete options.',
-  docs: 'The escape hatch for a MERGE the generated one cannot express: updating only some columns, inserting a different set, several conditional branches.\n\nEvery entry must start with WHEN. Inside one group (MATCHED, NOT MATCHED, NOT MATCHED BY SOURCE) the first clause that matches wins, so an unconditional clause may only be the last of its group — anything after it is unreachable, and the writer refuses the list instead of letting Spark fail at analysis time. Put the conditional DELETE before the plain UPDATE.\n\nWhen this list is filled, `delete_when` and `delete_not_matched_by_source` are ignored: the list is the whole MERGE body.',
+  required: true,
+  placeholder: 'WHEN MATCHED THEN UPDATE SET *',
+  help: `Each entry is one full WHEN ... clause, emitted in the order given — and that order is what the statement does. ${formatLabel} raises a ValueError when merge mode has no clauses.`,
+  docs: 'The plain upsert is two entries: `WHEN MATCHED THEN UPDATE SET *` and `WHEN NOT MATCHED THEN INSERT *`. Everything else is written the same way — updating only some columns, inserting a different set, deleting a row on a flag the source carries.\n\nEvery entry must start with WHEN. Inside one group (MATCHED, NOT MATCHED, NOT MATCHED BY SOURCE) the first clause that matches wins, so an unconditional clause may only be the last of its group — anything after it is unreachable, and the writer refuses the list instead of letting Spark fail at analysis time. Put the conditional DELETE before the plain UPDATE.',
   visibleWhen: visibleInMerge,
-  group: 'advanced',
-}
+  validate: (value, options) =>
+    isMergeMode(options) && (!Array.isArray(value) || value.length === 0)
+      ? 'Merge mode requires at least one WHEN clause, for example WHEN MATCHED THEN UPDATE SET *.'
+      : null,
+})
 
 export const FORMATS: FormatDef[] = [
   {
@@ -231,7 +191,7 @@ export const FORMATS: FormatDef[] = [
     canWrite: true,
     summary: 'Delta tables by catalog name or path, with time travel and MERGE upserts.',
     description:
-      'Reads and writes Delta Lake, auto-detecting whether the path is a catalog table name or a physical location, and implements upserts through a generated MERGE INTO statement.\n\nThe merge updates on match and inserts otherwise. Two options add deletes: `delete_when` for a row the source marks as deleted, and `delete_not_matched_by_source` for one the source no longer carries. There is still no source de-duplication.\n\nWhen the generated statement is not the one you want, `on` and `actions` replace it: the ON predicate and the list of WHEN clauses go in as written.',
+      'Reads and writes Delta Lake, auto-detecting whether the path is a catalog table name or a physical location, and implements upserts through a MERGE INTO statement.\n\nThe MERGE is written, not generated: `on` carries the whole match predicate and `actions` the list of WHEN clauses, both required in merge mode. The plain upsert is `WHEN MATCHED THEN UPDATE SET *` plus `WHEN NOT MATCHED THEN INSERT *`; deletes are clauses like any other. There is no source de-duplication.',
     pathLabel: 'Table or path',
     pathPlaceholder: 'catalog.schema.pedidos',
     pathHelp:
@@ -256,12 +216,8 @@ export const FORMATS: FormatDef[] = [
       },
     ],
     writeOptions: [
-      mergeKeysField('DeltaWriter'),
-      mergeConditionField,
-      mergeOnField,
-      mergeActionsField,
-      deleteWhenField,
-      deleteNotMatchedBySourceField,
+      mergeOnField('DeltaWriter'),
+      mergeActionsField('DeltaWriter'),
       {
         key: 'mergeSchema',
         label: 'Merge schema',
@@ -304,16 +260,14 @@ export const FORMATS: FormatDef[] = [
       },
     ],
     gotchas: [
-      'Merge mode requires merge_keys — an empty or absent list raises a ValueError before any Spark call, unless `on` carries the condition instead.',
-      'The two forms do not mix. With `actions` filled, the generated UPDATE/INSERT and both delete options are dropped: that list is the entire MERGE body. With `on` filled, merge_keys and the extra condition are ignored.',
+      'Merge mode requires both `on` and `actions` — either one missing raises a ValueError before any Spark call. The old declarative options (merge_keys, merge_condition, delete_when, delete_not_matched_by_source) are refused with a message naming the clause to write instead.',
       'Within one WHEN group the first matching clause wins, so an unconditional clause may only be the last of its group. A conditional DELETE listed after a plain UPDATE never runs — the writer refuses the list and says which clause became unreachable.',
       'Table-vs-path is scheme-agnostic: any value with "/" or ":" is a physical path (every object-storage scheme — s3://, s3a://, gs://, abfss://, wasb://, dbfs:/, … — plus relative and Windows paths). Only a dotted name with neither (e.g. "out.delta") is still read as a catalog table — prefix "./" to force a path.',
       'partition_by is ignored entirely on the merge path.',
-      'The generated UPDATE SET covers every column except the merge keys — a DataFrame containing only key columns produces invalid MERGE SQL.',
-      'Deletes come from delete_when and delete_not_matched_by_source. There is still no source de-duplication: duplicated merge keys in the source raise Delta\'s "multiple source rows matched" error at runtime.',
-      'On merge, only the columns the target already has are written — a control column the source carries (an `op` flag read by delete_when) is left out of the UPDATE and the INSERT instead of failing to resolve.',
+      'UPDATE SET * / INSERT * work here only when source and target carry the same columns. A CDC source with an extra control column (an `op` flag) fails to resolve it — list the target columns instead: UPDATE SET T.a = S.a, ... and INSERT (a, b) VALUES (S.a, S.b).',
+      'There is no source de-duplication: two source rows matching one target row raise Delta\'s "multiple source rows matched" error at runtime.',
       'The merge registers the temp view _spark_fw_merge_src, the same name the Iceberg writer uses — two merge outputs in one pipeline share it.',
-      'merge_condition is interpolated raw into the SQL statement; validate it as an expression over T./S. columns.',
+      '`on` and every entry of `actions` are interpolated raw into the SQL statement; validate them as expressions over T./S. columns.',
       'The merge runs through spark.sql(), so the Delta SQL extensions must be enabled on the session.',
       'mode is lower-cased before dispatch, so "MERGE" also works here (unlike Iceberg).',
     ],
@@ -333,13 +287,16 @@ export const FORMATS: FormatDef[] = [
   "path": "catalog.schema.pedidos",
   "mode": "merge",
   "options": {
-    "merge_keys": ["pedido_id"],
-    "merge_condition": "T.deleted = false"
+    "on": "T.pedido_id = S.pedido_id",
+    "actions": [
+      "WHEN MATCHED THEN UPDATE SET *",
+      "WHEN NOT MATCHED THEN INSERT *"
+    ]
   }
 }`,
       },
       {
-        title: 'MERGE written by hand',
+        title: 'Partial UPDATE and a CDC delete',
         json: `{
   "format": "delta",
   "path": "catalog.schema.pedidos",
@@ -365,7 +322,7 @@ export const FORMATS: FormatDef[] = [
     canWrite: true,
     summary: 'Apache Iceberg tables through the Spark DSv2 connector, with MERGE upserts.',
     description:
-      'Reads and writes Iceberg tables, with an upsert path built on a generated MERGE INTO ... UPDATE SET * / INSERT *.\n\nThe merge updates on match and inserts otherwise. Two options add deletes: `delete_when` for a row the source marks as deleted, and `delete_not_matched_by_source` for one the source no longer carries, and `on` / `actions` replace the whole generated statement with one written by hand.\n\nUnlike Delta there is no path-vs-table heuristic: the value is handed to the connector as-is, and on merge it is interpolated straight into the SQL statement.',
+      'Reads and writes Iceberg tables, with an upsert path built on MERGE INTO.\n\nThe MERGE is written, not generated: `on` carries the whole match predicate and `actions` the list of WHEN clauses, both required in merge mode. The plain upsert is `WHEN MATCHED THEN UPDATE SET *` plus `WHEN NOT MATCHED THEN INSERT *`, and the `*` here tolerates an extra column on the source side.\n\nUnlike Delta there is no path-vs-table heuristic: the value is handed to the connector as-is, and on merge it is interpolated straight into the SQL statement.',
     pathLabel: 'Table identifier',
     pathPlaceholder: 'catalog.db.pedidos',
     pathHelp:
@@ -404,12 +361,8 @@ export const FORMATS: FormatDef[] = [
       },
     ],
     writeOptions: [
-      mergeKeysField('IcebergWriter'),
-      mergeConditionField,
-      mergeOnField,
-      mergeActionsField,
-      deleteWhenField,
-      deleteNotMatchedBySourceField,
+      mergeOnField('IcebergWriter'),
+      mergeActionsField('IcebergWriter'),
       {
         key: 'write-format',
         label: 'Write format',
@@ -439,13 +392,12 @@ export const FORMATS: FormatDef[] = [
       },
     ],
     gotchas: [
-      'Merge mode requires merge_keys — an empty or absent list raises a ValueError, unless `on` carries the condition instead.',
-      'The two forms do not mix. With `actions` filled, UPDATE SET * / INSERT * and both delete options are dropped: that list is the entire MERGE body, and it is also the way to merge into a table whose schema does not line up with the source.',
+      'Merge mode requires both `on` and `actions` — either one missing raises a ValueError. The old declarative options (merge_keys, merge_condition, delete_when, delete_not_matched_by_source) are refused with a message naming the clause to write instead, and they are checked before the first-load shortcut, so a wrong JSON fails on the run where the table does not exist yet.',
       'Within one WHEN group the first matching clause wins, so an unconditional clause may only be the last of its group. A conditional DELETE listed after a plain UPDATE never runs — the writer refuses the list and says which clause became unreachable.',
       'The mode is compared case-sensitively against "merge": "MERGE" skips the merge path and reaches df.write.mode("MERGE"), where Spark raises "Unknown save mode" — nothing is written and the run reports success=false (Delta lower-cases first). Always emit it lowercase.',
       'The merge target is string-interpolated with no quoting and no path fallback, so a filesystem path yields invalid MERGE SQL.',
-      'MERGE uses UPDATE SET * / INSERT *, so source and target schemas must line up — the auto-injected ingestion_ts column must exist in the target table. An extra source column the target lacks (an op flag read by delete_when) is tolerated and simply not written, but a column missing on the source side is not.',
-      'Deletes come from delete_when and delete_not_matched_by_source. There is still no source de-duplication: duplicated merge keys raise a runtime error.',
+      'With UPDATE SET * / INSERT *, an extra source column the target lacks (an op flag) is tolerated and simply not written, but a target column missing on the source side is not — the auto-injected ingestion_ts must exist in the target table. Listing the columns in the clause is the way around a schema that does not line up.',
+      'There is no source de-duplication: two source rows matching one target row raise a runtime error.',
       'Registers the temp view _spark_fw_merge_src, the same name the Delta writer uses.',
       'Runs through spark.sql(), so the Iceberg session extensions and catalog must be configured.',
       'partition_by is ignored on merge, and on save it is only honored by the connector at table-creation time.',
@@ -465,7 +417,13 @@ export const FORMATS: FormatDef[] = [
   "format": "iceberg",
   "path": "catalog.db.pedidos",
   "mode": "merge",
-  "options": { "merge_keys": ["id"] }
+  "options": {
+    "on": "T.id = S.id",
+    "actions": [
+      "WHEN MATCHED THEN UPDATE SET *",
+      "WHEN NOT MATCHED THEN INSERT *"
+    ]
+  }
 }`,
       },
     ],

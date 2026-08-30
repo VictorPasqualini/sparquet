@@ -1,6 +1,6 @@
 {
   "name": "04_merge_delta",
-  "description": "Upsert incremental (MERGE INTO) em tabela Delta. Demonstra cast, filter, group_by com expressões SQL e o modo de escrita merge com merge_keys.",
+  "description": "Upsert incremental (MERGE INTO) em tabela Delta. Demonstra cast, filter, group_by com expressões SQL e o modo de escrita merge, com o ON e as clausulas WHEN escritas em options.",
 
   "input": {
     "format": "parquet",
@@ -33,6 +33,12 @@
     "format": "delta",
     "path": "analytics.resumo_cliente",
     "mode": "merge",
-    "options": { "merge_keys": ["cliente_id"] }
+    "options": {
+      "on": "T.cliente_id = S.cliente_id",
+      "actions": [
+        "WHEN MATCHED THEN UPDATE SET *",
+        "WHEN NOT MATCHED THEN INSERT *"
+      ]
+    }
   }
 }

@@ -202,15 +202,18 @@ Pendentes / candidatos:
       Quem precisa da sessão antes de executar usa a propriedade `Sparquet.spark`.
       `tests/io/integration/harness.py` passa o bloco pelo JSON e é a prova disso.
 
-- ✅ **`mode: merge` apaga** — `sparquet/io/merge.py` monta as cláusulas de DELETE e
-      `DeltaWriter._merge`/`IcebergWriter._merge` as inserem no SQL. Duas opções em
-      `output.options`: `delete_when` (condição sobre a origem, vira
-      `WHEN MATCHED AND <cond> THEN DELETE` **antes** do UPDATE, porque a primeira
-      cláusula que casa vence) e `delete_not_matched_by_source` (`true` ou uma condição
-      sobre `T.`, vira `WHEN NOT MATCHED BY SOURCE THEN DELETE` — só correto contra um
-      snapshot completo da origem). No Delta o UPDATE/INSERT passou a listar só as
-      colunas que o destino já tem, então a coluna de controle do CDC pode vir junto sem
-      quebrar a resolução. Catálogo do Studio atualizado; falta o PR no `sparquet-web`.
+- ✅ **`mode: merge` escrito à mão** — `sparquet/io/merge.py` monta o `MERGE INTO` a
+      partir de duas opções **obrigatórias** em `output.options`: `on` (a condição ON
+      inteira, sobre `T.` e `S.`) e `actions` (a lista de cláusulas `WHEN ...`, emitidas
+      na ordem dada). Nada é gerado por conta própria: o upsert simples é
+      `["WHEN MATCHED THEN UPDATE SET *", "WHEN NOT MATCHED THEN INSERT *"]`, e apagar é
+      uma cláusula como qualquer outra — `WHEN MATCHED AND S.op = 'D' THEN DELETE`
+      **antes** do UPDATE, porque a primeira cláusula que casa vence, e
+      `WHEN NOT MATCHED BY SOURCE THEN DELETE` só contra um snapshot completo da origem.
+      A forma declarativa antiga (`merge_keys`, `merge_condition`, `delete_when`,
+      `delete_not_matched_by_source`) **deixou de existir**: cada chave é recusada pelo
+      nome, dizendo qual cláusula a substitui. Catálogo do Studio atualizado; falta o PR
+      no `sparquet-web`.
 
 - [ ] **Credenciais cloud (AWS/GCP/Azure)** — hoje passa-se tudo por `spark.configs`
       (ex: `spark.hadoop.fs.s3a.access.key`, IAM role, credenciais GCS, `fs.azure.account.key...`).
@@ -872,9 +875,10 @@ Restante, na ordem do plano:
 - ✅ **`mode: merge`** (Delta e Iceberg) — em
       `tests/io/integration/test_lakehouse_spark.py`, com jar de verdade e pulando-se
       sozinho quando ele falta: upsert (atualiza o que casa, insere o que não casa),
-      `merge_keys` ausente falhando antes de qualquer chamada Spark, e os dois DELETEs
-      (`delete_when` sobre um CSV de CDC com coluna `op`, `delete_not_matched_by_source`
-      sobre um snapshot). 14 testes no arquivo.
+      `on` ausente falhando antes de qualquer chamada Spark, e os dois DELETEs escritos
+      como cláusula (`WHEN MATCHED AND S.op = 'D' THEN DELETE` sobre um CSV de CDC com
+      coluna `op`, `WHEN NOT MATCHED BY SOURCE THEN DELETE` sobre um snapshot).
+      15 testes no arquivo.
 - [ ] **Orquestração do `Pipeline`** — `input_df`, `columns`, `input_view`, projeção por
       output, `transformations` por output, `PipelineResult` nunca levantando exceção.
 - [ ] **`opensearch`** — conector próprio (opções `opensearch.*`), nunca afirmado, ao

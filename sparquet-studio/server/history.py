@@ -1650,7 +1650,7 @@ def lineage_of(config: Any) -> Optional[str]:
     if isinstance(transformations, list):
         for step in transformations:
             if isinstance(step, dict) and step.get("type") == "join":
-                _collect(inputs, step.get("input", step.get("with")), "join")
+                _collect(inputs, step.get("input"), "join")
 
     _collect(outputs, config.get("output"), "output")
     _collect(outputs, config.get("outputs"), "output")

@@ -3,7 +3,11 @@ from __future__ import annotations
 from pyspark.sql import DataFrame
 
 from sparquet.io.base import BaseReader, BaseWriter, is_table_name
-from sparquet.io.merge import MERGE_OPTIONS as _MERGE_OPTIONS, merge_sql
+from sparquet.io.merge import (
+    MERGE_OPTIONS as _MERGE_OPTIONS,
+    validate_merge_options,
+    merge_sql,
+)
 
 
 class IcebergReader(BaseReader):
@@ -26,15 +30,13 @@ class IcebergReader(BaseReader):
 class IcebergWriter(BaseWriter):
     """Escreve em tabelas Iceberg.
 
-    Modos via 'mode': overwrite, append e merge (upsert; requer 'merge_keys').
+    Modos via 'mode': overwrite, append e merge (upsert).
 
-    No merge, além de 'merge_keys' e 'merge_condition', duas opções apagam:
-    'delete_when' (condição sobre a origem; vira WHEN MATCHED AND <cond> THEN
-    DELETE) e 'delete_not_matched_by_source' (true ou condição sobre T; apaga o
-    que a origem não trouxe — só correto quando a origem é um snapshot completo).
-    Para o que essas opções não expressam, 'on' recebe a condição inteira e
-    'actions' a lista de cláusulas "WHEN ..." escritas à mão, na ordem dada.
-    Ver `sparquet/io/merge.py`.
+    O merge requer 'on' (a condição inteira, sobre T = destino e S = origem) e
+    'actions' (a lista de cláusulas "WHEN ..." escritas à mão, emitidas na ordem
+    dada). O upsert de sempre são duas: "WHEN MATCHED THEN UPDATE SET *" e
+    "WHEN NOT MATCHED THEN INSERT *" — o `*` do Iceberg casa as colunas por nome
+    e tolera uma coluna a mais na origem. Ver `sparquet/io/merge.py`.
 
     Quando 'path' é um identificador de catálogo ("catalogo.schema.tabela"), a
     escrita usa `saveAsTable`, que **cria a tabela se ela ainda não existir** —
@@ -67,6 +69,9 @@ class IcebergWriter(BaseWriter):
     def _merge(self, df: DataFrame) -> None:
         options = self.config.options
         target = self.config.path
+        # Antes do atalho da primeira carga: um merge mal escrito tem de falhar
+        # já na execução em que a tabela ainda não existe, não só na seguinte.
+        validate_merge_options(options, "IcebergWriter")
         # MERGE INTO só existe sobre tabela do catálogo, e só depois que ela
         # existe. Na primeira carga não há o que atualizar: gravar tudo cria a
         # tabela e deixa o mesmo estado que um merge contra tabela vazia deixaria.
@@ -77,10 +82,4 @@ class IcebergWriter(BaseWriter):
         view = "_spark_fw_merge_src"
         df.createOrReplaceTempView(view)
 
-        # `UPDATE SET *` / `INSERT *` casam as colunas por nome e toleram uma
-        # coluna a mais na origem — o oposto do Delta, que precisa listá-las.
-        defaults = [
-            "WHEN MATCHED THEN UPDATE SET *",
-            "WHEN NOT MATCHED THEN INSERT *",
-        ]
-        self.spark.sql(merge_sql(target, view, options, defaults, "IcebergWriter"))
+        self.spark.sql(merge_sql(target, view, options, "IcebergWriter"))

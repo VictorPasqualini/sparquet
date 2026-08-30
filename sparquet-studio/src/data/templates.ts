@@ -234,8 +234,8 @@ export const TEMPLATES: JobTemplate[] = [
     name: 'Delta merge (upsert)',
     summary: 'Aggregate an incremental drop and upsert it into a Delta table with MERGE INTO.',
     highlights: [
-      'mode "merge" requires options.merge_keys — without them the write raises',
-      'merge_condition is extra SQL on the ON clause, using T. for the target and S. for the source',
+      'mode "merge" requires options.on and options.actions — either one missing and the write raises',
+      'The ON is the whole predicate, using T. for the target and S. for the source; the WHEN clauses run in the order given',
       'A unique rule on the merge key guards against Delta\'s "multiple source rows matched" error',
     ],
     level: 'intermediate',
@@ -274,8 +274,11 @@ export const TEMPLATES: JobTemplate[] = [
         path: 'analytics.customer_summary',
         mode: 'merge',
         options: {
-          merge_keys: ['customer_id'],
-          merge_condition: 'T.updated_at < S.updated_at',
+          on: 'T.customer_id = S.customer_id AND T.updated_at < S.updated_at',
+          actions: [
+            'WHEN MATCHED THEN UPDATE SET *',
+            'WHEN NOT MATCHED THEN INSERT *',
+          ],
         },
       },
     } satisfies PipelineSpec,

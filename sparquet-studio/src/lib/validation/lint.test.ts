@@ -387,14 +387,15 @@ describe('lintJob', () => {
       )
       expect(idsOf(unsupported)).toContain('merge-unsupported:out')
 
-      const keyless = lint(
+      const semClausulas = lint(
         [source('src'), sink('out', { format: 'delta', path: 'db.t', mode: 'merge' })],
         [link('src', 'out')],
       )
-      expect(idsOf(keyless)).toContain('merge-keys:out')
+      expect(idsOf(semClausulas)).toContain('merge-on:out')
+      expect(idsOf(semClausulas)).toContain('merge-actions:out')
     })
 
-    it('blames the mode, not the keys, when an iceberg merge is not lowercase', () => {
+    it('blames the mode, not the clauses, when an iceberg merge is not lowercase', () => {
       const issues = lint(
         [
           source('src'),
@@ -402,7 +403,10 @@ describe('lintJob', () => {
             format: 'iceberg',
             path: 'cat.db.t',
             mode: 'MERGE',
-            options: { merge_keys: ['id'] },
+            options: {
+              on: 'T.id = S.id',
+              actions: ['WHEN MATCHED THEN UPDATE SET *', 'WHEN NOT MATCHED THEN INSERT *'],
+            },
           }),
         ],
         [link('src', 'out')],
@@ -410,10 +414,10 @@ describe('lintJob', () => {
       const issue = issues.find((entry) => entry.id === 'merge-case:out')
       expect(issue?.severity).toBe('error')
       expect(issue?.field).toBe('mode')
-      expect(idsOf(issues)).not.toContain('merge-keys:out')
+      expect(idsOf(issues)).not.toContain('merge-on:out')
     })
 
-    it('accepts a lowercase iceberg merge and still blames a keyless delta merge', () => {
+    it('accepts a lowercase iceberg merge and still blames a clauseless delta merge', () => {
       const iceberg = lint(
         [
           source('src'),
@@ -421,7 +425,10 @@ describe('lintJob', () => {
             format: 'iceberg',
             path: 'cat.db.t',
             mode: 'merge',
-            options: { merge_keys: ['id'] },
+            options: {
+              on: 'T.id = S.id',
+              actions: ['WHEN MATCHED THEN UPDATE SET *', 'WHEN NOT MATCHED THEN INSERT *'],
+            },
           }),
         ],
         [link('src', 'out')],
@@ -433,11 +440,11 @@ describe('lintJob', () => {
         [source('src'), sink('out', { format: 'delta', path: 'db.t', mode: 'MERGE' })],
         [link('src', 'out')],
       )
-      expect(idsOf(delta)).toContain('merge-keys:out')
+      expect(idsOf(delta)).toContain('merge-on:out')
       expect(idsOf(delta)).not.toContain('merge-case:out')
     })
 
-    it('accepts a delta merge that declares its keys', () => {
+    it('accepts a delta merge that writes its ON and its clauses', () => {
       const issues = lint(
         [
           source('src'),
@@ -445,13 +452,42 @@ describe('lintJob', () => {
             format: 'delta',
             path: 'db.t',
             mode: 'merge',
-            options: { merge_keys: ['id'] },
+            options: {
+              on: 'T.id = S.id',
+              actions: ['WHEN MATCHED THEN UPDATE SET *', 'WHEN NOT MATCHED THEN INSERT *'],
+            },
           }),
         ],
         [link('src', 'out')],
       )
       expect(idsOf(issues)).not.toContain('merge-unsupported:out')
-      expect(idsOf(issues)).not.toContain('merge-keys:out')
+      expect(idsOf(issues).filter((id) => id.startsWith('merge-'))).toEqual([])
+    })
+
+    it('names the removed option when a job still carries the old merge form', () => {
+      const issues = lint(
+        [
+          source('src'),
+          sink('out', {
+            format: 'delta',
+            path: 'db.t',
+            mode: 'merge',
+            options: {
+              merge_keys: ['id'],
+              delete_when: "S.op = 'D'",
+              on: 'T.id = S.id',
+              actions: ['WHEN MATCHED THEN UPDATE SET *'],
+            },
+          }),
+        ],
+        [link('src', 'out')],
+      )
+      const removed = issues.filter((entry) => entry.id.startsWith('merge-removed:'))
+      expect(removed.map((entry) => entry.field)).toEqual([
+        'options.merge_keys',
+        'options.delete_when',
+      ])
+      expect(removed[0]?.hint).toContain('options.on')
     })
   })
 

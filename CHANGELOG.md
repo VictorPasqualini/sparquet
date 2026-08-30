@@ -22,6 +22,52 @@ Notes on the history below:
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: the declarative merge options are gone. `mode: merge` now requires `on` and
+  `actions`.** Both forms shipped in `0.9.0`, the hand-written one on top of the generated
+  one, and a pipeline could be written either way. Keeping both meant two code paths for one
+  statement and, worse, two mental models of what a merge does — the generated form hid the
+  clause order that decides whether a CDC delete works at all. The generated form was
+  removed, so `on` and `actions` are the only way to write a merge, and both are required:
+  neither has a default and a missing one raises a `ValueError` naming it before any Spark
+  call. Every removed key is refused **by name**, with the clause that replaces it, so a
+  pipeline written against the old form fails on config instead of running a merge that no
+  longer means what it says:
+
+  | Removed option | What replaces it |
+  |---|---|
+  | `merge_keys` | the whole predicate in `on`, e.g. `"T.id = S.id"` |
+  | `merge_condition` | folded into `on`, which is the entire `ON` condition |
+  | `delete_when` | a clause: `"WHEN MATCHED AND <condition> THEN DELETE"`, before the `UPDATE` |
+  | `delete_not_matched_by_source` | a clause: `"WHEN NOT MATCHED BY SOURCE THEN DELETE"` |
+
+  The plain upsert that used to be generated from `merge_keys` is written as:
+
+  ```json
+  "options": {
+    "on": "T.id = S.id",
+    "actions": [
+      "WHEN MATCHED THEN UPDATE SET *",
+      "WHEN NOT MATCHED THEN INSERT *"
+    ]
+  }
+  ```
+
+  `UPDATE SET *` / `INSERT *` are always fine on Iceberg, which tolerates an extra source
+  column. On Delta they need both sides to carry the same columns: a CDC source with an `op`
+  column the target lacks fails to resolve, and the clause has to list the target columns —
+  which is what the framework used to do for you, and is now visible in the JSON.
+
+  The Iceberg writer also validates the two options **before** its first-load shortcut (an
+  empty target is written with `append` + `saveAsTable`, no MERGE at all), so a wrong merge
+  config can no longer pass on the first run and fail on the second.
+
+- **BREAKING: `with` is no longer read as the second source of `join`/`union`.** `0.9.0`
+  renamed it to `input` and kept `with` working; it now raises a `ValueError` telling you to
+  rename the key. The two names for one block were only a migration aid, and no project is
+  running on the old one.
+
 ## [0.9.0] — 2026-08-30
 
 ### Added

@@ -285,7 +285,7 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
     {
       "type": "join",
       "input": { "format": "parquet", "path": "/ref/table", "options": {} },
-      // input: a segunda fonte (o nome antigo `with` continua aceito)
+      // input: a segunda fonte — mesma forma do input principal (obrigatório)
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
       // Nome presente nos dois lados sai renomeado à DIREITA com sufixo `_r`
       // (`nome` e `nome_r`; `_r2`, `_r3` se já ocupado) — nunca duas colunas de mesmo
@@ -407,21 +407,9 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
     "transformations": [ { "type": "with_column", "column": "value", "expression": "to_json(payload)" } ],
     // merge (Delta/Iceberg): T = target (tabela destino), S = source (DataFrame)
     "options": {
-      "merge_keys": ["id"],
-      "merge_condition": "T.deleted = FALSE",   // condição SQL extra — usa T./S.
-      // DELETE (opcional). Sem estas duas o merge só atualiza e insere.
-      "delete_when": "S.op = 'D'",              // a origem TRAZ a linha marcada como
-                                                // excluída; vira WHEN MATCHED AND (…)
-                                                // THEN DELETE, avaliado ANTES do UPDATE
-      "delete_not_matched_by_source": true,     // true, ou uma condição sobre T.;
-                                                // vira WHEN NOT MATCHED BY SOURCE THEN
-                                                // DELETE. Só use contra um snapshot
-                                                // COMPLETO da origem — numa carga
-                                                // incremental apaga tudo que ela não
-                                                // repetiu
-      // Forma explícita: escreve o MERGE à mão. `on` substitui merge_keys/merge_condition;
-      // `actions` substitui o UPDATE/INSERT gerado E os dois deletes acima.
-      "on": "S.id = T.id AND S.loja = T.loja",
+      // As duas são obrigatórias no merge: sem uma delas o writer levanta ValueError
+      // antes de qualquer chamada Spark.
+      "on": "S.id = T.id AND S.loja = T.loja",   // a condição ON inteira
       "actions": [
         "WHEN MATCHED AND S.op = 'D' THEN DELETE",
         "WHEN MATCHED THEN UPDATE SET T.status = S.status",
@@ -431,6 +419,13 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
       // NOT MATCHED, NOT MATCHED BY SOURCE) a primeira cláusula que casa é a que vale,
       // então a incondicional só pode ser a última do grupo — o writer recusa a lista
       // dizendo qual cláusula ficou inalcançável.
+      // O upsert simples é ["WHEN MATCHED THEN UPDATE SET *",
+      //                     "WHEN NOT MATCHED THEN INSERT *"].
+      // No Delta, `SET *`/`INSERT *` exigem as MESMAS colunas dos dois lados: uma origem
+      // de CDC com coluna `op` que o destino não tem falha ao resolver, e a cláusula
+      // precisa listar as colunas do destino. O Iceberg tolera a coluna extra.
+      // WHEN NOT MATCHED BY SOURCE THEN DELETE só vale contra um snapshot COMPLETO da
+      // origem — numa carga incremental apaga tudo que ela não repetiu.
       // Kafka:
       "bootstrap_servers": "broker:9092",
       "topic": "meu-topico",

@@ -390,16 +390,21 @@ _SO_LADO_ESQUERDO = {
 def _fonte(params: dict, transformacao: str) -> dict:
     """A configuração da segunda fonte, em `input`.
 
-    `input` é o nome atual, o mesmo do bloco de entrada do pipeline — a fonte de
-    um join é uma entrada como qualquer outra, e chamá-la de outra coisa era uma
-    palavra a mais para aprender. `with` era esse nome e continua aceito, para
-    não quebrar JSON já escrito.
+    `input` é o mesmo nome do bloco de entrada do pipeline — a fonte de um join é
+    uma entrada como qualquer outra, e chamá-la de outra coisa era uma palavra a
+    mais para aprender. `with` era esse nome e não é mais aceito: em vez de ser
+    ignorada em silêncio (o que faria o join rodar sem a segunda fonte), a chave
+    antiga é recusada dizendo qual usar.
     """
-    source = params.get("input", params.get("with"))
+    if "with" in params and "input" not in params:
+        raise ValueError(
+            f"{transformacao}: 'with' nao existe mais; renomeie a chave para "
+            "'input'."
+        )
+    source = params.get("input")
     if source is None:
         raise ValueError(
-            f"{transformacao}: falta 'input' com a segunda fonte (formato + path). "
-            "'with' e aceito como nome antigo."
+            f"{transformacao}: falta 'input' com a segunda fonte (formato + path)."
         )
     return source
 
@@ -428,8 +433,7 @@ class JoinTransformation(BaseTransformation):
     name. See `_desambiguar`.
 
     JSON params:
-      input                – source config (format + path + options). 'with' is
-                             still accepted as the old name for this key.
+      input                – source config (format + path + options)
       on                   – column name, list of column names, or SQL expression
                              (SQL expressions containing spaces use l./r. aliases)
       how                  – join type (default: inner)
@@ -663,8 +667,7 @@ class UnionTransformation(BaseTransformation):
     """Appends rows from a second source to the main DataFrame.
 
     JSON params:
-      input                 – source config (format + path + options). 'with' is
-                              still accepted as the old name for this key.
+      input                 – source config (format + path + options)
       allow_missing_columns – fill missing columns with null (default: false)
 
     Example:

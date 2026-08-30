@@ -552,10 +552,28 @@ const checkSources = (ctx: LintContext): void => {
 }
 
 /**
- * `merge_keys` is skipped here and reported by the dedicated merge rule, which knows
- * the write mode and produces one precise message instead of two overlapping ones.
+ * `on` and `actions` are skipped here and reported by the dedicated merge rule, which
+ * knows the write mode and produces one precise message instead of two overlapping ones.
  */
-const SINK_OPTION_SKIP: ReadonlySet<string> = new Set(['merge_keys'])
+const SINK_OPTION_SKIP: ReadonlySet<string> = new Set(['on', 'actions'])
+
+/**
+ * The options of the merge form that no longer exists, and the clause that replaces
+ * each one. The writer refuses them, so the lint has to name them before the run:
+ * a job written against the old syntax fails on the first execution otherwise.
+ */
+const MERGE_REMOVED: ReadonlyArray<readonly [string, string]> = [
+  ['merge_keys', 'Write the whole predicate in options.on, e.g. "T.id = S.id".'],
+  ['merge_condition', 'Fold it into options.on, which is the entire ON condition.'],
+  [
+    'delete_when',
+    'Write it as a clause: "WHEN MATCHED AND <condition> THEN DELETE", before the UPDATE.',
+  ],
+  [
+    'delete_not_matched_by_source',
+    'Write it as a clause: "WHEN NOT MATCHED BY SOURCE THEN DELETE".',
+  ],
+]
 
 const checkSinks = (ctx: LintContext): void => {
   const destinations = new Map<string, string>()
@@ -614,17 +632,40 @@ const checkSinks = (ctx: LintContext): void => {
           message: `Write mode "${writeMode}" does not merge into ${def.label}.`,
           nodeId: node.id,
           field: 'mode',
-          hint: 'The Iceberg writer compares the mode against "merge" case-sensitively, so this takes the ordinary-write branch and the string reaches df.write.mode() as-is. Write it in lowercase — merge keys make no difference here.',
+          hint: 'The Iceberg writer compares the mode against "merge" case-sensitively, so this takes the ordinary-write branch and the string reaches df.write.mode() as-is. Write it in lowercase — the merge options make no difference here.',
         })
-      } else if (nonEmptyStrings(options.merge_keys).length === 0) {
-        ctx.issues.push({
-          id: `merge-keys:${node.id}`,
-          severity: 'error',
-          message: 'Merge mode needs at least one merge key.',
-          nodeId: node.id,
-          field: 'options.merge_keys',
-          hint: 'Set options.merge_keys — it builds the ON clause (T.<key> = S.<key>) and the writer raises a ValueError before any Spark call when it is empty.',
-        })
+      } else {
+        for (const [key, hint] of MERGE_REMOVED) {
+          if (options[key] === undefined) continue
+          ctx.issues.push({
+            id: `merge-removed:${node.id}:${key}`,
+            severity: 'error',
+            message: `options.${key} no longer exists on merge.`,
+            nodeId: node.id,
+            field: `options.${key}`,
+            hint: `${hint} The writer raises a ValueError naming this key before any Spark call.`,
+          })
+        }
+        if (text(options.on) === '') {
+          ctx.issues.push({
+            id: `merge-on:${node.id}`,
+            severity: 'error',
+            message: 'Merge mode needs an ON condition.',
+            nodeId: node.id,
+            field: 'options.on',
+            hint: 'Set options.on to the whole match predicate over T. (target) and S. (source), e.g. "T.id = S.id". The writer raises a ValueError before any Spark call when it is missing.',
+          })
+        }
+        if (nonEmptyStrings(options.actions).length === 0) {
+          ctx.issues.push({
+            id: `merge-actions:${node.id}`,
+            severity: 'error',
+            message: 'Merge mode needs at least one WHEN clause.',
+            nodeId: node.id,
+            field: 'options.actions',
+            hint: 'Set options.actions — the plain upsert is ["WHEN MATCHED THEN UPDATE SET *", "WHEN NOT MATCHED THEN INSERT *"], and the writer raises a ValueError before any Spark call when the list is empty.',
+          })
+        }
       }
     }
 

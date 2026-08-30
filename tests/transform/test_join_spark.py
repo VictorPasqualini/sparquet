@@ -10,9 +10,9 @@ trava.
 
 O que cada teste cobre:
 
-  input/with       a chave da fonte direita: `input` e o nome atual, `with` e o
-                   antigo e continua valendo; sem nenhuma das duas, erro que diz
-                   qual chave falta.
+  input            a chave da fonte direita. `with`, o nome antigo, e recusado
+                   com um erro que manda renomear — ignorado em silencio, o join
+                   rodaria sem a segunda fonte.
   chave por nome   `on: "id"` — o Spark ja funde a chave numa coluna so, e ela
                    NAO pode ser renomeada.
   homonimas        as demais colunas repetidas viram `nome_r`, e o valor de cada
@@ -122,16 +122,19 @@ class TestJoin(unittest.TestCase):
         self.assertEqual(juntado.count(), 1)
         self.assertIn("extra", juntado.columns)
 
-    def test_with_continua_valendo_como_nome_antigo(self) -> None:
-        """JSON ja escrito nao para de funcionar por causa da troca de nome."""
+    def test_with_e_recusado_com_o_nome_novo_no_erro(self) -> None:
+        """A chave antiga nao pode ser ignorada: sem a fonte o join nao existe."""
         caminho = self.gravar("dim2.parquet", "(1, 'x')", "id, extra")
-        juntado = self.juntar(
-            self.esquerda(),
-            {"with": {"format": "parquet", "path": caminho}, "on": "id"},
-        )
-        self.assertEqual(juntado.count(), 1)
+        with self.assertRaises(ValueError) as capturado:
+            self.juntar(
+                self.esquerda(),
+                {"with": {"format": "parquet", "path": caminho}, "on": "id"},
+            )
+        mensagem = str(capturado.exception)
+        self.assertIn("'with' nao existe mais", mensagem)
+        self.assertIn("'input'", mensagem)
 
-    def test_sem_input_nem_with_o_erro_diz_qual_chave_falta(self) -> None:
+    def test_sem_input_o_erro_diz_qual_chave_falta(self) -> None:
         with self.assertRaises(ValueError) as capturado:
             self.juntar(self.esquerda(), {"on": "id"})
         self.assertIn("input", str(capturado.exception))

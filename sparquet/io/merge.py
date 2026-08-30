@@ -1,21 +1,13 @@
 """Montagem do MERGE INTO, compartilhada por Delta e Iceberg.
 
-Os dois escritores emitem o mesmo comando e diferem só no alvo e nas cláusulas
-default, então a montagem mora aqui em vez de ser duplicada — do mesmo jeito que
-`is_table_name` mora em `base.py`.
+Os dois escritores emitem o mesmo comando e diferem só no alvo, então a montagem
+mora aqui em vez de ser duplicada — do mesmo jeito que `is_table_name` mora em
+`base.py`.
 
-Há duas formas de escrever um merge no JSON, e elas não se misturam:
-
-**Forma declarativa** (a de sempre): `merge_keys`, opcionalmente
-`merge_condition`, `delete_when` e `delete_not_matched_by_source`. O framework
-monta o `ON` e as cláusulas. Cobre o upsert normal sem que ninguém precise
-escrever SQL.
-
-**Forma explícita**: `on` (a condição inteira, como no `on` do join) e `actions`
-(a lista de cláusulas `WHEN ...`, escritas à mão e emitidas na ordem dada). É a
-saída para tudo que a forma declarativa não expressa — `UPDATE SET` parcial,
-constante literal, coluna com nome diferente dos dois lados, várias cláusulas
-condicionais. O framework não interpreta o conteúdo: valida a forma e interpola.
+Há **uma** forma de escrever um merge no JSON: `on` recebe a condição inteira
+(como o `on` do join) e `actions` a lista de cláusulas `WHEN ...`, escritas à mão
+e emitidas na ordem dada. As duas são obrigatórias. O framework não interpreta o
+conteúdo: valida a forma e interpola.
 
     "options": {
       "on": "S.id = T.id AND S.loja = T.loja",
@@ -26,48 +18,61 @@ condicionais. O framework não interpreta o conteúdo: valida a forma e interpol
       ]
     }
 
-`on` e `actions` são independentes: dá para escrever o `ON` à mão e deixar as
-cláusulas no default, ou o contrário.
+O upsert de sempre são duas linhas — `UPDATE SET *` e `INSERT *` casam as colunas
+por nome:
 
-Sobre as duas exclusões da forma declarativa, que não são intercambiáveis:
+    "actions": [
+      "WHEN MATCHED THEN UPDATE SET *",
+      "WHEN NOT MATCHED THEN INSERT *"
+    ]
 
-  `delete_when`  — a origem **traz** a linha, marcada como excluída (`op = 'D'`,
+No Iceberg isso vale sempre. No Delta o `*` exige que os dois lados tenham as
+mesmas colunas: uma origem de CDC que traz `op`, coluna que o destino não tem,
+falha ao resolvê-la — aí as colunas do destino entram listadas à mão.
+
+A ordem das cláusulas é a ordem do comando, e em `MERGE INTO` a primeira que casa
+é a que vale. Um DELETE condicional escrito depois de um UPDATE incondicional
+nunca é alcançado — a linha seria atualizada e nunca apagada. Este módulo recusa
+esse caso na montagem, antes de o Spark rodar.
+
+As duas exclusões que antes tinham opção própria continuam existindo como
+cláusula, e não são intercambiáveis:
+
+  `WHEN MATCHED AND <cond> THEN DELETE`
+                 — a origem **traz** a linha, marcada como excluída (`op = 'D'`,
                    `deleted = true`, o que o CDC do sistema de origem emitir).
-                   Vira `WHEN MATCHED AND <cond> THEN DELETE`, avaliado antes do
-                   UPDATE porque a primeira cláusula que casa é a que vale: sem
-                   essa ordem a linha seria atualizada e nunca apagada.
+                   Precisa vir antes do UPDATE.
 
-  `delete_not_matched_by_source`
-                 — a origem **não traz** a linha, e isso é o que significa que ela
-                   sumiu. Vira `WHEN NOT MATCHED BY SOURCE THEN DELETE`, opcional-
-                   mente com uma condição sobre `T`. Só é correto quando a origem é
-                   um snapshot **completo** do conjunto: contra uma carga
-                   incremental, apaga tudo o que aquela carga não repetiu.
-
-Nenhuma das duas é ligada por default — um MERGE sem elas continua exatamente o
-que era, `UPDATE` mais `INSERT`.
+  `WHEN NOT MATCHED BY SOURCE THEN DELETE`
+                 — a origem **não traz** a linha, e isso é o que significa que
+                   ela sumiu. Só é correto quando a origem é um snapshot
+                   **completo** do conjunto: contra uma carga incremental, apaga
+                   tudo o que aquela carga não repetiu.
 """
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence
 
 #: Chaves de `options` que configuram o MERGE e não são opções do writer. Numa
 #: escrita comum elas seriam repassadas ao Spark como opção desconhecida —
 #: aceita em silêncio e sem efeito, que é a pior forma de errar.
-MERGE_OPTIONS = (
-    "merge_keys",
-    "merge_condition",
-    "delete_when",
-    "delete_not_matched_by_source",
-    "on",
-    "actions",
-)
+MERGE_OPTIONS = ("on", "actions")
 
-#: Valores textuais aceitos como "sim" em `delete_not_matched_by_source`. Uma
-#: string qualquer fora desta lista é tratada como condição SQL, não como flag.
-_TRUE = {"true", "yes", "1"}
-_FALSE = {"false", "no", "0", "", "none"}
+#: As opções da forma declarativa antiga, e o que escrever no lugar de cada uma.
+#: Ignorá-las em silêncio seria pior do que recusar: o merge rodaria sem a chave
+#: e sem a condição de exclusão que quem escreveu o JSON pediu.
+_REMOVIDAS = {
+    "merge_keys": "'on' com a condicao inteira. Ex: \"on\": \"T.id = S.id\"",
+    "merge_condition": "'on', que ja recebe a condicao inteira",
+    "delete_when": (
+        "uma clausula em 'actions': \"WHEN MATCHED AND <cond> THEN DELETE\", "
+        "escrita ANTES do UPDATE"
+    ),
+    "delete_not_matched_by_source": (
+        "uma clausula em 'actions': \"WHEN NOT MATCHED BY SOURCE THEN DELETE\""
+    ),
+}
 
 #: Os três grupos de cláusula do MERGE INTO. Dentro de cada grupo o SQL padrão
 #: exige que só a última possa ser incondicional — as anteriores precisam de
@@ -81,85 +86,53 @@ _GRUPOS = (
 _CONDICIONAL = re.compile(r"^WHEN\s+(NOT\s+MATCHED(\s+BY\s+SOURCE)?|MATCHED)\s+AND\b", re.I)
 
 
-def delete_clauses(options: Dict[str, Any]) -> Tuple[str, str]:
-    """Devolve `(cláusula WHEN MATCHED ... DELETE, cláusula NOT MATCHED BY SOURCE)`.
+def check_merge_options(options: Dict[str, Any], writer: str) -> None:
+    """Recusa as opções da forma antiga, dizendo o que escrever no lugar."""
+    for chave, substituta in _REMOVIDAS.items():
+        if chave in options:
+            raise ValueError(
+                f"{writer} mode='merge': '{chave}' nao existe mais. Use {substituta}."
+            )
 
-    Cada uma vem pronta para ser interpolada no comando, ou vazia quando a opção
-    correspondente não foi pedida. A condição é injetada crua: é SQL escrito por
-    quem monta o pipeline, como `merge_condition` já era.
+
+def validate_merge_options(options: Dict[str, Any], writer: str) -> None:
+    """Roda toda a validação do merge sem montar o comando.
+
+    Existe para o Iceberg, que valida antes de decidir se a primeira carga vira
+    `append`: sem isto um JSON errado passaria batido na execução em que a
+    tabela ainda não existe e só falharia na seguinte.
     """
-    matched = ""
-    delete_when = options.get("delete_when")
-    if isinstance(delete_when, str) and delete_when.strip():
-        matched = f"WHEN MATCHED AND ({delete_when.strip()}) THEN DELETE"
-
-    by_source = ""
-    raw = options.get("delete_not_matched_by_source")
-    if raw is True:
-        by_source = "WHEN NOT MATCHED BY SOURCE THEN DELETE"
-    elif isinstance(raw, str):
-        valor = raw.strip()
-        if valor.lower() in _TRUE:
-            by_source = "WHEN NOT MATCHED BY SOURCE THEN DELETE"
-        elif valor and valor.lower() not in _FALSE:
-            by_source = f"WHEN NOT MATCHED BY SOURCE AND ({valor}) THEN DELETE"
-    elif raw not in (None, False):
-        raise ValueError(
-            "'delete_not_matched_by_source' aceita true/false ou uma condicao SQL "
-            f"sobre T; veio {raw!r}"
-        )
-
-    return matched, by_source
+    check_merge_options(options, writer)
+    on_condition(options, writer)
+    action_clauses(options, writer)
 
 
 def on_condition(options: Dict[str, Any], writer: str) -> str:
-    """A condição do `ON`, escrita à mão em `on` ou montada de `merge_keys`.
+    """A condição do `ON`, escrita à mão em `on`.
 
     `writer` só entra na mensagem de erro, para dizer qual destino recusou.
     """
     bruto = options.get("on")
-    if bruto is not None:
-        if not isinstance(bruto, str) or not bruto.strip():
-            raise ValueError(
-                f"{writer} mode='merge': 'on' precisa ser uma condicao SQL sobre "
-                f"T e S; veio {bruto!r}"
-            )
-        return bruto.strip()
-
-    merge_keys = options.get("merge_keys") or []
-    if not merge_keys:
+    if not isinstance(bruto, str) or not bruto.strip():
+        veio = f"; veio {bruto!r}" if bruto is not None else ""
         raise ValueError(
-            f"{writer} mode='merge' requer 'merge_keys' em options, ou 'on' com a "
-            "condicao inteira. Ex: {\"merge_keys\": [\"id\"]} ou "
-            "{\"on\": \"T.id = S.id\"}"
+            f"{writer} mode='merge' requer 'on' em options: a condicao SQL "
+            "inteira sobre T (destino) e S (origem). Ex: "
+            "{\"on\": \"T.id = S.id\"}" + veio
         )
-
-    condicao = " AND ".join(f"T.{k} = S.{k}" for k in merge_keys)
-    extra = options.get("merge_condition", "")
-    if extra:
-        condicao = f"({condicao}) AND ({extra})"
-    return condicao
+    return bruto.strip()
 
 
-def action_clauses(
-    options: Dict[str, Any], defaults: Sequence[str], writer: str
-) -> List[str]:
-    """As cláusulas `WHEN ...`, escritas à mão em `actions` ou montadas.
-
-    Com `actions`, a ordem da lista é a ordem emitida: em `MERGE INTO` a primeira
-    cláusula que casa é a que vale, então mover o DELETE para depois do UPDATE
-    muda o resultado. Sem `actions`, os deletes declarativos entram em volta das
-    cláusulas default do writer.
-    """
+def action_clauses(options: Dict[str, Any], writer: str) -> List[str]:
+    """As cláusulas `WHEN ...`, na ordem em que foram escritas."""
     brutas = options.get("actions")
-    if brutas is None:
-        matched_delete, by_source = delete_clauses(options)
-        return [c for c in [matched_delete, *defaults, by_source] if c]
-
     if not isinstance(brutas, list) or not brutas:
+        veio = f"; veio {brutas!r}" if brutas is not None else ""
         raise ValueError(
-            f"{writer} mode='merge': 'actions' precisa ser uma lista nao vazia de "
-            f"clausulas WHEN ...; veio {brutas!r}"
+            f"{writer} mode='merge' requer 'actions' em options: a lista nao "
+            "vazia de clausulas WHEN ..., na ordem em que devem ser avaliadas. "
+            "Ex: [\"WHEN MATCHED THEN UPDATE SET *\", "
+            "\"WHEN NOT MATCHED THEN INSERT *\"]" + veio
         )
 
     acoes: List[str] = []
@@ -179,15 +152,18 @@ def merge_sql(
     target: str,
     source_view: str,
     options: Dict[str, Any],
-    defaults: Sequence[str],
     writer: str,
 ) -> str:
     """O comando `MERGE INTO` inteiro, pronto para `spark.sql`."""
-    clausulas = "\n            ".join(action_clauses(options, defaults, writer))
+    check_merge_options(options, writer)
+    # `on` primeiro: com as duas opções faltando, o erro que aparece é o da
+    # primeira parte do comando, e não o da última.
+    condicao = on_condition(options, writer)
+    clausulas = "\n            ".join(action_clauses(options, writer))
     return f"""
             MERGE INTO {target} AS T
             USING {source_view} AS S
-            ON {on_condition(options, writer)}
+            ON {condicao}
             {clausulas}
         """
 
