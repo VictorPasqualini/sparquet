@@ -701,8 +701,8 @@ const checkTransforms = (ctx: LintContext): void => {
           severity: 'error',
           message: `${labelOf(node)} has no second input.`,
           nodeId: node.id,
-          field: 'with',
-          hint: 'Connect a source to the right-hand handle: `with` is compiled from it and the run fails with a KeyError without it.',
+          field: 'input',
+          hint: 'Connect a source to the right-hand handle: `input` is compiled from it and the run fails without it.',
         })
       } else if (def.type === 'union') {
         const reshaped = [...collectAncestors(ctx, secondary.source)]

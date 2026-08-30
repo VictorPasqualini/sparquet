@@ -83,8 +83,8 @@ const OUTPUT_KEY_ORDER = [
   'transformations',
 ]
 const VALIDATIONS_KEY_ORDER = ['on_failure', 'report', 'outputs', 'rules']
-/** `with` / `with_transformations` lead because they describe the second input. */
-const TRANSFORM_KEY_ORDER = ['type', 'skip_if_false', 'with', 'with_transformations']
+/** `input` / `with_transformations` lead because they describe the second input. */
+const TRANSFORM_KEY_ORDER = ['type', 'skip_if_false', 'input', 'with_transformations']
 
 const MAX_CLONE_DEPTH = 32
 
@@ -419,13 +419,14 @@ function compileTransform(node: TransformNode, ctx: CompileContext): Transformat
     ctx.stack.add(node.id)
     const side = compileSideInput(node, ctx)
     ctx.stack.delete(node.id)
-    if (side.source) spec.with = side.source
+    if (side.source) spec.input = side.source
     if (side.transformations.length > 0) spec.with_transformations = side.transformations
   }
 
   for (const [key, value] of Object.entries(params)) {
     if (key === 'type' || key === 'skip_if_false') continue
-    if (hasSideInput && (key === 'with' || key === 'with_transformations')) continue
+    if (hasSideInput && (key === 'input' || key === 'with' || key === 'with_transformations'))
+      continue
     // Prune only "unset" params (null/undefined/blank string); keep empty maps/lists
     // so structural params round-trip instead of emitting framework-breaking JSON.
     if (isUnset(value)) continue
@@ -698,7 +699,7 @@ function orderTransformationDeep(value: unknown): unknown {
   if ('$include' in value) return { $include: value.$include }
 
   const ordered = orderTransformationSpec(value)
-  if (isRecord(ordered.with)) ordered.with = orderKeys(ordered.with, INPUT_KEY_ORDER)
+  if (isRecord(ordered.input)) ordered.input = orderKeys(ordered.input, INPUT_KEY_ORDER)
   if (Array.isArray(ordered.with_transformations)) {
     ordered.with_transformations = ordered.with_transformations.map(orderTransformationDeep)
   }

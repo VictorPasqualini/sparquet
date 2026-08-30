@@ -15,7 +15,7 @@
 
     {
       "type": "join",
-      "with": { "format": "delta", "path": "vendas.bronze_eventos_cliente" },
+      "input": { "format": "delta", "path": "vendas.bronze_eventos_cliente" },
       "with_transformations": [
         { "type": "filter", "condition": "id_cliente IN ({{clientes_ativos}})" },
         { "type": "select", "columns": ["id_cliente", "score_credito", "segmento"] },

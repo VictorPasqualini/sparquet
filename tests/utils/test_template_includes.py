@@ -86,15 +86,18 @@ class ApplyTemplateTest(unittest.TestCase):
         self.assertEqual(apply_template("{a.b}", {"a.b": "z"}), "{a.b}")
         self.assertEqual(apply_template("{ }", {" ": "z"}), "{ }")
 
-    def test_a_variavel_de_runtime_de_chave_dupla_e_alcancada(self) -> None:
-        """Gotcha real, não detalhe: `{{var}}` das transformações contém `{var}`,
-        e este regex casa o de dentro. Um `params` com uma chave de mesmo nome de
-        uma variável de runtime reescreve a referência ANTES de o
-        TransformationEngine vê-la — o `{{var}}` some e vira `{valor}`.
-        Nomes de param e de variável de runtime precisam ser distintos."""
-        self.assertEqual(apply_template("{{var}}", {"var": "x"}), "{x}")
-        # Sem a colisão de nome, a referência atravessa intacta.
+    def test_a_variavel_de_runtime_de_chave_dupla_fica_intacta(self) -> None:
+        """As duas sintaxes convivem no mesmo texto e passam pelo mesmo regex:
+        `{param}` e o `{{var}}` de runtime das transformacoes. O que separa uma da
+        outra sao as chaves duplas, e o padrao as exclui — antes disso, um param
+        com o mesmo nome de uma variavel de runtime reescrevia a referencia antes
+        de o TransformationEngine ve-la, e a variavel sumia."""
+        self.assertEqual(apply_template("{{var}}", {"var": "x"}), "{{var}}")
         self.assertEqual(apply_template("{{var}}", {"outro": "x"}), "{{var}}")
+        # As duas no mesmo texto, com o mesmo nome: so a de chave simples muda.
+        self.assertEqual(
+            apply_template("{a} e {{a}}", {"a": "1"}), "1 e {{a}}"
+        )
 
     def test_o_valor_entra_cru_no_texto(self) -> None:
         """Não há escape: o valor é interpolado como veio. Aspas dentro de um
@@ -196,17 +199,82 @@ class ResolveIncludesTest(unittest.TestCase):
             resolve_includes(data, self.dir)
         self.assertIn("nao-existe.json", str(capturado.exception))
 
-    def test_include_dentro_de_include_nao_e_expandido(self) -> None:
-        """Limite documentado: um nível só. O include interno chega como está e
-        vira uma transformação de tipo desconhecido mais adiante — não silêncio,
-        mas também não recursão."""
+    def test_include_dentro_de_include_e_expandido(self) -> None:
+        """Recursivo: um arquivo compartilhado pode ser montado de outros, que e
+        o que permite ter um `padrao_bronze.json` feito de tres blocos menores."""
         self.escrever("interno.json", {"type": "filter", "condition": "c = 3"})
-        self.escrever("externo.json", [{"$include": "interno.json"}])
+        self.escrever(
+            "externo.json",
+            [{"$include": "interno.json"}, {"type": "select", "columns": ["c"]}],
+        )
         data = {"transformations": [{"$include": "externo.json"}]}
 
         resolvido = resolve_includes(data, self.dir)
 
-        self.assertEqual(resolvido["transformations"], [{"$include": "interno.json"}])
+        self.assertEqual(
+            resolvido["transformations"],
+            [
+                {"type": "filter", "condition": "c = 3"},
+                {"type": "select", "columns": ["c"]},
+            ],
+        )
+
+    def test_o_caminho_do_include_aninhado_e_relativo_a_quem_o_escreveu(self) -> None:
+        """Uma pasta de includes se move inteira sem reescrever os caminhos de
+        dentro: o `$include` de um arquivo incluido parte do diretorio DELE, nao
+        do JSON principal."""
+        pasta = self.dir / "blocos"
+        pasta.mkdir()
+        (pasta / "folha.json").write_text(
+            json.dumps({"type": "filter", "condition": "d = 4"}), encoding="utf-8"
+        )
+        (pasta / "raiz.json").write_text(
+            json.dumps([{"$include": "folha.json"}]), encoding="utf-8"
+        )
+        data = {"transformations": [{"$include": "blocos/raiz.json"}]}
+
+        resolvido = resolve_includes(data, self.dir)
+
+        self.assertEqual(resolvido["transformations"][0]["condition"], "d = 4")
+
+    def test_params_valem_em_todos_os_niveis(self) -> None:
+        self.escrever("folha2.json", {"type": "filter", "condition": "t IN ({tipos})"})
+        self.escrever("raiz2.json", [{"$include": "folha2.json"}])
+        data = {"transformations": [{"$include": "raiz2.json"}]}
+
+        resolvido = resolve_includes(data, self.dir, {"tipos": ["A"]})
+
+        self.assertEqual(resolvido["transformations"][0]["condition"], "t IN ('A')")
+
+    def test_ciclo_levanta_dizendo_o_percurso(self) -> None:
+        """Sem isto a recursao estouraria a pilha com um RecursionError que nao
+        diz qual arquivo fechou o ciclo."""
+        self.escrever("a.json", [{"$include": "b.json"}])
+        self.escrever("b.json", [{"$include": "a.json"}])
+        data = {"transformations": [{"$include": "a.json"}]}
+
+        with self.assertRaises(ValueError) as capturado:
+            resolve_includes(data, self.dir)
+
+        mensagem = str(capturado.exception)
+        self.assertIn("ciclico", mensagem)
+        self.assertIn("a.json", mensagem)
+        self.assertIn("b.json", mensagem)
+
+    def test_o_mesmo_arquivo_duas_vezes_lado_a_lado_nao_e_ciclo(self) -> None:
+        """Reuso nao e recursao: o mesmo bloco incluido duas vezes na sequencia e
+        exatamente o caso de uso do $include."""
+        self.escrever("bloco.json", {"type": "filter", "condition": "e = 5"})
+        data = {
+            "transformations": [
+                {"$include": "bloco.json"},
+                {"$include": "bloco.json"},
+            ]
+        }
+
+        resolvido = resolve_includes(data, self.dir)
+
+        self.assertEqual(len(resolvido["transformations"]), 2)
 
     def test_a_diretiva_so_vale_em_transformations(self) -> None:
         """Fora de `transformations` a diretiva é ignorada em silêncio — inclusive

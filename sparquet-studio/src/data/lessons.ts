@@ -148,7 +148,7 @@ export const LESSONS: Lesson[] = [
         code: `[
   { "type": "filter", "condition": "status = 'PENDING'" },
   { "type": "stop_if_empty", "message": "Nothing pending — nothing to do" },
-  { "type": "join", "with": { "format": "delta", "path": "crm.dim_customer" }, "on": "customer_id" }
+  { "type": "join", "input": { "format": "delta", "path": "crm.dim_customer" }, "on": "customer_id" }
 ]`,
       },
       {
@@ -159,7 +159,7 @@ export const LESSONS: Lesson[] = [
         ].join('\n\n'),
         code: `{
   "type": "join",
-  "with": { "format": "delta", "path": "sales.dim_customer" },
+  "input": { "format": "delta", "path": "sales.dim_customer" },
   "on": ["customer_id"],
   "how": "left"
 }`,
@@ -337,7 +337,7 @@ export const LESSONS: Lesson[] = [
         ].join('\n\n'),
         code: `{
   "type": "join",
-  "with": { "format": "delta", "path": "sales.bronze_customer_events" },
+  "input": { "format": "delta", "path": "sales.bronze_customer_events" },
   "with_transformations": [
     { "type": "select", "columns": ["customer_id", "credit_score", "segment"] },
     { "type": "distinct" }
@@ -353,7 +353,7 @@ export const LESSONS: Lesson[] = [
         ].join('\n\n'),
         code: `{
   "type": "join",
-  "with": { "format": "delta", "path": "crm.dim_address" },
+  "input": { "format": "delta", "path": "crm.dim_address" },
   "with_transformations": [{ "type": "select", "columns": ["document", "city", "state"] }],
   "on": "l.customer_document = r.document",
   "how": "left"
@@ -382,7 +382,7 @@ export const LESSONS: Lesson[] = [
   { "type": "collect", "column": "customer_id", "as": "active_customers" },
   {
     "type": "join",
-    "with": { "format": "delta", "path": "sales.bronze_customer_events" },
+    "input": { "format": "delta", "path": "sales.bronze_customer_events" },
     "with_transformations": [
       { "type": "filter", "condition": "customer_id IN ({{active_customers}})" }
     ],
@@ -409,7 +409,7 @@ export const LESSONS: Lesson[] = [
         ].join('\n\n'),
         code: `{
   "type": "union",
-  "with": { "format": "csv", "path": "/data/landing/orders_us" },
+  "input": { "format": "csv", "path": "/data/landing/orders_us" },
   "allow_missing_columns": true
 }`,
       },

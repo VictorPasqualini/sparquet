@@ -341,7 +341,13 @@ separação ao evoluir.
       "shared/spark-lakehouse.json"}`. Serve também para `output` e `validations`
       repetidos entre pipelines. Precisa de entrada no catálogo do Studio (o editor tem
       que entender arquivo compartilhado) e de doc no `sparquet-web`.
-- [ ] **`$include` aninhado** — hoje não suportado (um nível só).
+- ✅ **`$include` aninhado** — `sparquet/utils/includes.py` expande em profundidade: um
+      arquivo incluído pode conter novos `$include`, e o caminho deles é relativo ao
+      **arquivo que os escreveu**, não ao pipeline principal (mover uma pasta de includes
+      inteira não obriga a reescrever os caminhos de dentro). Ciclo (A inclui B que inclui
+      A) levanta `ValueError` com o percurso (`a.json -> b.json -> a.json`) em vez de
+      estourar a pilha; cadeia acima de 20 níveis é recusada. Coberto em
+      `tests/utils/test_template_includes.py`.
 - [ ] **Catálogo de erros** — mensagens de erro padronizadas e acionáveis
       (transformação desconhecida, coluna inexistente, etc.).
 
@@ -389,6 +395,32 @@ arbitrária**: tudo aqui é, no fim, postura de segurança e de operação. Ele 
 
 ### 9.1 Execução, histórico e canvas
 
+- [ ] **`input_view` pelo Studio** — hoje `input_view` só existe como **argumento Python**
+  (`Sparquet(input_view=...)`, `run(...)`, `run_from_dict(...)`, `sparquet/framework.py:49`),
+  nunca como chave do JSON. O Studio compila JSON e o runner chama
+  `framework.run_from_dict(body.pipeline, params=...)` (`server/main.py:1554`) sem esse
+  argumento, então não há como chegar lá pelo editor. **Impacto no framework** (as duas
+  primeiras linhas mexem no contrato do JSON):
+
+  1. `PipelineConfig` ganha o campo `input_view: Optional[Union[str, Dict[str, Any]]] = None`
+     (`sparquet/core/config.py:253`) e `from_dict` passa a lê-lo. É chave nova no JSON —
+     precisa de doc em `docs/PIPELINE_SCHEMA.md` e no `sparquet-web` (EN/PT/ES).
+  2. `Pipeline.__init__` (`sparquet/core/pipeline.py:113`) hoje recebe o valor só por
+     argumento. Passa a cair para o do config quando o argumento for `None` — **precedência
+     argumento > JSON**, igual à de `columns`/`input_df`, para que quem usa como lib não
+     perca o controle. Nada quebra: JSON sem a chave continua com o comportamento atual.
+  3. CLI ganha o caminho de graça (passa por `from_dict`); a API Python continua igual.
+  4. Studio: campo no catálogo do nó de input (`src/catalog/`), `compileGraph` emitindo e
+     `pipelineToGraph` lendo de volta — **o round-trip é o risco real**: chave que o
+     compilador não conhece some ao reabrir o Job no canvas, e o usuário perde a
+     configuração sem aviso. O teste de round-trip tem que cobrir.
+  5. Opcional, e só depois de 1–4: expor também como **opção de execução** no diálogo de
+     run (`run_from_dict(..., input_view=...)`), para experimentar sem gravar no Job. Sozinha
+     essa opção não serve — o valor não ficaria no JSON, e a mesma conf rodada pela CLI se
+     comportaria diferente.
+
+  Custo estimado: pequeno no framework (um campo e uma precedência), médio no Studio
+  (catálogo + compilador nos dois sentidos + round-trip).
 - ✅ **Histórico de execuções** — `PipelineRun`/`JobRun`/`StepRun` persistidos em SQLite
   (`server/history.py`, `ExecutionRepository`), sobrevivem a reiniciar o app.
   `GET /runs` (lista) e `GET /runs/{id}` (detalhe) servem o `ExecutionHistoryPanel` no
@@ -820,12 +852,13 @@ Restante, na ordem do plano:
       `tests/utils/test_template_includes.py`, sem Spark: a tabela de formatação
       (texto, número, `bool` como `"true"`/`""`, lista de texto com aspas, lista de
       número sem, lista vazia falsy), o primeiro item decidindo a lista inteira, chave
-      ausente ficando literal, o padrão `\w+`, a interpolação crua, e a colisão real
-      entre `{param}` e o `{{var}}` de runtime (`apply_template("{{var}}", {"var": "x"})`
-      devolve `"{x}"` — nomes de param e de variável precisam ser distintos). Do
-      `$include`: objeto, lista expandida na ordem, `params` valendo dentro do incluído,
-      caminho relativo ao JSON principal, `FileNotFoundError` nomeando o arquivo, e os
-      dois limites — não é recursivo e só vale em `transformations`.
+      ausente ficando literal, o padrão `\w+`, a interpolação crua, e a separação entre
+      `{param}` e o `{{var}}` de runtime (`apply_template("{{var}}", {"var": "x"})` devolve
+      `"{{var}}"` — as duas sintaxes não colidem mais, os lookarounds em `_PARAM` excluem a
+      chave dupla). Do `$include`: objeto, lista expandida na ordem, `params` valendo dentro
+      do incluído, caminho relativo a quem escreveu o include, aninhamento, ciclo com o
+      percurso na mensagem, `FileNotFoundError` nomeando o arquivo, e o limite que resta —
+      só vale em `transformations`.
 - [ ] **Camada HTTP do runner** (`sparquet-studio/server/main.py`) — os módulos de apoio
       já têm teste (`history.py`, `auth.py`, `workspace.py`, `credits.py`) e o escopo de
       execução também (`test_run_scope.py`), mas a **camada HTTP em si não tem nenhum**:

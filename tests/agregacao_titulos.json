@@ -20,7 +20,7 @@
     { "type": "checkpoint" },
 
     { "type": "join",
-      "with": { "format": "iceberg", "path": "lastros.titulos" },
+      "input": { "format": "iceberg", "path": "lastros.titulos" },
       "with_transformations": [
         { "type": "with_column", "column": "cnpj_entidade",
           "expression": "explode(array(cnpj_sacado, cnpj_cedente))" },
@@ -45,7 +45,7 @@
       ] },
 
     { "type": "join",
-      "with": { "format": "iceberg", "path": "lastros.titulos" },
+      "input": { "format": "iceberg", "path": "lastros.titulos" },
       "with_transformations": [
         { "type": "with_column", "column": "cnpj_entidade",
           "expression": "explode(array(cnpj_sacado, cnpj_cedente))" },

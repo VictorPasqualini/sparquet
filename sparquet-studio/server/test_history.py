@@ -744,7 +744,7 @@ class LineageTest(unittest.TestCase):
                 "input": {"format": "parquet", "path": "a"},
                 "transformations": [
                     {"type": "filter", "condition": "x > 1"},
-                    {"type": "join", "with": {"format": "parquet", "path": "b"}, "on": ["id"]},
+                    {"type": "join", "input": {"format": "parquet", "path": "b"}, "on": ["id"]},
                 ],
                 "output": {"format": "parquet", "path": "c"},
             }

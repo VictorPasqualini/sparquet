@@ -8,7 +8,7 @@
   "transformations": [
     {
       "type": "join",
-      "with": {
+      "input": {
         "format": "delta",
         "path": "ref.dim_cliente"
       },

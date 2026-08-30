@@ -3,12 +3,7 @@ from __future__ import annotations
 from pyspark.sql import DataFrame
 
 from sparquet.io.base import BaseReader, BaseWriter, is_table_name as _is_table_name
-from sparquet.io.merge import delete_clauses
-
-#: Chaves que configuram o MERGE e não são opções do writer Delta. Numa escrita
-#: comum elas seriam repassadas ao Spark como opção desconhecida.
-_MERGE_OPTIONS = ("merge_keys", "merge_condition", "delete_when",
-                  "delete_not_matched_by_source")
+from sparquet.io.merge import MERGE_OPTIONS as _MERGE_OPTIONS, merge_sql
 
 
 class DeltaReader(BaseReader):
@@ -60,6 +55,11 @@ class DeltaWriter(BaseWriter):
                          não veio na origem: WHEN NOT MATCHED BY SOURCE THEN DELETE.
                          Só faz sentido quando a origem é um snapshot COMPLETO —
                          com uma carga incremental isto apaga o histórico.
+      on               – a condição inteira do MERGE, escrita à mão (como o 'on'
+                         do join). Substitui merge_keys/merge_condition.
+      actions          – lista de cláusulas "WHEN ..." escritas à mão, emitidas
+                         na ordem dada. Substitui o UPDATE/INSERT default e as
+                         duas opções de delete. Ver `sparquet/io/merge.py`.
 
     Exemplos de JSON:
       { "format": "delta", "path": "catalog.schema.clientes", "mode": "overwrite" }
@@ -76,6 +76,19 @@ class DeltaWriter(BaseWriter):
         "options": {
           "merge_keys": ["cliente_id"],
           "delete_when": "S.op = 'D'"
+        }
+      }
+      {
+        "format": "delta",
+        "path": "catalog.schema.clientes",
+        "mode": "merge",
+        "options": {
+          "on": "T.cliente_id = S.cliente_id AND T.loja = S.loja",
+          "actions": [
+            "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+            "WHEN MATCHED THEN UPDATE SET T.nome = S.nome",
+            "WHEN NOT MATCHED THEN INSERT (cliente_id, loja, nome) VALUES (S.cliente_id, S.loja, S.nome)"
+          ]
         }
       }
     """
@@ -106,25 +119,29 @@ class DeltaWriter(BaseWriter):
             writer.save(path)
 
     def _merge(self, df: DataFrame) -> None:
-        merge_keys: list[str] = self.config.options.get("merge_keys", [])
-        if not merge_keys:
-            raise ValueError(
-                "DeltaWriter mode='merge' requer 'merge_keys' em options. "
-                "Ex: { \"merge_keys\": [\"id\"] }"
-            )
-
+        options = self.config.options
         path = self.config.path
-        target = (
-            f"delta.`{path}`" if not _is_table_name(path) else path
-        )
+        target = f"delta.`{path}`" if not _is_table_name(path) else path
 
         view = "_spark_fw_merge_src"
         df.createOrReplaceTempView(view)
 
-        join_cond = " AND ".join(f"T.{k} = S.{k}" for k in merge_keys)
-        extra = self.config.options.get("merge_condition", "")
-        if extra:
-            join_cond = f"({join_cond}) AND ({extra})"
+        sql = merge_sql(
+            target, view, options, self._default_actions(df, options), "DeltaWriter"
+        )
+        df.sparkSession.sql(sql)
+
+    def _default_actions(self, df: DataFrame, options: dict) -> list[str]:
+        """As cláusulas `UPDATE`/`INSERT` montadas a partir das colunas.
+
+        Não são calculadas quando `actions` foi escrito à mão — nesse caso ler o
+        schema do destino seria trabalho jogado fora, e um destino inexistente
+        deixaria de ser um problema de quem escreveu o SQL.
+        """
+        if options.get("actions") is not None:
+            return []
+
+        merge_keys: list[str] = options.get("merge_keys") or []
 
         # Só as colunas que existem NOS DOIS lados entram no UPDATE e no INSERT.
         # Uma origem de CDC costuma trazer colunas de controle (`op`, `_ts`) que o
@@ -139,21 +156,10 @@ class DeltaWriter(BaseWriter):
         )
         insert_cols = ", ".join(gravaveis)
         insert_vals = ", ".join(f"S.{c}" for c in gravaveis)
-
-        matched_delete, not_matched_by_source = delete_clauses(self.config.options)
-
-        sql = f"""
-            MERGE INTO {target} AS T
-            USING {view} AS S
-            ON {join_cond}
-            {matched_delete}
-            WHEN MATCHED THEN
-                UPDATE SET {update_set}
-            WHEN NOT MATCHED THEN
-                INSERT ({insert_cols}) VALUES ({insert_vals})
-            {not_matched_by_source}
-        """
-        df.sparkSession.sql(sql)
+        return [
+            f"WHEN MATCHED THEN UPDATE SET {update_set}",
+            f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})",
+        ]
 
     def _target_columns(self) -> list[str] | None:
         """As colunas da tabela de destino, ou None quando não dá para saber.

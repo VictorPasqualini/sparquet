@@ -169,6 +169,59 @@ class DeltaTest(unittest.TestCase):
         self.assertEqual(set(por_id), {"2", "3"})
         self.assertEqual(por_id["2"]["nome"], "atualizado")
 
+    def test_merge_escrito_a_mao_roda_as_clausulas_na_ordem_dada(self) -> None:
+        """A forma explicita: `on` e `actions` passam crus para o SQL. O que so
+        aparece aqui e que o comando montado e aceito pelo Delta — o teste de
+        montagem trava o texto, nao o dialeto — e que um UPDATE parcial mexe so
+        nas colunas listadas, deixando o resto da linha como estava."""
+        directory = (harness.WORK / "delta-merge-actions").as_posix()
+
+        harness.run(
+            {
+                "name": "it-delta-actions-base",
+                "input": harness.seed_input(),
+                "output": {"format": "delta", "path": directory, "mode": "overwrite"},
+            }
+        )
+        origem = harness.work_dir("delta-actions-origem") / "cdc.csv"
+        origem.write_text(
+            "id,nome,valor,op\n1,ignorado,9.9,D\n2,renomeado,9.9,U\n9,novo,7.5,I\n",
+            encoding="utf-8",
+        )
+        resultado = harness.run(
+            {
+                "name": "it-delta-actions",
+                "input": {
+                    "format": "csv",
+                    "path": origem.as_posix(),
+                    "options": {"header": "true", "inferSchema": "true"},
+                },
+                "output": {
+                    "format": "delta",
+                    "path": directory,
+                    "mode": "merge",
+                    "options": {
+                        "on": "S.id = T.id",
+                        "actions": [
+                            "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+                            "WHEN MATCHED THEN UPDATE SET T.nome = S.nome",
+                            "WHEN NOT MATCHED THEN INSERT (id, nome, valor) "
+                            "VALUES (S.id, S.nome, S.valor)",
+                        ],
+                    },
+                },
+            }
+        )
+        self.assertTrue(resultado.success, msg=resultado.error)
+
+        por_id = self._ler("delta-actions", directory)
+        # id=1 saiu pelo DELETE, id=9 entrou pelo INSERT, id=3 nao foi tocado.
+        self.assertEqual(set(por_id), {"2", "3", "9"})
+        # O UPDATE listou so `nome`: o valor original de id=2 continua la.
+        self.assertEqual(por_id["2"]["nome"], "renomeado")
+        self.assertEqual(por_id["2"]["valor"], "-0.25")
+        self.assertEqual(por_id["9"]["nome"], "novo")
+
     def test_merge_apaga_o_que_a_origem_nao_trouxe(self) -> None:
         """`delete_not_matched_by_source`: sincroniza o destino com um snapshot
         COMPLETO da origem. Contra uma carga incremental isto apagaria tudo o que

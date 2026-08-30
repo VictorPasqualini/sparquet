@@ -165,7 +165,9 @@ const joinDef: TransformationDef = {
   description: lines(
     'Joins the main DataFrame with a second source read inline. The left side is aliased `l` and the right side `r`, but only *after* the right-side chain has run.',
     '',
-    '**The right side is not a form field.** `with` (the source `{ format, path, options }`) is compiled from the node connected to the second input handle, and `with_transformations` from whatever chain feeds that handle. That chain accepts the full builtin vocabulary — `filter`, `select`, `distinct`, `group_by`, even another `join` — and it runs *before* the join, which is how you narrow a wide table instead of joining it whole.',
+    'Columns present on both sides are renamed on the right with a `_r` suffix, so a self join never produces two columns with the same name.',
+    '',
+    '**The right side is not a form field.** `input` (the source `{ format, path, options }`) is compiled from the node connected to the second input handle, and `with_transformations` from whatever chain feeds that handle. That chain accepts the full builtin vocabulary — `filter`, `select`, `distinct`, `group_by`, even another `join` — and it runs *before* the join, which is how you narrow a wide table instead of joining it whole.',
     '',
     'The canonical right-side chain in production configs is three nodes: push a `filter` down (usually `id IN ({{runtime_var}})`), `select` only the columns you need, then `distinct` so the join cannot fan out rows.',
     '',
@@ -188,10 +190,11 @@ const joinDef: TransformationDef = {
     'second source',
   ],
   gotchas: [
-    'The right side comes from the second input handle, not from a field. Disconnecting it leaves the node without `with`, which fails the run with a KeyError.',
+    'The right side comes from the second input handle, not from a field. Disconnecting it leaves the node without `input`, which fails the run with a ValueError naming the missing key.',
     'A string `on` is only treated as SQL when it contains a space. `l.id=r.id` is read as a column name and fails at analysis time.',
-    'The list form of `on` deduplicates the join columns; the expression form keeps both sides, so downstream references to the bare name become ambiguous.',
-    'The `l` / `r` aliases are applied only after the right-side chain has run, so bare column names are the only option inside that chain. In `on` — and in the nodes right after the join, until a projection drops the qualifiers — `l.` / `r.` resolve and are how you disambiguate a duplicated name.',
+    'The list form of `on` merges the join columns into one; the expression form does not, so the key itself is one of the names the join has to disambiguate.',
+    'A name present on both sides is renamed on the RIGHT with a `_r` suffix (`nome` and `nome_r`; `_r2`, `_r3` if taken), so the result never carries two columns with the same name. The projection is built after the join, so an `on` written as SQL can still say `r.nome`. Rename inside the right-side chain when `_r` is not the name you want.',
+    'The `l` / `r` aliases are applied only after the right-side chain has run, so bare column names are the only option inside that chain. They resolve in `on`, but NOT after a join that renamed a duplicate: that join ends in a projection, and downstream nodes see plain `nome` / `nome_r`.',
     '`leftsemi` / `leftanti` add no columns at all. Any downstream node expecting right-side columns after one of them will fail.',
     'The right-side chain runs on a nested engine that only knows the builtin types — transformations registered at runtime through `fw.register_transformation` are unavailable there.',
     'The nested chain shares the runtime-variable store with the outer chain: `{{vars}}` collected outside resolve inside, and a `collect` placed inside writes back to the outer scope.',
@@ -204,7 +207,7 @@ const joinDef: TransformationDef = {
       json: lines(
         '{',
         '  "type": "join",',
-        '  "with": { "format": "delta", "path": "lastros.silver_cessoes_status" },',
+        '  "input": { "format": "delta", "path": "lastros.silver_cessoes_status" },',
         '  "with_transformations": [',
         '    { "type": "filter", "condition": "status IN (1, 10, 11)" },',
         '    { "type": "select", "columns": ["id_cessao"] },',
@@ -220,7 +223,7 @@ const joinDef: TransformationDef = {
       json: lines(
         '{',
         '  "type": "join",',
-        '  "with": { "format": "delta", "path": "lastros.bronze_remessa" },',
+        '  "input": { "format": "delta", "path": "lastros.bronze_remessa" },',
         '  "with_transformations": [',
         '    { "type": "filter", "condition": "id_cessao IN ({{cessoes_pendentes}})" },',
         '    { "type": "select", "columns": ["id_cessao", "numero_contrato", "tipo_contrato"] }',
@@ -236,7 +239,7 @@ const joinDef: TransformationDef = {
         '{',
         '  "type": "join",',
         '  "skip_if_false": "{processar_somente_cessoes_pendentes}",',
-        '  "with": { "format": "delta", "path": "lastros.silver_registro_contratos" },',
+        '  "input": { "format": "delta", "path": "lastros.silver_registro_contratos" },',
         '  "with_transformations": [',
         '    { "type": "select", "columns": ["id_cessao"] },',
         '    { "type": "distinct" }',
@@ -286,7 +289,7 @@ const unionDef: TransformationDef = {
     'The default (false) matches columns by POSITION, not by name. A schema in a different order produces silently wrong data with no error.',
     'The main DataFrame carries the auto-added `ingestion_ts` column while the unioned source does not — a positional union between them is misaligned by one column.',
     'There is no `with_transformations` on union: the second source cannot be reshaped inline the way a join right side can.',
-    'The second source comes from the second input handle; without it the node fails with a KeyError on `with`.',
+    'The second source comes from the second input handle; without it the node fails with a ValueError naming the missing `input`.',
     'With the option on, missing columns are filled with null rather than rejected — a typo in a column name shows up as an all-null column, not as an error.',
   ],
   examples: [
@@ -295,7 +298,7 @@ const unionDef: TransformationDef = {
       json: lines(
         '{',
         '  "type": "union",',
-        '  "with": { "format": "delta", "path": "lastros.silver_cessao_historico" },',
+        '  "input": { "format": "delta", "path": "lastros.silver_cessao_historico" },',
         '  "allow_missing_columns": true',
         '}',
       ),
@@ -305,7 +308,7 @@ const unionDef: TransformationDef = {
       json: lines(
         '{',
         '  "type": "union",',
-        '  "with": { "format": "parquet", "path": "/data/incremental/pedidos" },',
+        '  "input": { "format": "parquet", "path": "/data/incremental/pedidos" },',
         '  "allow_missing_columns": false',
         '}',
       ),
@@ -694,7 +697,7 @@ const collectDef: TransformationDef = {
       docs: lines(
         'The placeholder regex is `\\{\\{(\\w+)\\}\\}`, so a name containing a dot, a dash or spaces can never be referenced — the placeholder stays literal and no error is raised.',
         '',
-        'Keep this name **disjoint from your `{param}` keys**. The pre-parse template pass matches the inner braces of `{{name}}` too, so a param with the same key rewrites the runtime placeholder before the runtime layer ever sees it.',
+        'A `{param}` of the same name no longer collides: the pre-parse template pass skips `{{name}}` entirely, so the two namespaces are independent. Older framework versions rewrote the runtime placeholder from `params` before the runtime layer saw it.',
       ),
       validate: (value) => {
         if (typeof value !== 'string' || value.trim() === '')
@@ -733,7 +736,7 @@ const collectDef: TransformationDef = {
         '  { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" },',
         '  {',
         '    "type": "join",',
-        '    "with": { "format": "delta", "path": "lastros.bronze_remessa" },',
+        '    "input": { "format": "delta", "path": "lastros.bronze_remessa" },',
         '    "with_transformations": [',
         '      { "type": "filter", "condition": "id_cessao IN ({{cessoes_pendentes}})" },',
         '      { "type": "select", "columns": ["id_cessao", "numero_contrato"] }',
@@ -988,7 +991,7 @@ const includeDef: TransformationDef = {
   ],
   gotchas: [
     'Only the TOP-LEVEL transformations array is scanned. An include inside a join right-side chain, a debug chain or an output chain is never expanded and fails the run with a KeyError on `type`.',
-    'Nested includes are not resolved: an `$include` inside an included file fails the same way.',
+    'Nested includes ARE resolved, and their paths are relative to the file that wrote them, not to the main pipeline — a folder of includes moves without rewriting the paths inside it. A cycle raises a ValueError naming the chain instead of recursing forever.',
     'Studio cannot preview the included content — the expanded nodes never appear on the canvas, and schema tracking, linting and preview all stop at this node.',
     '`{param}` substitution inside the included file only happens through `Sparquet.run` / `run_from_dict`. `Pipeline.from_file` expands the include but leaves placeholders literal.',
     'The path has no existence check; a wrong path surfaces as a FileNotFoundError in the run result.',

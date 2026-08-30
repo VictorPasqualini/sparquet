@@ -48,7 +48,61 @@ Notes on the history below:
   }
   ```
 
+- **The MERGE can be written by hand: `on` and `actions`.** The generated statement covers
+  the ordinary upsert, but not updating only some columns, inserting a different set, or
+  branching on more than one condition. Two `output.options`, shared by Delta and Iceberg:
+  `on` replaces the `ON` predicate built from `merge_keys`/`merge_condition` — same shape as
+  a join `on` written as SQL — and `actions` is the ordered list of `WHEN ...` clauses,
+  emitted as written.
+
+  ```json
+  "options": {
+    "on": "S.id = T.id AND S.loja = T.loja",
+    "actions": [
+      "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+      "WHEN MATCHED THEN UPDATE SET T.status = S.status",
+      "WHEN NOT MATCHED THEN INSERT (id, loja, status) VALUES (S.id, S.loja, S.status)"
+    ]
+  }
+  ```
+
+  The two forms do not mix: with `actions` present, the generated `UPDATE`/`INSERT` and both
+  delete options are dropped — that list is the whole MERGE body. Every clause must start
+  with `WHEN`, and because the first matching clause of a group wins, an unconditional clause
+  may only be the last of its group; a list that would leave a clause unreachable is refused
+  with a message naming it, instead of reaching Spark as an analysis error. The assembly moved
+  to `sparquet/io/merge.py`, shared by both writers.
+
+- **`$include` is expanded recursively.** An included file may now carry `$include`
+  directives of its own, and their paths are relative to **the file that wrote them**, not to
+  the main JSON — a folder of shared transformations can be moved without rewriting the paths
+  inside it. A cycle raises a `ValueError` naming the route it took
+  (`a.json -> b.json -> a.json`) instead of exhausting the stack, and a chain deeper than 20
+  levels is refused.
+
 ### Changed
+
+- **The second source of `join` and `union` is now `input`, not `with`.** It is the same
+  block as the pipeline's own `input` (`format`, `path`, `options`), and it now has the same
+  name. `with` keeps working as the old name on both transformations, so no existing JSON
+  breaks; the Studio compiler reads both and emits `input`.
+
+- **A join no longer leaves two columns with the same name.** Joining sources that share
+  column names — the normal case in a self join — produced a DataFrame with two `nome`
+  columns, and the next transformation to mention `nome` died with `AMBIGUOUS_REFERENCE`
+  three steps later, with nothing wrong in the JSON. Repeated names are now renamed on the
+  **right** side with a `_r` suffix (`nome` and `nome_r`; `_r2`, `_r3` when taken), so the
+  left side — the main chain — keeps the names it had. The projection is built after the
+  join, so an `on` written as SQL can still refer to `r.nome`; because it drops the `l`/`r`
+  aliases, they no longer resolve in the nodes after a join that renamed something. Nothing
+  changes when no name repeats. Renaming inside `with_transformations` is still the way to
+  choose a name other than `_r`.
+
+- **A param named after a runtime variable no longer eats it.** `apply_template` matched the
+  inner `{var}` of a runtime `{{var}}`, so a `params` key with the same name rewrote the
+  reference before the `TransformationEngine` ever saw it — `{{tipo}}` became `{valor}` and
+  the runtime variable silently disappeared. The pattern now excludes the doubled braces, and
+  the two syntaxes are independent.
 
 - **The Delta merge writes only the columns the target already has.** `UPDATE SET` and
   `INSERT` used to list every column of the incoming DataFrame, so a CDC source carrying

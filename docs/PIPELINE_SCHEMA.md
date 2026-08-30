@@ -105,7 +105,7 @@ Qualquer transformação aceita `"skip_if_false"`. Após a substituição de tem
 
 ```jsonc
 // Pula o join inteiro se params["aplicar_join"] == False  (valor vira "")
-{ "type": "join", "skip_if_false": "{aplicar_join}", "with": {...}, "on": "id" }
+{ "type": "join", "skip_if_false": "{aplicar_join}", "input": {...}, "on": "id" }
 
 // Filtro só aplicado se params["registradora"] != ""
 { "type": "filter", "skip_if_false": "{registradora}", "condition": "registradora = '{registradora}'" }
@@ -133,7 +133,7 @@ tabelas grandes carregadas depois — o equivalente declarativo ao `df.collect()
 
 // 2) usa {{cessoes_pendentes}} para filtrar a leitura de tabelas seguintes
 { "type": "join",
-  "with": { "format": "delta", "path": "lastros.bronze_remessa" },
+  "input": { "format": "delta", "path": "lastros.bronze_remessa" },
   "with_transformations": [
     { "type": "filter", "condition": "id_cessao IN ({{cessoes_pendentes}})" },  // pushdown
     { "type": "select", "columns": ["id_cessao", "numero_contrato", "tipo_contrato"] }
@@ -161,6 +161,9 @@ Como funciona:
 Ordem de resolução: `{param}` (template, pré-parse) → parse do JSON → `{{var}}` (runtime,
 durante as transformações).
 
+As duas sintaxes **não colidem**: `{{nome}}` fica intacto mesmo quando `params` tem uma chave
+`nome`. São as chaves duplas que distinguem as duas — o template só substitui `{nome}` sozinha.
+
 ---
 
 ## Reutilização de transformações com `$include`
@@ -184,7 +187,11 @@ O arquivo incluído pode ser um único objeto de transformação ou uma lista. T
 ]
 ```
 
-Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são suportadas.
+Inclusões aninhadas são expandidas: um arquivo incluído pode conter novos `$include`, e o
+caminho deles é relativo ao **arquivo que os escreveu**, não ao pipeline principal — é o que
+permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro. Um ciclo
+(A inclui B que inclui A) levanta `ValueError` nomeando o percurso, e uma cadeia com mais de
+20 níveis é recusada.
 
 ---
 
@@ -277,8 +284,13 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     },
     {
       "type": "join",
-      "with": { "format": "parquet", "path": "/ref/table", "options": {} },
+      "input": { "format": "parquet", "path": "/ref/table", "options": {} },
+      // input: a segunda fonte (o nome antigo `with` continua aceito)
       "on": "join_key",             // coluna, ["key1","key2"] ou SQL expr com l./r.
+      // Nome presente nos dois lados sai renomeado à DIREITA com sufixo `_r`
+      // (`nome` e `nome_r`; `_r2`, `_r3` se já ocupado) — nunca duas colunas de mesmo
+      // nome. A projeção é montada DEPOIS do join, então um `on` em SQL pode citar r.nome.
+      // Como ela desfaz os aliases, l./r. não resolvem nos nós seguintes ao join.
       "how": "inner|left|right|full|cross|leftsemi|leftanti|...",
       "broadcast": true,                // opcional: true/"right" faz broadcast do lado
                                         // direito (dimensão/lookup pequeno) — map-side
@@ -294,7 +306,7 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
     },
     {
       "type": "union",
-      "with": { "format": "parquet", "path": "/data/extra" },
+      "input": { "format": "parquet", "path": "/data/extra" },
       "allow_missing_columns": false
     }
   ],
@@ -407,6 +419,18 @@ Inclusions aninhadas (`$include` dentro de arquivo já incluído) não são supo
                                                 // COMPLETO da origem — numa carga
                                                 // incremental apaga tudo que ela não
                                                 // repetiu
+      // Forma explícita: escreve o MERGE à mão. `on` substitui merge_keys/merge_condition;
+      // `actions` substitui o UPDATE/INSERT gerado E os dois deletes acima.
+      "on": "S.id = T.id AND S.loja = T.loja",
+      "actions": [
+        "WHEN MATCHED AND S.op = 'D' THEN DELETE",
+        "WHEN MATCHED THEN UPDATE SET T.status = S.status",
+        "WHEN NOT MATCHED THEN INSERT (id, loja, status) VALUES (S.id, S.loja, S.status)"
+      ],
+      // Cada item começa com WHEN e sai na ordem dada. Dentro de um grupo (MATCHED,
+      // NOT MATCHED, NOT MATCHED BY SOURCE) a primeira cláusula que casa é a que vale,
+      // então a incondicional só pode ser a última do grupo — o writer recusa a lista
+      // dizendo qual cláusula ficou inalcançável.
       // Kafka:
       "bootstrap_servers": "broker:9092",
       "topic": "meu-topico",
@@ -548,7 +572,7 @@ Quando os destinos precisam de **formas diferentes** (não só subconjuntos de c
 
   { "format": "delta", "path": "schema.parcelas", "mode": "append",
     "transformations": [
-      { "type": "join", "with": { "format": "delta", "path": "schema.silver_parcela" },
+      { "type": "join", "input": { "format": "delta", "path": "schema.silver_parcela" },
         "on": ["id_cessao", "numero_contrato"], "how": "inner" },
       { "type": "with_column", "column": "data_baixa", "expression": "cast(null as date)" }
     ] }
