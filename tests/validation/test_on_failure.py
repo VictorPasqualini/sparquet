@@ -66,6 +66,11 @@ class FakeSpark:
     def createDataFrame(self, rows, schema=None) -> FakeDataFrame:  # noqa: ARG002
         return FakeDataFrame()
 
+    # The report is built from literals over `spark.range(1)`, so no Python worker
+    # is spawned for its handful of rows.
+    def range(self, *_args, **_kwargs) -> FakeDataFrame:
+        return FakeDataFrame()
+
 
 class RecordingWriter:
     """Every write lands in the shared list, which is the whole assertion."""
