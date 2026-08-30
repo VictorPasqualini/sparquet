@@ -109,13 +109,13 @@ Python.** Container = Workflow.
   descreve para a IA — **e de um PR no repo `sparquet-web`** (docs EN/PT/ES em
   `src/content/docs/docs/reference/`).
 - **`sparquet_cola` é repo/pacote separado** (`../sparquet-cola`, PyPI, dependência
-  `sparquet-cola>=0.3.0`). Mudança no motor de DQ se faz **lá** e publica antes de o
+  `sparquet-cola>=0.4.0`). Mudança no motor de DQ se faz **lá** e publica antes de o
   sparquet consumir. Import é `sparquet_cola` (underscore); nome PyPI tem hífen.
 - **`PYSPARK_PYTHON` em master local**: `context.py` faz `os.environ.setdefault` para
   `sys.executable`. Sem isso o worker sobe com outro Python e morre com
   `Python worker exited unexpectedly`. O sintoma engana — etapas puramente JVM
-  (CSV→Parquet) não criam worker, então só quebra na primeira que cria (tipicamente o
-  `validations.report`, montado com `createDataFrame`). **Só em master local.**
+  (CSV→Parquet) não criam worker, então só quebra na primeira que cria (UDF, `sql` com
+  função Python, `createDataFrame` a partir de linhas do driver). **Só em master local.**
 - **CSV em dialeto RFC 4180**: leitura e escrita usam `escape='"'` (aspas dobradas), não
   o `\"` default do Spark. Os dois lados mudam juntos. Para ler arquivos no dialeto
   antigo: `options: {"escape": "\\"}`.

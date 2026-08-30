@@ -22,6 +22,36 @@ Notes on the history below:
 
 ## [Unreleased]
 
+### Changed
+
+- **The aggregable validations are measured in a single Spark pass.** Every rule used to
+  run its own action, and some ran several: `not_null` counted once **per column**,
+  `unique` counted twice, and each percent metric counted the rows again for its
+  denominator. On a local master that is where the validation stage spent its time, and the
+  cost grew with the number of rules rather than with the data. `sparquet-cola` `0.4.0`
+  lets a check declare its measurement as aggregation columns, and the engine merges every
+  check of a run into one `df.agg(...)`. Same numbers, same messages, same order — pinned
+  by a test that compares the block against rule-by-rule execution. Rules that cannot be
+  expressed as an aggregation (`sql`, `schema`) still run on their own, and a third-party
+  check that does not declare aggregations keeps working unchanged. Measured on 2M rows
+  with 5 rules, the validation stage went from 4.53s to 2.39s.
+
+- **`validations.cache` now defaults to `false`.** The default was `true` back when each
+  rule was a separate pass over the DataFrame and caching traded N recomputations of the
+  lineage for one. With the rules now measured in a single pass there is nothing left to
+  amortize, and the cache only pays for materializing the data. Measured on 2M rows with
+  5 rules: 6.39s without cache against 10.08s with it from parquet, and 7.86s against
+  11.76s from CSV. Turn it on when the lineage itself is expensive **and** several actions
+  follow it — `sql` rules, quarantines with different scopes, many outputs.
+
+- **The validation report is built without spawning Python workers.** `createDataFrame`
+  over the handful of driver-side rows parallelized them across `defaultParallelism`, so a
+  5-row report started 16 Python worker processes and paid for them on every action. The
+  rows are now literals over `spark.range(1)`, keeping the plan inside the JVM. On the same
+  run the report stage went from 18.1s to 1.2s, and the whole pipeline from 29.7s to 12.0s.
+
+- **Minimum `sparquet-cola` is now `0.4.0`**, for the single-pass measurement above.
+
 ### Removed
 
 - **BREAKING: the declarative merge options are gone. `mode: merge` now requires `on` and

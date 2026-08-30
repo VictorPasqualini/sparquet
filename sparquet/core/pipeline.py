@@ -208,13 +208,11 @@ class Pipeline:
             )
             log.info("Transformations applied")
 
-            # Cada regra dispara a própria action (not_null faz uma por coluna,
-            # unique faz duas), e sem cache TODAS recomputam a linhagem desde a
-            # fonte — reler o arquivo e reaplicar cada transformação, uma vez por
-            # action. Materializar antes de validar troca N passes por um: medido
-            # em 2M linhas com 4 regras, 13,0s → 5,2s (validações + escrita).
-            # `cached` só é ligado quando há regras; sem elas a escrita é um passe
-            # único e o cache não pagaria a materialização.
+            # Materializa o df antes de validar. Só quando o JSON pede: as regras
+            # agregáveis são medidas numa passada só (ver `ValidationEngine`), então
+            # o cache deixou de trocar N passes por um — ele troca uma releitura por
+            # uma materialização, que na medição saiu mais cara. `cached` continua
+            # atrelado a haver regras: sem elas não há nada a reaproveitar.
             cached = bool(self.config.validations.rules) and self.config.validations.cache
             if cached:
                 df.cache()

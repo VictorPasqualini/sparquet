@@ -43,24 +43,26 @@ class ValidationEngine:
         self, df: DataFrame, config: ValidationConfig
     ) -> List[ValidationResult]:
         # Marcadores de etapa por regra (scope="validation"), para o Studio pintar o
-        # status de cada nó de validação ao vivo. Ao contrário das transformações,
-        # que são lazy, cada regra dispara uma action de verdade — então o "running"
-        # aqui representa trabalho real, e o tempo entre started/finished é o custo
-        # daquela regra.
+        # status de cada nó de validação ao vivo. As regras que sabem se exprimir
+        # como agregação são medidas JUNTAS, numa passada só sobre o df (ver
+        # `Cola.run`) — antes era uma action por regra, e `not_null` fazia uma por
+        # coluna. Por isso os marcadores abrem todos antes da passada e fecham todos
+        # depois: o custo é do bloco, não de cada regra, e cronometrar uma a uma
+        # daria um número inventado. O que não é agregável (`sql`, `schema`) ainda
+        # roda a própria action, dentro da mesma chamada.
         total = len(config.rules)
-        results: List[ValidationResult] = []
         for index, rule in enumerate(config.rules):
             logger.info(
                 "Validation started",
                 rule=rule.type, index=index, total=total, step=True, scope="validation",
             )
-            result = self._cola.run(df, [rule])[0]
+        results: List[ValidationResult] = list(self._cola.run(df, config.rules))
+        for index, (rule, result) in enumerate(zip(config.rules, results)):
             logger.info(
                 "Validation finished",
                 rule=rule.type, index=index, total=total, step=True, scope="validation",
                 passed=result.passed, severity=result.severity,
             )
-            results.append(result)
 
         failures: List[ValidationResult] = []
 
