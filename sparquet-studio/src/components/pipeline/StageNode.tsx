@@ -2,10 +2,13 @@
  * One box of a pipeline: a whole pipeline FILE running as one stage.
  *
  * It mirrors the pipeline canvas chrome (`canvas/NodeShell.tsx`) — accent stripe,
- * icon chip, ordinal, hover toolbar, run-status badge — without reusing it: that
- * shell is bound to the pipeline editor store (mute, duplicate, node issues),
- * and a stage has none of those. The pieces that MUST look identical, the run
- * status icon and colour, come from the shared `stepLook`.
+ * icon chip, ordinal, hover toolbar, run status — without reusing it: that shell is
+ * bound to the pipeline editor store (mute, duplicate, node issues), and a stage has
+ * none of those. The run status is drawn exactly like a step's, off the shared
+ * `stepLook`: the bar across the top edge, the ring and the border, the dimming while
+ * the run has not arrived, and the band at the bottom carrying the icon, the word and
+ * the time. A stage and a step are the same thing at two zoom levels, so reading one
+ * has to teach you the other.
  */
 
 import { Handle, NodeToolbar, Position, type Node, type NodeProps } from '@xyflow/react'
@@ -49,7 +52,10 @@ export type StageRfNode = Node<StageNodeData, 'stage'>
  */
 export const STAGE_NODE_WIDTH = 320
 
-/** A stage's wording differs from a transformation's; the icons and colours do not. */
+/**
+ * A stage's wording differs from a transformation's; the icons, the colours and the one
+ * word printed on the status band (`look.short`) do not.
+ */
 const STAGE_STATUS_LABEL: Record<'running' | PipelineStageOutcome, string> = {
   running: 'Running now',
   success: 'Finished successfully',
@@ -80,6 +86,11 @@ export const StageNode = memo(function StageNodeRenderer({
   const statusLabel =
     status && status !== 'pending'
       ? STAGE_STATUS_LABEL[status as 'running' | PipelineStageOutcome]
+      : null
+  // No time while it runs: only the closing marker fixes the end of the stage.
+  const durationLabel =
+    status !== 'running' && result?.durationMs !== undefined
+      ? formatDuration(result.durationMs)
       : null
 
   /**
@@ -131,10 +142,14 @@ export const StageNode = memo(function StageNodeRenderer({
         fromFile && !selected && 'border-dashed',
         !selected && errorCount > 0 && 'ring-2 ring-state-danger/45',
         !selected && errorCount === 0 && warningCount > 0 && 'ring-2 ring-state-warning/40',
-        // Selection and issues win the ring: a broken stage stays flagged mid-run.
-        // The status badge always shows, so no run state is ever lost.
-        !selected && flagged === 0 && look && look.ring,
+        // Selection and issues win the ring AND the border: a broken stage stays
+        // flagged mid-run. The status bar and the band below ignore this rule and always
+        // show, so no run state is ever lost on a stage that also has issues.
+        !broken && !selected && flagged === 0 && look && cn(look.ring, look.border),
         isConnectSource && 'ring-2 ring-brand-500',
+        // Not reached yet: dimmed rather than badged, exactly as a step is, so a run in
+        // flight reads as a bright wavefront crossing a quiet pipeline.
+        status === 'pending' && 'opacity-60',
       )}
       style={{ width: STAGE_NODE_WIDTH }}
     >
@@ -187,6 +202,23 @@ export const StageNode = memo(function StageNodeRenderer({
         aria-hidden
       />
 
+      {/* Status bar along the top edge — the one channel still legible when the whole
+          pipeline is zoomed out to fit and no label can be read. It starts after the
+          accent stripe so the two never fight over the corner. */}
+      {look && (
+        <span
+          className={cn(
+            'pointer-events-none absolute left-1 right-0 top-0 overflow-hidden rounded-tr-xl',
+            look.bar,
+          )}
+          aria-hidden
+        >
+          {look.live && (
+            <span className="block h-full w-1/4 animate-status-sweep bg-state-info motion-reduce:hidden" />
+          )}
+        </span>
+      )}
+
       <div className="flex items-start gap-2.5 py-2.5 pl-4 pr-3">
         <span
           className={cn(
@@ -224,20 +256,6 @@ export const StageNode = memo(function StageNodeRenderer({
             </p>
 
             <span className="flex shrink-0 items-center gap-1 pt-1">
-              {look && StatusIcon && statusLabel && (
-                <span
-                  role="img"
-                  aria-label={statusLabel}
-                  title={statusLabel}
-                  className={cn(
-                    'inline-flex h-4 w-4 items-center justify-center rounded-full',
-                    look.chip,
-                    look.spin,
-                  )}
-                >
-                  <StatusIcon className="h-3 w-3" aria-hidden />
-                </span>
-              )}
               {flagged > 0 && (
                 // The messages live in the label, not in a tooltip: this badge is
                 // not interactive, so a hover-only tooltip would hide them from
@@ -336,9 +354,11 @@ export const StageNode = memo(function StageNodeRenderer({
 
         {result && (
           <div className="space-y-0.5 border-t border-line/70 pt-1.5">
+            {/* No duration here: the status band below carries it, as it does on a
+                step, and printing it twice on one box invites reading the two as
+                different measurements. */}
             <p className="text-2xs tabular-nums text-content-muted">
               {formatCount(result.rowsRead)} read · {formatCount(result.rowsWritten)} written
-              {result.durationMs !== undefined && ` · ${formatDuration(result.durationMs)}`}
             </p>
             {result.error && (
               // Two lines, never more: a Spark stack trace would grow the box past
@@ -357,6 +377,31 @@ export const StageNode = memo(function StageNodeRenderer({
           </div>
         )}
       </div>
+
+      {/* The status in words, with its icon and the time it took — the same band a
+          step carries. role="img" plus an aria-label is what makes it announce as one
+          thing; the pieces inside are decorative once the label carries them. */}
+      {look && StatusIcon && statusLabel && (
+        <div
+          role="img"
+          aria-label={durationLabel ? `${statusLabel} · ${durationLabel}` : statusLabel}
+          title={
+            durationLabel
+              ? `${statusLabel} · ${durationLabel} of wall clock between this stage's start and end`
+              : statusLabel
+          }
+          className={cn(
+            'flex items-center gap-1.5 rounded-b-[11px] border-t px-3 py-1 text-2xs font-semibold',
+            look.footer,
+          )}
+        >
+          <StatusIcon className={cn('h-3 w-3 shrink-0', look.spin)} aria-hidden />
+          <span className="uppercase tracking-wide">{look.short}</span>
+          {durationLabel && (
+            <span className="ml-auto font-medium tabular-nums opacity-80">{durationLabel}</span>
+          )}
+        </div>
+      )}
 
       <Handle type="target" position={Position.Left} />
       <Handle type="source" position={Position.Right} />
