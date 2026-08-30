@@ -208,13 +208,11 @@ class Pipeline:
             )
             log.info("Transformations applied")
 
-            # Cada regra dispara a própria action (not_null faz uma por coluna,
-            # unique faz duas), e sem cache TODAS recomputam a linhagem desde a
-            # fonte — reler o arquivo e reaplicar cada transformação, uma vez por
-            # action. Materializar antes de validar troca N passes por um: medido
-            # em 2M linhas com 4 regras, 13,0s → 5,2s (validações + escrita).
-            # `cached` só é ligado quando há regras; sem elas a escrita é um passe
-            # único e o cache não pagaria a materialização.
+            # Materializa o df antes de validar. Só quando o JSON pede: as regras
+            # agregáveis são medidas numa passada só (ver `ValidationEngine`), então
+            # o cache deixou de trocar N passes por um — ele troca uma releitura por
+            # uma materialização, que na medição saiu mais cara. `cached` continua
+            # atrelado a haver regras: sem elas não há nada a reaproveitar.
             cached = bool(self.config.validations.rules) and self.config.validations.cache
             if cached:
                 df.cache()
@@ -333,7 +331,7 @@ class Pipeline:
         # paralelismo default o Spark abre um part file por partição, quase todos com
         # apenas o cabeçalho, mais `_SUCCESS` e `.crc`. Um arquivo é o que se lê.
         report_df = (
-            spark.createDataFrame(rows, schema)
+            _rows_df(spark, rows, schema)
             .withColumn("validated_at", F.current_timestamp())
             .coalesce(1)
         )
@@ -535,3 +533,31 @@ class Pipeline:
                 f"Colunas disponiveis: {df.columns}"
             )
         return df.select(*output.columns)
+
+
+def _rows_df(spark: SparkSession, rows: List[tuple], schema) -> DataFrame:
+    """DataFrame das linhas montadas no driver, **sem abrir worker Python**.
+
+    `spark.createDataFrame(lista)` paraleliza a lista em `defaultParallelism`
+    partições e cada tarefa desserializa a sua fatia num worker Python — 16
+    processos para as poucas dezenas de linhas do relatório de validação, pagos
+    de novo a cada action. Em master local no Windows isso custou ~20s por
+    action (medido: 21,6s só para contar 5 linhas, e outro tanto para gravá-las).
+    Montadas como literais, as linhas viram um `explode` de um array de structs:
+    o plano inteiro fica na JVM, nenhum worker sobe, e o mesmo relatório sai em
+    menos de 1s.
+
+    É também o que tira do caminho o `Python worker exited unexpectedly` que
+    aparecia aqui quando o worker subia com outro interpretador (ver
+    `core/context.py`): esta escrita deixa de criar worker.
+    """
+    if not rows:
+        return spark.createDataFrame([], schema)
+    linhas = F.array(*[
+        F.struct(*[
+            F.lit(valor).cast(campo.dataType).alias(campo.name)
+            for valor, campo in zip(row, schema.fields)
+        ])
+        for row in rows
+    ])
+    return spark.range(1).select(F.explode(linhas).alias("_r")).select("_r.*")

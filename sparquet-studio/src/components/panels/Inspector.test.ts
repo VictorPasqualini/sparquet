@@ -59,9 +59,9 @@ describe('retainOptions', () => {
 
 describe('resolveIssueField', () => {
   it('maps an option path onto the option field anchor', () => {
-    expect(resolveIssueField('n1', sink(), 'options.merge_keys')).toEqual({
+    expect(resolveIssueField('n1', sink(), 'options.actions')).toEqual({
       nodeId: 'n1',
-      key: 'merge_keys',
+      key: 'actions',
     })
   })
 
@@ -74,7 +74,7 @@ describe('resolveIssueField', () => {
   })
 
   it('returns null for an option the current form hides', () => {
-    expect(resolveIssueField('n1', sink({ mode: 'append' }), 'options.merge_keys')).toBeNull()
+    expect(resolveIssueField('n1', sink({ mode: 'append' }), 'options.actions')).toBeNull()
   })
 
   it('resolves the io controls rendered outside the field renderer', () => {
@@ -123,9 +123,9 @@ describe('resolveIssueField', () => {
   })
 
   it('accepts an option reported without its scope', () => {
-    expect(resolveIssueField('n1', sink(), 'merge_keys')).toEqual({
+    expect(resolveIssueField('n1', sink(), 'actions')).toEqual({
       nodeId: 'n1',
-      key: 'merge_keys',
+      key: 'actions',
     })
   })
 

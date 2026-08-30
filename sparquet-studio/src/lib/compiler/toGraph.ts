@@ -254,7 +254,13 @@ function importTransformation(
   ctx.nodes.push(node)
 
   if (hasSideInput) {
-    // `with` was this key's old name; JSON written before the rename still opens.
+    // `with` was this key's old name. The framework refuses it, so a job still carrying
+    // it is imported under the current name and the rename is reported: opening the file
+    // is how the author finds out, and saving it writes `input`.
+    if (entry.input === undefined && entry.with !== undefined)
+      ctx.issues.warning(
+        `${label} still uses \`with\` for its second source; it was renamed to \`input\` and the framework no longer reads \`with\`.`,
+      )
     const sideData = readSourceData(
       entry.input ?? entry.with,
       ctx.issues,

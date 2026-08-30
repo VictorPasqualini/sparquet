@@ -40,26 +40,19 @@ class DeltaWriter(BaseWriter):
     Modos suportados via 'mode' no JSON:
       overwrite – substitui toda a tabela / partição
       append    – adiciona linhas
-      merge     – MERGE INTO (upsert). Requer 'merge_keys' em 'options'.
+      merge     – MERGE INTO (upsert). Requer 'on' e 'actions' em 'options'.
 
-    Opções relevantes em 'options':
-      merge_keys       – lista de colunas que identificam o registro (para merge)
-      merge_condition  – condição SQL extra para o MERGE usando T.campo / S.campo
-                         onde T = target (tabela destino) e S = source (DataFrame)
-      delete_when      – condição SQL que marca a linha como excluída na origem;
-                         vira WHEN MATCHED AND <cond> THEN DELETE, avaliada ANTES
-                         do UPDATE. É o CDC de exclusão: a origem traz a linha com
-                         uma marca (op = 'D', deleted = true) em vez de omiti-la.
-      delete_not_matched_by_source
-                       – true, ou uma condição SQL sobre T. Apaga do destino o que
-                         não veio na origem: WHEN NOT MATCHED BY SOURCE THEN DELETE.
-                         Só faz sentido quando a origem é um snapshot COMPLETO —
-                         com uma carga incremental isto apaga o histórico.
+    Opções do merge em 'options', as duas obrigatórias:
       on               – a condição inteira do MERGE, escrita à mão (como o 'on'
-                         do join). Substitui merge_keys/merge_condition.
+                         do join), sobre T = target (tabela destino) e
+                         S = source (o DataFrame que está sendo gravado).
       actions          – lista de cláusulas "WHEN ..." escritas à mão, emitidas
-                         na ordem dada. Substitui o UPDATE/INSERT default e as
-                         duas opções de delete. Ver `sparquet/io/merge.py`.
+                         na ordem dada — e em MERGE INTO a primeira cláusula que
+                         casa é a que vale. Ver `sparquet/io/merge.py`.
+
+    `UPDATE SET *` / `INSERT *` funcionam aqui, mas só quando origem e destino
+    têm as mesmas colunas: uma origem de CDC que traz `op` falha ao resolver a
+    coluna extra no destino, e aí as colunas entram listadas à mão.
 
     Exemplos de JSON:
       { "format": "delta", "path": "catalog.schema.clientes", "mode": "overwrite" }
@@ -67,15 +60,12 @@ class DeltaWriter(BaseWriter):
         "format": "delta",
         "path": "catalog.schema.pedidos",
         "mode": "merge",
-        "options": { "merge_keys": ["pedido_id"] }
-      }
-      {
-        "format": "delta",
-        "path": "catalog.schema.clientes",
-        "mode": "merge",
         "options": {
-          "merge_keys": ["cliente_id"],
-          "delete_when": "S.op = 'D'"
+          "on": "T.pedido_id = S.pedido_id",
+          "actions": [
+            "WHEN MATCHED THEN UPDATE SET *",
+            "WHEN NOT MATCHED THEN INSERT *"
+          ]
         }
       }
       {
@@ -126,52 +116,4 @@ class DeltaWriter(BaseWriter):
         view = "_spark_fw_merge_src"
         df.createOrReplaceTempView(view)
 
-        sql = merge_sql(
-            target, view, options, self._default_actions(df, options), "DeltaWriter"
-        )
-        df.sparkSession.sql(sql)
-
-    def _default_actions(self, df: DataFrame, options: dict) -> list[str]:
-        """As cláusulas `UPDATE`/`INSERT` montadas a partir das colunas.
-
-        Não são calculadas quando `actions` foi escrito à mão — nesse caso ler o
-        schema do destino seria trabalho jogado fora, e um destino inexistente
-        deixaria de ser um problema de quem escreveu o SQL.
-        """
-        if options.get("actions") is not None:
-            return []
-
-        merge_keys: list[str] = options.get("merge_keys") or []
-
-        # Só as colunas que existem NOS DOIS lados entram no UPDATE e no INSERT.
-        # Uma origem de CDC costuma trazer colunas de controle (`op`, `_ts`) que o
-        # destino não tem: elas decidem o que fazer com a linha (é o que
-        # `delete_when` lê) e não são dado a gravar. Sem este filtro o MERGE
-        # falhava ao resolver `T.op`, com um erro que não diz isso.
-        alvo = self._target_columns()
-        gravaveis = [c for c in df.columns if alvo is None or c in alvo]
-
-        update_set = ", ".join(
-            f"T.{c} = S.{c}" for c in gravaveis if c not in merge_keys
-        )
-        insert_cols = ", ".join(gravaveis)
-        insert_vals = ", ".join(f"S.{c}" for c in gravaveis)
-        return [
-            f"WHEN MATCHED THEN UPDATE SET {update_set}",
-            f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})",
-        ]
-
-    def _target_columns(self) -> list[str] | None:
-        """As colunas da tabela de destino, ou None quando não dá para saber.
-
-        `None` faz o merge usar todas as colunas da origem, que é o
-        comportamento de sempre — nunca menos do que antes por causa de uma
-        leitura de schema que não deu certo.
-        """
-        path = self.config.path
-        try:
-            if _is_table_name(path):
-                return self.spark.table(path).columns
-            return self.spark.read.format("delta").load(path).columns
-        except Exception:
-            return None
+        df.sparkSession.sql(merge_sql(target, view, options, "DeltaWriter"))

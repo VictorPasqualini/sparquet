@@ -20,7 +20,83 @@ Notes on the history below:
   version numbers. Studio changes appear here only when they touch the framework or
   the JSON contract.
 
-## [Unreleased]
+## [0.10.0] — 2026-08-30
+
+### Changed
+
+- **The aggregable validations are measured in a single Spark pass.** Every rule used to
+  run its own action, and some ran several: `not_null` counted once **per column**,
+  `unique` counted twice, and each percent metric counted the rows again for its
+  denominator. On a local master that is where the validation stage spent its time, and the
+  cost grew with the number of rules rather than with the data. `sparquet-cola` `0.4.0`
+  lets a check declare its measurement as aggregation columns, and the engine merges every
+  check of a run into one `df.agg(...)`. Same numbers, same messages, same order — pinned
+  by a test that compares the block against rule-by-rule execution. Rules that cannot be
+  expressed as an aggregation (`sql`, `schema`) still run on their own, and a third-party
+  check that does not declare aggregations keeps working unchanged. Measured on 2M rows
+  with 5 rules, the validation stage went from 4.53s to 2.39s.
+
+- **`validations.cache` now defaults to `false`.** The default was `true` back when each
+  rule was a separate pass over the DataFrame and caching traded N recomputations of the
+  lineage for one. With the rules now measured in a single pass there is nothing left to
+  amortize, and the cache only pays for materializing the data. Measured on 2M rows with
+  5 rules: 6.39s without cache against 10.08s with it from parquet, and 7.86s against
+  11.76s from CSV. Turn it on when the lineage itself is expensive **and** several actions
+  follow it — `sql` rules, quarantines with different scopes, many outputs.
+
+- **The validation report is built without spawning Python workers.** `createDataFrame`
+  over the handful of driver-side rows parallelized them across `defaultParallelism`, so a
+  5-row report started 16 Python worker processes and paid for them on every action. The
+  rows are now literals over `spark.range(1)`, keeping the plan inside the JVM. On the same
+  run the report stage went from 18.1s to 1.2s, and the whole pipeline from 29.7s to 12.0s.
+
+- **Minimum `sparquet-cola` is now `0.4.0`**, for the single-pass measurement above.
+
+### Removed
+
+- **BREAKING: the declarative merge options are gone. `mode: merge` now requires `on` and
+  `actions`.** Both forms shipped in `0.9.0`, the hand-written one on top of the generated
+  one, and a pipeline could be written either way. Keeping both meant two code paths for one
+  statement and, worse, two mental models of what a merge does — the generated form hid the
+  clause order that decides whether a CDC delete works at all. The generated form was
+  removed, so `on` and `actions` are the only way to write a merge, and both are required:
+  neither has a default and a missing one raises a `ValueError` naming it before any Spark
+  call. Every removed key is refused **by name**, with the clause that replaces it, so a
+  pipeline written against the old form fails on config instead of running a merge that no
+  longer means what it says:
+
+  | Removed option | What replaces it |
+  |---|---|
+  | `merge_keys` | the whole predicate in `on`, e.g. `"T.id = S.id"` |
+  | `merge_condition` | folded into `on`, which is the entire `ON` condition |
+  | `delete_when` | a clause: `"WHEN MATCHED AND <condition> THEN DELETE"`, before the `UPDATE` |
+  | `delete_not_matched_by_source` | a clause: `"WHEN NOT MATCHED BY SOURCE THEN DELETE"` |
+
+  The plain upsert that used to be generated from `merge_keys` is written as:
+
+  ```json
+  "options": {
+    "on": "T.id = S.id",
+    "actions": [
+      "WHEN MATCHED THEN UPDATE SET *",
+      "WHEN NOT MATCHED THEN INSERT *"
+    ]
+  }
+  ```
+
+  `UPDATE SET *` / `INSERT *` are always fine on Iceberg, which tolerates an extra source
+  column. On Delta they need both sides to carry the same columns: a CDC source with an `op`
+  column the target lacks fails to resolve, and the clause has to list the target columns —
+  which is what the framework used to do for you, and is now visible in the JSON.
+
+  The Iceberg writer also validates the two options **before** its first-load shortcut (an
+  empty target is written with `append` + `saveAsTable`, no MERGE at all), so a wrong merge
+  config can no longer pass on the first run and fail on the second.
+
+- **BREAKING: `with` is no longer read as the second source of `join`/`union`.** `0.9.0`
+  renamed it to `input` and kept `with` working; it now raises a `ValueError` telling you to
+  rename the key. The two names for one block were only a migration aid, and no project is
+  running on the old one.
 
 ## [0.9.0] — 2026-08-30
 
@@ -559,7 +635,8 @@ Published as `spark-framework`.
   validation engines, the extension registries (`register_*`), `PipelineResult`, the
   structured JSON logger and the CLI.
 
-[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.6.0...v0.7.0

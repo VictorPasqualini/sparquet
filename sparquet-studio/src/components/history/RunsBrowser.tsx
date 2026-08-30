@@ -304,15 +304,20 @@ export function RunsBrowser({
 
       {shown.length > 0 && (
         <div className="scroll-area min-h-0 flex-1">
-          <table className="w-full border-collapse text-2xs">
+          {/* table-fixed, and every column but the id has a width: with the default
+              auto layout a long run id — and the error message under it — set the
+              column's minimum, which pushed "Launched" and the details button off
+              the right edge. Fixed, the id column takes what is left and truncates,
+              so the whole row is always on screen. */}
+          <table className="w-full table-fixed border-collapse text-2xs">
             <thead className="sticky top-0 z-10 bg-surface">
               <tr className="border-b border-line text-left text-content-subtle">
-                <Th className="w-40">Status</Th>
+                <Th className="w-36">Status</Th>
                 <Th>Run id</Th>
-                <Th className="w-44">Started</Th>
-                <Th className="w-24">Duration</Th>
-                <Th className="w-36">Run as</Th>
-                <Th className="w-28">Launched</Th>
+                <Th className="w-28">Started</Th>
+                <Th className="w-20">Duration</Th>
+                <Th className="w-28">Run as</Th>
+                <Th className="w-24">Launched</Th>
                 {canView && <Th className="w-10" />}
               </tr>
             </thead>
@@ -404,30 +409,45 @@ function RunRow({
       <td className="px-4 py-2">
         <span className="flex items-center gap-1.5">
           <StatusIcon status={run.status} className="h-3.5 w-3.5" />
-          <Badge tone={statusTone(run.status)}>{run.status}</Badge>
-          {run.kind === 'pipeline' && <Badge tone="neutral">pipeline</Badge>}
+          <Badge tone={statusTone(run.status)} className="shrink-0">
+            {run.status}
+          </Badge>
+          {run.kind === 'pipeline' && (
+            <Badge tone="neutral" className="shrink-0">
+              pipeline
+            </Badge>
+          )}
         </span>
       </td>
-      <td className="min-w-0 px-4 py-2">
-        {/* The drill-down: the id IS the link, because it is what a person quotes. */}
-        <button
-          type="button"
-          onClick={onOpen}
-          title={`${openLabel} — ${run.id}`}
-          className="max-w-full truncate font-mono text-brand-600 hover:underline dark:text-brand-400"
-        >
-          {run.id}
-        </button>
-        {onCanvas && <Badge tone="brand" className="ml-2">on canvas</Badge>}
-        {run.pinned && (
-          <span
-            className="ml-1.5 inline-flex align-text-top text-content-subtle"
-            title="Kept forever — retention will not expire this execution"
+      <td className="px-4 py-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {/* The drill-down: the id IS the link, because it is what a person quotes. */}
+          <button
+            type="button"
+            onClick={onOpen}
+            title={`${openLabel} — ${run.id}`}
+            className="min-w-0 truncate font-mono text-brand-600 hover:underline dark:text-brand-400"
           >
-            <Pin className="h-3 w-3" aria-label="Kept forever" />
-          </span>
-        )}
+            {run.id}
+          </button>
+          {onCanvas && (
+            <Badge tone="brand" className="shrink-0">
+              on canvas
+            </Badge>
+          )}
+          {run.pinned && (
+            <span
+              className="shrink-0 text-content-subtle"
+              title="Kept forever — retention will not expire this execution"
+            >
+              <Pin className="h-3 w-3" aria-label="Kept forever" />
+            </span>
+          )}
+        </div>
         {run.error && (
+          // One line, truncated: the message is a Spark stack trace as often as not,
+          // and a row that grows with it hides every other run. The whole text is a
+          // hover away, and the details dialog prints it in full.
           <p
             className={cn(
               'mt-0.5 truncate',
@@ -439,12 +459,17 @@ function RunRow({
           </p>
         )}
       </td>
-      <td className="px-4 py-2 text-content-muted" title={formatTimestamp(run.startedAt)}>
+      <td
+        className="truncate px-4 py-2 text-content-muted"
+        title={formatTimestamp(run.startedAt)}
+      >
         {relativeStarted(run.startedAt)}
       </td>
       <td className="px-4 py-2 text-content-muted">{formatDuration(run.durationMs ?? undefined)}</td>
-      <td className="px-4 py-2 text-content-muted">{run.runAs ?? '—'}</td>
-      <td className="px-4 py-2 text-content-muted">
+      <td className="truncate px-4 py-2 text-content-muted" title={run.runAs ?? undefined}>
+        {run.runAs ?? '—'}
+      </td>
+      <td className="truncate px-4 py-2 text-content-muted">
         {run.launched ? (LAUNCH_LABELS[run.launched] ?? run.launched) : '—'}
       </td>
       {showDetailsAction && (

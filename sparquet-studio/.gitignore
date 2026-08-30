@@ -15,6 +15,10 @@ server/__pycache__
 server/.venv
 *.pyc
 
+# The runner token is a password: it grants arbitrary Spark execution.
+.runner.token
+.runner.log
+
 .DS_Store
 .idea
 *.log

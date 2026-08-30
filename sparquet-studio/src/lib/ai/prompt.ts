@@ -20,9 +20,9 @@ const join = (values: string[]): string => (values.length ? values.join(', ') : 
 function transformationLine(def: TransformationDef): string {
   const required = keyList(def.fields, true)
   const optional = keyList(def.fields, false)
-  // `with` never appears in the catalog fields: on the canvas the right-hand
+  // `input` never appears in the catalog fields: on the canvas the right-hand
   // source is a second incoming edge, but in JSON it is a required key.
-  if (def.secondaryInput) required.unshift('with')
+  if (def.secondaryInput) required.unshift('input')
 
   const flags: string[] = []
   if (def.supportsSubPipeline) flags.push('accepts "with_transformations"')
@@ -91,7 +91,7 @@ const HARD_RULES = [
   '"with_column" uses either column + expression, or the "columns" map (name → expression, applied in key order); whenever the "columns" key is present it wins and the single-column keys are ignored, so never emit both.',
   '"struct" builds a nested column: string values are SQL expressions, object values are nested structs, and dotted keys such as "data.nc.issuerName" auto-nest.',
   'kafka is write-only — never use it as an input. It needs the brokers as either the bootstrap_servers option or the Spark-native kafka.bootstrap.servers option, plus a topic (the path doubles as the topic).',
-  'mode "merge" only exists for delta and iceberg, and requires options.merge_keys; options.merge_condition is extra SQL using the T. (target) and S. (source) aliases.',
+  'mode "merge" only exists for delta and iceberg, and requires BOTH options.on (the whole ON predicate over the T. target and S. source aliases) and options.actions (the list of WHEN clauses, emitted in the order given). The plain upsert is ["WHEN MATCHED THEN UPDATE SET *", "WHEN NOT MATCHED THEN INSERT *"]; a CDC delete is "WHEN MATCHED AND S.op = \'D\' THEN DELETE" written BEFORE the update. merge_keys, merge_condition, delete_when and delete_not_matched_by_source no longer exist.',
   '"skip_if_false" is a TOP-LEVEL key of any transformation, never nested inside its parameters. After substitution, an empty string skips the step and a boolean expression skips it when false.',
   '{param} is substituted in the raw JSON before parsing (values come from the job parameters); {{runtime}} is resolved during execution from a value captured by a "collect" step. Never mix the two syntaxes.',
   'Use "checkpoint" before "collect" so the collected values do not recompute the whole lineage, and before fanning out to several outputs.',

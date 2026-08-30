@@ -1093,7 +1093,7 @@ describe('pipelineToGraph', () => {
       transformations: [
         {
           type: 'union',
-          with: { format: 'csv', path: '/other' },  // the old key, still read on import
+          input: { format: 'csv', path: '/other' },
           with_transformations: [{ type: 'select', columns: ['id'] }],
         },
       ],

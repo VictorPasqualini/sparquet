@@ -585,8 +585,10 @@ export const LESSONS: Lesson[] = [
       {
         heading: 'Merge writes',
         body: [
-          'Upserts exist for `delta` and `iceberg` only. Both require `options.merge_keys`, and both accept an optional `merge_condition` ANDed into the ON clause using `T.` for the target table and `S.` for the source DataFrame.',
-          'The merge is a blind upsert: update on match, insert otherwise. There is **no delete branch and no de-duplication of the source** — duplicate merge keys in your DataFrame raise a runtime error, so guard them with a `unique` validation or a `drop_duplicates`.',
+          'Upserts exist for `delta` and `iceberg` only, and both require the same two options: `on`, the whole match predicate over `T.` (target table) and `S.` (source DataFrame), and `actions`, the list of `WHEN ...` clauses. Nothing is generated for you — the plain upsert is `WHEN MATCHED THEN UPDATE SET *` plus `WHEN NOT MATCHED THEN INSERT *`.',
+          'The clauses run in the order given, and the first one that matches wins. A delete on a CDC flag therefore goes **before** the update: `WHEN MATCHED AND S.op = \'D\' THEN DELETE`. To delete what the source no longer carries, add `WHEN NOT MATCHED BY SOURCE THEN DELETE` — correct only when the input is a complete snapshot.',
+          'There is **no de-duplication of the source** — two source rows matching one target row raise a runtime error, so guard them with a `unique` validation or a `drop_duplicates`.',
+          'On Delta, `UPDATE SET *` / `INSERT *` need source and target to carry the same columns: a CDC source with an extra `op` column fails to resolve it, and the clause has to list the target columns instead. Iceberg tolerates the extra column.',
           '`partition_by` is ignored on the merge path. And note the case sensitivity: Delta lower-cases the mode, Iceberg compares `merge` exactly — always emit lowercase.',
           'For Delta, `path` is a table name when it contains a dot and a physical path when it starts with a known scheme (`/`, `s3://`, `gs://`, `abfss://`, `wasbs://`, `hdfs://`, `dbfs:/`, `file:`). A dotted value under any other scheme is misread as a table name.',
         ].join('\n\n'),
@@ -595,8 +597,11 @@ export const LESSONS: Lesson[] = [
   "path": "analytics.customer_summary",
   "mode": "merge",
   "options": {
-    "merge_keys": ["customer_id"],
-    "merge_condition": "T.updated_at < S.updated_at"
+    "on": "T.customer_id = S.customer_id AND T.updated_at < S.updated_at",
+    "actions": [
+      "WHEN MATCHED THEN UPDATE SET *",
+      "WHEN NOT MATCHED THEN INSERT *"
+    ]
   }
 }`,
       },

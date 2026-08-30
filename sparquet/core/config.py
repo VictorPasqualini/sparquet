@@ -143,17 +143,21 @@ class ValidationConfig:
     #   • `annotate` – nome da coluna array<string> com os códigos das regras que
     #                  rejeitaram cada linha.
     outputs: Dict[str, "OutputConfig"] = field(default_factory=dict)
-    # Materializa o df antes de validar. Cada regra dispara a própria action e, sem
-    # cache, todas recomputam a linhagem desde a fonte. Default True porque quase
-    # sempre é o certo; desligue se o df for grande demais para caber em memória +
-    # disco do executor e você preferir pagar as releituras.
-    cache: bool = True
+    # Materializa o df antes de validar. Existia porque cada regra disparava a
+    # própria action (`not_null` uma por coluna, `unique` duas) e, sem cache, todas
+    # recomputavam a linhagem desde a fonte. Hoje as regras agregáveis são medidas
+    # numa passada só, então a materialização passou a custar mais do que economiza:
+    # medido em 2M linhas com 5 regras, ligar o cache levou o run de 6,4s a 10,1s em
+    # parquet e de 7,9s a 11,8s em CSV. Default False; ligue quando a linhagem for
+    # cara E houver muitas actions depois dela — regras `sql`, várias quarentenas
+    # com escopos diferentes, muitos destinos.
+    cache: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ValidationConfig:
         return cls(
             on_failure=data.get("on_failure", "fail"),
-            cache=bool(data.get("cache", True)),
+            cache=bool(data.get("cache", False)),
             # `targets` é expandido AQUI, no parse, e não no motor: o relatório casa
             # `config.validations.rules[i]` com `results[i]` por posição, então a lista
             # de regras já tem de estar achatada quando chega lá. A expansão vem do

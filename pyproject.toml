@@ -34,10 +34,10 @@ dependencies = [
     # separados). O bloco `validations` e os shims `sparquet.validation.*`
     # rodam sobre ele. O sparquet-cola é mantido sempre retrocompatível, então
     # sem cap de versão. Import: `sparquet_cola`.
-    # Piso 0.2.0: os códigos de falha por linha (`BaseCheck.code()`) e o
-    # `Cola.split(annotate=..., only=...)` que a quarentena escopada usa não
-    # existem na 0.1.x.
-    "sparquet-cola>=0.3.0",
+    # Piso 0.4.0: a medição em passada única (`BaseCheck.aggregations()` e o
+    # `Cola.run` que junta as regras num só `df.agg`) não existe antes dela, e
+    # sem isso o bloco `validations` volta a gastar uma action por regra.
+    "sparquet-cola>=0.4.0",
 ]
 
 [project.urls]

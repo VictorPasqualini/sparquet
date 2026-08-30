@@ -274,7 +274,7 @@ function anchoredKey(path: string, keys: readonly string[]): string | null {
 }
 
 /**
- * Issues carry JSON paths (`options.merge_keys`, `rules[0].columns`, `agg[1]`) while
+ * Issues carry JSON paths (`options.actions`, `rules[0].columns`, `agg[1]`) while
  * anchors are per field. Resolves a path to the field the panel can actually focus,
  * or null when nothing is reachable — a dead link is worse than plain text.
  */
@@ -289,7 +289,7 @@ export function resolveIssueField(
     const key = anchoredKey(field.slice(scope.prefix.length), scope.keys)
     if (key) return { nodeId: scope.nodeId, key }
   }
-  // Also accept a bare key where the path is reported unscoped, e.g. `merge_keys`.
+  // Also accept a bare key where the path is reported unscoped, e.g. `actions`.
   for (const scope of scopes) {
     const key = anchoredKey(field, scope.keys)
     if (key) return { nodeId: scope.nodeId, key }

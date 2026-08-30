@@ -11,9 +11,10 @@
  */
 
 import { AlertTriangle, History as HistoryIcon, X } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
+import { RunDetailDialog } from '@/components/history/RunDetailDialog'
 import { StatusIcon, formatTimestamp } from '@/components/history/status'
 import { Badge, IconButton } from '@/components/ui'
 import { resolveRunView } from '@/lib/runner/runView'
@@ -29,8 +30,12 @@ export function RunViewBanner() {
 
   const runView = useEditorStore((state) => state.runView)
   const clearRunView = useEditorStore((state) => state.clearRunView)
+  const showRunView = useEditorStore((state) => state.showRunView)
   const running = useEditorStore((state) => state.running)
-  const togglePanel = useEditorStore((state) => state.togglePanel)
+  const jobId = useEditorStore((state) => state.job?.id ?? null)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const [detailOpen, setDetailOpen] = useState(false)
 
   // A run in flight paints the boxes itself, and the Run panel already narrates it.
   if (!runView || running) return null
@@ -63,9 +68,13 @@ export function RunViewBanner() {
             {`${plural(runView.unmatchedSteps, 'step')} not on this canvas`}
           </Badge>
         )}
+        {/* Opens the execution itself, not the Run panel: that panel reports the run
+            THIS tab launched, so on a run loaded from the history it had nothing to
+            show and the button read as broken. This is the same dialog the Runs tab
+            opens, on the same run the boxes are painted with. */}
         <button
           type="button"
-          onClick={() => togglePanel('run', true)}
+          onClick={() => setDetailOpen(true)}
           className="shrink-0 rounded px-1 text-brand-600 transition-colors hover:bg-surface-sunken dark:text-brand-400"
         >
           Details
@@ -74,6 +83,23 @@ export function RunViewBanner() {
           <X />
         </IconButton>
       </div>
+
+      <RunDetailDialog
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+        runId={runView.runId}
+        runnerUrl={runnerUrl}
+        runnerToken={runnerToken}
+        // A pipeline run has one stage per job: preselect the one this canvas is.
+        focusJobId={jobId ?? undefined}
+        viewingJobRunId={runView.jobRunId}
+        // Picking another stage of the same run repaints the canvas with it, so the
+        // banner keeps describing what the boxes show.
+        onViewJobRun={(record, jobRun) => {
+          showRunView(record, jobRun, { pinned: true })
+          setDetailOpen(false)
+        }}
+      />
     </div>
   )
 }
