@@ -54,11 +54,40 @@ if str(_ROOT) not in sys.path:  # rodar o arquivo direto, sem PYTHONPATH
 # precisa ser o mesmo do driver.
 os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 
+def spark_version() -> str:
+    """A versão do pyspark instalado, que é quem manda na escolha dos jars.
+
+    Um jar de conector é compilado contra uma linha do Spark e quebra com
+    incompatibilidade binária na outra — não com "versão incompatível", mas com
+    um `IncompatibleClassChangeError` no meio da execução, que não parece o que
+    é. Foi o que aconteceu quando o CI, sem pin, instalou um pyspark mais novo
+    que os pacotes fixados aqui.
+    """
+    try:
+        import pyspark
+
+        return pyspark.__version__
+    except Exception:  # pragma: no cover - ambiente sem pyspark
+        return ""
+
+
+#: Linha do Spark contra a qual os pacotes fixos abaixo foram compilados. Quando
+#: o pyspark instalado for de outra linha, o teste **pula** em vez de falhar com
+#: erro de classe: a incompatibilidade é do ambiente, não do código.
+_SPARK_LINE = "4.1"
+
+
+def _spark_line() -> str:
+    return ".".join(spark_version().split(".")[:2])
+
+
 #: Coordenada Maven de cada conector que precisa de jar. Sobrescreva com
 #: `SPARQUET_IT_<CONECTOR>_PACKAGE` para testar outra versão sem editar o teste —
 #: é o que se faz quando o Spark do ambiente é outro.
 _PACKAGES: Dict[str, str] = {
-    "avro": "org.apache.spark:spark-avro_2.13:4.1.1",
+    # O avro acompanha a versão exata do Spark instalado; os demais são
+    # publicados por linha e por isso ficam fixos.
+    "avro": f"org.apache.spark:spark-avro_2.13:{spark_version() or _SPARK_LINE}",
     # delta-spark 4.3.x é a linha compilada contra o Spark 4.1 (4.4 já é 4.2).
     "delta": "io.delta:delta-spark_2.13:4.3.1",
     "iceberg": "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
@@ -153,6 +182,12 @@ def skip_reason() -> Optional[str]:
         return (
             "testes de integração desligados: rode com SPARQUET_IT=1 para baixar "
             "os jars do Maven Central na primeira vez"
+        )
+    if _spark_line() != _SPARK_LINE:
+        return (
+            f"pyspark {spark_version()} fora da linha {_SPARK_LINE}.x, para a qual "
+            "os jars deste diretório foram fixados; ajuste _PACKAGES ou use "
+            "SPARQUET_IT_<CONECTOR>_PACKAGE"
         )
     return None
 
