@@ -75,7 +75,9 @@ jobs:
           done
           # Skips are legitimate here (no JVM), but silent ones hide a suite that
           # stopped testing anything. Print them so the count is visible in the log.
-          skipped=$(grep -ho 'skipped=[0-9]*' /tmp/*.log | cut -d= -f2 | awk '{s+=$1} END {print s+0}')
+          # `|| true`: with a JVM on the runner nothing skips, and a grep that
+          # matches nothing would take the whole step down under `set -e`.
+          skipped=$(grep -ho 'skipped=[0-9]*' /tmp/*.log 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}' || true)
           echo "### Python ${{ matrix.python-version }}: $count files, ${skipped:-0} skipped tests" >> "$GITHUB_STEP_SUMMARY"
           exit $fail
 
@@ -124,7 +126,9 @@ jobs:
           fail=0
           for f in $(find tests/io/integration -name 'test_*.py' | sort); do
             echo "::group::$f"
-            python "$f" 2>&1 | tail -40 || fail=1
+            # The JVM stack frames are dropped and the tail is generous: a
+            # truncated failure report is a job that fails without saying why.
+            python -u "$f" 2>&1 | grep -vE '^\s+at |^\s+\.\.\. [0-9]+ more$' | tail -150 || fail=1
             echo "::endgroup::"
           done
           exit $fail
