@@ -97,6 +97,23 @@ _PACKAGES: Dict[str, str] = {
 }
 
 
+#: `False` desliga os pacotes de `_PACKAGES` nesta execução. Um arquivo de teste
+#: pode fazer isso **antes** de a sessão ser criada quando o jar de um serviço
+#: não conviva com os de formato. É o caso do Cassandra: com
+#: `spark-cassandra-connector_2.13:3.5.1` no mesmo `spark.jars.packages` que
+#: `delta-spark` ou `iceberg-spark-runtime`, o `SparkContext` não sobe — a
+#: registro do BlockManager entra em laço com
+#: `NullPointerException: Cannot invoke "org.apache.spark.storage.BlockManagerId
+#: .executorId()" because "idWithoutTopologyInfo" is null` e a criação da sessão
+#: morre em `Py4JError: An error occurred while calling
+#: None.org.apache.spark.api.java.JavaSparkContext`. Com o conector sozinho a
+#: sessão sobe; com avro ou h2 também. O par com delta e o par com iceberg travam
+#: os dois. Excluir `metrics-core` ou `commons-lang3` da árvore do conector
+#: também faz a sessão subir, mas depender de exclusão certa é frágil — quem não
+#: precisa do formato não carrega o jar dele.
+USE_BASE_PACKAGES = True
+
+
 def package_for(connector: str) -> str:
     return os.environ.get(
         f"SPARQUET_IT_{connector.upper()}_PACKAGE", _PACKAGES.get(connector, "")
@@ -106,7 +123,8 @@ def package_for(connector: str) -> str:
 def _packages() -> str:
     """Os pacotes que a sessão carrega.
 
-    Os de `_PACKAGES` entram sempre — são baratos e valem para qualquer máquina.
+    Os de `_PACKAGES` entram por default — são baratos e valem para qualquer
+    máquina — e saem quando o arquivo põe `USE_BASE_PACKAGES = False`.
     Os de serviço entram **só quando o serviço está de pé**: cada coordenada é
     uma resolução no Maven na criação da sessão, e quem não subiu container
     nenhum não deve pagar por driver de banco que não vai usar.
@@ -115,7 +133,7 @@ def _packages() -> str:
 
     coordenadas = [
         coordinate
-        for connector in _PACKAGES
+        for connector in (_PACKAGES if USE_BASE_PACKAGES else ())
         if (coordinate := package_for(connector))
     ]
     coordenadas.extend(packages_for_reachable())
@@ -225,21 +243,40 @@ def spark_block(app_name: str = "sparquet-integration") -> Dict[str, object]:
     valer também como exemplo executável de configuração.
     """
     configs = {
-        "spark.sql.extensions": f"{_DELTA_EXTENSION},{_ICEBERG_EXTENSION}",
-        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-        # Catálogo Hadoop: um diretório, sem metastore nem serviço.
-        "spark.sql.catalog.local": "org.apache.iceberg.spark.SparkCatalog",
-        "spark.sql.catalog.local.type": "hadoop",
-        "spark.sql.catalog.local.warehouse": WAREHOUSE.as_posix(),
         # O teste é sobre IO, não sobre paralelismo: 1 partição deixa a saída
         # previsível (um arquivo por escrita) e o tempo baixo.
         "spark.sql.shuffle.partitions": "1",
         "spark.sql.warehouse.dir": (WORK / "spark-warehouse").as_posix(),
         "spark.ui.enabled": "false",
     }
+    if USE_BASE_PACKAGES:
+        # Extensão e catálogo pedem a classe no classpath: declarar delta e
+        # iceberg sem os jars deles só rende `ClassNotFoundException` no log de
+        # quem desligou os pacotes base.
+        configs.update(
+            {
+                "spark.sql.extensions": f"{_DELTA_EXTENSION},{_ICEBERG_EXTENSION}",
+                "spark.sql.catalog.spark_catalog": (
+                    "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+                ),
+                # Catálogo Hadoop: um diretório, sem metastore nem serviço.
+                "spark.sql.catalog.local": "org.apache.iceberg.spark.SparkCatalog",
+                "spark.sql.catalog.local.type": "hadoop",
+                "spark.sql.catalog.local.warehouse": WAREHOUSE.as_posix(),
+            }
+        )
     packages = _packages()
     if packages:
         configs["spark.jars.packages"] = packages
+    from services import excludes_for_reachable
+
+    excludes = excludes_for_reachable()
+    if excludes:
+        configs["spark.jars.excludes"] = ",".join(excludes)
+    # Nada de config de serviço aqui de propósito: todo conector desta tier se
+    # configura por `options` do JSON, que é o caminho do usuário e o que os
+    # testes precisam provar. O DDL do Cassandra, que era a única exceção, hoje
+    # vai pelo `CassandraConnector` em `test_nosql_services_spark.py`.
     return {"app_name": app_name, "master": "local[2]", "configs": configs}
 
 
@@ -297,16 +334,36 @@ def run(spec: Dict[str, object]):
     return Sparquet().run_from_dict(payload)
 
 
+def session():
+    """A `SparkSession` da suíte, criada com o mesmo bloco `spark`.
+
+    Só para DDL: o spark-cassandra-connector não cria schema no write, e
+    `CREATE KEYSPACE`/`CREATE TABLE` não cabem num pipeline JSON. O bloco vai pelo
+    **construtor** aqui (e não pelo JSON, como em `run`) porque não há JSON nenhum
+    envolvido; `SparkContextManager` é singleton, então quem chamar primeiro cria
+    a sessão e os dois caminhos veem a mesma.
+    """
+    from sparquet import Sparquet
+
+    return Sparquet(spark=spark_block()).spark
+
+
 def round_trip(
     connector: str,
     write_output: Dict[str, object],
     read_input: Dict[str, object],
     transformations: Optional[Iterable[Dict[str, object]]] = None,
+    read_transformations: Optional[Iterable[Dict[str, object]]] = None,
 ):
     """Grava a semente no conector e lê de volta — o par que interessa.
 
     Devolve `(escrita, leitura)`; a leitura grava um CSV em `back-<conector>`
     para o teste conferir valor por valor, e não só a contagem.
+
+    `read_transformations` existe porque alguns conectores devolvem mais do que
+    guardaram: o Mongo acrescenta `_id` (um struct, que o CSV não escreve) e o
+    Kafka devolve `key`/`value` binários. Normalizar isso é trabalho da volta, não
+    da ida.
     """
     written = run(
         {
@@ -320,6 +377,7 @@ def round_trip(
         {
             "name": f"it-{connector}-leitura",
             "input": read_input,
+            "transformations": list(read_transformations or []),
             "output": {
                 "format": "csv",
                 "path": (WORK / f"back-{connector}").as_posix(),

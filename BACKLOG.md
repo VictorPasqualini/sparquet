@@ -173,6 +173,70 @@ Decisões tomadas:
 - **Streaming (readStream/writeStream)**: mantido **batch-only** por ora — streaming
   exige caminho de execução próprio (ver §7).
 
+- [ ] **`mariadb` não funciona sem opção extra no Spark 4** — achado da camada de
+  integração com serviço (`tests/io/integration/test_jdbc_services_spark.py`). O Spark
+  4.1.1 **não tem dialeto MariaDB**: existe só `MySQLDialect`, que reconhece apenas url
+  começando em `jdbc:mysql`. A url `jdbc:mariadb://` que o nosso `_MariaDbDialect` monta
+  cai no dialeto default, que cita identificador com `"` — e o MariaDB recusa:
+
+      java.sql.SQLSyntaxErrorException: You have an error in your SQL syntax; check the
+      manual ... near '"id" INTEGER , "nome" TEXT , "valor" DOUBLE PRECISION'
+
+  Vale para escrita **e** leitura (o SELECT que o Spark monta cita as colunas do mesmo
+  jeito), ou seja o conector está inteiro fora do ar contra um MariaDB de verdade. Duas
+  rotas foram executadas contra o container e as duas resolvem:
+
+  | Rota | Como | Preço |
+  |---|---|---|
+  | `sql_mode='ANSI_QUOTES'` | `options: {"sessionVariables": "sql_mode='ANSI_QUOTES'"}` | na mesma sessão `"..."` deixa de ser literal de string — importa para quem usa `query`; e o dialeto continua o default (sem pushdown de LIMIT/agregação, `TEXT` no lugar de `VARCHAR`) |
+  | driver do MySQL | `url: jdbc:mysql://...` + `driver: com.mysql.cj.jdbc.Driver` | traz o `MySQLDialect` de verdade, mas exige o jar do MySQL e faz `mariadb` virar sinônimo de `mysql` |
+
+  Decidir qual vira default do conector (ou se fica só documentado) é o item. Enquanto
+  não for decidido, o teste de integração usa a primeira rota e diz por quê.
+
+- [ ] **`elasticsearch` e `opensearch` não têm build para Spark 4** — achado da camada
+  de integração com serviço (`tests/io/integration/test_nosql_services_spark.py`). O
+  conector sobe, a sessão sobe, e a escrita morre em:
+
+      java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'
+
+  `Dataset.sqlContext()` saiu da API no Spark 4. Vale para as três coordenadas
+  publicadas mais recentes — `org.elasticsearch:elasticsearch-spark-30_2.13` em 8.16.1
+  e 9.0.3, e `org.opensearch.client:opensearch-spark-30_2.13:1.3.0` (o OpenSearch é
+  fork do elasticsearch-hadoop e herdou o problema). **Não existe** artefato
+  `elasticsearch-spark-40` no Maven Central. Na leitura o sintoma é outro e engana
+  menos:
+
+      EsHadoopIllegalArgumentException: Cannot find mapping for sparquet-it-semente - one is required before using Spark SQL
+
+  Não há o que corrigir no nosso lado: o `path`/`resource` e os prefixos de opção
+  (`es.*` vs `opensearch.*`) estão certos e cobertos por teste unitário. O item é
+  **acompanhar** o upstream e, quando sair um build para Spark 4, apagar o campo
+  `incompativel` da linha em `services.py` — os testes de integração já estão escritos
+  e voltam a rodar sem mais nenhuma mudança. Até então eles pulam dizendo isto.
+  Enquanto não sair, quem precisa de ES/OpenSearch em Spark 4 escreve pela API REST
+  (`bulk`) fora do Spark, ou fica em Spark 3.5.
+
+- [ ] **`cassandra`: o catálogo do conector não funciona em Spark 4 (só o caminho de
+  dados)** — mesmo achado. Ler e escrever com `format("cassandra")` passa com
+  `com.datastax.spark:spark-cassandra-connector_2.13:3.5.1` (a última publicada; não
+  há build para Spark 4). O que não passa é registrar
+  `spark.sql.catalog.<nome> = com.datastax.spark.connector.datasource.CassandraCatalog`
+  e usar SQL: o primeiro `CREATE` morre com
+
+      java.lang.NoClassDefFoundError: org/apache/spark/sql/catalyst/analysis/NoSuchNamespaceException
+
+  — classe que existia no Spark 3.5 e saiu no Spark 4. Consequência prática para o
+  usuário: **keyspace e tabela precisam existir antes** do pipeline, e o DDL sai de
+  fora do Spark (cqlsh, driver DataStax, migration). Vale documentar isso no
+  `sparquet-web` junto com o conector; e a tabela precisa ter a coluna
+  `ingestion_ts timestamp`, que o `Pipeline` acrescenta depois do reader. Duas
+  consequências para o nosso lado, além da doc: o jar do Cassandra **não** convive com
+  `delta-spark` nem com `iceberg-spark-runtime` no mesmo `spark.jars.packages` (o
+  `SparkContext` não sobe — ver `harness.USE_BASE_PACKAGES`), então um pipeline que
+  escreve de Cassandra para Delta na mesma sessão precisa ser verificado antes de ser
+  prometido.
+
 Pendentes / candidatos:
 
 | Conector | Notas |
@@ -881,8 +945,28 @@ Restante, na ordem do plano:
       15 testes no arquivo.
 - [ ] **Orquestração do `Pipeline`** — `input_df`, `columns`, `input_view`, projeção por
       output, `transformations` por output, `PipelineResult` nunca levantando exceção.
-- [ ] **`opensearch`** — conector próprio (opções `opensearch.*`), nunca afirmado, ao
-      lado do caso `elasticsearch` de que foi separado.
-- [ ] **Integração com containers** — Postgres, MySQL, Mongo, Cassandra, Elasticsearch e
-      Kafka têm imagem oficial. Atrás de env var, **nunca** na execução default (que
-      tem de continuar offline e de um segundo).
+- ✅ **`opensearch`** — conector próprio (opções `opensearch.*`) afirmado ao lado do
+      caso `elasticsearch` de que foi separado, no unitário e na camada de integração.
+      O teste com serviço existe e **pula**: nenhuma versão publicada do conector roda
+      em Spark 4 (item acima).
+- ✅ **Integração com containers** — três arquivos em `tests/io/integration/`, atrás de
+      `SPARQUET_IT=1` e pulando-se sozinhos quando a porta não responde, com a razão
+      nomeando o `docker compose ... up -d <serviço>` que falta:
+      `test_jdbc_services_spark.py` (25 casos: os cinco dialetos contra Postgres, MySQL,
+      MariaDB, SQL Server e Oracle de verdade), `test_kafka_spark.py` (4) e
+      `test_nosql_services_spark.py` (10: Mongo e Cassandra passam, ES e OpenSearch
+      pulam pelo item acima). O `docker-compose.yml` publica tudo em `127.0.0.1` e não
+      declara volume nomeado — teste que depende de estado sobrevivente é teste que
+      mente, e `down -v` limpa. Um serviço por vez: uma JVM Spark local mais vários
+      containers estoura a memória da máquina, e o sintoma engana (o mesmo laço de
+      `idWithoutTopologyInfo` do conflito de jar). O que cada execução descobriu está em
+      [docs/TEST_PLAN.md](docs/TEST_PLAN.md) → *The service tier*.
+- [ ] **Camada de serviço no CI** — os três arquivos acima rodam só na máquina de quem
+      sobe os containers. O job `integration` do `ci.yml` já os coleta por
+      `find tests/io/integration -name 'test_*.py'`, mas não sobe serviço nenhum, então
+      eles passam pulando tudo. Fechar isso é declarar `services:` no workflow (Postgres,
+      MySQL, MariaDB, Mongo, Cassandra e Kafka têm imagem oficial e healthcheck) — de
+      preferência num quarto job, para o tier de jar continuar rápido. Vale medir antes:
+      o custo é resolução de jar + boot de container por PR.
+- [ ] **`dynamodb` sem serviço** — é o único conector NoSQL sem container na
+      `docker-compose.yml`. `amazon/dynamodb-local` fecharia a lacuna sem conta AWS.
