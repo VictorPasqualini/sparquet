@@ -952,6 +952,161 @@ describe('lintJob', () => {
     })
   })
 
+  describe('read strategy', () => {
+    const jdbc = (options: Record<string, unknown>): ValidationIssue[] =>
+      lint(
+        [
+          source('src', { format: 'postgresql', path: 'public.vendas', options }),
+          sink('out'),
+        ],
+        [link('src', 'out')],
+      )
+
+    const CONNECTED = { host: 'db.internal', database: 'app' }
+
+    it('rejects a partitionColumn without the other three options', () => {
+      const issue = jdbc({ ...CONNECTED, partitionColumn: 'id' }).find(
+        (entry) => entry.id === 'jdbc-quartet:src',
+      )
+      expect(issue?.severity).toBe('error')
+      expect(issue?.message).toContain('lowerBound, upperBound, numPartitions')
+      expect(issue?.field).toBe('options.lowerBound')
+    })
+
+    it('accepts the complete quartet', () => {
+      const issues = jdbc({
+        ...CONNECTED,
+        partitionColumn: 'id',
+        lowerBound: '1',
+        upperBound: '1000',
+        numPartitions: 8,
+      })
+      expect(idsOf(issues).filter((id) => id.startsWith('jdbc-'))).toEqual([])
+    })
+
+    it('only warns when the bounds have no partitionColumn — Spark ignores them silently', () => {
+      const issue = jdbc({ ...CONNECTED, lowerBound: '1', upperBound: '1000' }).find(
+        (entry) => entry.id === 'jdbc-bounds-orphan:src',
+      )
+      expect(issue?.severity).toBe('warning')
+      expect(issue?.message).toContain('lowerBound, upperBound')
+    })
+
+    it('notes that a JDBC read with no partitionColumn runs in one task', () => {
+      const issue = jdbc(CONNECTED).find((entry) => entry.id === 'jdbc-single-task:src')
+      expect(issue?.severity).toBe('info')
+    })
+
+    it('rejects query together with dbtable', () => {
+      const issue = jdbc({
+        ...CONNECTED,
+        query: 'SELECT 1',
+        dbtable: 'public.vendas',
+      }).find((entry) => entry.id === 'jdbc-query-dbtable:src')
+      expect(issue?.severity).toBe('error')
+    })
+
+    it('rejects query together with partitionColumn and points at the dbtable subquery', () => {
+      const issue = jdbc({
+        ...CONNECTED,
+        query: 'SELECT 1',
+        partitionColumn: 'id',
+        lowerBound: '1',
+        upperBound: '1000',
+        numPartitions: 8,
+      }).find((entry) => entry.id === 'jdbc-query-partition:src')
+      expect(issue?.severity).toBe('error')
+      expect(issue?.hint).toContain('dbtable')
+    })
+
+    it('warns that a path pointing inside a partition drops the column', () => {
+      const issues = lint(
+        [source('src', { path: '/lake/vendas/dt=2026-09-01' }), sink('out')],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id === 'base-path:src')
+      expect(issue?.severity).toBe('warning')
+      expect(issue?.message).toContain('"dt"')
+      expect(issue?.field).toBe('options.basePath')
+    })
+
+    it('stays quiet once basePath is set', () => {
+      const issues = lint(
+        [
+          source('src', {
+            path: '/lake/vendas/dt=2026-09-01',
+            options: { basePath: '/lake/vendas' },
+          }),
+          sink('out'),
+        ],
+        [link('src', 'out')],
+      )
+      expect(idsOf(issues).filter((id) => id.startsWith('base-path:'))).toEqual([])
+    })
+
+    it('does not mistake an ordinary path for a partition directory', () => {
+      const issues = lint([source('src', { path: '/lake/vendas' }), sink('out')], [
+        link('src', 'out'),
+      ])
+      expect(idsOf(issues).filter((id) => id.startsWith('base-path:'))).toEqual([])
+    })
+  })
+
+  describe('write partitioning', () => {
+    const icebergSink = (path: string, partitionBy: string[]): ValidationIssue[] =>
+      lint(
+        [source('src'), sink('out', { format: 'iceberg', path, partitionBy })],
+        [link('src', 'out')],
+      )
+
+    it('accepts Iceberg partition transforms on a catalog table', () => {
+      const issues = icebergSink('catalog.db.eventos', ['days(data_evento)', 'bucket(16, id)'])
+      expect(idsOf(issues).filter((id) => id.startsWith('partition-transform'))).toEqual([])
+    })
+
+    it('rejects a bucket transform with the wrong arity', () => {
+      const issue = icebergSink('catalog.db.eventos', ['bucket(id)']).find((entry) =>
+        entry.id.startsWith('partition-transform-bucket:'),
+      )
+      expect(issue?.severity).toBe('error')
+      expect(issue?.hint).toContain('bucket(<n>, <column>)')
+    })
+
+    it('rejects an unknown transform and names the supported set', () => {
+      const issue = icebergSink('catalog.db.eventos', ['truncate(10, nome)']).find((entry) =>
+        entry.id.startsWith('partition-transform-unknown:'),
+      )
+      expect(issue?.severity).toBe('error')
+      expect(issue?.hint).toContain('bucket, years, months, days, hours')
+    })
+
+    it('rejects a transform written against a physical path', () => {
+      const issue = icebergSink('/warehouse/db/eventos', ['bucket(16, id)']).find((entry) =>
+        entry.id.startsWith('partition-transform-path:'),
+      )
+      expect(issue?.severity).toBe('error')
+      expect(issue?.field).toBe('path')
+    })
+
+    it('rejects a transform on a format that has no hidden partitioning', () => {
+      const issues = lint(
+        [source('src'), sink('out', { partitionBy: ['days(data_evento)'] })],
+        [link('src', 'out')],
+      )
+      const issue = issues.find((entry) => entry.id.startsWith('partition-transform-format:'))
+      expect(issue?.severity).toBe('error')
+      expect(issue?.hint).toContain('with_column')
+    })
+
+    it('leaves plain column names alone', () => {
+      const issues = lint(
+        [source('src'), sink('out', { partitionBy: ['dt'] })],
+        [link('src', 'out')],
+      )
+      expect(idsOf(issues).filter((id) => id.startsWith('partition-transform'))).toEqual([])
+    })
+  })
+
   describe('bundled templates', () => {
     for (const template of TEMPLATES) {
       it(`lints "${template.id}" without a single error`, () => {

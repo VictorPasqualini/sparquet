@@ -5,7 +5,7 @@
  * json/orc are native Spark; avro/xml/hudi need their connector JAR on the classpath.
  */
 
-import type { FieldOption, FormatDef } from '@/catalog/types'
+import type { FieldOption, FieldSpec, FormatDef } from '@/catalog/types'
 
 const BOOL_OPTIONS: FieldOption[] = [
   { value: 'true', label: 'true' },
@@ -19,6 +19,24 @@ const COMPRESSION: FieldOption[] = [
   { value: 'lz4', label: 'lz4' },
   { value: 'none', label: 'none' },
 ]
+
+export const basePathOption = (example: string): FieldSpec => ({
+  key: 'basePath',
+  label: 'Base path',
+  type: 'text',
+  placeholder: example,
+  help: 'Root of the partitioned dataset. Needed when the path points INSIDE a partition directory.',
+  docs: [
+    'Spark derives the partition columns from the directories **below** the path it is given. Reading',
+    '`' + example + '/dt=2026-09-01` directly is the cheapest possible read — no listing of the other',
+    'partitions at all — but there is nothing left below it to derive from, so `dt` is simply absent',
+    'from the DataFrame, and a downstream `select`/`filter` on it fails at runtime.',
+    '',
+    'Setting `basePath` to the dataset root (`' + example + '`) restores the column while keeping the',
+    'narrow read. Same for a glob (`dt=2026-09-0*`).',
+  ].join('\n'),
+  group: 'advanced',
+})
 
 const json: FormatDef = {
   id: 'json',
@@ -36,6 +54,7 @@ const json: FormatDef = {
   supportsPartitioning: true,
   supportsMerge: false,
   readOptions: [
+    basePathOption('/data/landing/eventos'),
     { key: 'multiLine', label: 'Multi-line', type: 'select', options: BOOL_OPTIONS, help: 'true reads each file as one JSON document instead of one object per line.' },
     { key: 'primitivesAsString', label: 'Primitives as string', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
     { key: 'dateFormat', label: 'Date format', type: 'text', placeholder: 'yyyy-MM-dd', group: 'advanced' },
@@ -82,6 +101,7 @@ const orc: FormatDef = {
   supportsPartitioning: true,
   supportsMerge: false,
   readOptions: [
+    basePathOption('/data/silver/vendas'),
     { key: 'mergeSchema', label: 'Merge schema', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
   ],
   writeOptions: [
@@ -114,6 +134,7 @@ const avro: FormatDef = {
   supportsPartitioning: true,
   supportsMerge: false,
   readOptions: [
+    basePathOption('/data/bronze/eventos'),
     { key: 'avroSchema', label: 'Avro schema', type: 'json', rows: 4, help: 'Explicit reader schema (JSON).', group: 'advanced' },
     { key: 'ignoreExtension', label: 'Ignore extension', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
   ],
@@ -144,6 +165,7 @@ const xml: FormatDef = {
   supportsPartitioning: true,
   supportsMerge: false,
   readOptions: [
+    basePathOption('/data/raw/catalogo'),
     { key: 'rowTag', label: 'Row tag', type: 'text', required: true, placeholder: 'book', help: 'Required: the tag that delimits each record (row).', validate: (v) => (typeof v === 'string' && v.trim() !== '' ? null : 'rowTag is required for XML.') },
     { key: 'attributePrefix', label: 'Attribute prefix', type: 'text', placeholder: '_', group: 'advanced' },
     { key: 'valueTag', label: 'Value tag', type: 'text', placeholder: '_VALUE', group: 'advanced' },

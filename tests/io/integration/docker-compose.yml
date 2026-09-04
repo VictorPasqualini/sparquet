@@ -50,19 +50,33 @@ services:
       interval: 5s
       retries: 20
 
+  # O healthcheck aqui não é conforto: a porta abre antes de o banco aceitar
+  # login, e `services.py` decide rodar o teste sondando a porta. Sem ele o
+  # teste falha por banco ainda subindo, o que não é falha de conector.
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "Sparquet!2024"
     ports: ["127.0.0.1:1433:1433"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1"
+      interval: 10s
+      retries: 20
 
   # Imagem gratuita da Oracle (sem licença para produção, boa para teste).
+  # É a mais lenta a subir de todas — minutos, não segundos.
   oracle:
     image: gvenzl/oracle-free:slim
     environment:
       ORACLE_PASSWORD: sparquet
     ports: ["127.0.0.1:1521:1521"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 15s
+      retries: 40
 
   # KRaft: sem ZooKeeper. O `ADVERTISED_LISTENERS` precisa ser o endereço que o
   # Spark usa de fora do container, senão o cliente conecta e é redirecionado
@@ -84,6 +98,10 @@ services:
   mongodb:
     image: mongo:7
     ports: ["127.0.0.1:27017:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 5s
+      retries: 20
 
   cassandra:
     image: cassandra:5

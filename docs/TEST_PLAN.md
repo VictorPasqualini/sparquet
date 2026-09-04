@@ -129,21 +129,20 @@ to do with file formats.
 
 | Format | Status | Pinned by |
 |---|:---:|---|
-| `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle` | ✅ | URL built from `host`+`database`, explicit `url` precedence, `query` over `dbtable`, write mode, missing-URL error. The shared read/write path is also [executed for real](../tests/io/integration/test_jdbc_spark.py) against H2 in the same JVM: the table is created, values and nulls come back, `append` adds, `overwrite` replaces, `truncate` keeps the table, `query` replaces `dbtable`. What stays unproven is each vendor's dialect — that needs the service tier |
+| `postgresql`, `mysql`, `mariadb`, `sqlserver`, `oracle` | ✅ | URL built from `host`+`database`, explicit `url` precedence, `query` over `dbtable`, write mode, missing-URL error. The shared read/write path is also [executed for real](../tests/io/integration/test_jdbc_spark.py) against H2 in the same JVM: the table is created, values and nulls come back, `append` adds, `overwrite` replaces, `truncate` keeps the table, `query` replaces `dbtable`. Each vendor's dialect — driver, default port, URL shape — is [executed against the real server](../tests/io/integration/test_jdbc_services_spark.py) in the service tier: all five pass |
 | `bigquery` | ✅ | load path vs write table, `query` option |
 | `snowflake` | ✅ | `dbtable` and format name |
 | `redshift` | ✅ | `dbtable` (a missing `tempdir` is not asserted) |
-| `mongodb`, `documentdb` | ✅ | collection from `path`, shared connector |
+| `mongodb`, `documentdb` | ✅ | collection from `path`, shared connector. [Executed against the container](../tests/io/integration/test_nosql_services_spark.py): `mongo-spark-connector_2.13:10.4.1` reads and writes on Spark 4.1.1, and `_id` is the only column the connector adds on the way back |
 | `dynamodb` | ✅ | `tableName` |
-| `cassandra` | ✅ | `keyspace.table` split, table-only + `keyspace` option |
-| `elasticsearch` | ✅ | resource as load path |
-| `opensearch` | ⬜ | **its own connector** (`opensearch.*` options), never asserted — the easiest gap here to close, next to the `elasticsearch` case it was split from |
-| `kafka` | ✅ | `subscribe` from `path`, bootstrap alias, batch defaults, missing-bootstrap error |
+| `cassandra` | ✅ | `keyspace.table` split, table-only + `keyspace` option. Executed against the container: the data path of `spark-cassandra-connector_2.13:3.5.1` works on Spark 4.1.1 and `append` is an upsert by key. Its `CassandraCatalog` does not — see the service-tier section |
+| `elasticsearch` | ✅ | resource as load path. The service test exists and skips: no published connector runs on Spark 4 — see below |
+| `opensearch` | ✅ | **its own connector** (`opensearch.*` options), now asserted next to the `elasticsearch` case it was split from. Its service test skips for the same reason as Elasticsearch |
+| `kafka` | ✅ | `subscribe` from `path`, bootstrap alias, batch defaults, missing-bootstrap error. [Executed against the broker](../tests/io/integration/test_kafka_spark.py): batch read of a published topic, `latest` refused in batch, missing topic named as an error and not as a timeout |
 
-An integration tier against containers (Postgres, MySQL, Mongo, Cassandra,
-Elasticsearch, Kafka all have official images) is worth having eventually, but it
-belongs behind an opt-in env var — never in the default `python tests/...` run, which
-must stay a second long and offline.
+The container tier below is the one that covers these, and it is behind an opt-in env
+var on purpose — never in the default `python tests/...` run, which must stay a second
+long and offline.
 
 ### The integration tier that exists today
 
@@ -172,22 +171,84 @@ all five database connectors are the same `JdbcReader`/`JdbcWriter` plus a diale
 that only picks a default driver, a default port and a URL shape. Everything the file
 asserts is the shared code. Everything it cannot assert is the dialect.
 
-For the connectors that genuinely need a server — Kafka, MongoDB, Cassandra,
-Elasticsearch, OpenSearch and the real databases — `services.py` and the
-`docker-compose.yml` beside it are in place, and no test has been written against them
-yet. A service test skips unless its port answers, with the reason naming the compose
+### The service tier
+
+For the connectors that genuinely need a server there are three more files, sharing
+the same `harness.py` plus `services.py`, which holds one row per service: host, port,
+compose service name and maven coordinate.
+
+    docker compose -f tests/io/integration/docker-compose.yml up -d postgres
+    SPARQUET_IT=1 python tests/io/integration/test_jdbc_services_spark.py
+    SPARQUET_IT=1 python tests/io/integration/test_kafka_spark.py
+    SPARQUET_IT=1 python tests/io/integration/test_nosql_services_spark.py
+    docker compose -f tests/io/integration/docker-compose.yml down -v
+
+A service test skips unless its port answers, with the reason naming the compose
 service to start, so the tier costs nothing on a machine without Docker. A connector's
 jar joins the session only while its service is reachable, because every coordinate in
 `spark.jars.packages` is resolved at session creation and nobody should download a
-Cassandra connector to test Avro. The Spark-4 compatible versions of the connectors
-that carry Spark code (Cassandra, Elasticsearch, OpenSearch, Mongo) are marked in
-`services.py` as unverified — that is the first thing to settle when the tier is used.
+Cassandra connector to test Avro. The compose file publishes every port on
+`127.0.0.1` and declares no named volume: a test that survives on state left by the
+last run is a test that lies, and `down -v` clears everything.
 
-Two things about the harness are worth knowing before extending it. The `spark` block
-goes through the `Sparquet` **constructor**, not the JSON, because the JSON block
-never reaches session creation (`BACKLOG.md` §4) — when that is fixed the harness
-should move the block back into the JSON, where a user would put it. And the ivy cache
-lives in `~/.ivy2.5.2` on Spark 4 (`~/.ivy2` on 3.x); both are checked.
+What running it settled, and what it cost:
+
+- **Postgres, MySQL, MariaDB, SQL Server, Oracle** — all five dialects pass, 25 cases.
+  MariaDB needs `sql_mode='ANSI_QUOTES'` as a session option, because Spark quotes
+  identifiers with `"` and MariaDB reads that as a string literal by default
+  (`BACKLOG.md`).
+- **Kafka** — passes. `startingOffsets: latest` is *not* a valid batch start; the
+  broker refuses it, and the test asserts the refusal instead of pretending zero rows
+  is a result. A missing topic surfaces as `UnknownTopicOrPartitionException` from
+  `describeTopics`, without the topic name in the message.
+- **MongoDB** — passes with `mongo-spark-connector_2.13:10.4.1`.
+- **Cassandra** — the data path passes with `spark-cassandra-connector_2.13:3.5.1`,
+  the last version published; there is no Spark 4 build. Its `CassandraCatalog` is
+  compiled against Spark 3.5 and the first `CREATE` dies with
+  `java.lang.NoClassDefFoundError: org/apache/spark/sql/catalyst/analysis/NoSuchNamespaceException`,
+  a class that was removed in Spark 4. So the DDL these tests need goes through the
+  connector's own `CassandraConnector` over py4j — and a pipeline that needs DDL in
+  Cassandra needs it from outside Spark too.
+- **Elasticsearch and OpenSearch** — the tests are written and they skip. No published
+  connector works on Spark 4: `elasticsearch-spark-30_2.13` (8.16.1 and 9.0.3, both
+  probed) and `opensearch-spark-30_2.13:1.3.0` hit
+  `java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'`
+  on write, and there is no `-spark-40` artifact on Maven Central. The reason lives in
+  the `incompativel` field of each row in `services.py`, which is what turns the
+  failure into a skip; deleting that field is all it takes for the tests to run again
+  the day a build ships.
+
+Four things about the harness are worth knowing before extending it.
+
+The `spark` block goes through the `Sparquet` **constructor**, not the JSON, because
+the JSON block never reaches session creation (`BACKLOG.md` §4) — when that is fixed
+the harness should move the block back into the JSON, where a user would put it. And
+the ivy cache lives in `~/.ivy2.5.2` on Spark 4 (`~/.ivy2` on 3.x); both are checked.
+
+`harness.USE_BASE_PACKAGES = False`, set by a test file **before** the session is
+created, drops avro, delta, iceberg and H2 from `spark.jars.packages`. It exists
+because those jars and the Cassandra connector do not share a classpath: with
+`spark-cassandra-connector_2.13:3.5.1` next to `delta-spark` or
+`iceberg-spark-runtime`, `SparkContext` never starts — BlockManager registration loops
+on `NullPointerException: Cannot invoke "org.apache.spark.storage.BlockManagerId.executorId()" because "idWithoutTopologyInfo" is null`
+and session creation dies in
+`Py4JError: An error occurred while calling None.org.apache.spark.api.java.JavaSparkContext`.
+The flag also drops the delta and iceberg `spark.sql.extensions` and catalogs, which
+would otherwise only log `ClassNotFoundException` for jars nobody loaded.
+
+`services.py` carries an `exclui` tuple per service, which becomes
+`spark.jars.excludes`. A datasource connector tends to declare a dependency on a whole
+Spark distribution, and a jar from another Spark line on the classpath breaks things
+that have nothing to do with the connector: the Elasticsearch tree asks for
+`org.apache.spark:spark-yarn_2.13:3.4.3`, and its `commons-logging:1.1.1` resolves
+through the local m2 cache to a jar that is not there, which alone brings the session
+down with `[JAVA_GATEWAY_EXITED] Java gateway process exited before sending its port number.`
+
+Run one service at a time. A local Spark JVM plus several containers is enough to
+exhaust the host: the same BlockManager `idWithoutTopologyInfo` loop shows up under
+memory pressure with no jar conflict involved, and a Kafka broker that has been
+starved logs `Unable to send a heartbeat because the RPC got timed out` and needs a
+`docker restart` rather than a retry.
 
 ---
 

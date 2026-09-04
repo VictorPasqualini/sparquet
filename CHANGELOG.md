@@ -20,6 +20,83 @@ Notes on the history below:
   version numbers. Studio changes appear here only when they touch the framework or
   the JSON contract.
 
+## [0.11.0] — 2026-09-04
+
+### Added
+
+- **`repartition` transformation.** The write side had no lever at all: `partition_by` on
+  the output decided which directories existed, and nothing decided how many tasks wrote
+  into them. Files written are one per *(task, directory)* pair that holds rows, so 200
+  shuffle partitions over 30 days of `dt` left up to 6,000 files behind. Repartitioning by
+  the same key the output partitions by collapses that to one file per key value, because a
+  single key value never splits across tasks — AQE merges neighbouring partitions but never
+  separates one. Four parameters, none required on its own but at least one of the first two
+  needed: `num_partitions`, `columns` (each entry goes through `F.expr`, so
+  `pmod(hash(id), 64)` is as valid as a column name), `coalesce` (merge without a shuffle,
+  reduces only) and `range` (`repartitionByRange`, split by value band instead of by hash).
+  Every invalid combination raises with the reason rather than silently doing something
+  else: `coalesce` with `columns` (no key to group by), `coalesce` with `range`, `coalesce`
+  without a count, `range` without columns, a non-integer or non-positive count, and no
+  parameters at all.
+
+  ```json
+  { "type": "repartition", "columns": ["dt"] }
+  ```
+
+- **Iceberg hidden partitioning: `partition_by` accepts partition transforms.**
+  `bucket(16, id)`, `years(ts)`, `months(ts)`, `days(ts)` and `hours(ts)` alongside plain
+  column names. A transform routes the write through `DataFrameWriterV2` (`writeTo`),
+  because the V1 `partitionBy` only takes column names — so it requires a catalog table, and
+  a physical path combined with a transform is refused with the alternative spelled out.
+  This is the only form that keeps pruning: Iceberg stores the column-to-transform relation
+  in the table metadata, so `WHERE id = 'X'` prunes the buckets on its own, whereas a bucket
+  column materialized by hand with `pmod(hash(id), N)` is only pruned by a filter on that
+  column. Spark's own `bucketBy` is not an alternative — it only works with `saveAsTable`
+  (Hive bucketing), `save(path)` refuses it and Delta does not support it.
+
+  ```json
+  "partition_by": ["days(data_evento)", "bucket(16, id)"]
+  ```
+
+  The partition spec belongs to the table, not to the write: it is applied by
+  `create` / `createOrReplace`, and an append into an existing table uses the spec the table
+  already has.
+
+### Changed
+
+- **The JDBC reader validates the parallel-read options before Spark does.**
+  `partitionColumn`/`lowerBound`/`upperBound`/`numPartitions` is an all-or-none quartet, and
+  getting it wrong failed in two different ways, both bad: an incomplete `partitionColumn`
+  raised a generic Spark message, while the three bounds **without** `partitionColumn` were
+  ignored silently and the whole table came through one connection in one task. Now the
+  first case raises a `ValueError` naming exactly what is missing, and the second emits a
+  deferred warning saying the options are being ignored and why. `query` + `dbtable` and
+  `query` + `partitionColumn` — both refused by Spark — are refused here first, the second
+  one pointing at the way to write it (move the SELECT into `dbtable` as a subquery **with**
+  an alias). Nothing that used to work stopped working: the pushdown options
+  (`pushDownPredicate`, `pushDownAggregate`, `pushDownLimit`, `sessionInitStatement`,
+  `queryTimeout`) always reached Spark through the passthrough and still do — they are now
+  documented and offered by the Studio form.
+
+- **`docs/PIPELINE_SCHEMA.md` gained a read and write strategy section.** The ordered
+  levers for reading (partition path plus `basePath`, `filter` first for pruning and
+  pushdown, `maxPartitionBytes`), the JDBC read, file-count arithmetic on write, hash
+  bucketing, skew, and Iceberg hidden partitioning. It also records a decision: there will
+  be no `input.partition_filter`. Catalyst produces the identical physical plan from a
+  `filter` placed first — the predicate becomes `PartitionFilters` plus `PushedFilters`
+  inside the `FileScan`, visible through `{ "type": "debug", "actions": ["explain"] }` — so
+  the key would only be a second place to write the same condition, and a second place for
+  it to drift.
+
+### Fixed
+
+- **The first load of an Iceberg merge now creates the table with `partition_by`.** A merge
+  cannot run against a table that does not exist, so the first execution writes everything
+  instead — and that write ignored `partition_by` entirely. The result was an unpartitioned
+  table that no later run repartitions, since the Iceberg partition spec is fixed at
+  creation. That first load now honors `partition_by`, transforms included, which makes it
+  the one execution of a merge pipeline where the setting has any effect.
+
 ## [0.10.0] — 2026-08-30
 
 ### Changed
@@ -635,7 +712,8 @@ Published as `spark-framework`.
   validation engines, the extension registries (`register_*`), `PipelineResult`, the
   structured JSON logger and the CLI.
 
-[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.7.0...v0.8.0

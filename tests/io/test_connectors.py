@@ -13,6 +13,15 @@ import unittest
 
 from sparquet.core.config import InputConfig, OutputConfig
 from sparquet.io.factory import ReaderFactory, WriterFactory
+from sparquet.utils.logger import _deferred_warnings
+
+
+def deferred_warnings():
+    return list(_deferred_warnings)
+
+
+def clear_deferred_warnings():
+    _deferred_warnings.clear()
 
 
 # --------------------------------------------------------------------- fakes
@@ -125,6 +134,57 @@ class TestJdbc(unittest.TestCase):
         rb = read_with("postgresql", "t", {"host": "h", "query": "SELECT 1 AS x"})
         self.assertEqual(rb.opts["query"], "SELECT 1 AS x")
         self.assertNotIn("dbtable", rb.opts)
+
+    def test_partition_column_without_the_other_three_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            read_with("postgresql", "t", {"host": "h", "partitionColumn": "id"})
+        message = str(ctx.exception)
+        for missing in ("lowerBound", "upperBound", "numPartitions"):
+            self.assertIn(missing, message)
+
+    def test_complete_partition_quartet_passes_through(self):
+        rb = read_with(
+            "postgresql",
+            "t",
+            {
+                "host": "h",
+                "partitionColumn": "id",
+                "lowerBound": "1",
+                "upperBound": "1000",
+                "numPartitions": "8",
+            },
+        )
+        self.assertEqual(rb.opts["partitionColumn"], "id")
+        self.assertEqual(rb.opts["numPartitions"], "8")
+
+    def test_partition_bounds_without_partition_column_only_warn(self):
+        # O Spark ignora as três em silêncio; o framework avisa mas não recusa.
+        clear_deferred_warnings()
+        rb = read_with("postgresql", "t", {"host": "h", "numPartitions": "8"})
+        self.assertEqual(rb.opts["numPartitions"], "8")
+        self.assertEqual(len(deferred_warnings()), 1)
+        self.assertIn("partitionColumn", deferred_warnings()[0][0])
+        clear_deferred_warnings()
+
+    def test_query_with_dbtable_raises(self):
+        with self.assertRaises(ValueError):
+            read_with("postgresql", "t", {"host": "h", "query": "SELECT 1", "dbtable": "x"})
+
+    def test_query_with_partition_column_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            read_with(
+                "postgresql",
+                "t",
+                {
+                    "host": "h",
+                    "query": "SELECT 1",
+                    "partitionColumn": "id",
+                    "lowerBound": "1",
+                    "upperBound": "9",
+                    "numPartitions": "4",
+                },
+            )
+        self.assertIn("dbtable", str(ctx.exception))
 
     def test_sqlserver_and_oracle_and_mariadb_urls(self):
         self.assertEqual(

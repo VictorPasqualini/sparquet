@@ -69,6 +69,66 @@ const promptLine = (type: string): string => {
   return line
 }
 
+describe('repartition guards', () => {
+  const validate = (key: string, params: Record<string, unknown>): string | null =>
+    fieldOf('repartition', key).validate?.(params[key], params) ?? null
+
+  it('requires a count, columns, or both', () => {
+    expect(validate('num_partitions', {})).toContain('nothing to redistribute')
+    expect(validate('num_partitions', { columns: ['dt'] })).toBeNull()
+    expect(validate('num_partitions', { num_partitions: 8 })).toBeNull()
+  })
+
+  it('rejects a non-integer or non-positive count', () => {
+    expect(validate('num_partitions', { num_partitions: 2.5 })).toContain('whole number')
+    expect(validate('num_partitions', { num_partitions: 0 })).toContain('1 or more')
+  })
+
+  it('refuses coalesce together with columns — there is no key to group by', () => {
+    const params = { coalesce: true, num_partitions: 8, columns: ['dt'] }
+    expect(validate('coalesce', params)).toContain('no key to group by')
+    expect(validate('columns', params)).toContain('Coalesce merges')
+  })
+
+  it('refuses coalesce and range together', () => {
+    expect(validate('coalesce', { coalesce: true, range: true, num_partitions: 8 })).toContain(
+      'exclusive',
+    )
+    expect(validate('range', { coalesce: true, range: true, columns: ['dt'] })).toContain(
+      'exclusive',
+    )
+  })
+
+  it('requires an explicit count for coalesce', () => {
+    expect(validate('coalesce', { coalesce: true })).toContain('explicit partition count')
+    expect(validate('num_partitions', { coalesce: true, columns: ['dt'] })).toContain(
+      'explicit partition count',
+    )
+    expect(validate('coalesce', { coalesce: true, num_partitions: 8 })).toBeNull()
+  })
+
+  it('requires columns for a range repartition', () => {
+    expect(validate('range', { range: true, num_partitions: 8 })).toContain('at least one column')
+    expect(validate('columns', { range: true })).toContain('add at least one column')
+    expect(validate('range', { range: true, columns: ['data_evento'] })).toBeNull()
+  })
+
+  it('accepts a SQL expression as the partitioning key', () => {
+    expect(validate('columns', { columns: ['pmod(hash(id), 64)'] })).toBeNull()
+  })
+
+  it('surfaces the missing-parameter case through the linter', () => {
+    expect(lintOne('repartition', {})).toContain('num_partitions')
+    expect(lintOne('repartition', { columns: ['dt'] })).toEqual([])
+  })
+
+  it('offers every parameter to the AI as optional', () => {
+    expect(promptLine('repartition')).toBe(
+      '- repartition — required: none — optional: num_partitions, columns, coalesce, range',
+    )
+  })
+})
+
 describe('with_column precedence', () => {
   const columnField = fieldOf('with_column', 'column')
   const expressionField = fieldOf('with_column', 'expression')

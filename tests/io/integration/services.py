@@ -51,8 +51,13 @@ class Service(NamedTuple):
     port: int
     #: Coordenada Maven do conector, ou `None` quando o jar já vem no pyspark.
     package: Optional[str]
-    #: `True` quando a coordenada ainda não foi executada contra o Spark 4.
-    a_verificar: bool = False
+    #: `grupo:artefato` que a árvore do conector traz e a sessão não deve
+    #: carregar. Entra em `spark.jars.excludes`.
+    exclui: tuple = ()
+    #: Preenchido quando **nenhuma** versão publicada do conector serve ao Spark
+    #: desta máquina. O serviço pode estar de pé; o teste pula assim mesmo, e a
+    #: razão é o que se descobriu executando. Some no dia em que sair um build.
+    incompativel: str = ""
 
 
 #: Chave = nome usado em `requires_service("postgres")` e nas variáveis de
@@ -69,29 +74,50 @@ SERVICES: Dict[str, Service] = {
         "oracle", 1521, "com.oracle.database.jdbc:ojdbc11:23.6.0.24.10"
     ),
     "kafka": Service("kafka", 9092, "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.1"),
+    # Executada contra o container: lê e escreve no Spark 4.1.1 sem opção extra.
     "mongodb": Service(
-        "mongodb",
-        27017,
-        "org.mongodb.spark:mongo-spark-connector_2.13:10.4.1",
-        a_verificar=True,
+        "mongodb", 27017, "org.mongodb.spark:mongo-spark-connector_2.13:10.4.1"
     ),
+    # Executada contra o container: leitura e escrita passam no Spark 4.1.1, mas
+    # o `CassandraCatalog` deste jar não sobe (é compilado contra a API do Spark
+    # 3.5 — ver `CassandraTest`). É a última versão publicada; não existe build
+    # para Spark 4. Quem precisa de DDL usa o `CassandraConnector` direto.
     "cassandra": Service(
-        "cassandra",
-        9042,
-        "com.datastax.spark:spark-cassandra-connector_2.13:3.5.1",
-        a_verificar=True,
+        "cassandra", 9042, "com.datastax.spark:spark-cassandra-connector_2.13:3.5.1"
     ),
+    # Não existe artefato para Spark 4: o `-spark-30` é o último nome publicado
+    # (8.16.1 até 9.0.3), e a árvore dele pede
+    # `org.apache.spark:spark-yarn_2.13:3.4.3` — jar de Spark 3.4 no classpath de
+    # um Spark 4.1. Excluído junto com `commons-logging`, cuja versão pedida
+    # (1.1.1) o ivy resolve pelo cache local do m2 e não encontra o jar, o que
+    # sozinho derruba a criação da sessão com `[JAVA_GATEWAY_EXITED] Java gateway
+    # process exited before sending its port number.` Com os dois excluídos a
+    # sessão sobe e a escrita morre no que não tem contorno.
     "elasticsearch": Service(
         "elasticsearch",
         9200,
         "org.elasticsearch:elasticsearch-spark-30_2.13:8.16.1",
-        a_verificar=True,
+        exclui=("org.apache.spark:spark-yarn_2.13", "commons-logging:commons-logging"),
+        incompativel=(
+            "elasticsearch-spark-30 (8.16.1 e 9.0.3, as últimas publicadas) chama "
+            "Dataset.sqlContext(), removido no Spark 4: "
+            "java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext "
+            "org.apache.spark.sql.Dataset.sqlContext()'. Não há artefato "
+            "elasticsearch-spark-40 no Maven Central"
+        ),
     ),
+    # Fork do elasticsearch-hadoop, e herdou o mesmo bloqueio — 1.3.0 é a última
+    # publicada e falha igual, executada contra o container.
     "opensearch": Service(
         "opensearch",
         9201,
         "org.opensearch.client:opensearch-spark-30_2.13:1.3.0",
-        a_verificar=True,
+        incompativel=(
+            "opensearch-spark-30 1.3.0 (a última publicada) chama "
+            "Dataset.sqlContext(), removido no Spark 4: "
+            "java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext "
+            "org.apache.spark.sql.Dataset.sqlContext()'"
+        ),
     ),
 }
 
@@ -141,9 +167,18 @@ def reachable(nome: str) -> bool:
 
 
 def skip_reason(nome: str) -> Optional[str]:
+    """Por que o teste deste serviço não roda — `None` quando ele roda.
+
+    Dois motivos, e o segundo não se resolve subindo container: quando não
+    existe versão do conector que funcione neste Spark, o teste pula com o que
+    se descobriu executando. Apagar o `incompativel` da tabela é o que basta
+    para ele voltar a rodar no dia em que sair um build.
+    """
+    servico = SERVICES[nome]
+    if servico.incompativel:
+        return f"{nome}: {servico.incompativel}"
     if reachable(nome):
         return None
-    servico = SERVICES[nome]
     return (
         f"{nome} não responde em {host_of(nome)}:{port_of(nome)} — "
         f"`docker compose -f {COMPOSE.name} up -d {servico.compose}`"
@@ -156,15 +191,31 @@ def requires_service(nome: str):
     return unittest.skipIf(razao is not None, razao or "")
 
 
+def excludes_for_reachable() -> list:
+    """`grupo:artefato` que os serviços de pé pedem e a sessão não deve carregar.
+
+    Conector de datasource costuma declarar dependência de Spark inteira, e um
+    jar de outra linha do Spark no classpath quebra coisa que não tem nada a ver
+    com o conector. O que cada um precisa excluir está na tabela `SERVICES`.
+    """
+    excluidos = []
+    for nome, servico in SERVICES.items():
+        if reachable(nome) and not servico.incompativel:
+            excluidos.extend(servico.exclui)
+    return excluidos
+
+
 def packages_for_reachable() -> list:
     """Coordenadas dos serviços que estão de pé — o que a sessão deve carregar.
 
     Só os alcançáveis: um pacote listado é um download na criação da sessão, e
-    quem não subiu serviço nenhum não deve pagar por nenhum.
+    quem não subiu serviço nenhum não deve pagar por nenhum. Marcado como
+    `incompativel` também fica fora: o teste vai pular, então o jar seria
+    resolução paga e classpath sujo sem nenhum teste em troca.
     """
     coordenadas = []
-    for nome in SERVICES:
-        if not reachable(nome):
+    for nome, servico in SERVICES.items():
+        if not reachable(nome) or servico.incompativel:
             continue
         pacote = package_of(nome)
         if pacote:
