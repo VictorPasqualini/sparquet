@@ -870,11 +870,15 @@ function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData 
             <div id={fieldAnchorId(id, 'partition_by')} className="scroll-mt-4">
               <Field
                 label="Partition by"
-                help="Columns used to lay the data out on disk. They keep their values but leave the written files."
+                help={
+                  format.id === 'iceberg'
+                    ? 'Column names, or Iceberg partition transforms: bucket(16, id), years/months/days/hours(ts). A transform requires a catalog table and is fixed when the table is created.'
+                    : 'Columns used to lay the data out on disk. They keep their values but leave the written files.'
+                }
               >
                 <StringListField
                   value={sink.partitionBy}
-                  placeholder="dt_ref"
+                  placeholder={format.id === 'iceberg' ? 'days(data_evento)' : 'dt_ref'}
                   onChange={(next) => updateNodeData(id, { partitionBy: next })}
                 />
               </Field>

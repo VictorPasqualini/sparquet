@@ -8,7 +8,7 @@
  */
 
 import { getFormat, getTransformation, getValidationSink, getValidator } from '@/catalog'
-import type { FieldSpec } from '@/catalog/types'
+import type { FieldSpec, FormatDef } from '@/catalog/types'
 import { ROW_LEVEL_METRICS } from '@/catalog/validators'
 import { DEFAULT_VALIDATION_POLICY, HANDLE } from '@/types/studio'
 import type {
@@ -518,6 +518,210 @@ const requireFormat = (ctx: LintContext, node: StudioNode, format: string): bool
   return false
 }
 
+/**
+ * Spark's parallel-read quartet for JDBC. `partitionColumn` needs the other three;
+ * the other three without it are silently ignored and the read collapses to one
+ * task on one connection (io/jdbc.py `_validate_read_partitioning`).
+ */
+const JDBC_PARTITION_QUARTET = ['partitionColumn', 'lowerBound', 'upperBound', 'numPartitions'] as const
+
+/** A format is JDBC-shaped when it exposes the quartet as read options. */
+const readsInParallelRanges = (def: FormatDef): boolean =>
+  def.readOptions.some((option) => option.key === 'partitionColumn')
+
+/** A format derives partition columns from directories when it accepts `basePath`. */
+const discoversPartitions = (def: FormatDef): boolean =>
+  def.readOptions.some((option) => option.key === 'basePath')
+
+/**
+ * A `key=value` directory anywhere in the path means Spark is being pointed inside a
+ * partitioned dataset. Matched per segment so a query string or a Windows drive letter
+ * is not mistaken for one.
+ */
+const PARTITION_SEGMENT = /(^|[/\\])[^/\\=]+=[^/\\]*([/\\]|$)/
+
+/**
+ * `is_table_name` (io/base.py:28): a catalog identifier has neither '/' nor ':', which
+ * keeps every object-storage scheme working without enumerating them.
+ */
+const isCatalogIdentifier = (path: string): boolean =>
+  path !== '' && !path.includes('/') && !path.includes(':') && !path.includes('\\')
+
+/** `bucket(16, id)` / `days(ts)` — same shape the Iceberg writer parses. */
+const TRANSFORM_CALL = /^([A-Za-z_]\w*)\s*\((.*)\)$/
+const ICEBERG_TIME_TRANSFORMS = ['years', 'months', 'days', 'hours']
+
+const checkJdbcRead = (
+  ctx: LintContext,
+  node: StudioNode,
+  def: FormatDef,
+  options: Record<string, unknown>,
+): void => {
+  const label = labelOf(node)
+  const present = JDBC_PARTITION_QUARTET.filter((key) => !isBlank(options[key]))
+  const hasQuery = text(options.query) !== ''
+
+  if (hasQuery && text(options.dbtable) !== '') {
+    ctx.issues.push({
+      id: `jdbc-query-dbtable:${node.id}`,
+      severity: 'error',
+      message: `${label}: options.query and options.dbtable are mutually exclusive.`,
+      nodeId: node.id,
+      field: 'options.query',
+      hint: 'Spark refuses both at once, and the reader raises a ValueError before any Spark call. Keep only query (a full SELECT), or only dbtable (a table, or a subquery with an alias).',
+    })
+  }
+
+  if (hasQuery && !isBlank(options.partitionColumn)) {
+    ctx.issues.push({
+      id: `jdbc-query-partition:${node.id}`,
+      severity: 'error',
+      message: `${label}: options.query cannot be combined with options.partitionColumn.`,
+      nodeId: node.id,
+      field: 'options.partitionColumn',
+      hint: 'Spark forbids the pair. To read a filtered slice in parallel, move the SELECT into options.dbtable as a subquery WITH an alias — "(SELECT ... WHERE ...) t" — and keep partitionColumn/lowerBound/upperBound/numPartitions.',
+    })
+  }
+
+  if (!isBlank(options.partitionColumn)) {
+    const missing = JDBC_PARTITION_QUARTET.filter((key) => isBlank(options[key]))
+    if (missing.length > 0) {
+      ctx.issues.push({
+        id: `jdbc-quartet:${node.id}`,
+        severity: 'error',
+        message: `${label}: options.partitionColumn also needs ${missing.join(', ')}.`,
+        nodeId: node.id,
+        field: `options.${missing[0]}`,
+        hint: 'Spark wants all four together (partitionColumn, lowerBound, upperBound, numPartitions) and the reader raises a ValueError naming what is missing. Take the bounds from a SELECT min/max of the column, or drop partitionColumn.',
+      })
+    }
+    return
+  }
+
+  if (present.length > 0) {
+    ctx.issues.push({
+      id: `jdbc-bounds-orphan:${node.id}`,
+      severity: 'warning',
+      message: `${label}: ${present.join(', ')} without options.partitionColumn.`,
+      nodeId: node.id,
+      field: `options.${present[0]}`,
+      hint: 'Spark IGNORES these options on read, so the whole table still arrives through one connection in one task. Add partitionColumn (a numeric/date column, indexed) to make them count. The run warns instead of failing.',
+    })
+    return
+  }
+
+  if (!def.canRead) return
+  ctx.issues.push({
+    id: `jdbc-single-task:${node.id}`,
+    severity: 'info',
+    message: `${label}: reading in a single task.`,
+    nodeId: node.id,
+    field: 'options.partitionColumn',
+    hint: 'With no partitionColumn the whole table comes through one connection in one task, however many executors exist. Filter in the database first (options.query, or a dbtable subquery), then add partitionColumn/lowerBound/upperBound/numPartitions to parallelize what is left.',
+  })
+}
+
+const checkPartitionPath = (
+  ctx: LintContext,
+  node: StudioNode,
+  path: string,
+  options: Record<string, unknown>,
+): void => {
+  if (!PARTITION_SEGMENT.test(path)) return
+  if (!isBlank(options.basePath)) return
+  const segment = path.split(/[/\\]/).find((part) => part.includes('='))
+  const column = segment?.split('=')[0] ?? 'the partition column'
+  ctx.issues.push({
+    id: `base-path:${node.id}`,
+    severity: 'warning',
+    message: `${labelOf(node)}: "${column}" will be missing from the schema.`,
+    nodeId: node.id,
+    field: 'options.basePath',
+    hint: `Spark derives partition columns from the directories BELOW the path it is given, and this path points inside one, so ${column} is simply absent from the DataFrame and a later select/filter on it fails at runtime. Set options.basePath to the dataset root to keep the column and the narrow read.`,
+  })
+}
+
+/**
+ * Iceberg accepts partition transforms inside `partition_by`; every other writer takes
+ * plain column names only, and would look for a column literally named `days(ts)`.
+ */
+const checkPartitionTransforms = (
+  ctx: LintContext,
+  node: StudioNode,
+  def: FormatDef | undefined,
+  path: string,
+  partitionBy: readonly string[],
+): void => {
+  for (const entry of partitionBy) {
+    const raw = entry.trim()
+    const match = TRANSFORM_CALL.exec(raw)
+    if (!match) continue
+
+    if (def && def.id !== 'iceberg') {
+      ctx.issues.push({
+        id: `partition-transform-format:${node.id}:${raw}`,
+        severity: 'error',
+        message: `${def.label} does not accept partition transforms: "${raw}".`,
+        nodeId: node.id,
+        field: 'partition_by',
+        hint: 'Hidden partitioning is an Iceberg feature. Every other writer passes partition_by to partitionBy(), which resolves plain column names — this one would be looked up as a column with that exact name. Materialize the value first (with_column, e.g. pmod(hash(id), 64) or date_trunc) and partition by that column.',
+      })
+      continue
+    }
+
+    const name = match[1].toLowerCase()
+    const args = match[2]
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part !== '')
+
+    if (name === 'bucket') {
+      if (args.length !== 2 || !/^\d+$/.test(args[0]) || Number(args[0]) < 1) {
+        ctx.issues.push({
+          id: `partition-transform-bucket:${node.id}:${raw}`,
+          severity: 'error',
+          message: `Invalid partition transform: "${raw}".`,
+          nodeId: node.id,
+          field: 'partition_by',
+          hint: 'The form is bucket(<n>, <column>) with n >= 1, e.g. bucket(16, id). Pick n from the target file size (total bytes / 128 MB to 1 GB) — a prime is not better, since the hash already avalanches.',
+        })
+      }
+    } else if (ICEBERG_TIME_TRANSFORMS.includes(name)) {
+      if (args.length !== 1) {
+        ctx.issues.push({
+          id: `partition-transform-time:${node.id}:${raw}`,
+          severity: 'error',
+          message: `Invalid partition transform: "${raw}".`,
+          nodeId: node.id,
+          field: 'partition_by',
+          hint: `${name} takes exactly one column, e.g. ${name}(data_evento).`,
+        })
+      }
+    } else {
+      ctx.issues.push({
+        id: `partition-transform-unknown:${node.id}:${raw}`,
+        severity: 'error',
+        message: `Unsupported partition transform: "${name}".`,
+        nodeId: node.id,
+        field: 'partition_by',
+        hint: 'Available: bucket, years, months, days, hours. Iceberg truncate has no Spark function equivalent — declare it in the table DDL and leave partition_by empty. The writer raises a ValueError before any Spark call.',
+      })
+      continue
+    }
+
+    if (!isCatalogIdentifier(path)) {
+      ctx.issues.push({
+        id: `partition-transform-path:${node.id}:${raw}`,
+        severity: 'error',
+        message: `A partition transform needs a catalog table, not a path: "${path}".`,
+        nodeId: node.id,
+        field: 'path',
+        hint: 'A transform routes the write through DataFrameWriterV2 (writeTo), which only exists over a catalog identifier — catalog.schema.table. For a destination on a path, materialize the bucket instead (with_column with pmod(hash(col), N)) and use that column name in partition_by.',
+      })
+    }
+  }
+}
+
 const checkSources = (ctx: LintContext): void => {
   for (const node of ctx.sources) {
     const { format, path, options } = node.data
@@ -547,6 +751,8 @@ const checkSources = (ctx: LintContext): void => {
         `field:${node.id}:option`,
         'options.',
       )
+      if (readsInParallelRanges(def)) checkJdbcRead(ctx, node, def, options)
+      if (discoversPartitions(def)) checkPartitionPath(ctx, node, text(path), options)
     }
   }
 }
@@ -668,6 +874,8 @@ const checkSinks = (ctx: LintContext): void => {
         }
       }
     }
+
+    checkPartitionTransforms(ctx, node, def, text(path), node.data.partitionBy)
 
     const destination = `${text(format).toLowerCase()}|${text(path)}`
     if (text(path) === '') continue

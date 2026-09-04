@@ -427,14 +427,62 @@ Já entregue:
 - ✅ **Input em temp view** (`input_view`, string ou `{"name","type"}`) — self-join / SQL sobre a entrada sem reler a base.
 - ✅ **Broadcast join** (`broadcast` no `join`) — map-side, sem shuffle.
 - ✅ **Doc: `filter`/`select` primeiro** — recomendação no guia de performance + convenção no CLAUDE.md.
+- ✅ **Estratégia de leitura e escrita** — `docs/PIPELINE_SCHEMA.md` §*Estratégia de leitura
+      e escrita*: ordem das alavancas de leitura (path direto na partição + `basePath`,
+      `filter` como primeira transformação, `maxPartitionBytes`), leitura JDBC, contagem de
+      arquivos na escrita, bucket por hash, skew e particionamento oculto do Iceberg.
+      **Decisão registrada: não existirá `input.partition_filter`.** O Catalyst produz o
+      mesmo plano físico a partir do `filter` (o predicado vira `PartitionFilters` +
+      `PushedFilters` dentro do `FileScan`, verificável com `debug.explain`), então a chave
+      seria só um segundo lugar para escrever a mesma condição — e um lugar a mais para ela
+      divergir. Não há "ler sempre particionado" por default: particionamento é propriedade
+      do layout dos dados, que o framework não descobre sozinho.
+- ✅ **`repartition`** — transformação nativa: `num_partitions`, `columns` (aceita expressão
+      SQL, não só nome de coluna), `coalesce` e `range` (`repartitionByRange`), com guards
+      para toda combinação inválida. É a alavanca do problema de *small files*: arquivos
+      gravados são pares *(task, diretório)*, então reparticionar pela mesma chave do
+      `partition_by` dá exatamente um arquivo por valor de chave (o AQE funde partições
+      vizinhas, nunca separa uma chave).
+- ✅ **Hash para `partitionBy`** — duas formas, e a escolha é entre pruning e controle de
+      arquivo. (a) *Bucket materializado*, em qualquer formato: `with_column` com
+      `pmod(hash(col), N)` + `repartition` pela mesma coluna. **`pmod`, nunca `%`** — o
+      `hash()` do Spark é Murmur3 de 32 bits com sinal, e `% N` cria diretórios
+      `bucket=-17`; `hash(null)` é constante, então coluna nullable joga todos os nulos num
+      bucket. **N vem do tamanho de arquivo alvo, não de primalidade**: Murmur3 já
+      avalancha, `% 64` distribui igual a `% 61` — a regra do módulo primo vale para hash
+      fraco ou identidade, não aqui. (b) *Transform do Iceberg* em `partition_by`:
+      `bucket(16, id)`, `years/months/days/hours(col)`, via `writeTo` (DataFrameWriterV2).
+      É a única forma que **mantém o pruning** — o Iceberg guarda a relação
+      coluna→transform nos metadados, então `WHERE id = 'X'` poda os buckets sozinho,
+      enquanto uma coluna `bucket` gravada à mão só é podada por filtro sobre `bucket`.
+      **`bucketBy` do Spark não entra**: só funciona com `saveAsTable` (bucketing Hive),
+      `save(path)` o recusa e o Delta não o suporta.
+- ✅ **Leitura paralela JDBC** — o quarteto
+      `partitionColumn`/`lowerBound`/`upperBound`/`numPartitions` é all-or-none e falhava
+      com mensagem genérica do Spark; agora `partitionColumn` incompleto levanta
+      `ValueError` nomeando o que falta, e o inverso (limites sem `partitionColumn`, que o
+      Spark **ignora em silêncio** caindo para uma task/conexão) emite warning.
+      `query` + `dbtable` e `query` + `partitionColumn` são recusados apontando a saída
+      (subquery com alias em `dbtable`). `pushDownPredicate`/`Aggregate`/`Limit`,
+      `fetchsize`, `sessionInitStatement` e `queryTimeout` expostos no catálogo do Studio.
 - 🟡 **Pushdown** — já disponível: `collect` + `{{var}}` (IN literal → data skipping), `checkpoint`, `partitionColumn`/`fetchsize` (JDBC), `partition_by` / `compression` / `maxRecordsPerFile` via `options`, e a heurística de path do Delta corrigida.
 
 Pendente:
 
-- [ ] **Ler sempre com partição / estratégia de leitura** — orientar (e onde fizer sentido, automatizar) leitura particionada com *partition pruning* por padrão, em vez de scan total.
-- [ ] **Hash para `partitionBy`** — particionamento por hash de coluna (buckets) para evitar skew e *small files* na escrita.
 - [ ] **Avaliar Apache DataFusion Comet** — acelerador vetorizado do Spark; medir ganho real e o custo de dependência antes de recomendar.
-- [ ] **Análise consolidada de opções de tuning** — mapear/expor/documentar e decidir o que vira opção declarativa vs recomendação de doc: `vacuum`, `optimize`, `z-order`, `repartition`, `coalesce`, `partitionBy`, `bucketBy`, `clustering`/`clusterBy`, `compression`, `persist`/`cache`, `checkpoint`, `maxRecordsPerFile`, broadcast automático (`spark.sql.autoBroadcastJoinThreshold`), *partition pruning*, *predicate pushdown*, problema de *small files*, `shuffle` (partitions/skew), *garbage collection* e `checkpointLocation` (streaming).
+- [ ] **Análise consolidada de opções de tuning** — já resolvido acima: `repartition`,
+      `coalesce`, `partitionBy`, `bucketBy`, `maxRecordsPerFile`, *partition pruning*,
+      *predicate pushdown*, *small files* e `shuffle` (partitions/skew). Falta mapear/expor/
+      documentar e decidir o que vira opção declarativa vs recomendação de doc: `vacuum`,
+      `optimize`, `z-order`, `clustering`/`clusterBy`, `compression`, `persist`/`cache`
+      (hoje só `checkpoint`), broadcast automático (`spark.sql.autoBroadcastJoinThreshold`),
+      *garbage collection* e `checkpointLocation` (streaming).
+- [ ] **Skew de chave única na escrita** — nem bucket nem `repartition` resolvem: o valor é
+      indivisível. As saídas hoje são manuais (*salting* com
+      `concat(chave, '-', pmod(hash(rand()), 8))`, ou `maxRecordsPerFile`). Decidir se vale
+      uma opção declarativa de salting ou se fica como recomendação de doc.
+- [ ] **Doc pública da estratégia** — a seção nova está só em `docs/PIPELINE_SCHEMA.md`;
+      falta o PR no `sparquet-web` (EN/PT/ES).
 
 > Streaming (readStream/writeStream, `checkpointLocation`, output modes, Kinesis) é
 > um eixo à parte — o modelo atual é batch. Decisão registrada em §4.

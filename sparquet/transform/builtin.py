@@ -170,6 +170,106 @@ class DistinctTransformation(BaseTransformation):
         return df.distinct()
 
 
+class RepartitionTransformation(BaseTransformation):
+    """Redistribui as partições do DataFrame — muda o custo, nunca os dados.
+
+    É a peça entre `partition_by` (quais diretórios existem no destino) e o
+    número de arquivos gravados (quantas tasks escrevem em cada diretório). Sem
+    ela, TODA task que contém linhas de um diretório abre um arquivo próprio
+    ali — a origem do problema de small files.
+
+    JSON params:
+      num_partitions – número de partições alvo (int)
+      columns        – expressões de particionamento: nome de coluna ou SQL
+                       (`pmod(hash(id), 64)`). Linhas com o mesmo valor caem
+                       na MESMA partição.
+      coalesce       – true usa df.coalesce(n): apenas REDUZ, sem shuffle
+                       (default: false)
+      range          – true usa df.repartitionByRange(...): divide por FAIXA de
+                       valor em vez de hash (default: false)
+
+    Pelo menos um de num_partitions/columns é obrigatório.
+
+    Combinação canônica contra small files: repartition pelas MESMAS expressões
+    do `partition_by` do destino. Cada valor de chave cai numa única task, então
+    sai exatamente UM arquivo por diretório — para qualquer num_partitions, que
+    aí só controla o paralelismo da escrita.
+
+    Exemplos:
+      { "type": "repartition", "num_partitions": 200 }
+      { "type": "repartition", "columns": ["dt"] }
+      { "type": "repartition", "num_partitions": 64, "columns": ["pmod(hash(id), 64)"] }
+      { "type": "repartition", "num_partitions": 1, "coalesce": true }
+      { "type": "repartition", "num_partitions": 8, "columns": ["data_evento"], "range": true }
+    """
+
+    def apply(self, df: DataFrame) -> DataFrame:
+        params = self.config.params
+        raw_num = params.get("num_partitions")
+        columns = params.get("columns") or []
+        use_coalesce = bool(params.get("coalesce", False))
+        by_range = bool(params.get("range", False))
+
+        if isinstance(columns, str):
+            columns = [columns]
+
+        if raw_num is None and not columns:
+            raise ValueError(
+                "repartition: informe 'num_partitions', 'columns', ou os dois — "
+                "sem nenhum dos dois não há redistribuição a fazer."
+            )
+
+        num: int | None = None
+        if raw_num is not None:
+            try:
+                num = int(raw_num)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"repartition: 'num_partitions' precisa ser um inteiro "
+                    f"(recebido: {raw_num!r})."
+                ) from None
+            if num < 1:
+                raise ValueError(
+                    f"repartition: 'num_partitions' precisa ser >= 1 (recebido: {num})."
+                )
+
+        if use_coalesce:
+            if by_range:
+                raise ValueError(
+                    "repartition: 'coalesce' e 'range' são exclusivos — coalesce funde "
+                    "partições vizinhas sem shuffle, repartitionByRange redistribui por "
+                    "faixa de valor com shuffle."
+                )
+            if columns:
+                raise ValueError(
+                    "repartition: 'coalesce' não aceita 'columns' — coalesce funde "
+                    "partições vizinhas sem shuffle, então não há chave para agrupar. "
+                    "Remova 'columns', ou remova 'coalesce' para redistribuir por chave."
+                )
+            if num is None:
+                raise ValueError("repartition: 'coalesce' exige 'num_partitions'.")
+            # coalesce só reduz: pedir mais partições do que existem é no-op silencioso.
+            return df.coalesce(num)
+
+        exprs = [F.expr(str(column)) for column in columns]
+
+        if by_range:
+            if not exprs:
+                raise ValueError(
+                    "repartition: 'range' exige 'columns' — repartitionByRange divide "
+                    "por faixa de valor, e sem coluna não há faixa."
+                )
+            if num is None:
+                return df.repartitionByRange(*exprs)
+            return df.repartitionByRange(num, *exprs)
+
+        if exprs:
+            if num is None:
+                return df.repartition(*exprs)
+            return df.repartition(num, *exprs)
+        return df.repartition(num)
+
+
 class CheckpointTransformation(BaseTransformation):
     """Materializa o DataFrame e trunca seu plano lógico (checkpoint).
 

@@ -3,7 +3,8 @@
  * inspection rather than plain row/column work.
  *
  * `join` and `union` pull a second DataFrame from the canvas, `group_by` reshapes
- * the schema wholesale, `checkpoint` / `stop_if_empty` / `collect` steer execution,
+ * the schema wholesale, `repartition` changes the cost of the write without touching
+ * the data, `checkpoint` / `stop_if_empty` / `collect` steer execution,
  * `debug` observes without touching the data, and `$include` is not a runtime
  * transformation at all — it is a pre-parse directive.
  */
@@ -498,6 +499,203 @@ const groupByDef: TransformationDef = {
         '  "by": ["cnpj_entidade"],',
         '  "agg": ["sum(valor_duplicata) as total"],',
         '  "pivot": { "column": "mes", "values": ["jan", "fev", "mar"] }',
+        '}',
+      ),
+    },
+  ],
+}
+
+/**
+ * `repartition` accepts a single string or a list (transform/builtin.py), and every
+ * entry goes through `F.expr` — so SQL expressions are legal here, unlike `sort`.
+ */
+const repartitionColumns = (params: Record<string, unknown>): string[] => {
+  const raw = params.columns
+  if (typeof raw === 'string') return raw.trim() === '' ? [] : [raw]
+  if (!Array.isArray(raw)) return []
+  return raw.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+}
+
+const repartitionDef: TransformationDef = {
+  type: 'repartition',
+  label: 'Repartition',
+  family: 'control',
+  accent: 'control',
+  icon: 'Shuffle',
+  summary: 'Redistributes the DataFrame across partitions — changes cost, never data.',
+  description: lines(
+    'Two independent decisions produce the files a pipeline writes: `partition_by` on the output decides **which directories exist**, and this node decides **how many tasks write into them**. Files written = one per (task, directory) pair that holds rows, which is why 200 shuffle partitions over 30 days of `dt` can leave 6,000 files behind.',
+    '',
+    'Repartitioning by the same key the output partitions by collapses that to one file per key value, because a single key value never splits across tasks — AQE merges neighbouring partitions but never separates one.',
+    '',
+    'The other three shapes:',
+    '',
+    '- **Count only** — set the write parallelism, or force a single output file with `1`.',
+    '- **Columns only** — co-locate rows by key ahead of a join or a window on the same key, skipping the shuffle those would do themselves.',
+    '- **Range** — `repartitionByRange`, which splits by value range instead of by hash. Sorted, roughly balanced partitions; the boundaries come from sampling, so they are not deterministic.',
+    '',
+    'It never changes rows or columns. Removing this node can only change how much the job costs.',
+  ),
+  fields: [
+    {
+      key: 'num_partitions',
+      label: 'Partition count',
+      type: 'number',
+      placeholder: '64',
+      help: 'Target number of partitions. Optional when columns are given.',
+      docs: lines(
+        'With columns set, this only caps the shuffle width — it does not decide the file count, since one key value always lands in one task.',
+        '',
+        'Left empty with columns set, Spark uses `spark.sql.shuffle.partitions` (200 by default) and AQE then coalesces the empty ones away, so the observed partition count is often far lower than 200.',
+        '',
+        '`1` is the honest way to write a single file: it pays one shuffle and keeps everything upstream of it parallel. `coalesce` with `1` does not — see the Coalesce field.',
+      ),
+      validate: (value, params) => {
+        const columns = repartitionColumns(params)
+        if (value === undefined || value === null || value === '') {
+          if (columns.length === 0)
+            return 'Set a partition count, columns, or both — with neither there is nothing to redistribute.'
+          if (params.coalesce === true) return 'Coalesce needs an explicit partition count.'
+          return null
+        }
+        const num = Number(value)
+        if (!Number.isInteger(num)) return 'Partition count must be a whole number.'
+        if (num < 1) return 'Partition count must be 1 or more.'
+        return null
+      },
+    },
+    {
+      key: 'columns',
+      label: 'Partition by',
+      type: 'sql-list',
+      placeholder: 'dt',
+      help: 'Hash key for the redistribution. SQL expressions are accepted.',
+      docs: lines(
+        'Each entry goes through `F.expr`, so `pmod(hash(id), 64)` is as valid as a plain column name.',
+        '',
+        'Match these to the output `partition_by` to get one file per directory. Match them to a join or window key to pre-shuffle the data for that operator.',
+        '',
+        'Skew warning: hashing by key cannot split a single dominant value. If one key holds 40% of the rows, its partition holds 40% of the rows.',
+      ),
+      validate: (value, params) => {
+        const columns = repartitionColumns(params)
+        if (columns.length === 0) {
+          if (params.range === true)
+            return 'repartitionByRange splits by value range — add at least one column.'
+          return null
+        }
+        if (params.coalesce === true)
+          return 'Coalesce merges neighbouring partitions without a shuffle, so there is no key to group by. Clear the columns, or turn Coalesce off.'
+        if (Array.isArray(value) && value.some((item) => typeof item !== 'string'))
+          return 'Every entry must be a column name or a SQL expression.'
+        return null
+      },
+    },
+    {
+      key: 'coalesce',
+      label: 'Coalesce',
+      type: 'boolean',
+      default: false,
+      group: 'advanced',
+      help: 'Merge partitions without a shuffle. Reduces only.',
+      docs: lines(
+        '`coalesce` merges neighbouring partitions in place — no shuffle, no network. The catch is that it also reduces the parallelism of **everything upstream**: `coalesce(1)` at the end of a chain makes the whole preceding stage run in a single task.',
+        '',
+        'To write one file after a parallel computation, leave this off and set the partition count to `1` — a shuffle in exchange for keeping the computation distributed.',
+        '',
+        'Asking for more partitions than currently exist is a silent no-op: coalesce only reduces.',
+      ),
+      validate: (value, params) => {
+        if (value !== true) return null
+        if (params.range === true)
+          return 'Coalesce and Range are exclusive: coalesce merges neighbours with no shuffle, repartitionByRange redistributes by value range with one.'
+        if (repartitionColumns(params).length > 0)
+          return 'Coalesce takes no columns — it has no key to group by.'
+        const num = params.num_partitions
+        if (num === undefined || num === null || num === '')
+          return 'Coalesce needs an explicit partition count.'
+        return null
+      },
+    },
+    {
+      key: 'range',
+      label: 'Range',
+      type: 'boolean',
+      default: false,
+      group: 'advanced',
+      help: 'Use repartitionByRange — split by value range instead of by hash.',
+      docs: lines(
+        'Range partitioning sorts and slices by value, so each partition holds a contiguous band of the key. Two things it buys: partitions of comparable size even when the hash distribution is uneven, and files whose min/max statistics are narrow, which lets a range filter on the reader side skip whole files.',
+        '',
+        'The boundaries come from a sample of the data, so they are not deterministic across runs, and a rerun can move rows between partitions.',
+      ),
+      validate: (value, params) => {
+        if (value !== true) return null
+        if (params.coalesce === true) return 'Coalesce and Range are exclusive.'
+        if (repartitionColumns(params).length === 0)
+          return 'Range needs at least one column — without a key there is no range to split on.'
+        return null
+      },
+    },
+  ],
+  keywords: [
+    'repartition',
+    'coalesce',
+    'repartitionByRange',
+    'shuffle',
+    'small files',
+    'partitions',
+    'skew',
+    'bucket',
+    'parallelism',
+    'maxRecordsPerFile',
+  ],
+  gotchas: [
+    'It changes cost, never results: this node cannot alter rows or columns, only the number of tasks and files.',
+    'The canonical anti-small-files shape is repartition by the same columns the output partitions by — one file per directory, because a key value never splits across tasks.',
+    'With columns and no count, the partition count is spark.sql.shuffle.partitions (200) and AQE then merges the empty ones, so a real run can report a single partition. That does not weaken the one-file-per-key guarantee: AQE merges partitions, it never splits a key.',
+    'coalesce reduces the parallelism of every stage upstream of it, and is a silent no-op when asked for more partitions than exist. For a single output file after parallel work, use num_partitions 1 instead.',
+    'Repartitioning by key cannot fix skew on a single dominant value — the value is indivisible. Salting (repartition by concat of the key and pmod(hash(rand()), 8)) or maxRecordsPerFile on the output are the ways out.',
+    'repartitionByRange boundaries are sampled, so they are not stable between runs.',
+    'This is the write-side lever only. Read-side parallelism comes from spark.sql.files.maxPartitionBytes and, for JDBC, from partitionColumn.',
+  ],
+  examples: [
+    {
+      title: 'One file per output partition (the usual reason to use this)',
+      json: lines(
+        '{ "type": "repartition", "columns": ["dt"] }',
+        '// with output: { "partition_by": ["dt"] }',
+      ),
+    },
+    {
+      title: 'Materialized hash bucket for a high-cardinality key',
+      json: lines(
+        '{ "type": "with_column", "column": "bucket", "expression": "pmod(hash(id), 64)" },',
+        '{ "type": "repartition", "num_partitions": 64, "columns": ["bucket"] }',
+      ),
+    },
+    {
+      title: 'Single output file, computation still parallel',
+      json: lines('{ "type": "repartition", "num_partitions": 1 }'),
+    },
+    {
+      title: 'Fewer, bigger files with no shuffle',
+      json: lines(
+        '{',
+        '  "type": "repartition",',
+        '  "num_partitions": 8,',
+        '  "coalesce": true',
+        '}',
+      ),
+    },
+    {
+      title: 'Sorted, balanced partitions by range',
+      json: lines(
+        '{',
+        '  "type": "repartition",',
+        '  "num_partitions": 16,',
+        '  "columns": ["data_evento"],',
+        '  "range": true',
         '}',
       ),
     },
@@ -1022,6 +1220,7 @@ export const ADVANCED_TRANSFORMATIONS: TransformationDef[] = [
   joinDef,
   unionDef,
   groupByDef,
+  repartitionDef,
   checkpointDef,
   stopIfEmptyDef,
   collectDef,

@@ -253,6 +253,14 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
     { "type": "sql", "query": "SELECT ...", "view_name": "_df" },
     { "type": "fill_na", "value": 0, "columns": ["col"] },
     { "type": "sort", "columns": ["col"], "ascending": true },
+    // repartition: muda o CUSTO, nunca os dados — quantas tasks (e portanto quantos
+    // arquivos por diretório de partition_by) existem daqui para frente.
+    // Pelo menos um de num_partitions/columns. columns aceita expressão SQL.
+    // coalesce: true → df.coalesce(n), só REDUZ e sem shuffle (exige num_partitions,
+    // recusa columns). range: true → repartitionByRange (divide por faixa, exige columns).
+    { "type": "repartition", "num_partitions": 200 },
+    { "type": "repartition", "num_partitions": 64, "columns": ["pmod(hash(id), 64)"] },
+    { "type": "repartition", "num_partitions": 1, "coalesce": true },
     // $include: expande inline o conteúdo de um arquivo JSON (caminho relativo ao pipeline)
     { "$include": "shared/filtro_tipo_ativo.json" },
     {
@@ -404,6 +412,8 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
     "format": "csv|parquet|iceberg|delta|txt|kafka|view",
     "path": "string",
     "mode": "overwrite|append|merge",
+    // partition_by: nomes de coluna. No Iceberg aceita também os transforms de
+    // particionamento oculto: bucket(16, id), years/months/days/hours(ts).
     "partition_by": ["col"],
     "columns": ["col_a", "col_b"],    // opcional: projeta só essas colunas
     // transformations: opcional — transformações próprias deste destino aplicadas
@@ -500,6 +510,216 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
 > `orc`/`binary` são nativos. O framework só monta `.format(...).options(...)`; não
 > empacota drivers. Cada `io/<fmt>.py` documenta as opções; o catálogo do Studio
 > (`formats.databases.ts`, `formats.files.ts`) as descreve para a UI e a IA.
+
+---
+
+## Estratégia de leitura e escrita
+
+Particionamento não é uma opção do pipeline: é uma propriedade do **layout dos dados**.
+O framework não descobre esse layout sozinho — não há como "ler sempre particionado" por
+default. O que existe são alavancas explícitas, e a ordem em que compensam.
+
+### Leitura — não trazer o que não vai ser usado
+
+**1. Path direto na partição** — o mais barato: nem lista o resto da tabela.
+
+```jsonc
+{ "format": "parquet", "path": "/lake/vendas/dt=2026-09-01" }
+{ "format": "parquet", "path": "/lake/vendas/dt=2026-09-0*" }   // glob também funciona
+```
+
+Gotcha: **a coluna de partição desaparece do schema.** O Spark deduz as colunas de
+partição dos diretórios *abaixo* do caminho apontado — apontando para dentro de
+`dt=...` não sobra nada para deduzir, e `dt` não existe no DataFrame. `basePath`
+devolve a coluna:
+
+```jsonc
+{ "format": "parquet", "path": "/lake/vendas/dt=2026-09-01",
+  "options": { "basePath": "/lake/vendas" } }
+```
+
+**2. `filter` como primeira transformação** — é o que dá *partition pruning* e
+*predicate pushdown*, os dois automáticos:
+
+```jsonc
+"input": { "format": "parquet", "path": "/lake/vendas" },
+"transformations": [
+  { "type": "filter", "condition": "dt >= '2026-09-01' AND uf = 'SP'" },
+  { "type": "select", "columns": ["id", "valor", "dt"] }
+]
+```
+
+Não existe `input.partition_filter`, e não vai existir: seria um segundo lugar para
+escrever a mesma coisa. O Catalyst empurra o predicado para dentro do scan — dá para
+conferir com `{ "type": "debug", "actions": ["explain"] }`, onde aparecem
+`PartitionFilters` (diretórios descartados sem abrir arquivo) e `PushedFilters`
+(row-groups Parquet descartados sem descomprimir). Um `input.partition_filter`
+produziria exatamente o mesmo plano.
+
+O que **não** é automático: o pruning só acontece se a coluna filtrada for coluna de
+partição na origem. Filtro sobre coluna comum lê todos os diretórios e conta apenas
+com o pushdown de row-group. Vale o mesmo para `{{var}}` de `collect`, que virou
+`IN (literal, literal, …)` — poda se a coluna for de partição.
+
+**3. Paralelismo do scan** — quantas tasks leem, via `spark.configs`:
+
+```jsonc
+"spark": { "configs": {
+  "spark.sql.files.maxPartitionBytes": "134217728",   // default 128 MB por task
+  "spark.sql.shuffle.partitions": "200"               // partições após cada shuffle
+} }
+```
+
+### JDBC — a leitura mais fácil de errar
+
+Sem `partitionColumn` o Spark abre **uma conexão e uma task**: a tabela inteira passa
+por um executor, não importa quantos existam no cluster. Três alavancas, nesta ordem:
+
+**a) Filtre no banco.** `query` (SELECT completo) ou `dbtable` com subquery — o que não
+sai do banco não custa rede nem memória:
+
+```jsonc
+{ "format": "postgresql", "path": "public.vendas",
+  "options": { "host": "db.internal", "database": "app", "user": "sparquet",
+               "password": "{db_password}",
+               "query": "SELECT id, valor, dt FROM public.vendas WHERE dt >= '{data_corte}'" } }
+```
+
+**b) Paralelize o que sobrou.** `partitionColumn` + os outros três — o Spark gera
+`numPartitions` queries com `WHERE col >= a AND col < b`:
+
+```jsonc
+{ "format": "postgresql", "path": "public.vendas",
+  "options": { "host": "db.internal", "database": "app",
+               "dbtable": "(SELECT id, valor, dt FROM public.vendas WHERE dt >= '2026-09-01') t",
+               "partitionColumn": "id", "lowerBound": "1",
+               "upperBound": "50000000", "numPartitions": "16",
+               "fetchsize": "10000" } }
+```
+
+- **`query` e `partitionColumn` são exclusivos** no Spark. Para os dois juntos, mova o
+  SELECT para `dbtable` como subquery **com alias** (o `t` do exemplo). O reader recusa
+  a combinação com uma mensagem que diz isso, em vez de deixar o Spark falhar depois.
+- **O quarteto é all-or-none**: `partitionColumn` sem `lowerBound`/`upperBound`/
+  `numPartitions` levanta `ValueError` nomeando o que falta. O inverso — limites sem
+  `partitionColumn` — o Spark **ignora em silêncio** e lê em uma task; aí o framework
+  emite warning em vez de recusar.
+- `lowerBound`/`upperBound` **não filtram nada**: são só a régua da divisão. Linhas fora
+  do intervalo entram nas partições das pontas, que ficam gordas. Para filtrar, use
+  `query`/`dbtable`.
+- A coluna precisa ser numérica/data **e indexada**: são N queries de faixa — sem índice
+  são N full scans, e paralelizar fica mais lento que não paralelizar.
+
+**c) Ajuste o transporte.** `fetchsize` (linhas por round-trip) — o default do driver
+raramente serve: o Postgres traz tudo de uma vez (risco de OOM no executor), o Oracle
+traz 10 por vez (um round-trip a cada 10 linhas). `pushDownPredicate` (default `true`),
+`pushDownAggregate` e `pushDownLimit` empurram filtro, agregação e LIMIT para o banco;
+passam direto ao Spark via `options`.
+
+### Escrita — quantos diretórios, quantos arquivos
+
+São duas decisões independentes, e confundi-las é a origem do problema de *small files*:
+
+| Decisão | Quem controla | Erro típico |
+|---|---|---|
+| **Quais diretórios existem** | `partition_by` do output | particionar por coluna de alta cardinalidade → um diretório por linha |
+| **Quantas tasks escrevem** (⇒ arquivos por diretório) | `repartition` na cadeia | nenhuma → cada task abre um arquivo em cada diretório que toca |
+
+Arquivos gravados = pares *(task, diretório)* com linhas. Com 200 partições de shuffle
+e `partition_by: ["dt"]` sobre 30 dias, isso são até **6.000 arquivos**. Reparticionando
+pela mesma chave, cada valor de `dt` cai numa única task e saem **30**:
+
+```jsonc
+"transformations": [
+  { "type": "repartition", "columns": ["dt"] }
+],
+"output": { "format": "parquet", "path": "/lake/vendas",
+            "mode": "overwrite", "partition_by": ["dt"] }
+```
+
+A garantia vale porque um valor de chave nunca se divide entre tasks (o AQE funde
+partições vizinhas, nunca as separa) — por isso `num_partitions` aqui só regula o
+paralelismo da escrita, não a contagem de arquivos. Teto complementar, para o caso de
+um diretório muito grande: `"options": { "maxRecordsPerFile": "2000000" }`.
+
+**`coalesce` vs `repartition`.** `coalesce` funde partições vizinhas sem shuffle, mas
+reduz o paralelismo **de tudo para trás**: `coalesce(1)` no fim faz o estágio anterior
+inteiro rodar numa única task. Para gravar um arquivo só depois de um cálculo paralelo,
+`repartition` com `num_partitions: 1` paga um shuffle e mantém o cálculo distribuído.
+E `coalesce` com `n` maior que o número atual de partições é **no-op silencioso** — ele
+só reduz.
+
+### Bucket por hash
+
+Quando a chave natural tem cardinalidade alta demais para `partition_by` (um `id`), o
+padrão é materializar um bucket e particionar por ele:
+
+```jsonc
+"transformations": [
+  { "type": "with_column", "column": "bucket", "expression": "pmod(hash(id), 64)" },
+  { "type": "repartition", "num_partitions": 64, "columns": ["bucket"] }
+],
+"output": { "format": "parquet", "path": "/lake/eventos",
+            "mode": "overwrite", "partition_by": ["bucket"] }
+```
+
+- **`pmod`, nunca `%`.** `hash()` é Murmur3 de 32 bits **com sinal**: `hash(id) % 64`
+  devolve negativo para metade das chaves e cria diretórios `bucket=-17`.
+- **`hash(null)` é constante** — coluna nullable manda todos os nulos para o mesmo
+  bucket. Trate antes (`coalesce(id, '')`) ou filtre.
+- **N vem do tamanho de arquivo alvo** (`total_bytes / 128 MB…1 GB`), não de
+  primalidade. Murmur3 já avalancha: `% 64` distribui igual a `% 61`. A regra do
+  "módulo primo" vem de tabela hash com hash fraco ou identidade (`Integer.hashCode`
+  devolve o próprio valor, e aí ids múltiplos de 10 concentram em módulo potência
+  de 2) — não é o caso aqui. Primo não atrapalha; só não ajuda.
+- **O que bucket resolve:** cardinalidade limitada e espalhamento uniforme entre
+  diretórios. **O que não resolve:** (a) *skew* de chave única — um `id` com 40% das
+  linhas cai inteiro num bucket; (b) pruning por `id` — quem lê filtrando `id = 'X'` só
+  poda se filtrar `bucket = pmod(hash('X'), 64)` também. Bucket materializado troca
+  pruning por controle de arquivo.
+
+### Skew
+
+- **Em join:** o AQE já divide a partição gorda (`spark.sql.adaptive.skewJoin.enabled`,
+  ligado por default no Spark 3.2+). Para dimensão pequena, `"broadcast": true` no
+  `join` elimina o shuffle inteiro.
+- **Na escrita, com uma chave dominante:** nem bucket nem `repartition` ajudam — o valor
+  é indivisível por definição. As saídas são *salting* (reparticionar por
+  `concat(chave, '-', pmod(hash(rand()), 8))`) ou aceitar o diretório grande e limitar o
+  arquivo com `maxRecordsPerFile`.
+- **Diagnóstico:** `{ "type": "debug", "actions": ["count"] }` não mostra skew; a
+  distribuição aparece num `group_by` da chave suspeita com `count(*)`, ou na aba Stages
+  da Spark UI (duração máxima ≫ mediana).
+
+### Iceberg — particionamento oculto
+
+No Iceberg, `partition_by` aceita também os *transforms* de particionamento, e essa é a
+**única** forma que mantém o pruning:
+
+```jsonc
+"output": { "format": "iceberg", "path": "catalogo.vendas.eventos", "mode": "overwrite",
+            "partition_by": ["days(data_evento)", "bucket(16, id)"] }
+```
+
+O Iceberg guarda a relação coluna→transform nos metadados da tabela, então
+`WHERE id = 'X'` poda os buckets e `WHERE data_evento = '2026-09-01'` poda os dias sem
+que quem lê saiba que existe transform — o oposto do bucket materializado à mão.
+
+- Transforms aceitos: `bucket(n, col)`, `years(col)`, `months(col)`, `days(col)`,
+  `hours(col)`. O `truncate` do Iceberg não tem função equivalente no Spark: declare-o
+  no DDL da tabela e deixe `partition_by` vazio.
+- **Exige tabela de catálogo** (`catalogo.schema.tabela`). Com transform a escrita passa
+  pelo `writeTo` (DataFrameWriterV2), porque o `partitionBy` do writer V1 só aceita nome
+  de coluna — e `writeTo` não aceita caminho físico. Para destino em path, materialize o
+  bucket numa coluna (receita acima).
+- **A spec pertence à tabela, não à escrita:** ela é aplicada em `create` /
+  `createOrReplace`. `mode: "append"` numa tabela existente usa a spec que a tabela já
+  tem, e trocar `partition_by` num pipeline de append não reparticiona o que já está
+  gravado. No `mode: "merge"`, a primeira carga (quando a tabela ainda não existe) cria
+  a tabela com o `partition_by` declarado — é a única execução em que ele tem efeito.
+- **`bucketBy` do Spark não é alternativa:** só funciona com `saveAsTable` (bucketing
+  Hive), `save(path)` o recusa, e o Delta não o suporta. É por isso que bucket
+  declarativo existe só no Iceberg.
 
 ---
 

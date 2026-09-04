@@ -9,7 +9,7 @@
 
 import type { FieldOption, FieldSpec, FormatDef } from '@/catalog/types'
 import { DATABASE_FORMATS } from './formats.databases'
-import { FILE_FORMATS } from './formats.files'
+import { FILE_FORMATS, basePathOption } from './formats.files'
 
 /**
  * The framework never coerces option values and PySpark stringifies whatever it
@@ -92,6 +92,7 @@ export const FORMATS: FormatDef[] = [
     supportsPartitioning: true,
     supportsMerge: false,
     readOptions: [
+      basePathOption('/data/bronze/clientes'),
       {
         key: 'mergeSchema',
         label: 'Merge schema',
@@ -400,7 +401,10 @@ export const FORMATS: FormatDef[] = [
       'There is no source de-duplication: two source rows matching one target row raise a runtime error.',
       'Registers the temp view _spark_fw_merge_src, the same name the Delta writer uses.',
       'Runs through spark.sql(), so the Iceberg session extensions and catalog must be configured.',
-      'partition_by is ignored on merge, and on save it is only honored by the connector at table-creation time.',
+      'partition_by accepts Iceberg partition transforms as well as plain column names: bucket(n, col), years(col), months(col), days(col), hours(col). A transform routes the write through DataFrameWriterV2 (writeTo), which only exists over a catalog table, so a filesystem path combined with a transform is refused with a message telling you to materialize the bucket instead. Iceberg truncate has no Spark function equivalent — declare it in the table DDL and leave partition_by empty.',
+      'A transform is what preserves pruning: Iceberg stores the column-to-transform relation in the table metadata, so WHERE id = X prunes the buckets by itself. A bucket column materialized by hand with pmod(hash(id), N) is only pruned by a filter on that column.',
+      'The partition spec belongs to the table, not to the write: it is applied by create / createOrReplace. An append into an existing table uses the spec the table already has, so changing partition_by in an append pipeline repartitions nothing that is already written.',
+      'On merge, partition_by takes effect only on the first load — the one run where the table does not exist yet and gets created. Every later merge uses the spec the table already carries.',
     ],
     examples: [
       {
@@ -426,6 +430,15 @@ export const FORMATS: FormatDef[] = [
   }
 }`,
       },
+      {
+        title: 'Hidden partitioning: one day per directory, 16 buckets per id',
+        json: `{
+  "format": "iceberg",
+  "path": "catalog.db.eventos",
+  "mode": "overwrite",
+  "partition_by": ["days(data_evento)", "bucket(16, id)"]
+}`,
+      },
     ],
   },
 
@@ -446,6 +459,7 @@ export const FORMATS: FormatDef[] = [
     supportsPartitioning: true,
     supportsMerge: false,
     readOptions: [
+      basePathOption('/data/raw/vendas'),
       {
         key: 'header',
         label: 'Header',
@@ -661,6 +675,7 @@ export const FORMATS: FormatDef[] = [
     supportsPartitioning: true,
     supportsMerge: false,
     readOptions: [
+      basePathOption('/data/logs'),
       {
         key: 'wholetext',
         label: 'Whole text',

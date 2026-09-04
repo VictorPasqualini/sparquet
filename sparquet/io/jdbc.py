@@ -3,11 +3,44 @@ from __future__ import annotations
 from pyspark.sql import DataFrame
 
 from sparquet.io.base import BaseReader, BaseWriter
+from sparquet.utils.logger import defer_warning
 
 # Chaves consumidas pelo framework para montar a conexão — não são repassadas ao
 # Spark como opções soltas (url/driver/dbtable/query são aplicadas explicitamente;
 # host/port/database servem só para montar a url quando 'url' não é informada).
 _CONN_KEYS = {"url", "driver", "host", "port", "database", "dbtable", "query"}
+
+
+# Quarteto de leitura paralela do Spark JDBC: `partitionColumn` só funciona com os
+# outros três. O Spark exige "all or none" e falha com uma mensagem genérica; as
+# outras três sem `partitionColumn` são IGNORADAS em silêncio e a leitura cai para
+# uma única task/conexão.
+_PARTITION_KEYS = ("partitionColumn", "lowerBound", "upperBound", "numPartitions")
+
+
+def _validate_read_partitioning(opts: dict, who: str) -> None:
+    """Recusa (ou avisa sobre) um quarteto de leitura paralela incompleto."""
+    present = [key for key in _PARTITION_KEYS if opts.get(key) not in (None, "")]
+    if not present:
+        return
+
+    if "partitionColumn" in present:
+        missing = [key for key in _PARTITION_KEYS if key not in present]
+        if missing:
+            raise ValueError(
+                f"{who}: 'partitionColumn' exige também {', '.join(missing)} — o Spark "
+                f"pede os quatro juntos ({', '.join(_PARTITION_KEYS)}). Informe os "
+                f"limites (ex: SELECT min/max da coluna) ou remova 'partitionColumn'."
+            )
+        return
+
+    defer_warning(
+        f"{who}: {', '.join(present)} sem 'partitionColumn' — o Spark IGNORA essas "
+        f"opções na leitura e a tabela inteira vem numa única task/conexão. "
+        f"Informe 'partitionColumn' (coluna numérica/data) com lowerBound, "
+        f"upperBound e numPartitions para ler em paralelo.",
+        options=present,
+    )
 
 
 class _JdbcDialect:
@@ -57,18 +90,43 @@ class JdbcReader(BaseReader, _JdbcDialect):
       query      – SELECT usado no lugar de 'dbtable' (não pode coexistir com dbtable)
       dbtable    – sobrepõe 'path' como tabela/subquery
       partitionColumn/lowerBound/upperBound/numPartitions – leitura paralela
+                   (os QUATRO juntos; ver _validate_read_partitioning)
       fetchsize  – linhas por round-trip
+      pushDownPredicate / pushDownAggregate / pushDownLimit – empurram filtro,
+                   agregação e LIMIT para o banco (passam direto ao Spark)
+      sessionInitStatement / queryTimeout / customSchema – idem
+
+    Estratégia de leitura: sem 'partitionColumn' a tabela inteira vem numa única
+    conexão e numa única task — todo o volume passa por um executor. Filtrar no
+    banco (via 'query', ou 'dbtable' com subquery) é o que evita trazer o que
+    não será usado; 'partitionColumn' é o que paraleliza o que sobra.
     """
 
     def read(self) -> DataFrame:
         opts = dict(self.config.options)
+        query = opts.get("query")
+
+        if query and opts.get("dbtable"):
+            raise ValueError(
+                f"{type(self).__name__}: 'query' e 'dbtable' são exclusivos — o Spark "
+                f"recusa os dois juntos. Deixe só 'query' (SELECT completo), ou só "
+                f"'dbtable' (tabela, ou subquery com alias: \"(SELECT ...) t\")."
+            )
+        if query and opts.get("partitionColumn"):
+            raise ValueError(
+                f"{type(self).__name__}: 'query' e 'partitionColumn' são exclusivos no "
+                f"Spark. Para ler em paralelo um recorte da tabela, mova o SELECT para "
+                f"'dbtable' como subquery com alias — \"(SELECT ... WHERE ...) t\" — e "
+                f"mantenha partitionColumn/lowerBound/upperBound/numPartitions."
+            )
+        _validate_read_partitioning(opts, type(self).__name__)
+
         reader = self.spark.read.format("jdbc").option("url", self._resolve_url(opts))
 
         driver = opts.get("driver", self._DRIVER)
         if driver:
             reader = reader.option("driver", driver)
 
-        query = opts.get("query")
         if query:
             reader = reader.option("query", query)
         else:
