@@ -104,6 +104,65 @@ export interface RunnerCapabilities {
   validators: string[]
 }
 
+/** One field of a schema the runner read from the storage itself. */
+export interface RunnerSchemaField {
+  name: string
+  /** Spark's own rendering of the type, such as `decimal(18,2)`. */
+  type: string
+  nullable: boolean
+}
+
+export interface RunnerDatasetSchema {
+  format: string
+  path: string
+  fields: RunnerSchemaField[]
+  /** When the runner opened the dataset, ISO-8601. */
+  readAt: string
+}
+
+/** The dataset to open, in the same shape a Job's `input` block has. */
+export interface DatasetSchemaRequest {
+  format: string
+  path: string
+  options?: Record<string, unknown>
+  /** Session config, honoured only while the runner has no SparkSession yet. */
+  spark?: Record<string, unknown>
+}
+
+/** One dataset the SQL may name: opened by the runner and registered as a temp view. */
+export interface QuerySource {
+  /** The view name the SQL writes in its FROM clause. */
+  alias: string
+  format: string
+  path: string
+  options?: Record<string, unknown>
+}
+
+export interface RunQueryRequest {
+  sql: string
+  sources: QuerySource[]
+  /** Rows the runner may return. It reads one more, to know it cut the result. */
+  limit?: number
+  /**
+   * Chosen here rather than by the runner: the response only arrives once the
+   * query is over, so cancelling it needs the id up front.
+   */
+  queryId?: string
+  timeoutSeconds?: number
+  /** Session config, honoured only while the runner has no SparkSession yet. */
+  spark?: Record<string, unknown>
+}
+
+export interface RunnerQueryResult {
+  queryId: string
+  columns: string[]
+  fields: RunnerSchemaField[]
+  rows: unknown[][]
+  /** The result had more rows than the limit asked for. */
+  truncated: boolean
+  elapsedMs: number
+}
+
 export interface RunnerValidation {
   valid: boolean
   error?: string
@@ -325,6 +384,135 @@ export async function validateJob(
   return {
     valid: asBoolean(payload.valid),
     error: optionalString(payload.error),
+  }
+}
+
+/**
+ * The schema a dataset really has, read by the runner.
+ *
+ * The catalog derives a schema from the canvas, which says what a Job intends to
+ * write. This says what is actually there, so the two can be compared. Reads no
+ * rows: the runner builds a reader and takes `df.schema`.
+ */
+export async function fetchDatasetSchema(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: DatasetSchemaRequest,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<RunnerDatasetSchema> {
+  let payload: Record<string, unknown>
+  try {
+    payload = expectRecord(
+      await requestJson(baseUrl, '/dataset/schema', jsonPost(body, token), signal),
+    )
+  } catch (error) {
+    // A runner started before this route existed answers 404 for the ROUTE, and
+    // FastAPI's bare "Not Found" reads as if the dataset were missing — the
+    // opposite of what happened. Say which of the two it is.
+    if (isRunnerError(error) && error.status === 404) {
+      throw new RunnerError(
+        'This runner has no /dataset/schema route: it was started from a version that ' +
+          'predates it. Restart the runner and try again.',
+        'http',
+        404,
+        error,
+      )
+    }
+    throw error
+  }
+  return {
+    format: asString(payload.format, body.format),
+    path: asString(payload.path, body.path),
+    fields: asArray(payload.fields)
+      .filter(isRecord)
+      .map((field) => ({
+        name: asString(field.name),
+        type: asString(field.type),
+        nullable: asBoolean(field.nullable, true),
+      }))
+      .filter((field) => field.name.length > 0),
+    readAt: asString(payload.read_at),
+  }
+}
+
+/**
+ * Runs one read-only SQL statement on the runner.
+ *
+ * Each source is opened by the framework's own `ReaderFactory` and registered as
+ * a temp view, so the query reads a Delta or Iceberg table exactly as a Job
+ * would, and the SQL only has to name the alias.
+ */
+export async function runQuery(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  body: RunQueryRequest,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<RunnerQueryResult> {
+  const payloadBody = {
+    sql: body.sql,
+    sources: body.sources.map((source) => ({
+      alias: source.alias,
+      format: source.format,
+      path: source.path,
+      options: source.options ?? {},
+    })),
+    limit: body.limit,
+    query_id: body.queryId,
+    timeout_seconds: body.timeoutSeconds,
+    spark: body.spark,
+  }
+
+  let payload: Record<string, unknown>
+  try {
+    payload = expectRecord(await requestJson(baseUrl, '/query', jsonPost(payloadBody, token), signal))
+  } catch (error) {
+    // FastAPI answers a bare "Not Found" for an unknown ROUTE, which reads as if
+    // the data were missing. A runner older than this route is the real cause.
+    if (isRunnerError(error) && error.status === 404) {
+      throw new RunnerError(
+        'This runner has no /query route: it was started from a version that predates ' +
+          'the SQL editor. Restart the runner and try again.',
+        'http',
+        404,
+        error,
+      )
+    }
+    throw error
+  }
+
+  return {
+    queryId: asString(payload.query_id, body.queryId ?? ''),
+    columns: asStringArray(payload.columns),
+    fields: asArray(payload.fields)
+      .filter(isRecord)
+      .map((field) => ({
+        name: asString(field.name),
+        type: asString(field.type),
+        nullable: asBoolean(field.nullable, true),
+      })),
+    rows: asArray(payload.rows).map((row) => asArray(row)),
+    truncated: asBoolean(payload.truncated),
+    elapsedMs: asNumber(payload.elapsed_ms),
+  }
+}
+
+/**
+ * Stops a query that is still running.
+ *
+ * Aborting the request only drops this end of the socket; Spark keeps computing
+ * until someone cancels the job group. Never throws: a query that already
+ * finished has nothing left to interrupt.
+ */
+export async function cancelQuery(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  queryId: string,
+  token?: string,
+): Promise<boolean> {
+  try {
+    await requestJson(baseUrl, `/query/${encodeURIComponent(queryId)}/cancel`, jsonPost({}, token))
+    return true
+  } catch {
+    return false
   }
 }
 

@@ -596,7 +596,170 @@ export const TEMPLATES: JobTemplate[] = [
       },
     } satisfies PipelineSpec,
   },
+  /* ------------------------------------------------------- lineage example */
+
+  {
+    id: 'medallion-bronze',
+    name: 'Medallion 1 · Orders to bronze',
+    summary:
+      'Lands the raw order drop as typed Parquet. First of three Jobs that chain by address alone.',
+    highlights: [
+      'The three Medallion Jobs are linked by nothing but the path: this one writes /lake/bronze/orders and the next one reads it',
+      'Landing keeps every row — filtering belongs downstream, where a rejected row can still be explained',
+      'ingested_at is stamped here so every later layer can say how old its input was',
+    ],
+    level: 'starter',
+    tags: ['medallion', 'lineage', 'parquet'],
+    pipeline: {
+      name: 'orders_bronze',
+      description: 'Raw order CSV landed as typed, partitioned Parquet.',
+      input: {
+        format: 'csv',
+        path: '/lake/landing/orders',
+        options: { header: 'true', inferSchema: 'true', sep: ',' },
+      },
+      transformations: [
+        {
+          type: 'cast',
+          columns: {
+            order_id: 'long',
+            customer_id: 'long',
+            amount: 'decimal(18,2)',
+            ordered_at: 'timestamp',
+          },
+        },
+        { type: 'with_column', column: 'ingested_at', expression: 'current_timestamp()' },
+      ],
+      output: {
+        format: 'parquet',
+        path: '/lake/bronze/orders',
+        mode: 'overwrite',
+        partition_by: ['country'],
+      },
+    } satisfies PipelineSpec,
+  },
+
+  {
+    id: 'medallion-silver',
+    name: 'Medallion 2 · Bronze to silver',
+    summary:
+      'Reads bronze, enriches it from the customer dimension and quarantines the rows that fail the rules.',
+    highlights: [
+      'Two reads, two roles: the pipeline input and the join side — lineage counts both as upstream',
+      'on_failure "warn" lets the run finish so the quarantine is actually written',
+      'The quarantine is a copy, not a fork: /lake/silver/orders still receives every row',
+    ],
+    level: 'intermediate',
+    tags: ['medallion', 'lineage', 'join', 'data-quality'],
+    pipeline: {
+      name: 'orders_silver',
+      description: 'Bronze orders enriched with customer attributes and checked before landing.',
+      input: { format: 'parquet', path: '/lake/bronze/orders' },
+      transformations: [
+        { type: 'filter', condition: "status = 'CONFIRMED'" },
+        {
+          type: 'join',
+          input: { format: 'parquet', path: '/lake/raw/customers' },
+          with_transformations: [
+            { type: 'select', columns: ['customer_id', 'customer_name', 'segment'] },
+          ],
+          on: 'customer_id',
+          how: 'left',
+        },
+        { type: 'fill_na', value: 'UNSEGMENTED', columns: ['segment'] },
+      ],
+      validations: {
+        on_failure: 'warn',
+        rules: [
+          { type: 'not_null', columns: ['order_id', 'customer_id'] },
+          { type: 'unique', columns: ['order_id'] },
+          { type: 'range', column: 'amount', min: 0 },
+        ],
+        report: { format: 'csv', path: '/lake/quality/orders_report', mode: 'append' },
+        outputs: {
+          invalid: {
+            format: 'parquet',
+            path: '/lake/quarantine/orders',
+            mode: 'overwrite',
+            annotate: 'dq_failures',
+          },
+        },
+      },
+      output: { format: 'parquet', path: '/lake/silver/orders', mode: 'overwrite' },
+    } satisfies PipelineSpec,
+  },
+
+  {
+    id: 'medallion-gold',
+    name: 'Medallion 3 · Silver to gold',
+    summary:
+      'Unions the backfill into silver and aggregates it into the table the dashboards read.',
+    highlights: [
+      'A union reads a dataset of its own, exactly like a join — it is upstream too',
+      'Two destinations from one chain: the Delta table and a CSV extract',
+      'Nothing reads the gold table back, which is what makes it terminal in the lineage',
+      'Delta needs its jar, and the JSON is where a job says so — that is what the spark block is for',
+    ],
+    level: 'intermediate',
+    tags: ['medallion', 'lineage', 'union', 'group_by'],
+    pipeline: {
+      name: 'orders_gold',
+      description: 'Revenue by country, from silver plus the backfill, for the dashboards.',
+      // A Delta destination is the first step in this chain that needs a jar the
+      // stock Spark does not ship. Pinned to the 4.x line, which is what
+      // `delta-spark_2.13:4.3.1` is built against.
+      spark: {
+        configs: {
+          'spark.jars.packages': 'io.delta:delta-spark_2.13:4.3.1',
+          'spark.sql.extensions': 'io.delta.sql.DeltaSparkSessionExtension',
+          'spark.sql.catalog.spark_catalog': 'org.apache.spark.sql.delta.catalog.DeltaCatalog',
+        },
+      },
+      input: { format: 'parquet', path: '/lake/silver/orders' },
+      transformations: [
+        { type: 'union', input: { format: 'parquet', path: '/lake/silver/orders_backfill' } },
+        {
+          type: 'group_by',
+          by: ['country'],
+          agg: [
+            'sum(amount) as revenue',
+            'count(distinct order_id) as orders',
+            'avg(amount) as avg_ticket',
+          ],
+        },
+        { type: 'with_column', column: 'computed_at', expression: 'current_timestamp()' },
+      ],
+      outputs: [
+        { format: 'delta', path: '/lake/gold/revenue_by_country', mode: 'overwrite' },
+        {
+          format: 'csv',
+          path: '/lake/exports/revenue_by_country',
+          mode: 'overwrite',
+          options: { header: 'true' },
+        },
+      ],
+    } satisfies PipelineSpec,
+  },
 ]
+
+/**
+ * The Medallion chain, in order — three Jobs that hand data to each other through
+ * addresses and nothing else. Loaded as a set from the Lineage screen, where the
+ * point is not any one of them but the shape they make together.
+ */
+export const LINEAGE_EXAMPLE_IDS = [
+  'medallion-bronze',
+  'medallion-silver',
+  'medallion-gold',
+] as const
+
+export const LINEAGE_EXAMPLE_WORKFLOW = 'Medallion example'
+
+export function lineageExampleTemplates(): JobTemplate[] {
+  return LINEAGE_EXAMPLE_IDS.map(getTemplate).filter(
+    (template): template is JobTemplate => template !== undefined,
+  )
+}
 
 export function getTemplate(id: string): JobTemplate | undefined {
   return TEMPLATES.find((template) => template.id === id)

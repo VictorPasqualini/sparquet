@@ -211,6 +211,67 @@ class ValidateRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
 
 
+class DatasetSchemaRequest(BaseModel):
+    """One dataset to open, in the same shape a Job's `input` block has."""
+
+    format: str
+    path: str
+    options: Optional[Dict[str, Any]] = None
+    #: Session config, as in a pipeline's `spark` block. Only honoured while no
+    #: SparkSession exists yet: `spark.jars.packages` and `spark.sql.extensions`
+    #: are read when the session is created and ignored afterwards, so a runner
+    #: that has already executed something keeps the session it has.
+    spark: Optional[Dict[str, Any]] = None
+
+
+class SchemaFieldOut(BaseModel):
+    name: str
+    #: Spark's own rendering of the type, nested types included, as in
+    #: `array<struct<id:bigint,name:string>>`.
+    type: str
+    nullable: bool = True
+
+
+class DatasetSchemaResponse(BaseModel):
+    format: str
+    path: str
+    fields: List[SchemaFieldOut]
+    read_at: str
+
+
+class QuerySource(BaseModel):
+    """One dataset made visible to the SQL as a temp view named `alias`."""
+
+    alias: str
+    format: str
+    path: str
+    options: Optional[Dict[str, Any]] = None
+
+
+class QueryRequest(BaseModel):
+    sql: str
+    sources: List[QuerySource] = Field(default_factory=list)
+    limit: int = DEFAULT_PREVIEW_LIMIT
+    #: Chosen by the caller so it can cancel a query that is still in flight —
+    #: the response only arrives when the query is already over.
+    query_id: Optional[str] = None
+    #: Cancels the query by itself after this many seconds. None leaves it to
+    #: run until it finishes or someone cancels it.
+    timeout_seconds: Optional[int] = None
+    #: As in `DatasetSchemaRequest`: honoured only while no SparkSession exists.
+    spark: Optional[Dict[str, Any]] = None
+
+
+class QueryResponse(BaseModel):
+    query_id: str
+    columns: List[str]
+    fields: List[SchemaFieldOut]
+    rows: List[List[Any]]
+    #: True when the query had more rows than `limit`, so the table can say so.
+    truncated: bool
+    elapsed_ms: int
+
+
 class ValidationOut(BaseModel):
     type: str
     passed: bool
@@ -1400,6 +1461,294 @@ def health() -> HealthResponse:
 def validate(body: ValidateRequest) -> ValidateResponse:
     error = _parse_config_error(body.pipeline, body.params)
     return ValidateResponse(valid=error is None, error=error)
+
+
+@app.post(
+    "/dataset/schema",
+    response_model=DatasetSchemaResponse,
+    dependencies=[Depends(requires("catalog:Inspect"))],
+)
+def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
+    """The schema a dataset really has, read from the storage itself.
+
+    The catalog in Studio derives a schema from the canvas, which is a claim
+    about what a Job writes. This opens the dataset and asks Spark, so the two
+    can be compared and a drift can be named. Nothing is written, and no rows
+    are collected: a reader is built and only `df.schema` is taken.
+    """
+    global _framework
+    if _framework is None and body.spark:
+        _framework = _import("sparquet").Sparquet(spark=body.spark)
+    framework = _get_framework()
+
+    config_module = _import("sparquet.core.config")
+    factory = _import("sparquet.io.factory")
+    try:
+        config = config_module.InputConfig.from_dict(
+            {"format": body.format, "path": body.path, "options": body.options or {}}
+        )
+        reader = factory.ReaderFactory.create(framework.spark, config)
+        schema = reader.read().schema
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=_describe(exc)) from exc
+
+    return DatasetSchemaResponse(
+        format=config.format,
+        path=config.path,
+        fields=[
+            SchemaFieldOut(
+                name=field.name,
+                type=field.dataType.simpleString(),
+                nullable=bool(field.nullable),
+            )
+            for field in schema.fields
+        ],
+        read_at=_now_iso(),
+    )
+
+
+#: A temp view name Spark accepts and that cannot carry SQL of its own — the
+#: alias is interpolated into the `FROM` clause, so it is never free text.
+_ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+#: The only statements the SQL editor may send. Everything else — INSERT, DROP,
+#: CREATE, MSCK, a `SET` that reconfigures the session — is refused before Spark
+#: sees it. This is a guard against a slip in the editor, not a sandbox: whoever
+#: holds `run:Execute` can already write anything through a Job.
+_READ_ONLY_HEADS = ("select", "with", "explain", "describe", "show")
+
+#: How long a query may run before the runner cancels it on its own.
+MAX_QUERY_TIMEOUT_SECONDS = 900
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Removes `--` and block comments, leaving quoted text alone.
+
+    A comment is how a second statement hides from a naive prefix check, as in
+    `select 1 --` followed by a newline and `; drop table t`, so the read-only
+    guard has to look at the SQL with the comments already gone.
+    """
+    out: List[str] = []
+    index, size = 0, len(sql)
+    quote: Optional[str] = None
+    while index < size:
+        char = sql[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and quote != "`":  # an escaped quote stays inside the string
+                if index + 1 < size:
+                    out.append(sql[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"`":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            end = sql.find("\n", index)
+            index = size if end < 0 else end
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = size if end < 0 else end + 2
+            out.append(" ")
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _splits_statement(sql: str) -> bool:
+    """True when a `;` separates two statements. A `;` inside a string literal
+    or a quoted identifier separates nothing, so quotes are tracked here too."""
+    quote: Optional[str] = None
+    index, size = 0, len(sql)
+    while index < size:
+        char = sql[index]
+        if quote is not None:
+            if char == "\\" and quote != "`":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char == ";":
+            return True
+        index += 1
+    return False
+
+
+def _read_only_sql(sql: str) -> str:
+    """Returns the single read-only statement in `sql`, or raises 400."""
+    stripped = _strip_sql_comments(sql).strip()
+    while stripped.endswith(";"):
+        stripped = stripped[:-1].rstrip()
+    if not stripped:
+        raise HTTPException(status_code=400, detail="Write a query first.")
+    if _splits_statement(stripped):
+        raise HTTPException(
+            status_code=400,
+            detail="Send one statement at a time: this query has more than one.",
+        )
+    head = stripped.split(None, 1)[0].lower()
+    if head not in _READ_ONLY_HEADS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{head.upper()}' is not allowed here: the SQL editor only reads. "
+                f"Start the query with {', '.join(word.upper() for word in _READ_ONLY_HEADS)}."
+            ),
+        )
+    return stripped
+
+
+def _query_group(query_id: str) -> str:
+    return f"studio-query-{query_id}"
+
+
+def _check_query_id(query_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", query_id):
+        raise HTTPException(status_code=400, detail=f"Invalid query_id: {query_id!r}")
+    return query_id
+
+
+@app.post(
+    "/query",
+    response_model=QueryResponse,
+    dependencies=[Depends(requires("catalog:Query"))],
+)
+def query(body: QueryRequest) -> QueryResponse:
+    """Runs one read-only SQL statement over datasets opened by the framework.
+
+    Each source is opened through the same `ReaderFactory` a Job uses and
+    registered as a temp view, so the SQL sees exactly what a pipeline reads —
+    Delta and Iceberg tables included — without the query having to know how to
+    reach the storage. The views are temporary and dropped at the end; nothing
+    is written.
+    """
+    global _framework
+    if _framework is None and body.spark:
+        _framework = _import("sparquet").Sparquet(spark=body.spark)
+
+    statement = _read_only_sql(body.sql)
+    limit = max(1, min(int(body.limit or DEFAULT_PREVIEW_LIMIT), MAX_PREVIEW_LIMIT))
+    query_id = _check_query_id(body.query_id or secrets.token_hex(8))
+
+    seen: Dict[str, str] = {}
+    for source in body.sources:
+        if not _ALIAS_RE.match(source.alias):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid view name {source.alias!r}: use a letter or '_' followed "
+                    "by letters, digits or '_'."
+                ),
+            )
+        if source.alias in seen:
+            raise HTTPException(
+                status_code=400, detail=f"Two sources are both named {source.alias!r}."
+            )
+        seen[source.alias] = source.path
+
+    framework = _get_framework()
+    spark = framework.spark
+    config_module = _import("sparquet.core.config")
+    factory = _import("sparquet.io.factory")
+
+    registered: List[str] = []
+    timer: Optional[threading.Timer] = None
+    started = time.perf_counter()
+    try:
+        for source in body.sources:
+            try:
+                config = config_module.InputConfig.from_dict(
+                    {
+                        "format": source.format,
+                        "path": source.path,
+                        "options": source.options or {},
+                    }
+                )
+                reader = factory.ReaderFactory.create(spark, config)
+                reader.read().createOrReplaceTempView(source.alias)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot open {source.path!r} as {source.alias}: {_describe(exc)}",
+                ) from exc
+            registered.append(source.alias)
+
+        context = spark.sparkContext
+        # The group is what makes the query cancellable: the HTTP response only
+        # comes back once the query is over, so cancelling has to name it.
+        context.setJobGroup(_query_group(query_id), statement[:200], True)
+        if body.timeout_seconds:
+            seconds = max(1, min(int(body.timeout_seconds), MAX_QUERY_TIMEOUT_SECONDS))
+            timer = threading.Timer(
+                seconds, lambda: context.cancelJobGroup(_query_group(query_id))
+            )
+            timer.daemon = True
+            timer.start()
+
+        try:
+            frame = spark.sql(statement)
+            # limit + 1 tells us whether more rows exist without a second action
+            rows = frame.limit(limit + 1).collect()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=_describe(exc)) from exc
+
+        return QueryResponse(
+            query_id=query_id,
+            columns=[str(name) for name in frame.columns],
+            fields=[
+                SchemaFieldOut(
+                    name=field.name,
+                    type=field.dataType.simpleString(),
+                    nullable=bool(field.nullable),
+                )
+                for field in frame.schema.fields
+            ],
+            rows=[[_json_safe(value) for value in row] for row in rows[:limit]],
+            truncated=len(rows) > limit,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
+    finally:
+        if timer is not None:
+            timer.cancel()
+        try:
+            spark.sparkContext.clearJobGroup()
+        except Exception:  # a dead JVM has nothing left to clear
+            pass
+        for alias in registered:
+            try:
+                spark.catalog.dropTempView(alias)
+            except Exception:  # the view outliving the request is harmless
+                pass
+
+
+@app.post("/query/{query_id}/cancel", dependencies=[Depends(requires("catalog:Query"))])
+def cancel_query(query_id: str) -> Dict[str, Any]:
+    """Stops a query that is still running. Cancelling one that already finished
+    (or never started) is not an error — there is nothing left to interrupt."""
+    _check_query_id(query_id)
+    module = sys.modules.get("sparquet.core.context")
+    session = getattr(getattr(module, "SparkContextManager", None), "_session", None)
+    if session is None:
+        return {"cancelled": False, "reason": "No SparkSession is running."}
+    try:
+        session.sparkContext.cancelJobGroup(_query_group(query_id))
+    except Exception as exc:
+        return {"cancelled": False, "reason": _describe(exc)}
+    return {"cancelled": True}
 
 
 def _engine_registry(engine_attr: str, module_name: str, class_name: str) -> Dict[str, Any]:

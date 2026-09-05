@@ -6,8 +6,10 @@ import {
   LayoutTemplate,
   ListOrdered,
   Moon,
+  Network,
   Search,
   Settings,
+  SquareTerminal,
   Sun,
   Workflow as JobIcon,
   type LucideIcon,
@@ -156,6 +158,25 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         icon: LayoutTemplate,
         keywords: 'examples starters gallery samples',
         run: () => navigate('/templates'),
+      },
+      {
+        id: 'action:catalog',
+        group: 'actions',
+        label: 'Open the data catalog',
+        hint: 'Every table, bucket and topic your Jobs touch — and the lineage between them',
+        icon: Network,
+        keywords:
+          'dataset dependency upstream downstream impact path table catalog owner domain classification pii glossary',
+        run: () => navigate('/catalog'),
+      },
+      {
+        id: 'action:sql',
+        group: 'actions',
+        label: 'Open the SQL editor',
+        hint: 'Query the datasets in the catalog, read-only, through the runner',
+        icon: SquareTerminal,
+        keywords: 'sql query select explore preview table view ad hoc',
+        run: () => navigate('/sql'),
       },
     ]
 

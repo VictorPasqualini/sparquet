@@ -14,6 +14,9 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker'
 import 'monaco-editor/esm/vs/language/json/monaco.contribution'
+// SQL is highlighting only — a basic language has no worker and no schema, so
+// it costs one grammar rather than the whole language service.
+import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution'
 import 'monaco-editor/esm/vs/editor/contrib/folding/browser/folding.js'
 import 'monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatching.js'
 import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js'
