@@ -24,6 +24,12 @@ a coordenada em `services.py`. Executado contra os containers no Spark 4.1.1:
                     servidor Elasticsearch chega nele pelo conector do OpenSearch
                     — e é isso que `ElasticsearchViaOpenSearchTest` mede.
 
+Na linha 3.5 as duas últimas trocam de papel, e é por isso que a matriz existe:
+o `elasticsearch-spark-30_2.12:8.16.1` roda, então `ElasticsearchTest` é quem
+cobre o Elasticsearch, e a rota alternativa se pula — o conector do OpenSearch
+daquela linha (`opensearch-spark-30_2.12:1.3.0`) recusa o servidor com
+`Unsupported/Unknown OpenSearch version [8.16.1]`.
+
   Os dois formatos são conectores DISTINTOS, com prefixos de opção diferentes
   (`es.*` e `opensearch.*`), e são o par mais fácil de confundir no catálogo.
 
@@ -394,9 +400,31 @@ def _razao_da_rota_alternativa() -> Optional[str]:
     Ela precisa de dois containers, e por motivos diferentes: o **elasticsearch**
     porque é o servidor sob teste, e o **opensearch** porque é de quem está de pé
     que a sessão tira o jar (`services.packages_for_reachable`). Note que aqui o
-    `incompativel` do elasticsearch não vale: ele fala do jar do
-    `elasticsearch-spark`, que esta rota justamente não usa.
+    `incompativel` do elasticsearch não vale como *impedimento*: ele fala do jar
+    do `elasticsearch-spark`, que esta rota justamente não usa.
+
+    Mas ele vale como *condição*. A rota é a saída para a linha em que o
+    `elasticsearch-spark` não tem build — e só para ela. Onde ele roda (3.5), a
+    rota não é alternativa nenhuma: é um caminho pior para o mesmo servidor, e o
+    conector daquela linha nem aceita o destino. Medido no CI contra o
+    Elasticsearch 8.16.1 com `opensearch-spark-30_2.12:1.3.0`:
+
+        org.opensearch.hadoop.OpenSearchHadoopIllegalArgumentException:
+        Unsupported/Unknown OpenSearch version [8.16.1].
+        Highest supported version is [3.x]. You may need to upgrade OpenSearch-Hadoop.
+
+    Quem tolera um servidor Elasticsearch é o `opensearch-spark-40_2.13:2.0.0`,
+    o conector da linha 4. Então: onde o jar nativo roda, esta classe se pula, e
+    quem cobre o Elasticsearch é o `ElasticsearchTest`.
     """
+    if not services.incompativel_aqui("elasticsearch"):
+        return (
+            "nesta linha do Spark o `elasticsearch-spark` roda — a rota pelo "
+            "conector do OpenSearch é a saída para quem não tem build, e o "
+            "conector desta linha recusa um servidor Elasticsearch "
+            "(`Unsupported/Unknown OpenSearch version [8.16.1]`). "
+            "Quem cobre o Elasticsearch aqui é o `ElasticsearchTest`."
+        )
     do_jar = services.skip_reason("opensearch")
     if do_jar:
         return f"o jar vem do opensearch, e {do_jar}"

@@ -536,19 +536,40 @@ O sintoma do lado do Elasticsearch é este, na escrita:
 java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'
 ```
 
-Não existe artefato `elasticsearch-spark-40` no Maven Central, e o `opensearch-spark-40`
-não serve de substituto: o cliente do OpenSearch 2.x recusa um servidor Elasticsearch 8+
-na verificação de versão. Quem precisa de Elasticsearch tem quatro saídas, em ordem de
+Não existe artefato `elasticsearch-spark-40` no Maven Central. O que existe é o conector
+do OpenSearch, que é fork do `elasticsearch-hadoop` e continua falando a mesma API REST de
+índice e busca — e o build de Spark 4 dele aceita um servidor Elasticsearch:
+`opensearch-spark-40_2.13:2.0.0` grava e lê num Elasticsearch 8.16.1, `mapping.id`
+inclusive (medido no CI por `ElasticsearchViaOpenSearchTest`).
+
+Isso é propriedade da **versão** do conector, não da rota: o build da linha 3.5
+(`opensearch-spark-30_2.12:1.3.0`) recusa o mesmo servidor já na verificação de versão —
+
+```
+org.opensearch.hadoop.OpenSearchHadoopIllegalArgumentException:
+Unsupported/Unknown OpenSearch version [8.16.1]. Highest supported version is [3.x].
+```
+
+— e ali a recusa não custa nada, porque no Spark 3.5 o `elasticsearch-spark-30` roda.
+
+Quem precisa de Elasticsearch em Spark 4 tem, então, estas saídas, em ordem de
 preferência:
 
-1. **Rodar aquele pipeline em Spark 3.5** — o `elasticsearch-spark-30` funciona lá, e o
-   JSON do pipeline não muda. É a única saída que mantém o conector nativo.
-2. **Escrever num formato intermediário** (Parquet/Delta) e indexar fora do Spark, com o
+1. **Apontar o conector do OpenSearch para o servidor Elasticsearch.** Custa duas edições
+   no JSON: `format: "opensearch"` e as opções `es.*` renomeadas para `opensearch.*`.
+   Nada mais muda — nem o servidor, nem o índice, nem o schema. As duas edições são
+   obrigatórias: `format: "elasticsearch"` com o jar do OpenSearch morre em
+   `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: es`, e opções `es.*` no
+   formato `opensearch` são ignoradas, o que derruba a escrita em
+   `OpenSearchHadoopIllegalArgumentException`.
+2. **Rodar aquele pipeline em Spark 3.5** — o `elasticsearch-spark-30` funciona lá, e o
+   JSON do pipeline não muda. É a saída que mantém o conector nativo.
+3. **Escrever num formato intermediário** (Parquet/Delta) e indexar fora do Spark, com o
    `_bulk` da API REST. É o caminho que não depende de nenhum build de terceiro.
-3. **Ler por JDBC** com o driver de Elasticsearch SQL (`format: "jdbc"`, url
+4. **Ler por JDBC** com o driver de Elasticsearch SQL (`format: "jdbc"`, url
    `jdbc:es://`): serve para leitura, é recurso de licença paga (Platinum/Enterprise) e
    não escreve.
-4. **Trocar o destino para OpenSearch**, que é fork do Elasticsearch 7.10 e tem o build
+5. **Trocar o destino para OpenSearch**, que é fork do Elasticsearch 7.10 e tem o build
    de Spark 4 — decisão de infraestrutura, não de pipeline.
 
 O `opensearch-spark-40` declara as próprias dependências de Spark, e `spark.jars.packages`
