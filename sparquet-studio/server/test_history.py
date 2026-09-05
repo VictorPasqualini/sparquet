@@ -754,6 +754,21 @@ class LineageTest(unittest.TestCase):
             [("input", "a"), ("join", "b")],
         )
 
+    def test_a_union_reads_a_dataset_too(self) -> None:
+        lineage = self._lineage(
+            {
+                "input": {"format": "parquet", "path": "a"},
+                "transformations": [
+                    {"type": "union", "input": {"format": "parquet", "path": "b"}},
+                ],
+                "output": {"format": "parquet", "path": "c"},
+            }
+        )
+        self.assertEqual(
+            [(d["role"], d["address"]) for d in lineage["inputs"]],
+            [("input", "a"), ("union", "b")],
+        )
+
     def test_quality_sinks_keep_the_role_that_names_them(self) -> None:
         lineage = self._lineage(
             {

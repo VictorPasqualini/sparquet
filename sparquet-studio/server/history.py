@@ -1625,6 +1625,13 @@ def config_version(config: Any) -> Tuple[Optional[str], Optional[str]]:
     return digest, canonical if len(encoded) <= MAX_STORED_CONFIG_BYTES else None
 
 
+#: Transformations that read a dataset of their own, under `input` — the same key
+#: the pipeline uses for its main entry (see `transform/builtin.py:_fonte`). Their
+#: sources are real reads and belong in the lineage: a `union` that pulls last
+#: month's file is as much an upstream dependency as the pipeline's own input.
+_SIDE_INPUT_TRANSFORMATIONS = ("join", "union")
+
+
 def lineage_of(config: Any) -> Optional[str]:
     """What a Job reads and what it writes, taken from the JSON submitted to run.
 
@@ -1633,10 +1640,11 @@ def lineage_of(config: Any) -> Optional[str]:
     touch, and that is exactly the run whose lineage a reader wants. Returns the
     JSON to persist, or None when the configuration names no dataset at all.
 
-    A join reads a second dataset, so it belongs on the input side; the quality
-    sinks (`validations.report`, `validations.outputs.*`) are writes, and keep
-    the role that says which one, since they are targets a reader looks for by
-    name.
+    A join and a union each read a second dataset through the same `input` key,
+    so both belong on the input side and keep the role that says which step
+    pulled them in; the quality sinks (`validations.report`,
+    `validations.outputs.*`) are writes, and likewise keep the role that says
+    which one, since they are targets a reader looks for by name.
     """
     if not isinstance(config, dict):
         return None
@@ -1649,8 +1657,11 @@ def lineage_of(config: Any) -> Optional[str]:
     transformations = config.get("transformations")
     if isinstance(transformations, list):
         for step in transformations:
-            if isinstance(step, dict) and step.get("type") == "join":
-                _collect(inputs, step.get("input"), "join")
+            if not isinstance(step, dict):
+                continue
+            kind = step.get("type")
+            if kind in _SIDE_INPUT_TRANSFORMATIONS:
+                _collect(inputs, step.get("input"), str(kind))
 
     _collect(outputs, config.get("output"), "output")
     _collect(outputs, config.get("outputs"), "output")

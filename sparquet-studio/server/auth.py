@@ -187,6 +187,8 @@ ACTIONS: Dict[str, str] = {
     "run:Execute": "Run a Job or a Pipeline on this runner.",
     "run:Cancel": "Stop a run that is in progress.",
     "run:Validate": "Check a JSON without running it.",
+    "catalog:Inspect": "Read the real schema of a dataset by opening it on this runner.",
+    "catalog:Query": "Run a read-only SQL query over datasets on this runner.",
     "history:Read": "Read past executions, their steps, logs and configuration.",
     "history:Pin": "Mark a run as kept forever, so retention never expires it.",
     "history:Purge": "Apply the retention policy by hand, deleting old history.",
@@ -230,8 +232,9 @@ BUILTIN_ROLES: Dict[str, Role] = {
             {
                 "effect": "allow",
                 "actions": [
-                    "workspace:*", "run:*", "history:Read", "history:Pin",
-                    "history:Ingest", "credits:Read",
+                    "workspace:*", "run:*", "catalog:Inspect", "catalog:Query",
+                    "history:Read",
+                    "history:Pin", "history:Ingest", "credits:Read",
                 ],
                 "resources": ["*"],
             }
@@ -248,6 +251,8 @@ BUILTIN_ROLES: Dict[str, Role] = {
                     "run:Execute",
                     "run:Cancel",
                     "run:Validate",
+                    "catalog:Inspect",
+                    "catalog:Query",
                     "history:Read",
                     "history:Pin",
                     "history:Ingest",

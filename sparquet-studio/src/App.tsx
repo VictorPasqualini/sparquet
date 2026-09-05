@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
-import { createHashRouter, RouterProvider } from 'react-router-dom'
+import { createHashRouter, Navigate, RouterProvider } from 'react-router-dom'
 import { Toaster } from 'sonner'
 
 import logoMark from '@/assets/logo.png'
@@ -21,6 +21,10 @@ const WorkflowDetail = lazy(() =>
 )
 const Templates = lazy(() =>
   import('@/screens/Templates').then((m) => ({ default: m.Templates })),
+)
+const Catalog = lazy(() => import('@/screens/Catalog').then((m) => ({ default: m.Catalog })))
+const SqlEditor = lazy(() =>
+  import('@/screens/SqlEditor').then((m) => ({ default: m.SqlEditor })),
 )
 const Learn = lazy(() => import('@/screens/Learn').then((m) => ({ default: m.Learn })))
 const LessonDetail = lazy(() =>
@@ -54,6 +58,11 @@ const router = createHashRouter([
       { path: '/', element: <Dashboard /> },
       { path: '/workflows/:workflowId', element: lazyRoute(<WorkflowDetail />) },
       { path: '/templates', element: lazyRoute(<Templates />) },
+      { path: '/catalog', element: lazyRoute(<Catalog />) },
+      { path: '/sql', element: lazyRoute(<SqlEditor />) },
+      // The screen answered to /lineage until the catalog became its front door;
+      // old bookmarks and links still point there.
+      { path: '/lineage', element: <Navigate to="/catalog" replace /> },
       { path: '/learn', element: lazyRoute(<Learn />) },
       { path: '/learn/:lessonId', element: lazyRoute(<LessonDetail />) },
       { path: '/billing', element: lazyRoute(<Billing />) },

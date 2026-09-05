@@ -26,6 +26,7 @@ import {
 } from 'idb-keyval'
 import { nanoid } from 'nanoid'
 
+import { sanitizeAnnotations, type CatalogAnnotations } from '@/lib/datacatalog'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { toStorable, type StorageBackend, type StorageKind } from '@/lib/storage/backend'
 import {
@@ -504,13 +505,36 @@ export async function importAll(
   }
 }
 
-/** Removes every workflow, job and backup. Meta keys survive by design. */
+/**
+ * Removes every workflow, job and backup. Meta keys survive by design — except
+ * the catalog, whose entries are all about datasets that no longer exist here.
+ */
 export async function clearAll(): Promise<void> {
   const store = await open()
   const keys = await store.keys(NS)
   await Promise.all(
     keys.filter((key) => !key.startsWith(META_PREFIX)).map((key) => store.del(key)),
   )
+  await store.del(KEY.catalog)
+}
+
+/* ------------------------------------------------------------ data catalog */
+
+/**
+ * Every dataset annotation, as one record.
+ *
+ * One record rather than one per dataset because the catalog is read whole (the
+ * screen joins all of it against lineage) and written one field at a time by a
+ * person typing — the write volume of a text box, not of a pipeline run.
+ */
+export async function readCatalog(): Promise<CatalogAnnotations> {
+  const store = await open()
+  return sanitizeAnnotations(await store.get(KEY.catalog))
+}
+
+export async function writeCatalog(annotations: CatalogAnnotations): Promise<void> {
+  const store = await open()
+  await store.set(KEY.catalog, annotations)
 }
 
 /* ------------------------------------------------------------------- seed */

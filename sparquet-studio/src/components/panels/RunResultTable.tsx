@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 
 import { cn } from '@/lib/utils/cn'
 
-/** Hard ceiling on rendered rows — a preview is for sanity-checking, not browsing. */
+/** Default ceiling on rendered rows — a preview is for sanity-checking, not browsing. */
 const MAX_ROWS = 50
 
 export interface RunResultTableProps {
@@ -11,9 +11,22 @@ export interface RunResultTableProps {
   rows: unknown[][]
   /** The runner already cut the result short. */
   truncated: boolean
+  /** Rows to render. The SQL editor asks for more than a run preview does. */
+  maxRows?: number
+  /** What to say when the result is empty — a run and a query mean different things by it. */
+  emptyMessage?: string
+  /** Height of the scrolling area, as a Tailwind class. */
+  heightClass?: string
 }
 
-export function RunResultTable({ columns, rows, truncated }: RunResultTableProps) {
+export function RunResultTable({
+  columns,
+  rows,
+  truncated,
+  maxRows = MAX_ROWS,
+  emptyMessage = 'The pipeline produced no rows.',
+  heightClass = 'max-h-80',
+}: RunResultTableProps) {
   if (columns.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-line px-3 py-6 text-center text-xs text-content-subtle">
@@ -22,7 +35,7 @@ export function RunResultTable({ columns, rows, truncated }: RunResultTableProps
     )
   }
 
-  const visible = rows.slice(0, MAX_ROWS)
+  const visible = rows.slice(0, maxRows)
   const clipped = truncated || rows.length > visible.length
 
   return (
@@ -31,7 +44,7 @@ export function RunResultTable({ columns, rows, truncated }: RunResultTableProps
         role="region"
         aria-label="Result preview"
         tabIndex={0}
-        className="max-h-80 overflow-auto"
+        className={cn(heightClass, 'overflow-auto')}
       >
         <table className="w-full border-collapse text-left text-2xs">
           <thead>
@@ -80,7 +93,7 @@ export function RunResultTable({ columns, rows, truncated }: RunResultTableProps
                   colSpan={columns.length + 1}
                   className="px-2.5 py-6 text-center font-sans text-xs text-content-subtle"
                 >
-                  The pipeline produced no rows.
+                  {emptyMessage}
                 </td>
               </tr>
             )}
@@ -89,7 +102,7 @@ export function RunResultTable({ columns, rows, truncated }: RunResultTableProps
       </div>
       <p className="border-t border-line bg-surface-sunken px-2.5 py-1.5 text-2xs text-content-subtle">
         {clipped
-          ? `Showing the first ${visible.length} of ${MAX_ROWS}+ rows — previews are capped.`
+          ? `Showing the first ${visible.length} of ${maxRows}+ rows — previews are capped.`
           : `${visible.length} ${visible.length === 1 ? 'row' : 'rows'}`}
       </p>
     </div>

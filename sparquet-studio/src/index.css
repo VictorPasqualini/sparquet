@@ -267,6 +267,18 @@
   stroke-dasharray: 6 4;
 }
 
+/* base.css draws the edge path but leaves the label alone. With no fill the SVG
+   default takes over — black text on a black rectangle, which reads as a box
+   sitting on the wire. Both halves are painted here instead. */
+.react-flow__edge-textbg {
+  fill: rgb(var(--surface));
+}
+
+.react-flow__edge-text {
+  fill: rgb(var(--content-muted));
+  font-size: 10px;
+}
+
 .react-flow__controls-button {
   @apply border-line bg-surface text-content-muted hover:bg-surface-sunken hover:text-content;
   border-bottom-width: 1px;

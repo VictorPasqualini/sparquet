@@ -61,7 +61,7 @@ with the same two layers: `tests/test_cola_lib.py` (25 pure) and
 |---|---:|---:|
 | Readers | 27 | 14 (option building) + 6 read back what was written |
 | Writers | 26 | 14 (option building) + 6 written then read back |
-| Transformations | 19 | **0** |
+| Transformations | 19 | 19 (58 tests against a real DataFrame) |
 | Validation rule types | 21 | 6 against real data |
 | Pipeline orchestration | — | 13 (`on_failure`, Spark-free) |
 | Write metrics (`rows_written`) | — | 17 (11 Spark-free on metric selection, 6 against real Spark) |
@@ -69,20 +69,15 @@ with the same two layers: `tests/test_cola_lib.py` (25 pure) and
 | Studio | — | 502 tests + 21 smoke checks |
 | Runner service (`server/`) | — | 363 `unittest` tests (history 92, auth 64, credits 89, audit 18, run scope 16, workspace 36, replaceable pieces 12, library files 28, formats executed 8) |
 
-Two findings worth stating plainly, because they are the reason this document exists:
+One finding worth stating plainly, because it is the reason this document exists:
 
-1. **No transformation has a behavioral test.** `tests/test_examples.py` asserts that
-   every `type` in the shipped examples is a *known* type — nothing asserts that
-   `struct` nests a dot-path, that `group_by` applies a pivot, or that `checkpoint`
-   truncates the lineage. Nineteen transformations, zero assertions on the DataFrame
-   that comes out.
-2. **Fifteen metric rules have never run against a DataFrame.** `avg`, `min`, `max`,
+1. **Fifteen metric rules have never run against a DataFrame.** `avg`, `min`, `max`,
    `sum`, `stddev`, `distinct_count`, `duplicate_*`, `missing_*`, `invalid_*` and
    `freshness` are covered for *code derivation* and *threshold parsing*, but the
    Spark suite only exercises `not_null`, `unique`, `range`, `regex` and `row_count`.
    A wrong aggregate expression would ship green.
 
-Neither is a call to write two hundred tests. Both are a call to write the *first*
+That is not a call to write two hundred tests. It is a call to write the *first*
 test in each family — the harness is the expensive part, and it already exists.
 
 ---
@@ -325,28 +320,35 @@ starved logs `Unable to send a heartbeat because the RPC got timed out` and need
 
 ## 4. Transformations
 
-None of the nineteen has a behavioral test. The unit to test is small and pure enough
-that one Spark session serves the whole file: build a DataFrame with
-`createDataFrame`, run the transformation through `TransformationEngine`, assert on
-`collect()` and on `df.columns`.
+All nineteen now have one. The unit is small and pure enough that a single Spark
+session serves the whole file: build a DataFrame, run the transformation through
+`TransformationEngine`, assert on `collect()` and on `df.columns`. Two files carry
+it — [`test_join_spark.py`](../tests/transform/test_join_spark.py) for the join's
+name disambiguation, and
+[`test_builtin_behavior_spark.py`](../tests/transform/test_builtin_behavior_spark.py)
+for everything else (58 tests). The fixtures are `spark.sql(... VALUES ...)` rather
+than `createDataFrame`: the second starts a Python worker, and in a local master
+with a mismatched `PYSPARK_PYTHON` the whole file would die for a reason that has
+nothing to do with transformations.
 
-| Transformation | Priority | The property that needs pinning |
+| Transformation | Status | The property pinned — and what is still open |
 |---|:---:|---|
-| `select` | high | plain names **and** SQL expressions with an alias (`to_json(payload) AS value`) |
-| `with_column` | high | `column`+`expression`, the `columns` map, and that a later entry sees an earlier one |
-| `struct` | high | dot-path auto-nesting, nested maps, and the two mixed |
-| `join` | ✅ | [10 tests](../tests/transform/test_join_spark.py): `input` as the right-side key with `with` still accepted and a ValueError naming the missing one; and the deduplication — a name on both sides renamed `<name>_r` on the right (`_r2` when taken), the key merged by the list form of `on` but disambiguated by the SQL form, a no-op when nothing repeats, semi/anti adding no column, and `with_transformations` renaming by hand instead. Still open: `broadcast` |
-| `group_by` | high | SQL agg expressions with aliases, `pivot` with and without an explicit value list |
-| `sql` | high | `view_name` registration and that the view does not leak |
-| `filter`, `drop`, `rename`, `cast` | medium | the obvious mapping, plus `cast` type aliases |
-| `drop_duplicates`, `distinct` | medium | subset vs all columns |
-| `fill_na`, `sort` | medium | `columns` subset, `ascending` |
-| `collect` + `{{var}}` | high | the runtime store: list of strings quoted, numbers bare, **empty list → `NULL`**, visibility inside a join's `with_transformations`, and the reset between runs |
-| `stop_if_empty` | high | `result.skipped is True`, `success is True`, nothing written, later steps not run |
-| `checkpoint` | medium | `localCheckpoint` vs `checkpoint`, and that an invalid `method` is ignored **with a warning** rather than raising |
-| `union` | medium | `allow_missing_columns` |
-| `debug` | low | it returns the *original* df even when its own `transformations` filter it |
-| `skip_if_false` | high | the three cases in the table in [CLAUDE.md](../CLAUDE.md): empty string skips, boolean expression skips when false, any other non-empty value runs |
+| `select` | ✅ | plain names in the requested order, an SQL expression with an alias becoming a column of that name, and an expression without one keeping its text as the name |
+| `with_column` | ✅ | `column`+`expression`, the `name` compat form, the `columns` map in writing order (a later entry reads an earlier one), an existing name replaced rather than duplicated, and the ValueError naming both accepted keys |
+| `struct` | ✅ | dot-path nesting for real (values read back through `payload.data.nc.nome`), a common prefix merged into one node, a nested map and a dot-path side by side, and the leaf-vs-map conflict refused |
+| `join` | ✅ | [10 tests](../tests/transform/test_join_spark.py): `input` as the right-side key with `with` still accepted and a ValueError naming the missing one; and the deduplication — a name on both sides renamed `<name>_r` on the right (`_r2` when taken), the key merged by the list form of `on` but disambiguated by the SQL form, a no-op when nothing repeats, semi/anti adding no column, and `with_transformations` renaming by hand instead. Plus `broadcast` as a hint in the physical plan (`BuildRight`, `BuildLeft`, and absent without it — the session sets `autoBroadcastJoinThreshold=-1` so a broadcast only happens when asked) and an invalid `how` listing the options |
+| `group_by` | ✅ | agg expressions keeping their alias, `pivot` as a string (one column per value, a missing month coming back null) and as a map with an explicit `values` list that limits the columns |
+| `sql` | ✅ | the df arriving as the default view and `view_name` renaming it. Open: that the view does not leak between runs |
+| `filter`, `drop`, `rename`, `cast` | ✅ | the condition as full SQL, the remaining columns after a drop, the rename preserving values and position, and `cast` changing dtype in place. Open: `cast` type aliases beyond `string`/`int` |
+| `drop_duplicates`, `distinct` | ✅ | subset vs whole row |
+| `fill_na`, `sort` | ✅ | the constant with `columns` leaving the rest null, the per-column map, and `ascending` as a bool and as a per-column list |
+| `collect` + `{{var}}` | ✅ | the runtime store filled by the step and read by the next one, a list becoming an `IN (...)` literal, **an empty list becoming `NULL` so nothing matches**, a string quoted with its inner quote escaped, and an unknown placeholder staying literal for a nested engine. Open: visibility inside a join's `with_transformations`, and the reset between runs |
+| `stop_if_empty` | ✅ | `PipelineStop` raised on an empty df carrying the given message, and a df with rows passing through untouched. The pipeline-level half (`result.skipped is True`, `success is True`, nothing written) is in [`test_on_failure.py`](../tests/validation/test_on_failure.py) |
+| `checkpoint` | ✅ | `localCheckpoint` materializing without changing the data, and an invalid `method` ignored instead of raising. Open: the reliable `checkpoint` (needs a checkpoint dir) and the deferred warning itself |
+| `repartition` | ✅ | the promise is cost, not data: rows unchanged, the same key landing in the **same** partition, and `coalesce` reducing to one. The parameter refusals stay in [`test_partitioning.py`](../tests/transform/test_partitioning.py), Spark-free |
+| `union` | ✅ | rows appended from the second source, and `allow_missing_columns` filling the absent ones with null |
+| `debug` | ✅ | its own `transformations` filter the *copy* (the printed `count:` proves it) while the pipeline receives the original df; an unknown action warns instead of raising |
+| `skip_if_false` | ✅ | the three cases in the table in [CLAUDE.md](../CLAUDE.md): empty string skips, a boolean expression skips when false and runs when true, and any other non-empty value runs |
 
 ---
 
@@ -487,9 +489,9 @@ Ranked by (risk it covers) ÷ (effort to write), highest first:
    [`tests/test_formats_roundtrip_spark.py`](../tests/test_formats_roundtrip_spark.py).
 3. ~~**`on_failure` semantics**~~ — done:
    [`tests/validation/test_on_failure.py`](../tests/validation/test_on_failure.py).
-4. **The transformation families in the high-priority rows of §4** — `select`,
-   `with_column`, `struct`, `join`, `group_by`, `sql`, plus `collect` + `{{var}}` and
-   `stop_if_empty`.
+4. ~~**The transformation families of §4**~~ — done:
+   [`tests/transform/test_builtin_behavior_spark.py`](../tests/transform/test_builtin_behavior_spark.py),
+   58 tests over all nineteen plus `skip_if_false`.
 5. ~~**Template and `$include`**~~ — done:
    [`tests/utils/test_template_includes.py`](../tests/utils/test_template_includes.py).
 6. **Runner service** — FastAPI's `TestClient` covers auth, the origin allow-list and
@@ -498,5 +500,5 @@ Ranked by (risk it covers) ÷ (effort to write), highest first:
    [`tests/io/integration/test_lakehouse_spark.py`](../tests/io/integration/test_lakehouse_spark.py).
 8. **Container-backed integration** for the connectors, opt-in via env var.
 
-The remaining items 4 and 6 are self-contained: each is one file, no harness work, and each one turns
+The remaining items 1 and 6 are self-contained: each is one file, no harness work, and each one turns
 a whole family of ⬜ into ✅.

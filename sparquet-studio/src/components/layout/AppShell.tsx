@@ -1,5 +1,6 @@
 import {
   Coins,
+  Database,
   Github,
   GraduationCap,
   LayoutDashboard,
@@ -11,6 +12,7 @@ import {
   Search,
   Settings as SettingsIcon,
   ShieldCheck,
+  SquareTerminal,
   Sun,
   type LucideIcon,
 } from 'lucide-react'
@@ -68,6 +70,8 @@ interface NavEntry {
 const NAV: NavEntry[] = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/templates', label: 'Templates', icon: LayoutTemplate },
+  { to: '/catalog', label: 'Catalog', icon: Database },
+  { to: '/sql', label: 'SQL editor', icon: SquareTerminal },
   { to: '/billing', label: 'Billing', icon: Coins },
   { to: '/access', label: 'Access & IAM', icon: ShieldCheck },
   { to: '/learn', label: 'Learn', icon: GraduationCap },

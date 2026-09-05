@@ -68,3 +68,6 @@ sparquet-workspace/
 .coverage
 .coverage.*
 htmlcov/
+
+# Deck promocional: capturas de tela regeráveis (ver docs/promo/README.md)
+docs/promo/*.png

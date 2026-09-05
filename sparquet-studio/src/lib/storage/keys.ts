@@ -23,6 +23,13 @@ export const FLOW_PREFIX = `${NS}flow:`
 
 export const KEY = {
   version: `${META_PREFIX}version`,
+  /**
+   * The data catalog: one record holding every dataset annotation, addressed by
+   * dataset key. Under `meta:` on purpose — the workspace backend already writes
+   * meta entries as files (`.studio/meta.json`), so the catalog persists through
+   * the same route the library does without a fourth record kind on the server.
+   */
+  catalog: `${META_PREFIX}catalog`,
   seeded: `${META_PREFIX}seeded`,
   probe: `${META_PREFIX}probe`,
   backup: `${NS}backup`,
