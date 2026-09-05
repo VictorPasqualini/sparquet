@@ -20,6 +20,139 @@ Notes on the history below:
   version numbers. Studio changes appear here only when they touch the framework or
   the JSON contract.
 
+## [0.12.0] — 2026-09-04
+
+### Added
+
+- **`pushdown` action on the `debug` transformation.** Every pushdown lever the framework
+  exposes was a request, not a fact: the JSON said `pushDownAggregate: true`, the pipeline
+  ran, and nothing anywhere said whether the aggregation actually reached the database or
+  whether the scan read the whole table. `{ "type": "debug", "actions": ["pushdown"] }`
+  parses the physical plan and reports, per read node, what went down to the source —
+  `PartitionFilters` (pruned before a file is opened), `PushedFilters` (predicate handed to
+  Parquet/ORC or to the database), `PushedAggregates`, `PushedGroupBy`, `RuntimeFilters`
+  (dynamic partition pruning and join bloom filters) and how many columns the scan returns.
+  A scan that pushed nothing is called out with what to do about it, and `Filter` nodes
+  sitting above the scans are counted, because a predicate evaluated after the read is data
+  that came off disk to be thrown away. It fires no job: the physical plan is planning, not
+  execution.
+- **`pushDownOffset` and `pushDownTableSample` on the JDBC connectors.** Spark 4 supports
+  both on the v2 read path and the framework was passing three of the five levers.
+  Documented with the constraint that matters: they only apply when reading a table, since
+  with `query` the SELECT is already the cut.
+
+### Changed
+
+- **`collect` refuses to build an unbounded `IN (...)`.** The transformation collects a
+  column's distinct values into a runtime variable, and that list becomes a literal inside
+  the next filter. Past a few thousand values the remedy becomes the problem: the plan
+  grows, Catalyst spends its time analysing the predicate and the pushdown degrades. There
+  is now a ceiling, `max_values`, defaulting to 10,000 (`0` disables it) and applied inside
+  the query as `limit(max_values + 1)` — so a column with millions of distinct values is
+  never materialised in the driver — plus a warning above 1,000. Over the ceiling it fails
+  and names the alternative: a semi/inner join against the list as a DataFrame, which Spark
+  resolves as a broadcast join without the driver ever holding the values. A pipeline that
+  relied on collecting more than 10,000 values has to say so explicitly.
+- **`mariadb` builds a MySQL URL with the MySQL driver.** Spark 4.1 has no MariaDB dialect
+  (the list is DB2, Databricks, Derby, H2, MsSqlServer, MySQL, Oracle, Postgres, Snowflake,
+  Teradata) and its `MySQLDialect` only matches a URL starting with `jdbc:mysql`. With
+  `jdbc:mariadb://` the connector fell through to the default dialect, which quotes
+  identifiers with `"`, and MariaDB rejects that — on **reads** as much as on writes, since
+  the `SELECT` Spark builds quotes the columns the same way:
+  `You have an error in your SQL syntax ... near '"id" INTEGER'`. MariaDB speaks the MySQL
+  protocol, so Connector/J over `jdbc:mysql://` reaches a MariaDB server and brings the
+  dialect with it: backtick quoting, MySQL type mapping and correct SQL in aggregate/LIMIT
+  pushdown. The escape hatch is unchanged and now documented — pass `url` and `driver`
+  explicitly for the MariaDB driver (the driver follows the URL automatically) together with
+  `sessionVariables: sql_mode='ANSI_QUOTES'`, at the price of `"..."` no longer being a
+  string literal in that session, which matters to anyone using `query`. An explicit
+  `jdbc:mariadb://` URL without `ANSI_QUOTES` now warns instead of failing at the first
+  statement.
+
+### Documentation
+
+- **What pushdown is, and every lever the framework has.** `docs/PIPELINE_SCHEMA.md` gained
+  the file-level levers that existed but were neither exposed nor documented
+  (`spark.sql.parquet.filterPushdown`, `aggregatePushdown`, `mergeSchema`, `basePath`,
+  `recursiveFileLookup`, `pathGlobFilter`, `spark.sql.sources.partitionOverwriteMode`,
+  `spark.sql.optimizer.dynamicPartitionPruning.*`, the bloom-filter join settings), a table
+  of what each non-JDBC connector pushes down and what it does not — including that Kafka
+  pushes nothing and the cut is the offset — and the reading of
+  `spark.sql.adaptive.skewJoin.*`, which handles read-side join skew and is not the same
+  problem as the pending write-side single-key skew item.
+- **Search on Spark 4 (Elasticsearch and OpenSearch).** No Elasticsearch connector runs on
+  Spark 4: `elasticsearch-spark-30_2.13` up to 9.5.3 still compiles against Spark 3.4.3 and
+  dies on write with
+  `java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'`,
+  and no `elasticsearch-spark-40` artifact exists. The route that works, measured against a
+  real Elasticsearch 8.16.1 server, is the **OpenSearch** connector
+  (`opensearch-spark-40_2.13:2.0.0`) pointed at it — same REST API. Migrating a pipeline
+  takes exactly two edits, neither skippable: `format` becomes `opensearch` (the jar does
+  not register `es`: `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: es`) and the
+  `es.*` options become `opensearch.*` (the old prefix is ignored and the write dies with
+  `OpenSearchHadoopIllegalArgumentException`). Three fallbacks are documented for pipelines
+  that must keep the native connector.
+- **DataFusion Comet evaluated and measured.** It needs no framework code — `spark.configs`
+  already passes `spark.plugins`, the Comet shuffle manager and the off-heap settings — and
+  on Linux the same pipeline comes back with identical rows and a plan that is native end to
+  end (`CometNativeScan`, `CometFilter`, `CometHashAggregate`,
+  `CometExchange`/`CometNativeShuffle`). It stays opt-in and is not a default: the jar is
+  88 MB and has to be on the driver classpath before the JVM starts, the native library
+  exists only for Linux — elsewhere the plugin disables itself **silently**, so the pipeline
+  passes and the acceleration simply does not happen — off-heap is mandatory and fallback is
+  per operator.
+
+### Tests and CI
+
+- `tests/transform/test_pushdown_debug.py` covers the plan parser and the new action;
+  `tests/io/integration/test_comet_spark.py` runs the same pipeline in two JVMs, with and
+  without Comet, and asserts identical rows plus `Comet` nodes only in the accelerated plan
+  (it skips, saying what is missing, off Linux or without the jar).
+- `tests/io/integration/bench_comet.py` measures what that test deliberately does not:
+  time. Same two-JVM design, data generated once so both runs read identical files, a
+  discarded warm-up and the median of N timed repetitions. On 40,000,000 rows / 290 MB of
+  Parquet in `local[4]`, the aggregation shape went from 3.56s to 1.61s (2.21x) and the
+  filter + `count` shape from 1.02s to 0.83s (1.24x). It asserts nothing and stays out of
+  CI on purpose: a timing assertion on a shared runner is a flaky test.
+- `ElasticsearchViaOpenSearchTest` proves the Elasticsearch route against a real container,
+  round trip plus `mapping.id`.
+- The service tier drops `waffle-jna` — Windows integrated login, which no test uses — from
+  the MariaDB driver's dependency tree, along with the `jna`, `jna-platform` and `caffeine`
+  jars it drags in, and excludes the Spark artifacts the OpenSearch connector declares.
+- CI gained a `comet` job (Linux, caches the 88 MB jar, fails if the download did not land),
+  an Elasticsearch container in the service tier, per-file test loops that report which file
+  failed instead of stopping at the first, and a release-time check that the tag matches
+  `sparquet.__version__` before anything is published.
+- **The three JVM tiers now run on two Spark lines**: pyspark 4.1.1 (Scala 2.13, Python
+  3.12) and 3.5.9 (Scala 2.12, Python 3.11). The cost of that matrix is not the YAML, it is
+  the coordinates — nearly every connector jar is published per line *and* per Scala
+  binary, and the wrong suffix does not fail as a version error, it fails as a
+  `NoSuchMethodError` halfway through a run. They live in `harness.py` (`_LINHAS`) and
+  `services.py` (`{scala}`/`{spark}` moulds, `por_linha` when the artifact name changes and
+  not just the suffix, `incompativel_em` when an incompatibility belongs to one line), so
+  the workflow only picks a pyspark version. Ivy and Comet cache keys carry that version:
+  one key shared by both legs would have each restoring the other's Scala binary.
+- Running the tier on 3.5 found a real gap on the first try: the `xml` datasource only
+  entered Spark in 4.0, so four tests died with
+  `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: xml`. The harness now adds
+  `com.databricks:spark-xml_2.12:0.18.0` on that line — and that jar, unlike the native
+  datasource, refuses `append`
+  (`Append mode is not supported by com.databricks.spark.xml.DefaultSource`), which the
+  append test now asserts per line. The 3.5 leg of `services-tier` is
+  `continue-on-error` for now: its coordinates were verified as published, but never run
+  against the containers.
+- **`lint` job**, with the rules in `[tool.ruff.lint]`: `select = ["E","W","F"]`,
+  `ignore = ["E501"]`, `target-version = "py39"`. The scope is a decision, not laziness —
+  ruff's default set flags 406 occurrences here, dominated by syntax modernization that
+  would rewrite the package to 3.10+ and break the 3.9 floor in `requires-python`.
+  `ruff format` stays out for the same reason it would reformat 56 files at once. The ruff
+  version is pinned in the new `dev` extra.
+- **Coverage is measured in the `test` job** — each file under `coverage run` in parallel
+  mode, combined, with the total published to the step summary and a `--fail-under=65`
+  floor. The floor sits below the measured 69.6% on purpose: that job has no Java, so every
+  branch needing a live SparkSession is unreachable there (76.9% with a JVM). It exists to
+  catch a module that dropped out of the suite entirely, not to police drift.
+
 ## [0.11.0] — 2026-09-04
 
 ### Added
@@ -712,7 +845,8 @@ Published as `spark-framework`.
   validation engines, the extension registries (`register_*`), `PipelineResult`, the
   structured JSON logger and the CLI.
 
-[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/VictorPasqualini/sparquet/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/VictorPasqualini/sparquet/compare/v0.8.0...v0.9.0

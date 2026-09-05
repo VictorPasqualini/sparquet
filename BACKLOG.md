@@ -173,49 +173,69 @@ Decisões tomadas:
 - **Streaming (readStream/writeStream)**: mantido **batch-only** por ora — streaming
   exige caminho de execução próprio (ver §7).
 
-- [ ] **`mariadb` não funciona sem opção extra no Spark 4** — achado da camada de
-  integração com serviço (`tests/io/integration/test_jdbc_services_spark.py`). O Spark
-  4.1.1 **não tem dialeto MariaDB**: existe só `MySQLDialect`, que reconhece apenas url
-  começando em `jdbc:mysql`. A url `jdbc:mariadb://` que o nosso `_MariaDbDialect` monta
-  cai no dialeto default, que cita identificador com `"` — e o MariaDB recusa:
+- ✅ **`mariadb` passou a montar url de MySQL** — achado da camada de integração com
+  serviço (`tests/io/integration/test_jdbc_services_spark.py`). O Spark 4.1.1 **não tem
+  dialeto MariaDB**: existe só `MySQLDialect`, e ele reconhece apenas url começando em
+  `jdbc:mysql`. A url `jdbc:mariadb://` que o `_MariaDbDialect` montava caía no dialeto
+  default, que cita identificador com `"` — e o MariaDB recusa:
 
       java.sql.SQLSyntaxErrorException: You have an error in your SQL syntax; check the
       manual ... near '"id" INTEGER , "nome" TEXT , "valor" DOUBLE PRECISION'
 
-  Vale para escrita **e** leitura (o SELECT que o Spark monta cita as colunas do mesmo
-  jeito), ou seja o conector está inteiro fora do ar contra um MariaDB de verdade. Duas
-  rotas foram executadas contra o container e as duas resolvem:
+  Valia para escrita **e** leitura (o SELECT que o Spark monta cita as colunas do mesmo
+  jeito): o conector estava inteiro fora do ar contra um MariaDB de verdade. As duas
+  rotas foram executadas contra o container e as duas funcionam — a do MySQL virou o
+  default do conector:
 
   | Rota | Como | Preço |
   |---|---|---|
-  | `sql_mode='ANSI_QUOTES'` | `options: {"sessionVariables": "sql_mode='ANSI_QUOTES'"}` | na mesma sessão `"..."` deixa de ser literal de string — importa para quem usa `query`; e o dialeto continua o default (sem pushdown de LIMIT/agregação, `TEXT` no lugar de `VARCHAR`) |
-  | driver do MySQL | `url: jdbc:mysql://...` + `driver: com.mysql.cj.jdbc.Driver` | traz o `MySQLDialect` de verdade, mas exige o jar do MySQL e faz `mariadb` virar sinônimo de `mysql` |
+  | **default** — driver do MySQL | o dialeto monta `jdbc:mysql://host:3306/db` e usa `com.mysql.cj.jdbc.Driver` | exige o jar do Connector/J em vez do `mariadb-java-client`; o servidor não muda (o MariaDB fala o protocolo do MySQL) |
+  | válvula — `sql_mode='ANSI_QUOTES'` | `url: jdbc:mariadb://...` à mão (o dialeto acompanha com `org.mariadb.jdbc.Driver`) + `options: {"sessionVariables": "sql_mode='ANSI_QUOTES'"}` | na mesma sessão `"..."` deixa de ser literal de string — importa para quem usa `query`; e o dialeto continua o default: sem pushdown de LIMIT/agregação no SQL do MariaDB, e `TEXT` no lugar de `VARCHAR` |
 
-  Decidir qual vira default do conector (ou se fica só documentado) é o item. Enquanto
-  não for decidido, o teste de integração usa a primeira rota e diz por quê.
+  O default é o do MySQL porque é o único que devolve o `MySQLDialect` de verdade:
+  citação com crase, mapeamento de tipo e SQL de pushdown corretos. Leitura não piora —
+  ela era exatamente o que estava quebrado antes. Quem informa `url` ou `driver` continua
+  no comando: `driver` explícito vence sempre, url `jdbc:mariadb:` traz o driver do
+  MariaDB por conta própria, e a mesma url sem `ANSI_QUOTES` sai com aviso dizendo as
+  duas saídas. Coberto por `tests/io/test_connectors.py` e pelas duas classes de
+  integração (`MariaDbTest`, `MariaDbUrlExplicitaTest`).
 
-- [ ] **`elasticsearch` e `opensearch` não têm build para Spark 4** — achado da camada
-  de integração com serviço (`tests/io/integration/test_nosql_services_spark.py`). O
-  conector sobe, a sessão sobe, e a escrita morre em:
+- ✅ **`opensearch` tem build para Spark 4 — e é por ele que o Elasticsearch chega** —
+  achado da camada de integração com serviço
+  (`tests/io/integration/test_nosql_services_spark.py`). O que existe publicado, medido
+  no Spark 4.1.1:
+
+  | Coordenada | Situação |
+  |---|---|
+  | `org.opensearch.client:opensearch-spark-40_2.13:2.0.0` | **funciona** — o pom declara Spark 4.1.1 e Scala 2.13.16 |
+  | `org.opensearch.client:opensearch-spark-30_2.13:1.3.0` | quebra — era a coordenada que estava aqui |
+  | `org.elasticsearch:elasticsearch-spark-30_2.13` 8.16.1, 9.0.3 e 9.5.3 (a última publicada) | quebra — a 9.5.3 ainda compila contra Spark 3.4.3 |
+  | `elasticsearch-spark-40` | **não existe** no Maven Central |
+
+  Quem quebra, quebra na escrita com `Dataset.sqlContext()`, que saiu da API no Spark 4:
 
       java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'
 
-  `Dataset.sqlContext()` saiu da API no Spark 4. Vale para as três coordenadas
-  publicadas mais recentes — `org.elasticsearch:elasticsearch-spark-30_2.13` em 8.16.1
-  e 9.0.3, e `org.opensearch.client:opensearch-spark-30_2.13:1.3.0` (o OpenSearch é
-  fork do elasticsearch-hadoop e herdou o problema). **Não existe** artefato
-  `elasticsearch-spark-40` no Maven Central. Na leitura o sintoma é outro e engana
-  menos:
+  A saída para Elasticsearch é o conector do OpenSearch apontado para o servidor do
+  Elasticsearch: o `opensearch-spark` é fork do `elasticsearch-hadoop` e continua
+  falando a mesma API REST. Medido contra o container 8.16.1 — escrita, leitura e
+  `mapping.id` passam, e os documentos aparecem no `_search` do próprio ES
+  (`ElasticsearchViaOpenSearchTest`). Migrar um pipeline custa duas edições no JSON, e
+  nenhuma das duas dá para pular:
 
-      EsHadoopIllegalArgumentException: Cannot find mapping for sparquet-it-semente - one is required before using Spark SQL
+  * `format: "elasticsearch"` → `"opensearch"`. O jar do OpenSearch não registra o nome
+    antigo: `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: es`.
+  * opções `es.*` → `opensearch.*`. O prefixo antigo é ignorado e a escrita morre em
+    `OpenSearchHadoopIllegalArgumentException`.
 
-  Não há o que corrigir no nosso lado: o `path`/`resource` e os prefixos de opção
-  (`es.*` vs `opensearch.*`) estão certos e cobertos por teste unitário. O item é
-  **acompanhar** o upstream e, quando sair um build para Spark 4, apagar o campo
-  `incompativel` da linha em `services.py` — os testes de integração já estão escritos
-  e voltam a rodar sem mais nenhuma mudança. Até então eles pulam dizendo isto.
-  Enquanto não sair, quem precisa de ES/OpenSearch em Spark 4 escreve pela API REST
-  (`bulk`) fora do Spark, ou fica em Spark 3.5.
+  Nada muda no servidor, no índice ou no schema. As outras saídas (rodar aquele pipeline
+  em Spark 3.5, indexar pelo `_bulk` fora do Spark, ou ler pelo JDBC de Elasticsearch
+  SQL, que é licença paga e só lê) estão em `docs/PIPELINE_SCHEMA.md`, na seção "Busca
+  (Elasticsearch e OpenSearch) no Spark 4".
+
+  Fica de acompanhamento: no dia em que sair um `elasticsearch-spark-40`, apagar o campo
+  `incompativel` da linha do elasticsearch em `services.py` devolve o conector nativo e
+  faz `ElasticsearchTest` rodar sem mais nenhuma mudança.
 
 - [ ] **`cassandra`: o catálogo do conector não funciona em Spark 4 (só o caminho de
   dados)** — mesmo achado. Ler e escrever com `format("cassandra")` passa com
@@ -465,11 +485,32 @@ Já entregue:
       `query` + `dbtable` e `query` + `partitionColumn` são recusados apontando a saída
       (subquery com alias em `dbtable`). `pushDownPredicate`/`Aggregate`/`Limit`,
       `fetchsize`, `sessionInitStatement` e `queryTimeout` expostos no catálogo do Studio.
+- ✅ **Apache DataFusion Comet avaliado — funciona, fica opt-in** — plugin que troca
+      operadores do plano físico por implementações nativas (Rust/Arrow). Não exige código
+      no framework: `spark.configs` já passa `spark.plugins`,
+      `spark.shuffle.manager` e o off-heap. Medido em Linux (Comet 1.0.0 + pyspark 4.1.1 +
+      JDK 17) por `tests/io/integration/test_comet_spark.py`, que roda o mesmo pipeline em
+      duas JVMs, com e sem as configs: as linhas saem idênticas e o plano acelerado fica
+      nativo de ponta a ponta (`CometNativeScan`, `CometFilter`, `CometHashAggregate`,
+      `CometExchange`/`CometNativeShuffle`, com `CometColumnarToRow` só na borda), contra
+      zero nó `Comet` na execução sem elas. O que impede virar default está medido também:
+      jar de 88 MB que precisa estar no `--driver-class-path` **antes** de a JVM subir
+      (pelo builder dá `ClassNotFoundException: org.apache.spark.CometPlugin`), binário
+      nativo só para Linux — em Windows/macOS o plugin se desabilita **em silêncio**, o
+      pipeline passa e a aceleração simplesmente não acontece —, off-heap obrigatório e
+      fallback por operador. Roda no CI no job `comet`; detalhes e configs em
+      `docs/PIPELINE_SCHEMA.md`, "DataFusion Comet". O ganho de tempo também está medido,
+      por `tests/io/integration/bench_comet.py` (mesmo pipeline nas duas configurações,
+      JVMs separadas, aquecimento descartado, mediana de três repetições): em 40 milhões de
+      linhas / 290 MB de Parquet em `local[4]`, a agregação caiu de 3,56s para 1,61s
+      (**2,21x**) e o filtro com `count` de 1,02s para 0,83s (1,24x) — o ganho acompanha
+      quanto do plano virou nativo, então o número é por forma de consulta, não do plugin.
+      O benchmark fica fora do CI de propósito: asserção de tempo em runner compartilhado é
+      teste instável.
 - 🟡 **Pushdown** — já disponível: `collect` + `{{var}}` (IN literal → data skipping), `checkpoint`, `partitionColumn`/`fetchsize` (JDBC), `partition_by` / `compression` / `maxRecordsPerFile` via `options`, e a heurística de path do Delta corrigida.
 
 Pendente:
 
-- [ ] **Avaliar Apache DataFusion Comet** — acelerador vetorizado do Spark; medir ganho real e o custo de dependência antes de recomendar.
 - [ ] **Análise consolidada de opções de tuning** — já resolvido acima: `repartition`,
       `coalesce`, `partitionBy`, `bucketBy`, `maxRecordsPerFile`, *partition pruning*,
       *predicate pushdown*, *small files* e `shuffle` (partitions/skew). Falta mapear/expor/
@@ -495,8 +536,38 @@ Pendente:
       (testes → build + `twine check` → publish). Release publicado → PyPI; execução
       manual → TestPyPI (ensaio). Trusted Publishing (OIDC), sem token manual. Ver
       [docs/DEPLOY_PYPI.md](docs/DEPLOY_PYPI.md) §8.
-- [ ] **Matriz de versões** — CI já cobre Python (3.9/3.11/3.12); falta variar
-      **PySpark** (ex: 3.4 × 3.5) na matriz.
+- ✅ **Matriz de versões** — Python (3.9/3.11/3.12) no job `test` e **linha do Spark**
+      nos três jobs com JVM (`integration`, `services-tier`, `comet`): 4.1.1 (Scala 2.13,
+      Python 3.12) e 3.5.9 (Scala 2.12, Python 3.11 — o pyspark 3.5 não é testado contra
+      3.12 upstream). O custo real da matriz não é o YAML, é a coordenada: quase todo jar
+      de conector é publicado por linha **e** por binário do Scala, e errar o sufixo não dá
+      erro de versão, dá `NoSuchMethodError` no meio da execução. Por isso as coordenadas
+      moram em `tests/io/integration/harness.py` (`_LINHAS`) e `services.py` (moldes com
+      `{scala}`/`{spark}`, `por_linha` quando muda o **nome** do artefato e não só o
+      sufixo, `incompativel_em` quando a incompatibilidade é de uma linha só), e o
+      workflow só escolhe a versão do pyspark. Acrescentar uma linha nova é acrescentar
+      uma entrada em `_LINHAS` e uma linha na matriz, nessa ordem.
+- [ ] **Perna 3.5 do `services-tier` não medida** — entrou com `continue-on-error: true`:
+      as coordenadas 2.12 (`opensearch-spark-30_2.12:1.3.0`,
+      `elasticsearch-spark-30_2.12:8.16.1`, Mongo e Cassandra 2.12) foram verificadas como
+      publicadas — o pom de cada uma diz contra que Spark foi compilada — mas nunca
+      rodaram contra os containers, porque não havia Docker na máquina onde a linha foi
+      escrita. Duas execuções verdes seguidas e o `continue-on-error` sai. Ponto de
+      atenção específico dessa perna: no 3.5 o conector nativo do Elasticsearch **roda**,
+      então é o primeiro lugar onde os dois conectores de busca dividem classpath.
+- [ ] **Cache de jar por linha** — a chave do cache do Ivy e a do jar do Comet incluem a
+      versão do pyspark de propósito. Uma chave só para as duas pernas faria cada uma
+      restaurar o Scala da outra no mesmo diretório, e o sintoma seria erro de classe num
+      job que não mudou.
+- ✅ **Lint de Python no CI** — job `lint` com `ruff check` e configuração em
+      `[tool.ruff.lint]` do `pyproject.toml`: `select = ["E","W","F"]`,
+      `ignore = ["E501"]`, `target-version = "py39"`. O escopo é decisão, não preguiça —
+      o conjunto default do ruff aponta 406 ocorrências neste repositório, dominadas por
+      modernização de sintaxe (`UP006`/`UP045`/`UP035`) que reescreveria o código para
+      3.10+ e quebraria o piso 3.9 declarado em `requires-python`. `ruff format` também
+      fica fora: reformataria 56 arquivos de uma vez, enterrando o histórico num diff que
+      ninguém revisou. Versão do ruff fixada no extra `dev` — linter que muda de regra
+      sozinho deixa vermelho um PR que não tocou no código apontado.
 - Base atual: versão única via `__version__` (pyproject `dynamic`); publicação no
   PyPI documentada e automatizada via CI.
 
@@ -1009,12 +1080,30 @@ Restante, na ordem do plano:
       containers estoura a memória da máquina, e o sintoma engana (o mesmo laço de
       `idWithoutTopologyInfo` do conflito de jar). O que cada execução descobriu está em
       [docs/TEST_PLAN.md](docs/TEST_PLAN.md) → *The service tier*.
-- [ ] **Camada de serviço no CI** — os três arquivos acima rodam só na máquina de quem
-      sobe os containers. O job `integration` do `ci.yml` já os coleta por
-      `find tests/io/integration -name 'test_*.py'`, mas não sobe serviço nenhum, então
-      eles passam pulando tudo. Fechar isso é declarar `services:` no workflow (Postgres,
-      MySQL, MariaDB, Mongo, Cassandra e Kafka têm imagem oficial e healthcheck) — de
-      preferência num quarto job, para o tier de jar continuar rápido. Vale medir antes:
-      o custo é resolução de jar + boot de container por PR.
+- ✅ **Camada de serviço no CI** — job `services-tier`, separado do `integration` para o
+      tier de jar continuar rápido. Sobe sete containers do próprio `docker-compose.yml`
+      com `up -d --wait` (Postgres, MySQL, MariaDB, Mongo, Kafka, OpenSearch e
+      Elasticsearch) e, antes de rodar, **verifica alcance de cada porta e falha se
+      faltar**: teste que se pula sozinho é a coisa certa na máquina de quem não tem
+      Docker e é um job verde provando nada no CI. Em falha, despeja
+      `docker compose logs --tail 40` — é o único lugar onde um boot quebrado se explica.
+- [ ] **Três serviços ainda de fora do `services-tier`** — SQL Server, Oracle e Cassandra
+      ficaram no run local: cada um leva minutos para subir, contra menos de um minuto dos
+      sete atuais. `test_jdbc_services_spark.py` cobre os cinco dialetos, então no CI dois
+      dos cinco passam pulando. Entram quando houver medição dizendo que o PR aguenta o
+      tempo — ou num job noturno, que é o formato natural para eles.
+- [ ] **Runner do Studio sem job** — o `sparquet-studio/server/` (FastAPI que executa o
+      Job e faz streaming do resultado) não é importado por nenhum job: o `studio` cobre o
+      frontend (typecheck, lint, testes, build e smoke em Chrome) e o `test` cobre o
+      framework. Um import + um `TestClient` no endpoint de execução fecharia a lacuna sem
+      precisar de Spark.
+- ✅ **Cobertura medida no CI** — o job `test` roda cada arquivo sob
+      `coverage run` (modo paralelo, um processo por arquivo), faz `combine` e publica o
+      total no `$GITHUB_STEP_SUMMARY` junto com a contagem de arquivos e de testes pulados.
+      O piso é `--fail-under=65`, deliberadamente abaixo do medido: esse job **não tem
+      Java**, então todo ramo que precisa de SparkSession viva é inalcançável ali — 69,6%
+      sem JVM contra 76,9% com uma. O piso existe para pegar módulo que saiu da suíte
+      inteiro, não para policiar ponto percentual; apertá-lo até o número atual deixaria
+      vermelho um refactor honesto.
 - [ ] **`dynamodb` sem serviço** — é o único conector NoSQL sem container na
       `docker-compose.yml`. `amazon/dynamodb-local` fecharia a lacuna sem conta AWS.

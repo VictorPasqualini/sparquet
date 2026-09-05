@@ -143,6 +143,10 @@ tabelas grandes carregadas depois — o equivalente declarativo ao `df.collect()
 
 Como funciona:
 
+- **`collect` tem teto**: acima de `max_values` valores distintos (default 10000) ele
+  falha em vez de montar um `IN (...)` gigante — nesse tamanho o literal degrada o plano
+  em vez de ajudar, e a saída é um join semi/inner contra a lista como DataFrame. O teto
+  é aplicado na consulta, então a coleta nunca chega a estourar o driver. `0` desliga.
 - **`collect`** roda `df.select(column).distinct().collect()` e guarda a lista em um
   *store* de runtime sob a chave `as`. Não altera o df, mas dispara uma action Spark
   (traz dados ao driver) — por isso use **após um `checkpoint`** (o df já materializado
@@ -244,7 +248,9 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
     // collect: coleta valores distintos de uma coluna numa variável de runtime {{as}}
     // (não altera o df; dispara collect no driver — use após checkpoint). Ver seção
     // "Variáveis de runtime ({{var}})" abaixo.
-    { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" },
+    // max_values: teto de valores distintos (default 10000; 0 desliga). Acima disso a
+    // transformação falha: lista grande em IN (...) degrada o plano em vez de ajudar.
+    { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes", "max_values": 10000 },
     // stop_if_empty: encerra o pipeline graciosamente se o df estiver vazio — não
     // roda as transformações seguintes nem escreve nas saídas. result.skipped = True,
     // success = True, rows_written = 0. Posicione logo após o filtro que define o
@@ -267,7 +273,8 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
       "type": "debug",                          // não modifica o df — apenas inspeciona
       "label": "após join contratos",           // opcional, aparece no separador
       // show usa df.show() — display() do Databricks só funciona chamado diretamente na célula
-      "actions": ["count", "print_schema", "show", "explain", "columns", "dtypes"],
+      // pushdown: lê o plano e diz o que desceu até a fonte (não dispara job)
+      "actions": ["count", "print_schema", "show", "explain", "pushdown", "columns", "dtypes"],
       // transformations: opcional — aplicadas a um df descartável SÓ para esta
       // inspeção (filter/select/group_by/etc.); NÃO alteram o df do pipeline
       // (o debug sempre retorna o df original). Útil p/ focar a visualização.
@@ -485,7 +492,7 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
 | `json` | sim | sim | JSON nativo (JSON Lines; `multiLine` p/ 1 doc por arquivo) |
 | `orc` | sim | sim | ORC colunar nativo |
 | `avro` | sim | sim | Requer `spark-avro` no classpath |
-| `xml` | sim | sim | Requer `spark-xml`; `rowTag` obrigatório |
+| `xml` | sim | sim | `rowTag` obrigatório. Nativo a partir do Spark 4; no 3.x requer `com.databricks:spark-xml`, que **não** suporta `mode: append` (`Append mode is not supported by com.databricks.spark.xml.DefaultSource`) |
 | `binary` | sim | **não** | `binaryFile` (só leitura): path/modificationTime/length/content |
 | `hudi` | sim | sim | Requer bundle Hudi; upsert/partição via opções `hoodie.*` |
 | `kafka` | sim | sim | Batch read/write; MSK via SASL/IAM; requer conector Kafka no classpath |
@@ -501,15 +508,55 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
 | `documentdb` | sim | sim | Amazon DocumentDB (mesmo conector Mongo; URI com TLS) |
 | `dynamodb` | sim | sim | `path`=tabela; write é upsert por chave (append) |
 | `cassandra` | sim | sim | `path`=`keyspace.tabela`; append (upsert); **mesma classe atende Cassandra e ScyllaDB** |
-| `elasticsearch` | sim | sim | `path`=índice; **mesma classe atende Elasticsearch e OpenSearch** |
+| `elasticsearch` | sim | sim | `path`=índice; opções `es.*`; **sem build para Spark 4** — ver a nota abaixo |
+| `opensearch` | sim | sim | `path`=índice; opções `opensearch.*`; conector próprio, **não** é o do Elasticsearch |
 
 > Conectores externos exigem o **JAR do driver/conector no classpath** do Spark
 > (`spark.jars` / `spark.jars.packages`): JDBC, BigQuery, Snowflake, Redshift, Mongo,
-> DynamoDB, Cassandra, Elasticsearch, Kafka, **Avro (`spark-avro`), XML (`spark-xml`)
-> e Hudi (`hudi-spark-bundle`)**. `parquet`/`csv`/`delta`/`iceberg`/`txt`/`view`/`json`/
-> `orc`/`binary` são nativos. O framework só monta `.format(...).options(...)`; não
+> DynamoDB, Cassandra, Elasticsearch, OpenSearch, Kafka, **Avro (`spark-avro`),
+> XML no Spark 3.x (`spark-xml`) e Hudi (`hudi-spark-bundle`)**.
+> `parquet`/`csv`/`delta`/`iceberg`/`txt`/`view`/`json`/`orc`/`binary` são nativos, e o
+> `xml` passou a ser a partir do Spark 4.0. O framework só monta `.format(...).options(...)`; não
 > empacota drivers. Cada `io/<fmt>.py` documenta as opções; o catálogo do Studio
 > (`formats.databases.ts`, `formats.files.ts`) as descreve para a UI e a IA.
+
+### Busca (Elasticsearch e OpenSearch) no Spark 4
+
+Os dois formatos existem no framework desde sempre; o que mudou com o Spark 4 é quais
+conectores ainda compilam. Medido contra container, em Spark 4.1.1:
+
+| Formato | Coordenada | Situação |
+|---|---|---|
+| `opensearch` | `org.opensearch.client:opensearch-spark-40_2.13:2.0.0` | **funciona** — o pom declara Spark 4.1.1 / Scala 2.13.16; ida e volta e `opensearch.mapping.id` passam |
+| `elasticsearch` | `org.elasticsearch:elasticsearch-spark-30_2.13:9.5.3` (a última publicada) | **não funciona** — ainda compila contra Spark 3.4.3 e chama `Dataset.sqlContext()`, que saiu da API |
+
+O sintoma do lado do Elasticsearch é este, na escrita:
+
+```
+java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'
+```
+
+Não existe artefato `elasticsearch-spark-40` no Maven Central, e o `opensearch-spark-40`
+não serve de substituto: o cliente do OpenSearch 2.x recusa um servidor Elasticsearch 8+
+na verificação de versão. Quem precisa de Elasticsearch tem quatro saídas, em ordem de
+preferência:
+
+1. **Rodar aquele pipeline em Spark 3.5** — o `elasticsearch-spark-30` funciona lá, e o
+   JSON do pipeline não muda. É a única saída que mantém o conector nativo.
+2. **Escrever num formato intermediário** (Parquet/Delta) e indexar fora do Spark, com o
+   `_bulk` da API REST. É o caminho que não depende de nenhum build de terceiro.
+3. **Ler por JDBC** com o driver de Elasticsearch SQL (`format: "jdbc"`, url
+   `jdbc:es://`): serve para leitura, é recurso de licença paga (Platinum/Enterprise) e
+   não escreve.
+4. **Trocar o destino para OpenSearch**, que é fork do Elasticsearch 7.10 e tem o build
+   de Spark 4 — decisão de infraestrutura, não de pipeline.
+
+O `opensearch-spark-40` declara as próprias dependências de Spark, e `spark.jars.packages`
+resolve a árvore inteira: sem `spark.jars.excludes` a sessão baixa um segundo jogo de
+jars do Spark (`spark-core`, `spark-sql`, `spark-sql-api`, `spark-common-utils`,
+`spark-streaming`, `spark-yarn`) e os põe no classpath do driver. Funciona assim mesmo
+(o pyspark instalado ganha na ordem do classpath), mas o certo é excluí-los — como
+`tests/io/integration/services.py` faz.
 
 ---
 
@@ -551,9 +598,10 @@ devolve a coluna:
 
 Não existe `input.partition_filter`, e não vai existir: seria um segundo lugar para
 escrever a mesma coisa. O Catalyst empurra o predicado para dentro do scan — dá para
-conferir com `{ "type": "debug", "actions": ["explain"] }`, onde aparecem
+conferir com `{ "type": "debug", "actions": ["pushdown"] }`, que lista
 `PartitionFilters` (diretórios descartados sem abrir arquivo) e `PushedFilters`
-(row-groups Parquet descartados sem descomprimir). Um `input.partition_filter`
+(row-groups Parquet descartados sem descomprimir) por nó de leitura — veja
+[Pushdown](#pushdown--o-que-a-leitura-deixa-de-trazer). Um `input.partition_filter`
 produziria exatamente o mesmo plano.
 
 O que **não** é automático: o pruning só acontece se a coluna filtrada for coluna de
@@ -613,8 +661,13 @@ sai do banco não custa rede nem memória:
 **c) Ajuste o transporte.** `fetchsize` (linhas por round-trip) — o default do driver
 raramente serve: o Postgres traz tudo de uma vez (risco de OOM no executor), o Oracle
 traz 10 por vez (um round-trip a cada 10 linhas). `pushDownPredicate` (default `true`),
-`pushDownAggregate` e `pushDownLimit` empurram filtro, agregação e LIMIT para o banco;
-passam direto ao Spark via `options`.
+`pushDownAggregate`, `pushDownLimit`, `pushDownOffset` e `pushDownTableSample` empurram
+filtro, agregação, `LIMIT`, `OFFSET` e `TABLESAMPLE` para o banco; passam direto ao Spark
+via `options`. `pushDownOffset` só chega ao banco junto do `LIMIT` (o par vai inteiro ou
+não vai), e `pushDownTableSample` depende do dialeto ter `TABLESAMPLE` — onde não tem, a
+opção é no-op e o Spark amostra depois de ler tudo. Todas valem no caminho por tabela; com
+`query`, o SELECT já é o recorte. Para conferir o que de fato desceu, veja
+[Pushdown](#pushdown--o-que-a-leitura-deixa-de-trazer).
 
 ### Escrita — quantos diretórios, quantos arquivos
 
@@ -681,8 +734,14 @@ padrão é materializar um bucket e particionar por ele:
 ### Skew
 
 - **Em join:** o AQE já divide a partição gorda (`spark.sql.adaptive.skewJoin.enabled`,
-  ligado por default no Spark 3.2+). Para dimensão pequena, `"broadcast": true` no
-  `join` elimina o shuffle inteiro.
+  ligado por default no Spark 3.2+). Uma partição é considerada torta quando passa dos
+  dois critérios ao mesmo tempo: `skewedPartitionFactor` × a mediana (default `5.0`) **e**
+  `skewedPartitionThresholdInBytes` (default `268435456b`, 256 MB). Skew abaixo de 256 MB
+  não é tratado — em dataset pequeno o AQE simplesmente não age, e o ajuste é baixar o
+  limiar. Para dimensão pequena, `"broadcast": true` no `join` elimina o shuffle inteiro.
+- **O AQE só enxerga shuffle.** Ele reparte a partição gorda *depois* do embaralhamento,
+  para o join. Escrita não passa por lá: o diretório de saída de uma chave dominante
+  continua sendo um arquivo grande, e nenhuma conf resolve.
 - **Na escrita, com uma chave dominante:** nem bucket nem `repartition` ajudam — o valor
   é indivisível por definição. As saídas são *salting* (reparticionar por
   `concat(chave, '-', pmod(hash(rand()), 8))`) ou aceitar o diretório grande e limitar o
@@ -720,6 +779,264 @@ que quem lê saiba que existe transform — o oposto do bucket materializado à 
 - **`bucketBy` do Spark não é alternativa:** só funciona com `saveAsTable` (bucketing
   Hive), `save(path)` o recusa, e o Delta não o suporta. É por isso que bucket
   declarativo existe só no Iceberg.
+
+---
+
+## Pushdown — o que a leitura deixa de trazer
+
+Pushdown é empurrar trabalho para quem guarda o dado: em vez de o Spark trazer tudo e
+descartar depois, a fonte já devolve menos. São cinco recortes, e cada um aparece com
+nome próprio no plano físico:
+
+| Recorte | Nome no plano | O que economiza |
+|---|---|---|
+| Diretórios inteiros | `PartitionFilters` | nem abre o arquivo: o descarte acontece na listagem |
+| Linhas | `PushedFilters` | Parquet/ORC pulam row-groups pela estatística min/max; banco recebe `WHERE` |
+| Colunas | `ReadSchema` | formato colunar lê só as colunas pedidas (*column pruning*) |
+| Agregação | `PushedAggregation` (v2 de arquivo) / `PushedAggregates` (JDBC) | `COUNT`/`MIN`/`MAX` saem do footer ou do banco, sem varrer linha |
+| Recorte descoberto em runtime | `RuntimeFilters` | *dynamic partition pruning* e bloom filter de join: o filtro só existe depois que o outro lado do join roda |
+
+Nada disso é opção do pipeline, e nada disso precisa ser pedido: o Catalyst empurra
+sozinho o que consegue. O que o JSON controla são as condições em que ele *pode* — o
+layout dos dados, a ordem da cadeia (`filter`/`select` antes de join/group_by), as opções
+do conector e algumas confs de formato.
+
+Duas coisas que pushdown **não** é:
+
+- **Não é garantia de leitura mais rápida.** `PushedFilters` diz que o predicado saiu do
+  Spark; o Parquet ainda precisa de estatística de row-group que case com ele para pular
+  alguma coisa, e o banco ainda precisa de índice. Predicado empurrado para uma tabela
+  sem índice vira full scan do lado de lá.
+- **Não é o mesmo que partition pruning.** Poda de partição descarta arquivos pela
+  estrutura de diretórios, antes de abrir qualquer um; pushdown de predicado abre o
+  arquivo e pula pedaços dele. A poda é uma ordem de grandeza mais barata, e só existe
+  se a coluna filtrada for coluna de partição na origem.
+
+### Conferindo: a ação `pushdown` do `debug`
+
+`explain` mostra o plano inteiro e deixa a conclusão por conta de quem lê.
+`{ "type": "debug", "actions": ["pushdown"] }` lê o mesmo plano e responde a pergunta
+direta — o que desceu até a fonte, por nó de leitura:
+
+```jsonc
+"transformations": [
+  { "type": "filter", "condition": "dia = 1 AND grupo = 3" },
+  { "type": "debug", "label": "leitura da fato", "actions": ["pushdown"] }
+]
+```
+
+```
+scan 1: FileScan parquet — file:/lake/vendas
+  colunas lidas: 2
+  PartitionFilters: isnotnull(dia#5), (dia#5 = 1)
+  PushedFilters: IsNotNull(grupo), EqualTo(grupo,3)
+  nota: 1 nó(s) `Filter` acima dos scans — predicado avaliado depois de ler (o Spark não
+  pôde descer, ou é expressão que a fonte não entende).
+```
+
+- Um scan que não empurrou nada recebe o aviso `⚠️ nada empurrado: este scan lê a fonte
+  inteira`.
+- No JDBC, o `*` antes do predicado (`PushedFilters: [*IsNotNull(id)]`) é o Spark dizendo
+  que ele foi **inteiramente** traduzido para o `WHERE`. Sem o `*`, o Spark reavalia o
+  predicado depois de buscar as linhas.
+- Não dispara job: o plano físico é planejamento, não execução. Diferente de `count`,
+  `show` e `explain` em plano estendido, essa ação é grátis.
+- Sem nó de leitura (dado vindo de `createDataFrame`, `range` ou de um `checkpoint` já
+  materializado) a ação diz isso, em vez de reportar zero.
+
+### Alavancas de arquivo (`spark.configs`)
+
+Todas passam por `"spark": { "configs": { … } }` e são globais da sessão. Os defaults
+abaixo foram lidos do Spark 4.1.1 — em geral já estão do lado certo, e a razão de estarem
+documentadas é o caso oposto: precisar **desligar** uma delas, ou descobrir que a que
+importa está desligada.
+
+| Conf | Default | Para quê |
+|---|---|---|
+| `spark.sql.parquet.filterPushdown` | `true` | predicado para o Parquet (row-group min/max) |
+| `spark.sql.parquet.filterPushdown.{date,timestamp,decimal,stringPredicate}` | `true` | recorta o pushdown por tipo — desligue um deles ao caçar bug de conversão |
+| `spark.sql.parquet.filterPushdown.string.startsWith` | `true` | `LIKE 'abc%'` empurrado |
+| `spark.sql.parquet.aggregatePushdown` | **`false`** | `MIN`/`MAX`/`COUNT` resolvidos no footer, sem ler dado |
+| `spark.sql.orc.filterPushdown` | `true` | equivalente do Parquet, no ORC |
+| `spark.sql.orc.aggregatePushdown` | **`false`** | idem, no ORC |
+| `spark.sql.avro.filterPushdown.enabled` | `true` | descarta registro antes de desserializar |
+| `spark.sql.csv.filterPushdown.enabled` | `true` | descarta a linha sem converter todos os campos |
+| `spark.sql.json.filterPushdown.enabled` | `true` | idem, no JSON |
+| `spark.sql.optimizer.nestedSchemaPruning.enabled` | `true` | lê só os campos usados **dentro** de um struct |
+| `spark.sql.optimizer.dynamicPartitionPruning.enabled` | `true` | poda partições da fato com as chaves que sobraram na dimensão |
+| `spark.sql.optimizer.runtime.bloomFilter.enabled` | `true` | bloom filter injetado no lado grande do join |
+| `spark.sql.optimizer.runtime.bloomFilter.creationSideThreshold` | `10485760b` | lado pequeno maior que isso não gera bloom filter |
+| `spark.sql.files.maxPartitionBytes` | `134217728b` | tamanho alvo da task de leitura (não é pushdown, mas é a outra metade do custo do scan) |
+
+**`aggregatePushdown` é o único que costuma valer a pena ligar — e é o mais cheio de
+condição.** Medido no Spark 4.1.1:
+
+- Só vale no caminho **DataSource v2** dos arquivos. O default de
+  `spark.sql.sources.useV1SourceList` é `avro,csv,json,kafka,orc,parquet,text`, ou seja,
+  Parquet é lido pelo v1 e a opção nem é consultada. Para usá-la, tire o formato da
+  lista: `"spark.sql.sources.useV1SourceList": ""`.
+- Só desce quando a consulta é **só** a agregação. Com `WHERE` (`PushedAggregation: []`)
+  ou com `GROUP BY` (`PushedGroupBy: []`, agregação vazia junto) o Spark volta a ler os
+  dados.
+- Com as duas condições atendidas o plano mostra
+  `PushedAggregation: [MAX(id), COUNT(*)]` e o scan devolve uma linha por arquivo, lida
+  do footer.
+- Trocar o Parquet para o v2 muda mais do que a agregação (o nó vira `BatchScan`, e o
+  conjunto de otimizações é outro). Ligue por consulta, num pipeline de contagem/
+  min/max, não como default do cluster.
+
+### Alavancas por conector
+
+O que o Spark empurra para arquivo, ele **não** empurra para conector: cada um traduz (ou
+não) os filtros por conta própria. A coluna "explícito" é o que se escreve em `options`;
+o resto o conector decide sozinho.
+
+| Formato | Explícito em `options` | Automático |
+|---|---|---|
+| `postgresql`, `mysql`, `oracle`, `sqlserver`, … (JDBC) | `query` / `dbtable` com subquery, `pushDownPredicate`, `pushDownAggregate`, `pushDownLimit`, `pushDownOffset`, `pushDownTableSample` | predicado e projeção viram `WHERE`/`SELECT`; veja a seção JDBC acima |
+| `cassandra` (e ScyllaDB) | `pushdown` (`true` por default) | predicado em *partition key* e *clustering column* vira CQL; filtro em coluna comum fica no Spark (o CQL exigiria `ALLOW FILTERING`) |
+| `mongodb` (e DocumentDB) | `aggregation.pipeline` — `$match`/`$project` escritos à mão | o conector v10 traduz filtro e projeção para o estágio inicial do pipeline |
+| `bigquery` | `filter`, `viewsEnabled` + `materializationDataset` (para `query`) | filtro e projeção vão para a Storage Read API; `maxParallelism` decide o número de streams |
+| `snowflake` | `autopushdown` (`on` por default), `query` | com `autopushdown`, fragmentos inteiros do plano (join, agregação) são traduzidos para SQL Snowflake |
+| `redshift` | `query`, `dbtable` com subquery | filtro e projeção entram no `UNLOAD`; o Spark lê do `tempdir` só o que sobrou |
+| `elasticsearch` | `es.query` (DSL), `es.read.field.include` / `.exclude` | o es-hadoop traduz filtros do Spark para query DSL |
+| `opensearch` | `opensearch.query`, mesmas chaves com o prefixo `opensearch.*` | idem |
+| `dynamodb` | `filterPushdown` (`true` por default) | vira `FilterExpression` do Scan — cobra RCU do mesmo jeito, só economiza rede |
+| `delta` | — | *data skipping* por estatística de arquivo (min/max das primeiras colunas indexadas) + poda de partição; `OPTIMIZE`/`ZORDER` melhoram o skipping |
+| `iceberg` | — | poda por metadado e *hidden partitioning*: o filtro na coluna original poda a partição derivada (`days(dt)`, `bucket(16, id)`) |
+| `kafka` | `startingOffsets`, `endingOffsets`, `assign`, `subscribePattern` | **nenhum**: filtro em `partition`/`offset`/`timestamp` roda depois da leitura. O recorte é o offset. |
+
+Nome de opção acompanha a versão do conector no classpath — confirme no README da versão
+que você fixou.
+
+## DataFusion Comet — acelerador nativo (medido; opt-in, não default)
+
+[Apache DataFusion Comet](https://datafusion.apache.org/comet/) é um plugin que troca
+operadores do plano físico do Spark por implementações nativas (Rust/Arrow), operador a
+operador, caindo de volta para o Spark no que não suporta. Não muda API nem resultado:
+o mesmo pipeline JSON roda igual, mais rápido em scan/filtro/projeção/agregação/sort de
+Parquet.
+
+O framework **não** precisa de código para isso: `spark.configs` já é passagem livre de
+conf. O que existe é uma lista de pré-requisitos que não são óbvios.
+
+**Por que usar.** O benefício não é "Rust é rápido"; são quatro propriedades concretas:
+
+1. **Execução vetorizada sobre Arrow.** O operador nativo trabalha em lotes colunares, com
+   instruções SIMD, em vez de linha a linha na JVM. É por isso que o ganho aparece onde há
+   varredura, filtro, projeção, hash aggregate e sort — e some onde o trabalho é de rede.
+2. **Memória fora do heap.** Os buffers de execução saem do heap da JVM para o off-heap, o
+   que tira do coletor de lixo justamente a parte que mais aloca. Em job com pausa de GC
+   visível no *timeline* do Spark, essa metade do ganho é a que aparece primeiro.
+3. **Nenhuma mudança no pipeline.** É configuração de sessão, não API: o mesmo JSON, os
+   mesmos readers, writers, transformações e validações. Nada no arquivo do pipeline diz
+   que existe Comet — o teste de integração afirma exatamente isso, comparando linha a
+   linha o resultado das duas execuções.
+4. **Adoção parcial e reversível.** A troca é operador a operador; o que o Comet não
+   suporta continua no Spark, no mesmo plano. Não há migração, não há "porta única": tirar
+   as configs volta ao estado anterior na próxima execução.
+
+**Quando compensa:** leitura volumosa de Parquet com filtro, projeção, agregação, sort ou
+shuffle no caminho — o perfil da maior parte da ingestão em lote. **Quando não compensa:**
+pipeline cujo tempo está do outro lado da rede (JDBC, APIs), UDF em Python (força fallback
+do trecho), pipeline dominado por escrita, e volume pequeno, onde o custo fixo de
+dimensionar off-heap e carregar 88 MB de jar não se paga. Fora do Linux não há aceleração
+nenhuma — ver "binário nativo" abaixo.
+
+**Medido**, e não só avaliado: `tests/io/integration/test_comet_spark.py` roda o mesmo
+pipeline (Parquet, `filter`, `group_by`) duas vezes em JVMs separadas, uma com as configs
+abaixo e uma sem, e compara. Em Linux com Comet 1.0.0 + pyspark 4.1.1 + JDK 17 as linhas
+saem idênticas e o plano acelerado fica nativo de ponta a ponta — só a borda de volta
+para o Spark sobra:
+
+```
+*(1) CometColumnarToRow
++- CometHashAggregate [nome, sum, count], [Final], [nome], [sum(valor), count(1)]
+   +- CometExchange hashpartitioning(nome, 1), ENSURE_REQUIREMENTS, CometNativeShuffle
+      +- CometHashAggregate [nome, valor], [Partial], [nome], [partial_sum(valor), partial_count(1)]
+         +- CometFilter [nome, valor], isnotnull(valor)
+            +- CometNativeScan parquet [nome,valor] ... PushedFilters: [IsNotNull(valor)]
+```
+
+Sem as configs, o mesmo pipeline não produz nenhum nó `Comet` — é esse contraste que o
+teste afirma, porque o plugin se desabilita em silêncio (ver "binário nativo" abaixo) e
+um pipeline que passa não prova que houve aceleração.
+
+```jsonc
+"spark": { "configs": {
+  "spark.plugins": "org.apache.spark.CometPlugin",
+  "spark.shuffle.manager": "org.apache.spark.sql.comet.execution.shuffle.CometShuffleManager",
+  "spark.memory.offHeap.enabled": "true",
+  "spark.memory.offHeap.size": "4g",
+  "spark.comet.explain.fallback.enabled": "true"
+} }
+```
+
+- **Coordenada:** `org.apache.datafusion:comet-spark-spark4.1_2.13:1.0.0` — o artefato é
+  por linha do Spark (`spark3.4`, `spark3.5`, `spark4.0`, `spark4.1`). O `org.apache.comet`
+  que aparece em alguns tutoriais **não existe** no Maven Central. O jar tem ~88 MB.
+- **O jar precisa estar no classpath do driver antes de a JVM subir.** Passar
+  `spark.jars` pelo builder não basta — o plugin é carregado na construção do
+  `SparkContext`, antes de o jar ser resolvido:
+
+  ```
+  java.lang.ClassNotFoundException: org.apache.spark.CometPlugin
+    at org.apache.spark.internal.plugin.PluginContainer$.apply(PluginContainer.scala:210)
+    at org.apache.spark.SparkContext.<init>(SparkContext.scala:594)
+  ```
+
+  Funciona via `spark-submit --jars <comet.jar> --driver-class-path <comet.jar>`, via
+  `PYSPARK_SUBMIT_ARGS` equivalente, ou com o jar instalado no cluster.
+- **Databricks (e qualquer host com sessão pré-existente):** `spark.configs` do JSON é
+  ignorado, porque a sessão já existe quando o pipeline começa. Comet ali se configura na
+  Spark config do cluster + a biblioteca instalada, nunca pelo pipeline.
+- **Binário nativo só para Linux.** O jar embarca
+  `org/apache/comet/linux/{amd64,aarch64}/libcomet.so` e mais nada. Em Windows/macOS o
+  plugin carrega e se desabilita sozinho:
+
+  ```
+  WARN CometSparkSessionExtensions: Comet extension is disabled because of error when loading native lib. Falling back to Spark
+  java.lang.UnsupportedOperationException: Unsupported OS/arch, cannot find /org/apache/comet/win32/amd64/comet.dll. Please try building from source.
+  ```
+
+  A degradação é graciosa — a consulta roda e o resultado é o mesmo, sem nenhum operador
+  Comet no plano. Isso é bom para portabilidade e ruim para diagnóstico: a aceleração
+  pode simplesmente não estar acontecendo em silêncio.
+- **Versões:** Comet 1.0.0 cobre Spark 3.4 a 4.1 (4.1 com Java 17 ou 21); 4.2 é
+  experimental.
+- **Como saber se está ativo:** os nós do plano ganham prefixo `Comet` — na 1.0.0,
+  `CometNativeScan` (não `CometScan`), `CometFilter`, `CometHashAggregate`,
+  `CometExchange`/`CometNativeShuffle` e o `CometColumnarToRow` da borda —, e
+  `{ "type": "debug", "actions": ["explain"] }` mostra. Com `spark.comet.explain.fallback.enabled=true`, cada operador que caiu de
+  volta para o Spark é registrado com o motivo.
+- **O que não acelera:** JDBC e os conectores (o trabalho está do outro lado da rede),
+  UDF Python (força fallback do trecho) e escrita — o ganho está no caminho de leitura
+  colunar e nos operadores intermediários.
+
+**Ganho medido.** `tests/io/integration/bench_comet.py` roda o mesmo pipeline do framework
+(`run_from_dict`) nas duas configurações, em JVMs separadas, com aquecimento descartado e
+mediana de três repetições cronometradas. Em 40.000.000 de linhas / 290 MB de Parquet,
+`local[4]`, off-heap de 4 GB, WSL2 com 16 núcleos:
+
+| Forma da consulta | Sem Comet | Com Comet | Ganho | Nós nativos no plano |
+|---|---|---|---|---|
+| `filter` + `group_by` com `sum`/`count` | 3,56s | 1,61s | **2,21x** | `CometNativeScan`, `CometFilter`, `CometHashAggregate`, `CometExchange`, `CometNativeShuffle` |
+| `filter` + `count` | 1,02s | 0,83s | 1,24x | `CometNativeScan`, `CometFilter`, `CometProject`, `CometColumnarToRow` |
+
+O ganho acompanha quanto do plano virou nativo: a agregação, que tem shuffle e hash
+aggregate para trocar, ganha mais que o dobro; a contagem, que é quase só varredura,
+ganha pouco. Duas ressalvas de método: as saídas do benchmark usam
+`"options": {"cache": "false"}`, porque o `ViewWriter` faz `cache()` + `count()` por
+default e a repetição mediria o cache do Spark, não o Comet; e o número é deste hardware
+e deste volume — reproduza com
+`python tests/io/integration/bench_comet.py --linhas 40000000 --repeticoes 3` no seu.
+
+**Posição atual:** funciona como opt-in, sem mudança no framework, em cluster Linux com
+o jar instalado — e é assim que deve ser usado por enquanto. Não vira default: são 88 MB de
+jar, exigência de off-heap dimensionado e fallback silencioso por operador, contra um
+ganho que depende do formato e da forma da consulta — 2,21x numa agregação e 1,24x numa
+contagem, na mesma máquina e nos mesmos dados. Vale medir no seu pipeline antes de adotar:
+`test_comet_spark.py` prova correção e aceleração efetiva, `bench_comet.py` mede o tempo.
 
 ---
 

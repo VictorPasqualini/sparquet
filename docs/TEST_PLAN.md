@@ -148,8 +148,9 @@ long and offline.
 
 `tests/io/integration/` holds the connectors that need a jar but no service, sharing
 one `harness.py`: `avro`, `delta` and `iceberg` pull their jars through
-`spark.jars.packages`, while `xml` and `binaryFile` are built into Spark 4 and need
-nothing. One session serves the whole tier, because `spark.jars.packages` only takes
+`spark.jars.packages`, `binaryFile` needs nothing, and `xml` needs nothing **on the
+Spark 4 line** — the datasource only entered Spark in 4.0, so on 3.5 the harness adds
+`com.databricks:spark-xml_2.12:0.18.0` for it. One session serves the whole tier, because `spark.jars.packages` only takes
 effect when the session is created and `SparkSession` is a per-process singleton.
 The harness declares those packages in the pipeline JSON, the same way a user
 would — which makes this tier the standing proof that the JSON `spark` block
@@ -163,6 +164,27 @@ creating the session ahead of the config it was supposed to honour.
 The gate opens on `SPARQUET_IT=1`, and also on its own once every jar is already in
 the ivy cache — so the suite never downloads by surprise and, once it has run, keeps
 running offline. Without the gate every test skips with the reason printed.
+
+**Two Spark lines, one harness.** `_LINHAS` in `harness.py` maps `major.minor` of the
+installed pyspark to what changes with it: the Scala binary (2.13 on 4.x, 2.12 on 3.5)
+and the coordinates that are published per line. `services.py` builds on that — its
+`package` and `exclui` fields are moulds taking `{scala}` and `{spark}`, `por_linha`
+carries a whole coordinate for a line where the artifact *name* changes and not just the
+suffix (OpenSearch: `-spark-40` on Spark 4, `-spark-30` on 3.5), and `incompativel_em`
+says which lines an incompatibility applies to, because the Elasticsearch connector that
+cannot run on Spark 4 runs fine on 3.5. Outside the listed lines the tier skips with the
+reason instead of failing on a class error. CI runs `integration`, `services-tier` and
+`comet` once per line, and getting the suffix wrong is worth avoiding precisely because
+it does not surface as a version error — it surfaces as a `NoSuchMethodError` halfway
+through a run.
+
+Running the tier on 3.5 for the first time is what turned up the `xml` gap above: four
+tests died with `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: xml`, which is
+the kind of thing only an execution finds — the code, the JSON and the plan are all
+identical on both lines. Adding the jar then turned up a second one: `spark-xml` has no
+append (`Append mode is not supported by com.databricks.spark.xml.DefaultSource`), so
+`test_append_soma_no_mesmo_diretorio` asserts the clean refusal on 3.5 — `success=False`
+with that message, nothing written — and the sum on 4.x.
 
 The JDBC path is in this tier and not the next one because H2 runs inside the
 Spark JVM: a file, no server, no container. The connector under test is named
@@ -209,14 +231,63 @@ What running it settled, and what it cost:
   a class that was removed in Spark 4. So the DDL these tests need goes through the
   connector's own `CassandraConnector` over py4j — and a pipeline that needs DDL in
   Cassandra needs it from outside Spark too.
-- **Elasticsearch and OpenSearch** — the tests are written and they skip. No published
-  connector works on Spark 4: `elasticsearch-spark-30_2.13` (8.16.1 and 9.0.3, both
-  probed) and `opensearch-spark-30_2.13:1.3.0` hit
+- **OpenSearch** — passes with `opensearch-spark-40_2.13:2.0.0`, whose POM declares
+  Spark 4.1.1 / Scala 2.13.16. Its Spark dependencies go in `spark.jars.excludes`:
+  measured both ways, the suite passes either way (the installed pyspark wins classpath
+  order), so that is hygiene rather than a fix.
+- **Elasticsearch** — the connector tests skip and a third file passes in their place.
+  No Elasticsearch connector works on Spark 4: `elasticsearch-spark-30_2.13` (8.16.1,
+  9.0.3 and 9.5.3, all probed — the last one still compiles against Spark 3.4.3) hits
   `java.lang.NoSuchMethodError: 'org.apache.spark.sql.SQLContext org.apache.spark.sql.Dataset.sqlContext()'`
-  on write, and there is no `-spark-40` artifact on Maven Central. The reason lives in
-  the `incompativel` field of each row in `services.py`, which is what turns the
-  failure into a skip; deleting that field is all it takes for the tests to run again
-  the day a build ships.
+  on write, and no `elasticsearch-spark-40` artifact exists on Maven Central. The route
+  that does work is the **OpenSearch** connector pointed at the Elasticsearch server —
+  same REST API — and `ElasticsearchViaOpenSearchTest` proves it against a real ES
+  8.16.1 container, round trip plus `mapping.id`. Migrating a pipeline takes exactly two
+  edits, neither skippable: `format` becomes `opensearch` (the jar does not register
+  `es`: `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: es`) and the `es.*`
+  options become `opensearch.*` (the old prefix is ignored, and the write dies with
+  `OpenSearchHadoopIllegalArgumentException`). The `incompativel` field on the
+  elasticsearch row in `services.py` is what turns the native-connector tests into
+  skips; deleting it is all it takes for them to run the day a build ships.
+
+### DataFusion Comet
+
+`tests/io/integration/test_comet_spark.py` is the odd one out: Comet is not a connector
+but a session config, so what it asserts is that turning the plugin on does not change
+the result and does accelerate. It runs the same pipeline — Parquet in, `filter`,
+`group_by` — in two child processes, one with the plugin configs and one without, and
+compares rows and physical plans. Two JVMs are unavoidable: the plugin is instantiated
+while the `SparkContext` is being built, so the jar has to be on the driver's classpath
+before the JVM starts (`--driver-class-path`, passed through `PYSPARK_SUBMIT_ARGS`) — via
+`spark.jars` it is already too late and the session dies with
+`ClassNotFoundException: org.apache.spark.CometPlugin`.
+
+    SPARQUET_IT=1 SPARQUET_IT_COMET_JAR=/path/comet.jar python tests/io/integration/test_comet_spark.py
+
+It skips, naming what is missing, unless the platform is Linux and that jar exists — the
+native library ships for `linux/{amd64,aarch64}` and nothing else. The plan assertion is
+the point: on any other platform the plugin loads, disables itself **silently** and the
+pipeline still passes, so "the test is green" would say nothing about acceleration. On
+Linux the accelerated plan comes back native end to end (`CometNativeScan`, `CometFilter`,
+`CometHashAggregate`, `CometExchange`/`CometNativeShuffle`, `CometColumnarToRow` only at
+the boundary) and the unaccelerated one has no `Comet` node at all. CI runs it in the
+`comet` job, which caches the 88 MB jar and fails if the download did not land, because a
+skip there would be a green job proving nothing.
+
+Speed is measured separately, by `tests/io/integration/bench_comet.py`, which is a
+benchmark and **not** a test: it asserts nothing and is deliberately kept out of CI,
+because a timing assertion on a shared runner is a flaky test. It reuses the same two-JVM
+design, generates the data once without the plugin so both runs read identical files,
+discards a warm-up and reports the median of N timed repetitions for two query shapes:
+
+    python tests/io/integration/bench_comet.py --linhas 40000000 --repeticoes 3
+
+On 40,000,000 rows / 290 MB of Parquet in `local[4]` with a 4 GB off-heap, the aggregation
+shape went from 3.56s to 1.61s (2.21x) and the filter + `count` shape from 1.02s to 0.83s
+(1.24x) — the gain tracks how much of the plan went native, so it is a number per query
+shape, not a number for the plugin. Both benchmark outputs pass
+`"options": {"cache": "false"}`, because `ViewWriter` caches by default and the repetitions
+would otherwise measure Spark's cache instead of Comet.
 
 Four things about the harness are worth knowing before extending it.
 
