@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from typing import List, NamedTuple
+
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
@@ -161,7 +164,7 @@ class DropDuplicatesTransformation(BaseTransformation):
     def apply(self, df: DataFrame) -> DataFrame:
         columns: list[str] | None = self.config.params.get("columns")
         return df.dropDuplicates(columns) if columns else df.dropDuplicates()
-    
+
 
 class DistinctTransformation(BaseTransformation):
     """Removes duplicate rows, using all columns."""
@@ -353,23 +356,72 @@ class CollectTransformation(BaseTransformation):
     de jobs Spark: traz a lista para o driver uma vez e reusa nos reads seguintes.
 
     JSON params:
-      column – coluna cujos valores distintos serão coletados
-      as     – nome da variável de runtime (referenciada como {{as}})
+      column     – coluna cujos valores distintos serão coletados
+      as         – nome da variável de runtime (referenciada como {{as}})
+      max_values – teto de valores distintos (default 10000; 0 desliga o teto)
 
     Não altera o DataFrame, mas dispara uma action Spark (collect no driver) —
     use após um `checkpoint` para evitar recomputar a linhagem inteira.
+
+    Guarda de tamanho: a lista coletada vira literal dentro de `IN (...)`, e a
+    partir de alguns milhares de valores o remédio passa a ser o problema — o
+    plano cresce, o Catalyst gasta tempo analisando o predicado e o pushdown
+    degrada. Acima de `max_values` a transformação **falha** dizendo o que usar
+    no lugar (um `join` semi/inner com a lista como DataFrame, que o Spark
+    resolve como broadcast join sem trazer nada para o driver). O teto é
+    aplicado na própria consulta (`limit(max_values + 1)`), então uma coluna com
+    milhões de valores distintos não chega a ser materializada no driver.
 
     Exemplo:
       { "type": "collect", "column": "id_cessao", "as": "cessoes_pendentes" }
       // depois, no read de uma tabela grande:
       // { "type": "filter", "condition": "id_cessao IN ({{cessoes_pendentes}})" }
+      { "type": "collect", "column": "id", "as": "ids", "max_values": 50000 }
     """
+
+    #: Acima disto a lista deixa de ser um bom empurrão de filtro (ver docstring).
+    _MAX_VALUES = 10_000
+    #: Aviso antes do teto: ainda funciona, já merece revisão.
+    _WARN_VALUES = 1_000
 
     def apply(self, df: DataFrame) -> DataFrame:
         column = self.config.params["column"]
         var_name = self.config.params["as"]
+        max_values = self.config.params.get("max_values", self._MAX_VALUES)
 
-        values = [row[0] for row in df.select(column).distinct().collect()]
+        if not isinstance(max_values, int) or isinstance(max_values, bool) or max_values < 0:
+            raise ValueError(
+                f"collect: 'max_values' deve ser inteiro >= 0 (recebido: {max_values!r}). "
+                f"Use 0 para desligar o teto."
+            )
+
+        distintos = df.select(column).distinct()
+        # Teto aplicado na consulta: com N+1 sabemos que passou do limite sem
+        # trazer o resto. Sem teto (0), coleta tudo.
+        limitado = distintos.limit(max_values + 1) if max_values else distintos
+        values = [row[0] for row in limitado.collect()]
+
+        if max_values and len(values) > max_values:
+            raise ValueError(
+                f"collect: a coluna '{column}' tem mais de {max_values} valores distintos, "
+                f"e a lista é usada como literal em IN (...). Nesse tamanho o filtro literal "
+                f"deixa de ajudar: o plano cresce e o pushdown degrada. Troque por um join "
+                f"(semi/inner) contra a lista como DataFrame — o Spark resolve como broadcast "
+                f"join sem passar pelo driver — ou aumente o teto com "
+                f'"max_values": <n> (0 desliga) se a lista realmente for pequena o bastante '
+                f"para o banco de destino."
+            )
+
+        if len(values) > self._WARN_VALUES:
+            defer_warning(
+                "Lista coletada é grande para usar como literal em IN (...)",
+                coluna=column,
+                variavel=var_name,
+                quantidade=len(values),
+                limiar=self._WARN_VALUES,
+                alternativa="join semi/inner contra a lista como DataFrame",
+            )
+
         self.runtime[var_name] = values
 
         logger.info(
@@ -680,6 +732,153 @@ class JoinTransformation(BaseTransformation):
 
 
 
+class ScanPushdown(NamedTuple):
+    """O que um nó de leitura do plano físico diz ter empurrado para a fonte."""
+
+    #: `FileScan`, `BatchScan`, `Scan` (JDBC/v2) ou `RowDataSourceScan`.
+    kind: str
+    #: Formato ou relação: `parquet`, `iceberg`, `JDBCRelation(vendas)`.
+    source: str
+    #: Predicados resolvidos por diretório de partição — não abrem arquivo nenhum.
+    partition_filters: List[str]
+    #: Predicados entregues à fonte (row group do Parquet, WHERE do banco).
+    pushed_filters: List[str]
+    #: Agregações empurradas. O v2 de arquivo imprime `PushedAggregation`, o
+    #: JDBC imprime `PushedAggregates` — as duas etiquetas caem aqui.
+    pushed_aggregates: List[str]
+    #: Chaves de group by que a fonte assumiu (`PushedGroupBy`).
+    pushed_group_by: List[str]
+    #: Filtros dinâmicos, resolvidos em runtime (DPP e bloom filter de join).
+    runtime_filters: List[str]
+    #: Colunas de primeiro nível que o scan devolve (projeção efetiva).
+    columns_read: int
+    #: Caminho ou tabela, quando o plano informa.
+    location: str
+
+    @property
+    def pushes_nothing(self) -> bool:
+        return not (self.partition_filters or self.pushed_filters or self.pushed_aggregates)
+
+
+#: Início de um nó de leitura, já sem os glifos da árvore (`+-`, `:-`, `*(1)`).
+_SCAN_START = re.compile(r"^(FileScan|BatchScan|RowDataSourceScan|Scan)\b\s*(\S*)")
+#: `PushedFilters: [IsNotNull(id), EqualTo(id,3)]` e parentes.
+_LISTA = r"{campo}:\s*\[([^\]]*)\]"
+_LOCATION = re.compile(r"Location:\s*\w+\((?:[^)]*)\)\[([^\]]*)\]")
+_READ_SCHEMA = "ReadSchema: struct<"
+
+
+def _colunas_lidas(linha: str) -> int:
+    """Conta os campos de topo do `ReadSchema` do scan.
+
+    Não dá para regex simples: o struct aninha (`struct<a:int,b:struct<c:int>>`)
+    e o `ReadSchema` nem sempre é o último campo da linha (no v2 vem
+    `RuntimeFilters` depois). Anda pelo texto fechando os `<`.
+    """
+    inicio = linha.find(_READ_SCHEMA)
+    if inicio < 0:
+        return 0
+    corpo_inicio = inicio + len(_READ_SCHEMA)
+    nivel = 1
+    for pos in range(corpo_inicio, len(linha)):
+        if linha[pos] == "<":
+            nivel += 1
+        elif linha[pos] == ">":
+            nivel -= 1
+            if nivel == 0:
+                corpo = linha[corpo_inicio:pos]
+                return len(_split_top_level(corpo)) if corpo.strip() else 0
+    return 0
+
+
+def _lista(*campos: str, linha: str) -> List[str]:
+    achado = None
+    for campo in campos:
+        achado = re.search(_LISTA.format(campo=campo), linha)
+        if achado:
+            break
+    if not achado:
+        return []
+    corpo = achado.group(1).strip()
+    if not corpo:
+        return []
+    return [item.strip() for item in _split_top_level(corpo) if item.strip()]
+
+
+def _split_top_level(texto: str) -> List[str]:
+    """Divide por vírgula ignorando as que estão dentro de () ou <>.
+
+    `EqualTo(grupo,3)` é um item só, e `struct<a:int,b:struct<c:int>>` tem dois
+    campos de primeiro nível.
+    """
+    partes: List[str] = []
+    nivel = 0
+    atual = []
+    for char in texto:
+        if char in "(<":
+            nivel += 1
+        elif char in ")>":
+            nivel -= 1
+        if char == "," and nivel == 0:
+            partes.append("".join(atual))
+            atual = []
+            continue
+        atual.append(char)
+    partes.append("".join(atual))
+    return partes
+
+
+def parse_pushdown(plan: str) -> List[ScanPushdown]:
+    """Extrai o pushdown declarado por cada nó de leitura de um plano físico.
+
+    Recebe o texto de `queryExecution.executedPlan` (é o que `explain()` imprime)
+    e devolve uma entrada por scan. Função pura de propósito: o parsing é o que
+    tem risco de errar, e assim ele é testável sem SparkSession.
+
+    O plano é a única fonte que sabe o que o Spark realmente empurrou — a opção
+    pedida no JSON diz a intenção, não o resultado. Um `filter` sobre coluna
+    partitionada aparece em `PartitionFilters`; sobre coluna comum, em
+    `PushedFilters`; e o que não desceu fica num nó `Filter` acima do scan.
+    """
+    scans: List[ScanPushdown] = []
+    for linha_bruta in plan.splitlines():
+        # Tira os glifos da árvore e o marcador de codegen (`*(1) `).
+        linha = re.sub(r"^[\s:+\-]*", "", linha_bruta)
+        linha = re.sub(r"^\*\(\d+\)\s*", "", linha)
+        inicio = _SCAN_START.match(linha)
+        if not inicio:
+            continue
+        kind, resto = inicio.group(1), inicio.group(2)
+        # `FileScan parquet [id#2L,...]` → source `parquet`; no v2 o nome da
+        # relação já vem colado no colchete das colunas.
+        source = resto.split("[")[0].strip() or kind
+        # `Scan ExistingRDD` / `OneRowRelation` não são leitura de fonte: são
+        # dados que já estão na memória do driver. Sem fonte, não há pushdown a
+        # cobrar — ficam de fora para não gerar aviso falso.
+        if source.startswith(("ExistingRDD", "OneRowRelation")):
+            continue
+        local = _LOCATION.search(linha)
+        scans.append(
+            ScanPushdown(
+                kind=kind,
+                source=source,
+                partition_filters=_lista("PartitionFilters", linha=linha),
+                pushed_filters=_lista("PushedFilters", linha=linha),
+                pushed_aggregates=_lista("PushedAggregation", "PushedAggregates", linha=linha),
+                pushed_group_by=_lista("PushedGroupBy", "PushedGroupByExpressions", linha=linha),
+                runtime_filters=_lista("RuntimeFilters", linha=linha),
+                columns_read=_colunas_lidas(linha),
+                location=local.group(1) if local else "",
+            )
+        )
+    return scans
+
+
+def _plan_text(df: DataFrame) -> str:
+    """Texto do plano físico sem passar pelo stdout do `explain()`."""
+    return df._jdf.queryExecution().executedPlan().toString()
+
+
 class DebugTransformation(BaseTransformation):
     """Executes inspection actions on the DataFrame without modifying it.
 
@@ -702,18 +901,35 @@ class DebugTransformation(BaseTransformation):
       extended        – extended plan for explain (default: false)
 
     Supported actions:
-      show, print_schema, count, explain, columns, dtypes
+      show, print_schema, count, explain, pushdown, columns, dtypes
+
+    A ação `pushdown` lê o plano físico e diz, por nó de leitura, o que desceu
+    até a fonte: `PartitionFilters` (partição podada, nem abre arquivo),
+    `PushedFilters` (predicado entregue ao Parquet/ORC ou ao banco),
+    `PushedAggregates`, `RuntimeFilters` (DPP e bloom filter de join) e quantas
+    colunas o scan devolve. Quando um scan não empurra nada, avisa — é a
+    diferença entre "pedi pushdown" e "o Spark empurrou". Não dispara job: o
+    plano físico é planejamento, não execução.
 
     Example:
       { "type": "debug", "label": "após join", "actions": ["count", "print_schema", "show"] }
       { "type": "debug", "actions": ["show"], "show_rows": 5, "truncate": false }
+      { "type": "debug", "label": "leitura", "actions": ["pushdown"] }
       // inspeciona só as linhas de uma cessão, sem alterar o pipeline:
       { "type": "debug", "label": "cessão C1", "actions": ["count", "show"],
         "transformations": [ { "type": "filter", "condition": "id_cessao = 'C1'" },
                              { "type": "select", "columns": ["id_cessao", "numero_contrato"] } ] }
     """
 
-    _SUPPORTED_ACTIONS = {"show", "print_schema", "count", "explain", "columns", "dtypes"}
+    _SUPPORTED_ACTIONS = {
+        "show",
+        "print_schema",
+        "count",
+        "explain",
+        "pushdown",
+        "columns",
+        "dtypes",
+    }
 
     def apply(self, df: DataFrame) -> DataFrame:
         params = self.config.params
@@ -749,6 +965,8 @@ class DebugTransformation(BaseTransformation):
                 print(f"count: {view.count()}")
             elif action == "explain":
                 view.explain(extended=params.get("extended", False))
+            elif action == "pushdown":
+                self._report_pushdown(view)
             elif action == "columns":
                 print(f"columns: {view.columns}")
             elif action == "dtypes":
@@ -761,6 +979,50 @@ class DebugTransformation(BaseTransformation):
 
         print(f"{'─' * 60}\n")
         return df
+
+    def _report_pushdown(self, view: DataFrame) -> None:
+        """Imprime o pushdown por nó de leitura e avisa o que ficou sem."""
+        plan = _plan_text(view)
+        scans = parse_pushdown(plan)
+        if not scans:
+            print(
+                "pushdown: nenhum nó de leitura no plano — o df vem de memória "
+                "(range/createDataFrame) ou de um checkpoint já materializado."
+            )
+            return
+
+        # Um `Filter` acima do scan é predicado que o Spark decidiu (ou não pôde)
+        # avaliar depois da leitura — o dado sobe do disco e só então é descartado.
+        filtros_acima = len(re.findall(r"^[\s:+\-]*(?:\*\(\d+\)\s*)?Filter ", plan, re.M))
+
+        for i, scan in enumerate(scans, start=1):
+            alvo = f" — {scan.location}" if scan.location else ""
+            print(f"scan {i}: {scan.kind} {scan.source}{alvo}")
+            print(f"  colunas lidas: {scan.columns_read}")
+            for rotulo, valores in (
+                ("PartitionFilters", scan.partition_filters),
+                ("PushedFilters", scan.pushed_filters),
+                ("PushedAggregates", scan.pushed_aggregates),
+                ("PushedGroupBy", scan.pushed_group_by),
+                ("RuntimeFilters", scan.runtime_filters),
+            ):
+                if valores:
+                    print(f"  {rotulo}: {', '.join(valores)}")
+            if scan.pushes_nothing:
+                print(
+                    "  ⚠️  nada empurrado: este scan lê a fonte inteira. "
+                    "Ponha o `filter` como primeira transformação; se o predicado "
+                    "for sobre coluna de partição, aponte o path na raiz do dataset "
+                    "(+ basePath) para ele virar PartitionFilters."
+                )
+
+        if filtros_acima:
+            print(
+                f"  nota: {filtros_acima} nó(s) `Filter` acima dos scans — predicado "
+                f"avaliado depois de ler (o Spark não pôde descer, ou é expressão que "
+                f"a fonte não entende)."
+            )
+
 
 
 class UnionTransformation(BaseTransformation):

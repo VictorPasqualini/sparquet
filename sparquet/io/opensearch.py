@@ -1,9 +1,21 @@
 """OpenSearch (via opensearch-hadoop).
 
 Conector PRÓPRIO do OpenSearch — distinto do Elasticsearch. Requer
-`org.opensearch.client:opensearch-spark-30_<scala>:<versao>` no classpath, que
+`org.opensearch.client:opensearch-spark-<linha>_<scala>:<versao>` no classpath, que
 registra o formato "opensearch". As opções usam o prefixo `opensearch.*` (espelho
 do `es.*` do es-hadoop).
+
+Em Spark 4 a coordenada é `opensearch-spark-40_2.13:2.0.0` — o único conector de
+busca com build de Spark 4 (o `-spark-30` chama `Dataset.sqlContext()`, que saiu da
+API). Ele declara as próprias dependências de Spark, então com `spark.jars.packages`
+convém excluí-las em `spark.jars.excludes` para não carregar um segundo jogo de jars
+do Spark.
+
+**Serve também para Elasticsearch**: o opensearch-hadoop é fork do es-hadoop e fala a
+mesma API REST — medido contra um servidor ES 8.16.1, escrita e leitura passam. É a
+rota para Elasticsearch em Spark 4, porque o `elasticsearch-spark` não tem build. O
+formato tem de ser `opensearch` e as opções `opensearch.*`: este jar não registra o
+formato "es" nem entende o prefixo `es.*`.
 
 path = índice/resource lido/escrito (ex: 'clientes' ou 'clientes/_doc').
 

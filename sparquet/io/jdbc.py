@@ -71,6 +71,11 @@ class _JdbcDialect:
         database = opts.get("database", "")
         return cls._format_url(host, port, database)
 
+    @classmethod
+    def _resolve_driver(cls, opts: dict) -> str | None:
+        """Classe do driver: a informada em options, senão o default do dialeto."""
+        return opts.get("driver") or cls._DRIVER
+
     def _passthrough(self, opts: dict) -> dict:
         return {k: v for k, v in opts.items() if k not in _CONN_KEYS}
 
@@ -92,8 +97,10 @@ class JdbcReader(BaseReader, _JdbcDialect):
       partitionColumn/lowerBound/upperBound/numPartitions – leitura paralela
                    (os QUATRO juntos; ver _validate_read_partitioning)
       fetchsize  – linhas por round-trip
-      pushDownPredicate / pushDownAggregate / pushDownLimit – empurram filtro,
-                   agregação e LIMIT para o banco (passam direto ao Spark)
+      pushDownPredicate / pushDownAggregate / pushDownLimit / pushDownOffset /
+      pushDownTableSample – empurram filtro, agregação, LIMIT, OFFSET e TABLESAMPLE
+                   para o banco (passam direto ao Spark). Só valem no caminho v2
+                   (leitura por tabela); com 'query' o SELECT já é o recorte.
       sessionInitStatement / queryTimeout / customSchema – idem
 
     Estratégia de leitura: sem 'partitionColumn' a tabela inteira vem numa única
@@ -123,7 +130,7 @@ class JdbcReader(BaseReader, _JdbcDialect):
 
         reader = self.spark.read.format("jdbc").option("url", self._resolve_url(opts))
 
-        driver = opts.get("driver", self._DRIVER)
+        driver = self._resolve_driver(opts)
         if driver:
             reader = reader.option("driver", driver)
 
@@ -161,7 +168,7 @@ class JdbcWriter(BaseWriter, _JdbcDialect):
             .option("dbtable", opts.get("dbtable") or self.config.path)
         )
 
-        driver = opts.get("driver", self._DRIVER)
+        driver = self._resolve_driver(opts)
         if driver:
             writer = writer.option("driver", driver)
 
@@ -190,12 +197,61 @@ class _MySqlDialect(_JdbcDialect):
 
 
 class _MariaDbDialect(_JdbcDialect):
-    _DRIVER = "org.mariadb.jdbc.Driver"
+    """MariaDB pela url do MySQL — é o único caminho com dialeto no Spark.
+
+    O Spark 4.1 não tem dialeto MariaDB (a lista é DB2, Databricks, Derby, H2,
+    MsSqlServer, MySQL, Oracle, Postgres, Snowflake, Teradata), e o `MySQLDialect`
+    só reconhece url que comece com `jdbc:mysql`. Com `jdbc:mariadb://` cai-se no
+    dialeto default, que cita identificador com `"` — o MariaDB recusa, e não é só
+    a escrita: o SELECT que o Spark monta cita as colunas do mesmo jeito, então a
+    leitura morre em `You have an error in your SQL syntax ... near '"id" INTEGER'`.
+
+    O MariaDB fala o protocolo do MySQL, então o Connector/J com `jdbc:mysql://`
+    conversa com o servidor MariaDB e traz o dialeto junto: citação com crase,
+    mapeamento de tipos do MySQL e SQL correto no pushdown de agregação/LIMIT.
+    Por isso o default deste formato é a url e o driver do MySQL.
+
+    Para usar o driver do MariaDB assim mesmo (recurso específico dele, ou por
+    política de jar), informe `url` e `driver` em options — o driver acompanha a
+    url automaticamente — e junte `sessionVariables: sql_mode='ANSI_QUOTES'`, que
+    faz o MariaDB aceitar `"` como citação de identificador. O preço é que, na
+    mesma sessão, `"..."` deixa de ser literal de string: importa para quem usa
+    `query`.
+    """
+
+    _DRIVER = "com.mysql.cj.jdbc.Driver"
+    _MARIADB_DRIVER = "org.mariadb.jdbc.Driver"
     _DEFAULT_PORT = "3306"
 
     @staticmethod
     def _format_url(host: str, port: str, database: str) -> str:
-        return f"jdbc:mariadb://{host}:{port}/{database}"
+        return f"jdbc:mysql://{host}:{port}/{database}"
+
+    @classmethod
+    def _resolve_driver(cls, opts: dict) -> str | None:
+        driver = opts.get("driver")
+        if driver:
+            return driver
+        # Url de MariaDB informada à mão: o Connector/J recusa uma url que não
+        # comece com `jdbc:mysql`, então o driver acompanha a url.
+        if str(opts.get("url", "")).startswith("jdbc:mariadb:"):
+            return cls._MARIADB_DRIVER
+        return cls._DRIVER
+
+    @classmethod
+    def _resolve_url(cls, opts: dict) -> str:
+        url = super()._resolve_url(opts)
+        variaveis = str(opts.get("sessionVariables", ""))
+        if url.startswith("jdbc:mariadb:") and "ANSI_QUOTES" not in variaveis:
+            defer_warning(
+                "url jdbc:mariadb:// sem ANSI_QUOTES — o Spark 4 não tem dialeto "
+                "MariaDB e cita identificador com aspas duplas, que o servidor "
+                "recusa (leitura inclusive). Use a url jdbc:mysql:// (o default "
+                "deste formato) ou acrescente "
+                "sessionVariables: sql_mode='ANSI_QUOTES'.",
+                url=url,
+            )
+        return url
 
 
 class _SqlServerDialect(_JdbcDialect):

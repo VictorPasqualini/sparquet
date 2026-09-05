@@ -158,6 +158,31 @@ const jdbcReadOptions = (driver: string, port: string): FieldSpec[] => [
     group: 'advanced',
   },
   {
+    key: 'pushDownOffset',
+    label: 'Push down offset',
+    type: 'select',
+    options: BOOL_OPTIONS,
+    help: 'Sends OFFSET to the database (Spark 3.4+).',
+    docs: [
+      'Only reaches the database when the LIMIT ... OFFSET pair can go together, so it needs',
+      'pushDownLimit as well. Without it the server still produces every row before the offset and',
+      'Spark discards them after reading.',
+    ].join('\n'),
+    group: 'advanced',
+  },
+  {
+    key: 'pushDownTableSample',
+    label: 'Push down table sample',
+    type: 'select',
+    options: BOOL_OPTIONS,
+    help: 'Sends TABLESAMPLE to the database (Spark 3.4+), so the sampling happens at the source.',
+    docs: [
+      'Support is per dialect: where the dialect has no TABLESAMPLE the option is a no-op and Spark',
+      'samples after reading everything.',
+    ].join('\n'),
+    group: 'advanced',
+  },
+  {
     key: 'sessionInitStatement',
     label: 'Session init statement',
     type: 'sql',
@@ -209,6 +234,8 @@ const jdbcFormat = (opts: {
   driver: string
   port: string
   urlExample: string
+  /** Warnings that only apply to this database, appended to the shared JDBC list. */
+  extraGotchas?: string[]
 }): FormatDef => ({
   id: opts.id,
   label: opts.label,
@@ -238,6 +265,7 @@ const jdbcFormat = (opts: {
     'query and dbtable are mutually exclusive, and so are query and partitionColumn. A filtered parallel read has to be written as a dbtable subquery with an alias.',
     'The partition column must be indexed on the database side: N range queries against an unindexed column are N full scans.',
     `Credentials in user/password are plaintext in the JSON — ${PLAINTEXT_SECRET.toLowerCase()}`,
+    ...(opts.extraGotchas ?? []),
   ],
   examples: [
     {
@@ -675,6 +703,7 @@ const elasticsearch: FormatDef = {
   ],
   gotchas: [
     'Requires the elasticsearch-spark (es-hadoop) JAR matching your Spark/Scala version.',
+    'NO Spark 4 build exists: the latest elasticsearch-spark-30 (9.5.3) still compiles against Spark 3.4.3 and dies with NoSuchMethodError on Dataset.sqlContext(). On Spark 4, reach an Elasticsearch server through the `opensearch` format instead — same REST API, measured against ES 8.16.1 — or keep that pipeline on Spark 3.5.',
     'update/upsert need es.mapping.id — without an id column every write creates a new document.',
     'Managed/cloud clusters usually need es.nodes.wan.only=true.',
     'For OpenSearch use the `opensearch` format (its own connector + opensearch.* options), not this one.',
@@ -725,8 +754,9 @@ const opensearch: FormatDef = {
     { key: 'opensearch.write.operation', label: 'Write operation', type: 'select', options: [{ value: 'index', label: 'index' }, { value: 'create', label: 'create' }, { value: 'update', label: 'update' }, { value: 'upsert', label: 'upsert' }], group: 'advanced' },
   ],
   gotchas: [
-    'Requires the opensearch-spark (opensearch-hadoop) JAR matching your Spark/Scala version — NOT the Elasticsearch one.',
+    'Requires the opensearch-spark (opensearch-hadoop) JAR matching your Spark/Scala version — NOT the Elasticsearch one. On Spark 4 that is org.opensearch.client:opensearch-spark-40_2.13:2.0.0, the only search connector with a Spark 4 build; add its Spark dependencies to spark.jars.excludes so the session does not load a second set of Spark JARs.',
     'Option prefix is opensearch.* (not es.*).',
+    'Also works against an Elasticsearch server (measured on ES 8.16.1), which is the Spark 4 route for Elasticsearch. Migrating a pipeline takes two edits: format `elasticsearch` becomes `opensearch`, and every es.* option becomes opensearch.* — this JAR registers neither the old format name nor the old prefix.',
     'update/upsert need opensearch.mapping.id.',
     'Managed clusters usually need opensearch.nodes.wan.only=true.',
   ],
@@ -746,7 +776,19 @@ const opensearch: FormatDef = {
 export const DATABASE_FORMATS: FormatDef[] = [
   jdbcFormat({ id: 'postgresql', label: 'PostgreSQL', driver: 'org.postgresql.Driver', port: '5432', urlExample: 'jdbc:postgresql://db:5432/app' }),
   jdbcFormat({ id: 'mysql', label: 'MySQL', driver: 'com.mysql.cj.jdbc.Driver', port: '3306', urlExample: 'jdbc:mysql://db:3306/app' }),
-  jdbcFormat({ id: 'mariadb', label: 'MariaDB', driver: 'org.mariadb.jdbc.Driver', port: '3306', urlExample: 'jdbc:mariadb://db:3306/app' }),
+  jdbcFormat({
+    id: 'mariadb',
+    label: 'MariaDB',
+    // MySQL Connector/J on purpose: Spark 4 has no MariaDB dialect, and MySQLDialect
+    // only matches URLs starting with `jdbc:mysql`. See the gotcha below.
+    driver: 'com.mysql.cj.jdbc.Driver',
+    port: '3306',
+    urlExample: 'jdbc:mysql://db:3306/app',
+    extraGotchas: [
+      'MariaDB connects through the MySQL route: from host + database the framework builds `jdbc:mysql://...` and uses the MySQL Connector/J driver. Spark 4 has no MariaDB dialect, and MySQLDialect only matches URLs starting with `jdbc:mysql` — MariaDB speaks the MySQL wire protocol, so this is what gives back backtick quoting and the right type mapping.',
+      'A `jdbc:mariadb://` URL given by hand still works (the MariaDB driver follows it automatically), but it falls to Spark\'s default dialect, which quotes identifiers with double quotes and the server rejects — reads included. Add `sessionVariables: sql_mode=\'ANSI_QUOTES\'`; the framework warns when it is missing. The cost is that `"..."` stops being a string literal in that session, which matters for `query`.',
+    ],
+  }),
   jdbcFormat({ id: 'sqlserver', label: 'SQL Server', driver: 'com.microsoft.sqlserver.jdbc.SQLServerDriver', port: '1433', urlExample: 'jdbc:sqlserver://db:1433;databaseName=app' }),
   jdbcFormat({ id: 'oracle', label: 'Oracle', driver: 'oracle.jdbc.OracleDriver', port: '1521', urlExample: 'jdbc:oracle:thin:@//db:1521/ORCLPDB1' }),
   bigquery,

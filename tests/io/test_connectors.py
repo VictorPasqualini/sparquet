@@ -195,10 +195,43 @@ class TestJdbc(unittest.TestCase):
             read_with("oracle", "t", {"host": "h", "database": "svc"}).opts["url"],
             "jdbc:oracle:thin:@//h:1521/svc",
         )
-        self.assertEqual(
-            read_with("mariadb", "t", {"host": "h", "database": "d"}).opts["url"],
-            "jdbc:mariadb://h:3306/d",
+        # MariaDB monta url de MySQL de propósito: é o que traz o MySQLDialect
+        # (o Spark 4 não tem dialeto MariaDB). Ver `_MariaDbDialect`.
+        maria = read_with("mariadb", "t", {"host": "h", "database": "d"})
+        self.assertEqual(maria.opts["url"], "jdbc:mysql://h:3306/d")
+        self.assertEqual(maria.opts["driver"], "com.mysql.cj.jdbc.Driver")
+
+    def test_mariadb_url_explicita_leva_o_driver_do_mariadb(self):
+        explicita = read_with("mariadb", "t", {"url": "jdbc:mariadb://h:3306/d"})
+        self.assertEqual(explicita.opts["driver"], "org.mariadb.jdbc.Driver")
+
+    def test_mariadb_driver_informado_vence(self):
+        forcado = read_with(
+            "mariadb", "t", {"host": "h", "database": "d", "driver": "x.Y"}
         )
+        self.assertEqual(forcado.opts["driver"], "x.Y")
+
+    def test_mariadb_url_explicita_sem_ansi_quotes_avisa(self):
+        # O Spark 4 não tem dialeto MariaDB: com `jdbc:mariadb://` ele cita
+        # identificador com aspas duplas e o servidor recusa — leitura inclusive.
+        clear_deferred_warnings()
+        read_with("mariadb", "t", {"url": "jdbc:mariadb://h:3306/d"})
+        self.assertEqual(len(deferred_warnings()), 1)
+        self.assertIn("ANSI_QUOTES", deferred_warnings()[0][0])
+        clear_deferred_warnings()
+
+    def test_mariadb_url_explicita_com_ansi_quotes_nao_avisa(self):
+        clear_deferred_warnings()
+        read_with(
+            "mariadb",
+            "t",
+            {
+                "url": "jdbc:mariadb://h:3306/d",
+                "sessionVariables": "sql_mode='ANSI_QUOTES'",
+            },
+        )
+        self.assertEqual(deferred_warnings(), [])
+        clear_deferred_warnings()
 
     def test_write_uses_dbtable_and_mode(self):
         wb = write_with("postgresql", "public.saida", {"host": "h", "database": "d"}, mode="append")

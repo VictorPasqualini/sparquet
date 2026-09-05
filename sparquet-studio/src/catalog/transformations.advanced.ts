@@ -905,6 +905,27 @@ const collectDef: TransformationDef = {
           : 'Only letters, digits and underscore — the {{name}} placeholder matches \\w+ and nothing else.'
       },
     },
+    {
+      key: 'max_values',
+      label: 'Maximum distinct values',
+      type: 'number',
+      default: 10000,
+      group: 'advanced',
+      help: 'The node fails above this. 0 turns the cap off.',
+      docs: lines(
+        'The collected list is inlined as literals inside `IN (...)`. Past a few thousand values the cure becomes the disease: the plan grows, Catalyst spends real time on the predicate, and the pushdown it was meant to enable degrades. Databases have their own ceilings too — Oracle rejects more than 1000 expressions in an `IN` list.',
+        '',
+        'The cap is applied in the query itself (`limit(max_values + 1)`), so a column with millions of distinct values is never materialised on the driver — the node fails instead of taking the JVM down with it.',
+        '',
+        'The failure message points at the alternative: join the list back as a DataFrame (`semi` or `inner`), which Spark resolves as a broadcast join without the driver round trip. Raise the cap only when the list really is small enough for the target database.',
+      ),
+      validate: (value) => {
+        if (value === undefined || value === null || value === '') return null
+        return Number.isInteger(value) && (value as number) >= 0
+          ? null
+          : 'Use a whole number of values, or 0 to turn the cap off.'
+      },
+    },
   ],
   keywords: [
     'collect',
@@ -918,7 +939,7 @@ const collectDef: TransformationDef = {
   ],
   gotchas: [
     'This fires a driver-side action. Place it after a `checkpoint`, or the whole chain is recomputed to produce the list.',
-    'Everything collected lands in driver memory — collecting a high-cardinality column is a straightforward way to kill the driver.',
+    'Everything collected lands in driver memory — collecting a high-cardinality column is a straightforward way to kill the driver. Since 0.11 a cap of 10000 distinct values fails the node before that happens; `max_values` moves or removes it.',
     'An empty result renders as the literal `NULL`, so `IN ({{var}})` becomes `IN (NULL)` and matches nothing. That is usually correct, but it looks like a silent data loss.',
     'An unresolved `{{name}}` is left LITERAL — no error. A typo reaches Spark as invalid SQL, or resolves unexpectedly later inside a nested chain.',
     "Value formatting is decided by the FIRST element: a list of strings becomes `'a', 'b'`, a list of numbers becomes `1, 2`. A column with nulls, or mixed types, produces invalid SQL.",
@@ -1000,6 +1021,11 @@ const debugDef: TransformationDef = {
         { value: 'show', label: 'show', hint: 'Prints rows via df.show().' },
         { value: 'explain', label: 'explain', hint: 'Physical plan.' },
         {
+          value: 'pushdown',
+          label: 'pushdown',
+          hint: 'What each read pushed down to the source. Cheap.',
+        },
+        {
           value: 'columns',
           label: 'columns',
           hint: 'Column names only. Cheap.',
@@ -1011,6 +1037,10 @@ const debugDef: TransformationDef = {
         '`count`, `show` and `explain` each trigger work on the inspected view — a debug node inside a hot path re-triggers computation every run.',
         '',
         '`show` deliberately uses `df.show()`. Databricks `display()` only renders when called directly from a notebook cell, so the framework never calls it.',
+        '',
+        '`pushdown` reads the physical plan and reports, per read node, what reached the source: `PartitionFilters` (whole partitions skipped, no file opened), `PushedFilters` (predicates handed to Parquet/ORC or turned into a `WHERE`), `PushedAggregates`, `RuntimeFilters` (dynamic partition pruning and join bloom filters) and how many columns the scan returns. A read that pushed nothing gets a warning. On JDBC a leading `*` means the predicate was fully translated; without it Spark still re-evaluates it after the fetch.',
+        '',
+        'It answers a question `explain` only hints at: whether the option asked for in the JSON actually took effect. Like `explain` it works off the plan, so it costs no job.',
       ),
     },
     {
@@ -1082,6 +1112,9 @@ const debugDef: TransformationDef = {
     'preview',
     'dtypes',
     'troubleshoot',
+    'pushdown',
+    'predicate pushdown',
+    'partition pruning',
   ],
   gotchas: [
     'The node always returns the ORIGINAL DataFrame, even when its own transformations reshaped what was printed. Nothing downstream can observe it.',
@@ -1090,6 +1123,7 @@ const debugDef: TransformationDef = {
     'A `stop_if_empty` placed inside the nested chain still aborts the whole pipeline, despite this node being "read-only". So does a `collect`, which writes to the shared runtime store.',
     'The nested chain runs on an engine that only knows the builtin types — runtime-registered custom transformations are unavailable there.',
     '`count`, `show` and `explain` are Spark actions on the inspected view; a debug node in a hot path pays for them on every run.',
+    '`pushdown` reports what the optimizer decided to push, which is not the same as a faster read: Parquet still needs row-group statistics that match the predicate to skip anything, and a database still needs an index. It proves the filter left Spark, not that the source used it well.',
     'Output goes to stdout via print(), not to the structured logger — it will not appear in log aggregation.',
     'An unknown action prints a warning line and is otherwise ignored, so a typo never fails the run.',
   ],
@@ -1105,6 +1139,16 @@ const debugDef: TransformationDef = {
         '    { "type": "select", "columns": ["id_operacao"] },',
         '    { "type": "distinct" }',
         '  ]',
+        '}',
+      ),
+    },
+    {
+      title: 'Check that the filter reached the source, not just the plan',
+      json: lines(
+        '{',
+        '  "type": "debug",',
+        '  "label": "leitura da fato",',
+        '  "actions": ["pushdown"]',
         '}',
       ),
     },
