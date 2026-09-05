@@ -94,6 +94,12 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      # A porta abre antes de o broker atender metadata. `--list` só responde
+      # quando ele atende, e é o que `up --wait` precisa para não liberar cedo.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      retries: 30
 
   mongodb:
     image: mongo:7
@@ -125,6 +131,10 @@ services:
       # aqui só faria o teste carregar certificado sem provar nada de conector.
       xpack.security.enabled: "false"
       ES_JAVA_OPTS: -Xms512m -Xmx512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      retries: 30
 
   # 9201 no host: Elasticsearch e OpenSearch usam 9200 dentro do container.
   opensearch:
@@ -134,3 +144,7 @@ services:
       discovery.type: single-node
       DISABLE_SECURITY_PLUGIN: "true"
       OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      retries: 30

@@ -155,9 +155,9 @@ const xml: FormatDef = {
   icon: 'FileCode2',
   canRead: true,
   canWrite: true,
-  summary: 'XML files via spark-xml (rowTag required).',
+  summary: 'XML files (rowTag required; native from Spark 4).',
   description:
-    'Reads and writes XML. Requires the `com.databricks:spark-xml` package on the classpath (it registers the "xml" format). Each record is delimited by `rowTag`.',
+    'Reads and writes XML. The "xml" datasource is built into Spark from 4.0 on; on Spark 3.x it needs the `com.databricks:spark-xml` package on the classpath, and that package does not support `append`. Each record is delimited by `rowTag`.',
   pathLabel: 'Path',
   pathPlaceholder: '/data/raw/catalogo',
   pathHelp: 'Filesystem path or URI to an XML directory.',
@@ -176,7 +176,7 @@ const xml: FormatDef = {
     { key: 'rootTag', label: 'Root tag', type: 'text', placeholder: 'books', help: 'Default: "rows".', group: 'advanced' },
   ],
   gotchas: [
-    'Requires the spark-xml package on the classpath.',
+    'Native from Spark 4.0; on Spark 3.x it requires the spark-xml package on the classpath, which rejects mode "append" ("Append mode is not supported by com.databricks.spark.xml.DefaultSource").',
     'rowTag is mandatory on both read and write.',
     'mode "merge" is invalid.',
   ],

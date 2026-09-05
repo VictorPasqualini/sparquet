@@ -14,13 +14,18 @@ a coordenada em `services.py`. Executado contra os containers no Spark 4.1.1:
                     duplica, ao contrário de todo o resto da suíte). O
                     `CassandraCatalog` do mesmo jar **não** sobe no Spark 4 — ver
                     `CassandraTest`.
-  **elasticsearch** / **opensearch** — conectores DISTINTOS, com prefixos de opção
-                    diferentes (`es.*` e `opensearch.*`). É o par mais fácil de
-                    confundir no catálogo. Os dois pulam: nenhuma versão
-                    publicada roda em Spark 4 (`Dataset.sqlContext()` saiu da
-                    API), e o motivo exato está no campo `incompativel` de cada
-                    coordenada. O dia em que sair um build, apagar aquele campo
-                    faz estes testes rodarem sem mais nenhuma mudança.
+  **opensearch**    passa com `org.opensearch.client:opensearch-spark-40_2.13:2.0.0`,
+                    que é build de Spark 4 de verdade.
+  **elasticsearch** pula: nenhuma versão publicada do `elasticsearch-spark`
+                    roda em Spark 4 (`Dataset.sqlContext()` saiu da API), e o
+                    motivo exato está no campo `incompativel` da coordenada. O
+                    dia em que sair um build, apagar aquele campo faz este teste
+                    rodar sem mais nenhuma mudança. Enquanto não sai, quem tem um
+                    servidor Elasticsearch chega nele pelo conector do OpenSearch
+                    — e é isso que `ElasticsearchViaOpenSearchTest` mede.
+
+  Os dois formatos são conectores DISTINTOS, com prefixos de opção diferentes
+  (`es.*` e `opensearch.*`), e são o par mais fácil de confundir no catálogo.
 
 Um serviço por vez; sem container, cada classe se pula dizendo o que subir:
 
@@ -33,6 +38,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -380,6 +386,66 @@ class OpenSearchTest(_BuscaTests, unittest.TestCase):
     servico = "opensearch"
     formato = "opensearch"
     prefixo = "opensearch"
+
+
+def _razao_da_rota_alternativa() -> Optional[str]:
+    """Por que a rota "Elasticsearch pelo conector do OpenSearch" não roda.
+
+    Ela precisa de dois containers, e por motivos diferentes: o **elasticsearch**
+    porque é o servidor sob teste, e o **opensearch** porque é de quem está de pé
+    que a sessão tira o jar (`services.packages_for_reachable`). Note que aqui o
+    `incompativel` do elasticsearch não vale: ele fala do jar do
+    `elasticsearch-spark`, que esta rota justamente não usa.
+    """
+    do_jar = services.skip_reason("opensearch")
+    if do_jar:
+        return f"o jar vem do opensearch, e {do_jar}"
+    if not services.reachable("elasticsearch"):
+        return (
+            f"elasticsearch não responde em {services.host_of('elasticsearch')}:"
+            f"{services.port_of('elasticsearch')} — "
+            f"`docker compose -f {services.COMPOSE.name} up -d elasticsearch`"
+        )
+    return None
+
+
+_SEM_ROTA = _razao_da_rota_alternativa()
+
+
+@harness.requires_integration
+@unittest.skipIf(_SEM_ROTA is not None, _SEM_ROTA or "")
+class ElasticsearchViaOpenSearchTest(_BuscaTests, unittest.TestCase):
+    """A saída para Elasticsearch em Spark 4: o conector do **OpenSearch**
+    apontado para um servidor **Elasticsearch**.
+
+    O `opensearch-spark` é fork do `elasticsearch-hadoop` e continua falando a
+    API REST de índice e busca, então um Elasticsearch responde a ele. Medido
+    contra o container 8.16.1: escrita, leitura e `mapping.id` passam, e os
+    documentos aparecem no `_search` do próprio ES.
+
+    O que **não** funciona, e por isso a migração de um pipeline custa duas
+    edições no JSON em vez de zero:
+
+      * `format: "elasticsearch"` com o jar do OpenSearch — o jar não registra o
+        nome antigo: `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: es`.
+      * opções `es.*` no formato `opensearch` — o prefixo antigo é ignorado e a
+        escrita morre em `OpenSearchHadoopIllegalArgumentException`.
+
+    Ou seja: trocar `format` para `opensearch` e renomear `es.*` para
+    `opensearch.*`. Nada mais muda — nem o servidor, nem o índice, nem o schema.
+    """
+
+    #: O servidor sob teste é o Elasticsearch: é dele que saem host e porta.
+    servico = "elasticsearch"
+    #: O conector é o do OpenSearch, com o prefixo de opção dele.
+    formato = "opensearch"
+    prefixo = "opensearch"
+
+    def indice(self, sufixo: str) -> str:
+        # Índice próprio: no dia em que sair um build de Spark 4 do
+        # `elasticsearch-spark`, `ElasticsearchTest` volta a rodar contra o mesmo
+        # servidor, e duas classes gravando no mesmo índice esconderiam falha.
+        return super().indice(f"via-opensearch-{sufixo}")
 
 
 if __name__ == "__main__":

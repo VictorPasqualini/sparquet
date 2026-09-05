@@ -8,7 +8,9 @@ testes deste diretório executam de verdade — jar real, dado real, ida e volta
 
 Cada conector cai em um de três grupos:
 
-  **sem jar extra**  `xml` e `binary` rodam com o que vem no pyspark.
+  **sem jar extra**  `binary` roda com o que vem no pyspark; `xml` também, mas
+                     só no Spark 4 — na linha 3.5 ele é o `spark-xml` da tabela
+                     abaixo, porque o datasource só foi absorvido pelo Spark no 4.0.
   **um jar**         `avro`, `delta`, `iceberg` e `hudi` precisam de um pacote
                      Maven; nada mais.
   **um serviço**     Kafka, Mongo, Cassandra, Elasticsearch/OpenSearch e os
@@ -71,30 +73,90 @@ def spark_version() -> str:
         return ""
 
 
-#: Linha do Spark contra a qual os pacotes fixos abaixo foram compilados. Quando
-#: o pyspark instalado for de outra linha, o teste **pula** em vez de falhar com
-#: erro de classe: a incompatibilidade é do ambiente, não do código.
-_SPARK_LINE = "4.1"
+#: As linhas do Spark que este diretório sabe testar, e o que muda de uma para a
+#: outra. A chave é `major.minor` do pyspark instalado. Fora delas o teste
+#: **pula** em vez de falhar com erro de classe: a incompatibilidade é do
+#: ambiente, não do código.
+#:
+#: `scala` é o binário com que a linha é publicada — 2.13 no Spark 4.x, 2.12 no
+#: 3.5 — e entra no sufixo de quase todo artefato de conector. Errar o sufixo não
+#: dá "versão incompatível": dá `NoSuchMethodError` no meio da execução, que não
+#: parece o que é.
+_LINHAS: Dict[str, Dict[str, str]] = {
+    "4.1": {
+        "scala": "2.13",
+        # delta-spark 4.3.x é a linha compilada contra o Spark 4.1 (4.4 já é 4.2).
+        "delta": "io.delta:delta-spark_2.13:4.3.1",
+        "iceberg": "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
+    },
+    "3.5": {
+        "scala": "2.12",
+        # delta-spark 3.3.0 declara `spark-sql_2.12:3.5.3` como provided; a linha
+        # 4.x do delta pede a API do Spark 4 e não sobe aqui.
+        "delta": "io.delta:delta-spark_2.12:3.3.0",
+        "iceberg": "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0",
+        # O datasource `xml` só entrou no Spark em 4.0; no 3.5 quem o registra é
+        # o `spark-xml`, que é justamente o projeto doado ao Spark e que virou o
+        # nativo. Sem ele, o teste morre com
+        # `[DATA_SOURCE_NOT_FOUND] Failed to find the data source: xml`.
+        "xml": "com.databricks:spark-xml_2.12:0.18.0",
+    },
+}
+
+#: Linha assumida quando não há pyspark instalado — só para a mensagem do skip
+#: dizer algo em vez de montar coordenada vazia.
+_LINHA_PADRAO = "4.1"
 
 
-def _spark_line() -> str:
+def spark_line() -> str:
+    """`major.minor` do pyspark instalado — a chave de `_LINHAS`."""
     return ".".join(spark_version().split(".")[:2])
 
 
-#: Coordenada Maven de cada conector que precisa de jar. Sobrescreva com
-#: `SPARQUET_IT_<CONECTOR>_PACKAGE` para testar outra versão sem editar o teste —
-#: é o que se faz quando o Spark do ambiente é outro.
-_PACKAGES: Dict[str, str] = {
-    # O avro acompanha a versão exata do Spark instalado; os demais são
-    # publicados por linha e por isso ficam fixos.
-    "avro": f"org.apache.spark:spark-avro_2.13:{spark_version() or _SPARK_LINE}",
-    # delta-spark 4.3.x é a linha compilada contra o Spark 4.1 (4.4 já é 4.2).
-    "delta": "io.delta:delta-spark_2.13:4.3.1",
-    "iceberg": "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
-    # H2 roda dentro da própria JVM: é o único banco que exercita o caminho
-    # JDBC de verdade sem subir serviço nenhum.
-    "h2": "com.h2database:h2:2.3.232",
-}
+def _linha() -> Dict[str, str]:
+    return _LINHAS.get(spark_line(), _LINHAS[_LINHA_PADRAO])
+
+
+def scala_binary() -> str:
+    """Sufixo `_2.12`/`_2.13` dos artefatos desta linha do Spark.
+
+    `services.py` usa isto para montar as coordenadas dos conectores de serviço,
+    que mudam de sufixo junto com a linha.
+    """
+    return _linha()["scala"]
+
+
+def _pacotes_base() -> Dict[str, str]:
+    """Coordenada Maven de cada conector que precisa de jar, nesta linha.
+
+    Sobrescreva com `SPARQUET_IT_<CONECTOR>_PACKAGE` para testar outra versão sem
+    editar o teste — é o que se faz quando o Spark do ambiente é outro.
+    """
+    linha = _linha()
+    return {
+        # O avro é publicado pelo próprio Spark e acompanha a versão exata
+        # instalada; delta e iceberg são de terceiros e vão por linha.
+        "avro": (
+            f"org.apache.spark:spark-avro_{linha['scala']}:"
+            f"{spark_version() or _LINHA_PADRAO}"
+        ),
+        "delta": linha["delta"],
+        "iceberg": linha["iceberg"],
+        # H2 roda dentro da própria JVM: é o único banco que exercita o caminho
+        # JDBC de verdade sem subir serviço nenhum. Não tem Scala dentro, então
+        # a coordenada é a mesma nas duas linhas.
+        "h2": "com.h2database:h2:2.3.232",
+        # Chaves que só existem em algumas linhas — um formato que é nativo numa
+        # e precisa de jar na outra. Vazio no 4.1.
+        **{
+            chave: linha[chave]
+            for chave in ("xml",)
+            if linha.get(chave)
+        },
+    }
+
+
+_PACKAGES: Dict[str, str] = _pacotes_base()
 
 
 #: `False` desliga os pacotes de `_PACKAGES` nesta execução. Um arquivo de teste
@@ -201,11 +263,11 @@ def skip_reason() -> Optional[str]:
             "testes de integração desligados: rode com SPARQUET_IT=1 para baixar "
             "os jars do Maven Central na primeira vez"
         )
-    if _spark_line() != _SPARK_LINE:
+    if spark_line() not in _LINHAS:
         return (
-            f"pyspark {spark_version()} fora da linha {_SPARK_LINE}.x, para a qual "
-            "os jars deste diretório foram fixados; ajuste _PACKAGES ou use "
-            "SPARQUET_IT_<CONECTOR>_PACKAGE"
+            f"pyspark {spark_version()} fora das linhas com jars fixados aqui "
+            f"({', '.join(sorted(_LINHAS))}); acrescente a linha em _LINHAS ou "
+            "use SPARQUET_IT_<CONECTOR>_PACKAGE"
         )
     return None
 

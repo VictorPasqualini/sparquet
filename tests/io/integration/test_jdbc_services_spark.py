@@ -272,25 +272,67 @@ class MariaDbTest(_DialetoTests, unittest.TestCase):
     # O container publica a 3307 no host de propósito, então o teste da porta
     # default se pula aqui. O número continua declarado: é o do dialeto.
     porta_default = 3306
-    # Citação de identificador em ANSI_QUOTES é `"`, e não o backtick do MySQL —
-    # ver a nota do `sessionVariables` abaixo.
-    citacao = '"'
+    # O dialeto monta `jdbc:mysql://` e o servidor é MariaDB: quem cita é o
+    # MySQLDialect, com backtick.
+    citacao = "`"
     # ACHADO desta camada: o Spark 4.1 **não tem dialeto MariaDB**. Só existe
-    # `MySQLDialect`, e ele só reconhece url que comece com `jdbc:mysql`; a url
-    # `jdbc:mariadb://` do nosso dialeto cai no dialeto default, que cita
-    # identificador com `"`. O MariaDB recusa isso e o CREATE TABLE morre em
-    # `You have an error in your SQL syntax ... near '"id" INTEGER'` — leitura
-    # inclusive, porque o SELECT montado pelo Spark cita as colunas do mesmo jeito.
+    # `MySQLDialect`, e ele só reconhece url que comece com `jdbc:mysql`; uma url
+    # `jdbc:mariadb://` cai no dialeto default, que cita identificador com `"`. O
+    # MariaDB recusa isso e o CREATE TABLE morre em `You have an error in your SQL
+    # syntax ... near '"id" INTEGER'` — leitura inclusive, porque o SELECT montado
+    # pelo Spark cita as colunas do mesmo jeito.
     #
-    # `sql_mode='ANSI_QUOTES'` na sessão faz o MariaDB aceitar `"` como citação
-    # de identificador, e o conector volta a funcionar inteiro. O preço é que na
-    # mesma sessão `"..."` deixa de ser literal de string — o que importa para
-    # quem usa `query`. A alternativa é apontar o `mariadb` para o driver do
-    # MySQL (`url: jdbc:mysql://...`, `driver: com.mysql.cj.jdbc.Driver`), que
-    # traz o MySQLDialect de verdade; as duas rotas foram executadas contra o
-    # container e as duas funcionam. Ver BACKLOG.
-    extra = {"sessionVariables": "sql_mode='ANSI_QUOTES'"}
+    # As duas saídas foram executadas contra o container e as duas funcionam:
+    # `sessionVariables: sql_mode='ANSI_QUOTES'` (o MariaDB passa a aceitar `"`,
+    # mas na mesma sessão `"..."` deixa de ser literal de string — importa para
+    # quem usa `query`), ou o Connector/J com url de MySQL, que traz o
+    # MySQLDialect de verdade. O dialeto adotou a segunda; a primeira continua
+    # disponível informando `url`/`driver` em options, e o
+    # `MariaDbUrlExplicitaTest` abaixo a exercita.
+    extra = {"sslMode": "DISABLED", "allowPublicKeyRetrieval": "true"}
 
+
+@harness.requires_integration
+@services.requires_service("mariadb")
+class MariaDbUrlExplicitaTest(unittest.TestCase):
+    """A rota alternativa do MariaDB: url `jdbc:mariadb://` informada à mão.
+
+    O dialeto default monta url de MySQL. Quem precisa do driver do MariaDB
+    (recurso específico dele, política de jar) informa `url` em options — e aí
+    o driver acompanha a url sozinho, sem precisar de `driver`. O preço é o
+    `sql_mode='ANSI_QUOTES'`, sem o qual o servidor recusa a citação com aspas
+    duplas do dialeto default do Spark; o framework avisa quando ele falta.
+    """
+
+    def opcoes(self) -> dict:
+        host = services.host_of("mariadb")
+        porta = services.port_of("mariadb")
+        return {
+            "url": f"jdbc:mariadb://{host}:{porta}/sparquet",
+            "user": "root",
+            "password": "sparquet",
+            "sessionVariables": "sql_mode='ANSI_QUOTES'",
+        }
+
+    def test_url_de_mariadb_com_ansi_quotes_faz_a_ida_e_volta(self) -> None:
+        tabela = "sparquet_it_maria_url"
+        rotulo = "jdbc-mariadb-url"
+        opcoes = self.opcoes()
+
+        written, read_back = harness.round_trip(
+            rotulo,
+            {
+                "format": "mariadb",
+                "path": tabela,
+                "mode": "overwrite",
+                "options": opcoes,
+            },
+            {"format": "mariadb", "path": tabela, "options": opcoes},
+        )
+
+        self.assertTrue(written.success, msg=written.error)
+        self.assertTrue(read_back.success, msg=read_back.error)
+        self.assertEqual(read_back.rows_read, len(harness.SEED_ROWS))
 
 @harness.requires_integration
 @services.requires_service("sqlserver")

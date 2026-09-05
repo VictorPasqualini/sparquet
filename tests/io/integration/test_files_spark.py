@@ -112,7 +112,8 @@ class AvroTest(unittest.TestCase):
 
 @harness.requires_integration
 class XmlTest(unittest.TestCase):
-    """No Spark 4 o datasource `xml` é nativo; até o 3.x exigia `spark-xml`."""
+    """No Spark 4 o datasource `xml` é nativo; no 3.5 é o `spark-xml`, que o
+    harness acrescenta por linha — e que não implementa `append`."""
 
     def test_ida_e_volta_com_row_tag(self) -> None:
         directory = (harness.WORK / "xml").as_posix()
@@ -171,7 +172,18 @@ class XmlTest(unittest.TestCase):
 
     def test_append_soma_no_mesmo_diretorio(self) -> None:
         """`append` em XML não gera um arquivo inválido: cada escrita põe outro
-        arquivo com o mesmo `rootTag`, e a leitura soma os dois."""
+        arquivo com o mesmo `rootTag`, e a leitura soma os dois.
+
+        Isso é do datasource nativo, da linha 4.x. No 3.5 quem atende é o
+        `spark-xml`, e ele **recusa** o modo:
+
+            Append mode is not supported by com.databricks.spark.xml.DefaultSource
+
+        A recusa é limpa — `PipelineResult.success` vem `False` com essa
+        mensagem, nada é escrito e o diretório continua com a primeira escrita —,
+        então é isso que se afirma na linha 3.5. Não é bug do framework nem
+        opção faltando: o formato simplesmente não tem append naquele jar.
+        """
         directory = (harness.WORK / "xml-append").as_posix()
         escrita = {
             "format": "xml",
@@ -183,13 +195,19 @@ class XmlTest(unittest.TestCase):
         harness.run(
             {"name": "it-xml-append-1", "input": harness.seed_input(), "output": escrita}
         )
-        harness.run(
+        segunda = harness.run(
             {
                 "name": "it-xml-append-2",
                 "input": harness.seed_input(),
                 "output": {**escrita, "mode": "append"},
             }
         )
+        sem_append = harness.spark_line() == "3.5"
+        if sem_append:
+            self.assertFalse(segunda.success, msg="spark-xml aceitou append?")
+            self.assertIn("Append mode is not supported", segunda.error or "")
+        else:
+            self.assertTrue(segunda.success, msg=segunda.error)
         lido = harness.run(
             {
                 "name": "it-xml-append-leitura",
@@ -203,7 +221,7 @@ class XmlTest(unittest.TestCase):
         )
 
         self.assertTrue(lido.success, msg=lido.error)
-        self.assertEqual(lido.rows_read, len(harness.SEED_ROWS) * 2)
+        self.assertEqual(lido.rows_read, len(harness.SEED_ROWS) * (1 if sem_append else 2))
 
     def test_compressao_comprime_o_arquivo_e_a_leitura_descomprime_sozinha(self) -> None:
         """XML comprimido é o caso normal em ingestão de terceiro: o arquivo sai

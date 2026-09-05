@@ -1,7 +1,12 @@
-"""XML (via spark-xml).
+"""XML.
 
-Requer `com.databricks:spark-xml_<scala>:<versao>` no classpath (registra o
-formato "xml"). path = diretório XML.
+path = diretório XML. O datasource "xml" é nativo a partir do Spark 4.0 — foi
+o próprio `spark-xml` doado ao projeto. No Spark 3.x ele não existe, e sem o
+jar a leitura morre com
+`[DATA_SOURCE_NOT_FOUND] Failed to find the data source: xml`; lá é preciso
+`com.databricks:spark-xml_<scala>:<versao>` no classpath, e esse jar **não**
+implementa `mode: append` (`Append mode is not supported by
+com.databricks.spark.xml.DefaultSource`).
 
 Opções:
   rowTag  – OBRIGATÓRIO: tag que delimita cada registro (linha). Ex: "book".
