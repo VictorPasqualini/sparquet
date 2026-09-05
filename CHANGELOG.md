@@ -139,8 +139,14 @@ Notes on the history below:
   datasource, refuses `append`
   (`Append mode is not supported by com.databricks.spark.xml.DefaultSource`), which the
   append test now asserts per line. The 3.5 leg of `services-tier` is
-  `continue-on-error` for now: its coordinates were verified as published, but never run
-  against the containers.
+  `continue-on-error` for now: its coordinates were verified as published, but the first
+  run against real containers was CI's own, and it failed where the matrix was expected to
+  bite — the pair of search connectors. `ElasticsearchViaOpenSearchTest` is the way out for
+  the line where `elasticsearch-spark` has no build, and 3.5 is not that line: there the
+  OpenSearch connector of that line refuses an Elasticsearch server with
+  `Unsupported/Unknown OpenSearch version [8.16.1]. Highest supported version is [3.x]`.
+  The route now skips wherever the native jar runs, and `ElasticsearchTest` covers the
+  server there.
 - **`lint` job**, with the rules in `[tool.ruff.lint]`: `select = ["E","W","F"]`,
   `ignore = ["E501"]`, `target-version = "py39"`. The scope is a decision, not laziness —
   ruff's default set flags 406 occurrences here, dominated by syntax modernization that

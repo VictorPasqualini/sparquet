@@ -54,7 +54,11 @@ all   = ["delta-spark>=3.0.0"]
 # mexeu no código apontado.
 dev = [
     "ruff==0.16.6",
-    "coverage>=7.6",
+    # `[toml]` não é enfeite: a configuração de cobertura mora neste pyproject, e
+    # o coverage só lê TOML sozinho a partir do 3.11 (`tomllib` na stdlib). Sem o
+    # extra, no Python 3.9 do CI ele morre antes de medir qualquer coisa com
+    # `Can't read 'pyproject.toml' without TOML support. Install with [toml] extra`.
+    "coverage[toml]>=7.6",
 ]
 
 [project.scripts]

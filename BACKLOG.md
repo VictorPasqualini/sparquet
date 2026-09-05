@@ -547,14 +547,19 @@ Pendente:
       sufixo, `incompativel_em` quando a incompatibilidade é de uma linha só), e o
       workflow só escolhe a versão do pyspark. Acrescentar uma linha nova é acrescentar
       uma entrada em `_LINHAS` e uma linha na matriz, nessa ordem.
-- [ ] **Perna 3.5 do `services-tier` não medida** — entrou com `continue-on-error: true`:
-      as coordenadas 2.12 (`opensearch-spark-30_2.12:1.3.0`,
+- [ ] **Perna 3.5 do `services-tier` ainda com `continue-on-error: true`** — as
+      coordenadas 2.12 (`opensearch-spark-30_2.12:1.3.0`,
       `elasticsearch-spark-30_2.12:8.16.1`, Mongo e Cassandra 2.12) foram verificadas como
-      publicadas — o pom de cada uma diz contra que Spark foi compilada — mas nunca
-      rodaram contra os containers, porque não havia Docker na máquina onde a linha foi
-      escrita. Duas execuções verdes seguidas e o `continue-on-error` sai. Ponto de
-      atenção específico dessa perna: no 3.5 o conector nativo do Elasticsearch **roda**,
-      então é o primeiro lugar onde os dois conectores de busca dividem classpath.
+      publicadas — o pom de cada uma diz contra que Spark foi compilada — mas foram
+      escritas sem Docker na máquina, então quem as executou pela primeira vez foi o CI.
+      A primeira execução falhou exatamente no ponto de atenção previsto, o par de
+      conectores de busca: `ElasticsearchViaOpenSearchTest` é a saída para a linha em que
+      o `elasticsearch-spark` não tem build, e na 3.5 ele tem — lá o conector do OpenSearch
+      daquela linha recusa o servidor Elasticsearch com
+      `Unsupported/Unknown OpenSearch version [8.16.1]. Highest supported version is [3.x]`.
+      A classe agora se pula onde o jar nativo roda (o `ElasticsearchTest` é quem cobre o
+      servidor ali). Falta o resto: duas execuções verdes seguidas e o `continue-on-error`
+      sai.
 - [ ] **Cache de jar por linha** — a chave do cache do Ivy e a do jar do Comet incluem a
       versão do pyspark de propósito. Uma chave só para as duas pernas faria cada uma
       restaurar o Scala da outra no mesmo diretório, e o sintoma seria erro de classe num
