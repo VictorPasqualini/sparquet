@@ -912,15 +912,139 @@ Pendente aqui:
 ### 9.5 Catálogo de dados
 
 - [ ] **Revisar e implementar.** Cada Job já declara o que lê e o que escreve, e desde o
-      histórico isso é persistido por execução (`job_run.lineage`). Falta transformar
-      essas arestas num catálogo: inventário de datasets (endereço, formato, schema
-      observado, dono, Jobs que produzem e que consomem), grafo de lineage cruzando Jobs
-      e Pipelines, última atualização e frescor, e o resultado das validações do
-      `sparquet_cola` anexado ao dataset — a resposta para "de onde veio isto, quem
-      depende disto, e dá para confiar". Decidir se é catálogo próprio (servido pelo
-      runner, consumível pelo Studio e pela IA como contexto) ou integração com um
-      existente (Unity Catalog, DataHub, OpenMetadata) — e, se próprio, se ele também
-      alimenta a paleta do Studio com fontes já conhecidas.
+      histórico isso é persistido por execução (`job_run.lineage`). **Parcial**: a aba
+      **Catalog** (`/catalog`, `src/screens/Catalog.tsx`; `/lineage` redireciona) reúne as
+      duas metades.
+
+      *Linhagem, derivada.* `src/lib/lineage/` lê o inventário direto do canvas da
+      biblioteca — endereço normalizado, formatos, Jobs que produzem e consomem, os
+      workflows que tocam cada dataset (`LineageDataset.workflowIds`) e a classificação
+      `external`/`intermediate`/`terminal`/`isolated`, que é onde aparecem endereço com
+      typo e handoff que ninguém lê. A visão padrão é o **grafo** (React Flow + dagre,
+      `src/lib/lineage/flow.ts`), bipartido dataset→Job→dataset, com clique traçando o
+      caminho inteiro para cima e para baixo (`traceFrom`) e duplo-clique abrindo o Job
+      ou a ficha do dataset; a outra visão é a lista. O escopo por **workflow** filtra
+      quais Jobs são lidos, não quais datasets aparecem — o dataset cujo outro lado mora
+      em outro workflow continua na tela, marcado com o número de workflows, porque é
+      exatamente a fronteira que ninguém enxerga de dentro do próprio workflow. É
+      derivado do canvas, não do JSON compilado, para que um Job incompleto também
+      apareça. O botão *Load example* cria os três Jobs Medallion
+      (`LINEAGE_EXAMPLE_IDS` em `src/data/templates.ts`) encadeados só por endereço; o
+      `union` foi acrescentado ao `history.lineage_of()` no mesmo passo, porque a segunda
+      fonte dele é uma leitura como a do `join` e não estava sendo registrada.
+
+      *Catálogo, digitado.* `src/lib/datacatalog/` guarda uma anotação por **endereço**
+      de dataset (a mesma chave normalizada com que a linhagem junta dois Jobs, não um id
+      de registro: apagar o Job não pode levar a descrição da tabela junto): descrição,
+      dono, domínio, classificação (`public`/`internal`/`confidential`/`restricted`) e
+      tags. Store em `src/store/catalog.ts` (carregado sob demanda, só por esta tela),
+      persistência em um único registro sob a chave `meta:catalog` — rota que o backend
+      de workspace **já** escreve como arquivo (`.studio/meta.json`), então o catálogo
+      grava no repositório sem um quarto tipo de registro no servidor. `orphanAnnotations`
+      aponta anotação cujo endereço nenhum Job menciona mais (o caso normal é endereço
+      renomeado), e ela é mantida, não apagada.
+
+      *Hierarquia, deduzida do endereço.* `src/lib/datacatalog/namespace.ts` lê cada
+      endereço na forma que Glue, Hive e Unity Catalog usam: `describeAsset` decide o
+      **tipo** pelo formato (delta/iceberg/hudi/JDBC são `table` mesmo morando num path;
+      parquet/csv/json são `directory`; kafka é `topic`; view é `view`) e o **lugar** pelo
+      endereço — `analytics.gold.revenue` vira catálogo/database/tabela, `/lake/gold/revenue`
+      vira bucket/pasta/tabela, `s3://warehouse/...` vira o próprio bucket,
+      `jdbc:postgresql://db:5432/app` tem o esquema empilhado descascado antes de parsear.
+      Identificador pontuado só é quebrado em níveis quando o formato diz tabela: `orders.csv`
+      é arquivo, não tabela `csv` dentro do database `orders`. `buildNamespaceTree` monta a
+      árvore que o `CatalogBrowser` (`src/components/lineage/CatalogBrowser.tsx`) desenha —
+      buckets primeiro (ícone de balde), depois catálogos, depois streams e views. Nada disso
+      é metastore: não resolve endereço para o engine nem concede acesso; quem resolve em
+      runtime continua sendo Spark/Glue/Unity Catalog.
+
+      Sobre a **decisão de fundo**: Unity Catalog (e Glue, Hive Metastore, Polaris) é
+      *runtime* — fica no caminho da leitura, resolve nome para path e aplica ACL, então
+      adotá-lo muda o `PipelineConfig` e vira dependência de execução. DataHub e
+      OpenMetadata são *observadores* fora do caminho crítico, e tiram lineage de scan +
+      parse de SQL, que é justamente onde erram. Aqui o lineage é **declarado**, não
+      inferido: o JSON já diz `input.path` e `outputs[].path`. A escolha é catálogo próprio
+      com saída planejada — o modelo `{key, description, owner, domain, classification,
+      tags}` mapeia direto para `GlueTable.Parameters`, para `COMMENT`/`OWNER`/`TAG` do
+      Unity Catalog e para `DatasetProperties` do DataHub, então falta só um exportador.
+      O que **não** fazer é virar metastore de runtime.
+
+      *Schema, derivado do canvas.* `src/lib/datacatalog/schema.ts` percorre a cadeia de
+      cada Job e devolve as colunas de cada endereço, com o tipo quando alguém o afirma:
+      `cast` prova nome e tipo, `with_column`/`struct` criam, `group_by` devolve
+      exatamente chaves + agregados, a lista `columns` do destino é a projeção final e uma
+      regra de validação prova que a coluna existe. A confiança é dita na tela
+      (`complete`/`partial`/`unknown`) porque um leitor CSV traz o resto das colunas só em
+      runtime; entre duas leituras do mesmo endereço vence a escrita sobre a leitura e a
+      completa sobre a parcial. Um passo `sql` torna a cadeia opaca e o derivador para de
+      afirmar ordem. A ficha do dataset mostra a tabela; a lista mostra o badge `N col`.
+
+      *Schema real, lido pelo runner.* `POST /dataset/schema` (`server/main.py`) monta um
+      `InputConfig`, cria o reader pelo `ReaderFactory` e devolve `df.schema` — nenhuma
+      linha é lida e nada é escrito. Ação própria `catalog:Inspect` (`server/auth.py`,
+      concedida a `editor` e `operator`), cliente em `fetchDatasetSchema`
+      (`src/lib/runner/client.ts`). O corpo aceita um bloco `spark`, que só vale enquanto o
+      processo ainda não tem SparkSession — `spark.jars.packages` e `spark.sql.extensions`
+      são lidos na criação da sessão e ignorados depois, então um runner que já executou
+      algo continua com a sessão que tem. A comparação vive em
+      `src/lib/datacatalog/drift.ts`: tipos normalizados antes de confrontar (`bigint` e
+      `long`, `integer` e `int`, `smallint`, `tinyint`, `real`, `numeric` são grafias do
+      mesmo tipo; `int` e `long` continuam diferentes, que é justamente o drift que
+      interessa), nomes casados sem diferenciar maiúsculas, como o próprio Spark resolve.
+      Coluna a mais **não** é drift enquanto o schema derivado for parcial — ali ela é o
+      estado esperado do mundo, não um achado.
+
+      *Coluna: linhagem e impacto.* O mesmo passeio que deriva o schema registra a
+      procedência (`analyzeJob` devolve `{schemas, links, uses}`), e
+      `src/lib/datacatalog/columns.ts` monta o grafo: `impactOf` responde "o que quebra se
+      eu mexer nesta coluna", `originsOf` responde "de onde vem este número". São dois
+      registros diferentes de propósito — uma **aresta** é valor que flui
+      (`/lake/silver/orders.amount` alimenta `revenue`), um **uso** é passo que só cita a
+      coluna (filtro, chave de join, regra de DQ) — porque um rename quebra os dois e uma
+      troca de tipo quebra só o primeiro. Cada coluna em voo carrega as raízes de onde
+      veio; coluna intocada tem como raiz implícita o dataset de entrada; `union` empilha
+      o head do outro lado, então a coluna somada aponta para as duas fontes; depois de um
+      `sql` a cadeia fica opaca e nenhuma aresta é inventada. A busca é em largura, com
+      limite de profundidade e à prova de ciclo, e diz quando parou no limite em vez de no
+      fim. Na ficha, cada linha do schema abre em *Comes from* / *Feeds* / *Named by*.
+
+      Falta: **persistir o schema observado** (hoje a leitura morre ao fechar a ficha, e
+      guardá-la é o que permite comparar duas datas) e frescor/última atualização (vêm do
+      `job_run`, não do canvas); **lineage de execução** (`job_run.lineage`, com `{param}`
+      já resolvido) sobreposto ao declarado; cruzamento com **Pipelines** (hoje as arestas
+      são Job→Job pelo endereço, e a ordem declarada no Pipeline não é confrontada com
+      ela); **anotação por coluna** (descrição, PII) e busca por nome de coluna no
+      catálogo; **diff de schema entre revisões** do Job, para ver a mudança antes de ela
+      virar drift; resultado das validações do `sparquet_cola` anexado ao dataset;
+      **amostra de linhas** na ficha (mesmo caminho do preview de execução, com limite);
+      o catálogo servido pelo runner como **API** (hoje ele é lido e escrito só pelo
+      cliente) e usado como contexto pela IA e pela paleta; export/import do bundle
+      levando o catálogo junto (`exportAll`/`importAll` ainda ignoram `meta:catalog`);
+      tela própria de catálogo com busca por domínio/dono/classificação, se a árvore da
+      aba não bastar; **glossário e política** (dono obrigatório por domínio, termo de
+      negócio ligado à coluna); e os **exportadores** que a decisão acima deixa em aberto —
+      `GlueTable`/`CreateTable`, MCE do DataHub, eventos OpenLineage e `schema.yml` do dbt.
+
+- [ ] **Editor SQL sobre o catálogo.** Uma aba onde se escreve `SELECT` contra os
+      endereços que o catálogo já conhece, e o runner executa. O catálogo é o que torna
+      isso barato: ele já tem endereço, formato e schema (derivado e observado), então o
+      editor sabe o que existe sem ninguém digitar caminho — autocomplete de dataset e de
+      coluna sai direto de `deriveSchemas`/`/dataset/schema`, e clicar numa tabela na
+      árvore abre a consulta já escrita.
+
+      Desenho: endpoint `POST /query` no runner, com ação própria (`catalog:Query`,
+      separada de `run:Execute` porque consultar não é executar pipeline), que registra
+      como temp view cada endereço citado — usando o mesmo `ReaderFactory` da inspeção de
+      schema — roda a consulta e devolve as linhas. Guardas obrigatórias: só leitura (nada
+      de DDL/DML nem `INSERT`), `LIMIT` imposto pelo servidor, timeout, e cancelamento
+      pelo mesmo caminho do `/runs/{id}/cancel`, já que a SparkSession é a mesma do
+      processo e uma consulta boba pode ocupar o runner inteiro.
+
+      O que dá valor de verdade depois: **salvar a consulta como Job** — a consulta vira
+      um JSON com `input`, uma transformação `sql` e um `output`, que abre no canvas e
+      passa a ser versionado como qualquer outro Job. Ou seja, o editor não é um brinquedo
+      de exploração: é a porta de entrada mais curta entre "olhei os dados" e "isto virou
+      pipeline".
 
 ### 9.6 Biblioteca e arquivos
 
@@ -982,7 +1106,8 @@ opções), o DSL de threshold, a severidade, o parse da quarentena, a expansão 
 testes**: histórico 48, identidade 64, workspace 10, créditos 42, escopo de execução
 16) e o **Studio (455 testes** + 19 checagens de smoke em Chrome real).
 
-As duas lacunas que pesam, e por que pesam:
+A lacuna que ainda pesa, e por que pesa (a outra, o comportamento das transformações,
+está fechada logo abaixo):
 
 - [ ] **Métricas contra dados reais** — `avg`, `min`, `max`, `sum`, `stddev`,
       `distinct_count`, `duplicate_*`, `missing_*`, `invalid_*` e `freshness` **nunca
@@ -990,12 +1115,19 @@ As duas lacunas que pesam, e por que pesam:
       `unique`, `range`, `regex` e `row_count`. Uma expressão de agregação errada passa
       verde hoje. Um arquivo local-Spark com uma métrica de cada família sobre um CSV
       fixo fecha isso.
-- [ ] **Nenhuma transformação tem teste de comportamento** — o `test_examples.py`
-      confere que o `type` existe, não o que sai do DataFrame. São 19 transformações;
-      as de maior risco são `select` (expressão com alias), `with_column` (mapa em
-      ordem), `struct` (dot-path aninhando), `join` (`on` como SQL, `broadcast`,
-      `with_transformations`), `group_by` (pivot), `collect` + `{{var}}` (lista vazia →
-      `NULL`) e `skip_if_false` (os três casos).
+- ✅ **Comportamento das transformações** — `tests/transform/test_builtin_behavior_spark.py`,
+      58 testes sobre as 19 transformações mais o `skip_if_false` do engine: o alias da
+      expressão de `select`, o mapa em ordem do `with_column` (a segunda coluna enxerga a
+      primeira), o dot-path do `struct` aninhando de verdade e o conflito folha-vs-mapa
+      recusado, o `pivot` do `group_by` nas duas formas, o `broadcast` do `join` como
+      dica no plano físico (a sessão sobe com `autoBroadcastJoinThreshold=-1`, senão
+      qualquer fixture pequena vira broadcast e o teste não prova nada), o `{{var}}` do
+      `collect` (lista → literal de `IN`, **lista vazia → `NULL`**, aspas escapadas), o
+      `debug` inspecionando a cópia e devolvendo o original, e o `repartition` provando
+      que a mesma chave cai na mesma partição. As fixtures são `spark.sql(... VALUES ...)`,
+      não `createDataFrame`, pelo mesmo motivo do round-trip de formatos. Fica pendente o
+      que a tabela do plano lista: vazamento da view do `sql`, aliases de tipo do `cast`,
+      `{{var}}` dentro de `with_transformations` e o reset do runtime entre execuções.
 
 Restante, na ordem do plano:
 

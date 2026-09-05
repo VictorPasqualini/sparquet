@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>Sparquet Studio</title>
+<style>
+  :root {
+    --ink: #0a0c10;
+    --ink-2: #10131a;
+    --card: #151922;
+    --line: #232a38;
+    --text: #eef2f8;
+    --muted: #98a3b6;
+    --brand: #4a8fdd;
+    --brand-strong: #2f6fc4;
+    --gold: #e2b23c;
+    --green: #3ecf8e;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--ink);
+    color: var(--text);
+    font-family: "Segoe UI", -apple-system, "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    width: 1080px;
+    height: 1350px;
+    padding: 76px 84px 118px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background:
+      radial-gradient(1100px 620px at 82% -12%, rgba(74, 143, 221, 0.20), transparent 62%),
+      radial-gradient(760px 520px at -12% 108%, rgba(226, 178, 60, 0.10), transparent 60%),
+      var(--ink);
+    justify-content: center;
+    page-break-after: always;
+    break-after: page;
+  }
+  .page:last-child { page-break-after: auto; break-after: auto; }
+
+  .kicker {
+    font-size: 20px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--brand);
+    font-weight: 700;
+    margin: 0 0 22px;
+  }
+
+  h1 {
+    font-size: 78px;
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+    margin: 0 0 26px;
+    font-weight: 800;
+  }
+
+  h2 {
+    font-size: 62px;
+    line-height: 1.06;
+    letter-spacing: -0.028em;
+    margin: 0 0 24px;
+    font-weight: 800;
+  }
+
+  .lede {
+    font-size: 30px;
+    line-height: 1.42;
+    color: #cdd6e4;
+    margin: 0;
+    max-width: 860px;
+  }
+
+  .lede strong { color: #ffffff; font-weight: 700; }
+
+  .shot {
+    /* Full bleed: the screenshots are the argument, so they get the whole width. */
+    margin: 54px -84px 0;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border: 1px solid var(--line);
+    overflow: hidden;
+    box-shadow: 0 40px 90px rgba(0, 0, 0, 0.55);
+    background: var(--ink-2);
+  }
+  .shot img { display: block; width: 100%; }
+
+  .caption {
+    margin: 26px 0 0;
+    font-size: 21px;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+
+  .foot {
+    position: absolute;
+    left: 84px;
+    right: 84px;
+    bottom: 44px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 17px;
+    color: #6d7889;
+    letter-spacing: 0.04em;
+  }
+  .foot b { color: #8e9aad; font-weight: 600; }
+
+  /* Cover */
+  .cover { justify-content: center; }
+  .cover .mark { width: 420px; margin-bottom: 64px; }
+  .cover h1 { font-size: 96px; letter-spacing: -0.04em; }
+  .cover .lede { font-size: 33px; max-width: 880px; }
+  .rule {
+    width: 128px;
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--brand), var(--gold));
+    margin: 44px 0;
+  }
+  .cover .tags {
+    margin-top: 66px;
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .tag {
+    border: 1px solid var(--line);
+    background: rgba(21, 25, 34, 0.8);
+    border-radius: 999px;
+    padding: 12px 22px;
+    font-size: 20px;
+    color: #c3cddc;
+  }
+
+  /* Bullets */
+  ul.points { list-style: none; margin: 40px 0 0; padding: 0; }
+  ul.points li {
+    position: relative;
+    padding-left: 44px;
+    margin-bottom: 30px;
+    font-size: 28px;
+    line-height: 1.42;
+    color: #c9d3e2;
+  }
+  ul.points li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 14px;
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--brand);
+  }
+  ul.points li b { color: #ffffff; font-weight: 700; }
+
+  .panel {
+    margin-top: 40px;
+    border: 1px solid var(--line);
+    border-left: 5px solid var(--brand);
+    background: rgba(21, 25, 34, 0.72);
+    border-radius: 16px;
+    padding: 34px 38px;
+    font-size: 27px;
+    line-height: 1.45;
+    color: #d6dfec;
+  }
+  .panel b { color: #fff; }
+
+  /* Stats grid */
+  .grid {
+    margin-top: 56px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 26px;
+  }
+  .stat {
+    border: 1px solid var(--line);
+    background: rgba(21, 25, 34, 0.75);
+    border-radius: 18px;
+    padding: 34px 32px;
+  }
+  .stat .n {
+    font-size: 62px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: #fff;
+    line-height: 1;
+    margin-bottom: 12px;
+  }
+  .stat .n.small { font-size: 40px; }
+  .stat .t { font-size: 22px; color: var(--muted); line-height: 1.4; }
+
+  code, .mono {
+    font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+
+  .cmd {
+    margin-top: 18px;
+    border: 1px solid var(--line);
+    background: #0d1017;
+    border-radius: 14px;
+    padding: 26px 30px;
+    font-size: 25px;
+    color: #d7e2f2;
+  }
+  .cmd .p { color: var(--green); }
+  .cmd .c { color: #6d7889; }
+
+  .cta-links { margin-top: 52px; font-size: 28px; line-height: 1.7; color: #c9d3e2; }
+  .cta-links b { color: #fff; }
+  .cta-links .u { color: var(--brand); }
+</style>
+</head>
+<body>
+
+<!-- 1 · capa -->
+<section class="page cover">
+  <img class="mark" src="lockup-light.png" alt="Sparquet Studio" />
+  <h1>O pipeline<br />que o time<br />consegue ler.</h1>
+  <div class="rule"></div>
+  <p class="lede">
+    Sparquet descreve engenharia de dados como <strong>um JSON que o Spark executa</strong>.
+    O Studio abre esse mesmo arquivo como um canvas — e mostra de onde vem cada coluna.
+  </p>
+  <div class="tags">
+    <span class="tag">PySpark</span>
+    <span class="tag">Delta · Iceberg · Kafka · JDBC</span>
+    <span class="tag">Catálogo e linhagem</span>
+    <span class="tag">Open source · Apache 2.0</span>
+  </div>
+  <div class="foot"><b>sparquet.dev</b><span>github.com/VictorPasqualini</span></div>
+</section>
+
+<!-- 2 · problema -->
+<section class="page">
+  <p class="kicker">O problema</p>
+  <h2>Todo pipeline vira código<br />que só uma pessoa entende.</h2>
+  <ul class="points">
+    <li>O notebook cresce, a <b>regra de negócio some</b> entre um join e um withColumn.</li>
+    <li>Ninguém sabe <b>quem lê a tabela</b> que você está prestes a mudar.</li>
+    <li>Revisar em pull request é ler diff de código, não ler o fluxo do dado.</li>
+    <li>O catálogo corporativo depende de alguém lembrar de cadastrar.</li>
+  </ul>
+  <div class="panel">
+    Sparquet inverte a ordem: o pipeline é <b>um documento</b>. Versionável, revisável,
+    executável em qualquer Spark — local, Databricks, EMR, Dataproc ou Synapse.
+  </div>
+  <div class="foot"><b>Sparquet Studio</b><span>02</span></div>
+</section>
+
+<!-- 3 · canvas -->
+<section class="page">
+  <p class="kicker">Desenhe</p>
+  <h2>O canvas é o pipeline.</h2>
+  <p class="lede">
+    Arraste fonte, transformação, regra de qualidade e destino. Cada nó tem formulário próprio,
+    com validação e exemplos — <strong>não é diagrama de documentação</strong>, é o pipeline que roda.
+  </p>
+  <div class="shot"><img src="canvas.png" alt="Canvas do Studio" /></div>
+  <p class="caption">Job real: leitura em Parquet, join com clientes, preenchimento de nulos, três regras de qualidade e quarentena das linhas inválidas.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>03</span></div>
+</section>
+
+<!-- 4 · json -->
+<section class="page">
+  <p class="kicker">O contrato</p>
+  <h2>O mesmo arquivo<br />que o Spark executa.</h2>
+  <p class="lede">
+    O Studio nunca inventa sintaxe que o framework não suporta. Canvas e JSON são
+    <strong>o mesmo objeto</strong>, nos dois sentidos: abra um JSON escrito à mão e ele vira canvas;
+    mexa no canvas e o JSON muda enquanto você digita.
+  </p>
+  <div class="shot"><img src="json.png" alt="JSON do pipeline" /></div>
+  <p class="caption">81 linhas, 1,5 kB — e é isto que vai para o Git, para o code review e para o cluster.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>04</span></div>
+</section>
+
+<!-- 5 · catálogo -->
+<section class="page">
+  <p class="kicker">Catálogo</p>
+  <h2>Um catálogo que<br />ninguém precisou cadastrar.</h2>
+  <p class="lede">
+    Cada tabela, bucket e tópico que seus Jobs tocam, agrupado como um metastore agrupa —
+    só que <strong>a hierarquia é lida dos próprios endereços</strong>. Delta e Iceberg aparecem como tabela,
+    arquivos como diretório, Kafka como tópico.
+  </p>
+  <div class="shot"><img src="catalog-list.png" alt="Catálogo de dados" /></div>
+  <p class="caption">Schema derivado do canvas, com o grau de confiança dito na tela — e o botão que lê o schema real no storage para comparar.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>05</span></div>
+</section>
+
+<!-- 6 · lineage -->
+<section class="page">
+  <p class="kicker">Linhagem</p>
+  <h2>Do landing ao gold,<br />sem ninguém desenhar.</h2>
+  <p class="lede">
+    Dois Jobs se ligam <strong>pelo endereço</strong>: um escreve o caminho, outro lê. A linhagem é o mesmo
+    inventário visto pela aresta — inclusive os destinos que existem só para relatório de qualidade
+    e quarentena.
+  </p>
+  <div class="shot"><img src="catalog-graph.png" alt="Grafo de linhagem" /></div>
+  <p class="caption">Arquitetura medalhão de exemplo: 14 datasets, 6 Jobs, 3 entregas de um Job para outro.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>06</span></div>
+</section>
+
+<!-- 7 · coluna -->
+<section class="page">
+  <p class="kicker">Impacto</p>
+  <h2>&ldquo;O que quebra se<br />eu mexer nesta coluna?&rdquo;</h2>
+  <p class="lede">
+    Linhagem no nível da coluna, atravessando Jobs: <strong>de onde vem</strong> este número,
+    <strong>o que ele alimenta</strong> lá na frente, e <strong>quem apenas o cita</strong> num filtro,
+    numa chave de join ou numa regra de qualidade.
+  </p>
+  <div class="shot"><img src="dataset-column.png" alt="Linhagem por coluna" /></div>
+  <p class="caption">Um rename quebra os dois; uma troca de tipo quebra só o primeiro. Por isso o Studio separa as duas coisas.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>07</span></div>
+</section>
+
+<!-- 8 · SQL -->
+<section class="page">
+  <p class="kicker">SQL</p>
+  <h2>E quando a pergunta<br />é mais rápida em SQL.</h2>
+  <p class="lede">
+    O catálogo já sabe o endereço e o formato de cada base, então <strong>consultar é só dar um nome</strong>.
+    O runner abre cada tabela com o mesmo leitor que um Job usa — Delta e Iceberg inclusive — e registra
+    como view temporária. Somente leitura: SELECT, WITH, EXPLAIN, DESCRIBE e SHOW.
+  </p>
+  <div class="shot"><img src="sql.png" alt="Editor SQL sobre o catálogo" /></div>
+  <p class="caption">Nenhum caminho na consulta, nenhuma credencial no navegador: quem lê o disco é o runner, na sua máquina.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>08</span></div>
+</section>
+
+<!-- 8 · IA -->
+<section class="page">
+  <p class="kicker">Assistente</p>
+  <h2>IA que conhece<br />a sua paleta.</h2>
+  <p class="lede">
+    Descreva o pipeline e receba um JSON válido, pronto para aplicar em um clique — gerar, modificar,
+    explicar, otimizar ou corrigir os problemas do linter. O prompt sai do mesmo catálogo que
+    desenha os formulários, então <strong>a IA não inventa parâmetro que não existe</strong>.
+  </p>
+  <div class="shot"><img src="ai.png" alt="Assistente de IA" /></div>
+  <p class="caption">Anthropic, OpenAI, Gemini ou qualquer endpoint compatível. A chave fica no seu navegador e nunca vai para um servidor Sparquet.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>09</span></div>
+</section>
+
+<!-- 9 · local -->
+<section class="page">
+  <p class="kicker">Onde roda</p>
+  <h2>Na sua máquina.<br />Sem conta, sem telemetria.</h2>
+  <p class="lede">
+    O Studio é um app de navegador que guarda tudo localmente. Quando você quer executar de verdade,
+    um runner opcional em <strong>127.0.0.1</strong> sobe o Spark, transmite o log em tempo real e devolve
+    o relatório de qualidade — com token e papéis por ação.
+  </p>
+  <div class="shot"><img src="templates.png" alt="Galeria de templates" /></div>
+  <p class="caption">Comece por um template pronto: ingestão com data quality, medalhão de três Jobs, CSV para Parquet.</p>
+  <div class="foot"><b>Sparquet Studio</b><span>10</span></div>
+</section>
+
+<!-- 10 · números -->
+<section class="page">
+  <p class="kicker">O que já vem pronto</p>
+  <h2>Bateria inclusa.</h2>
+  <div class="grid">
+    <div class="stat">
+      <div class="n">27</div>
+      <div class="t">fontes e destinos: Parquet, Delta, Iceberg, CSV, JSON, ORC, Avro, XML, Hudi, Kafka, JDBC, BigQuery, Snowflake, Mongo, Cassandra e mais</div>
+    </div>
+    <div class="stat">
+      <div class="n">19</div>
+      <div class="t">transformações — filter, select, cast, join com broadcast, group_by, union, sql, struct, checkpoint, collect</div>
+    </div>
+    <div class="stat">
+      <div class="n">10</div>
+      <div class="t">regras de qualidade com política fail/warn/skip, relatório por regra e quarentena linha a linha</div>
+    </div>
+    <div class="stat">
+      <div class="n small">Delta &amp; Iceberg</div>
+      <div class="t">MERGE de upsert e time travel do Delta, declarados no mesmo JSON</div>
+    </div>
+    <div class="stat">
+      <div class="n small">{param} · {{var}}</div>
+      <div class="t">parâmetros de template e variáveis de runtime que viram pushdown no próximo read</div>
+    </div>
+    <div class="stat">
+      <div class="n small">4 nuvens</div>
+      <div class="t">Databricks, EMR, Dataproc e Synapse detectados sozinhos — e local, para desenvolver</div>
+    </div>
+  </div>
+  <div class="panel">
+    O motor de qualidade é a biblioteca <b>sparquet-cola</b>, publicada à parte e usável sozinha.
+  </div>
+  <div class="foot"><b>Sparquet Studio</b><span>11</span></div>
+</section>
+
+<!-- 11 · CTA -->
+<section class="page cover">
+  <p class="kicker">Comece agora</p>
+  <h1>Dois comandos.</h1>
+  <div class="cmd mono">
+    <span class="p">$</span> pip install sparquet<br />
+    <span class="p">$</span> sparquet pipeline.json <span class="c"># roda em qualquer Spark</span>
+  </div>
+  <div class="cmd mono">
+    <span class="p">$</span> cd sparquet-studio &amp;&amp; npm install &amp;&amp; npm run dev<br />
+    <span class="c">&nbsp;&nbsp;http://localhost:5273</span>
+  </div>
+  <div class="rule"></div>
+  <div class="cta-links">
+    <b>Site e documentação em 3 idiomas</b> · <span class="u">sparquet.dev</span><br />
+    <b>Código, roadmap e issues</b> · <span class="u">github.com/VictorPasqualini/sparquet</span><br />
+    <b>Qualidade de dados como lib</b> · <span class="u">pip install sparquet-cola</span>
+  </div>
+  <p class="caption" style="margin-top:56px">Licença Apache 2.0. Sem conta, sem servidor obrigatório, sem telemetria.</p>
+  <div class="foot"><b>sparquet.dev</b><span>12</span></div>
+</section>
+
+</body>
+</html>
