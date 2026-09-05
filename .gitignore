@@ -61,3 +61,10 @@ spark-warehouse/
 # $XDG_DATA_HOME/sparquet no resto), e a pasta abaixo so sobrevive como local
 # antigo, adotado automaticamente por quem ja tinha uma biblioteca ali.
 sparquet-workspace/
+
+# Dados de cobertura: o job `test` do CI roda cada arquivo num processo e o
+# coverage grava um `.coverage.<host>.<pid>` por processo, combinados depois.
+# Medicao, nao fonte.
+.coverage
+.coverage.*
+htmlcov/

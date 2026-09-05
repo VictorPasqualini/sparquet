@@ -49,6 +49,13 @@ Repository = "https://github.com/VictorPasqualini/sparquet"
 # pip install sparquet[delta]  →  OSS Delta fora do Databricks
 delta = ["delta-spark>=3.0.0"]
 all   = ["delta-spark>=3.0.0"]
+# Ferramental de desenvolvimento; nada aqui entra no runtime da lib. As versões
+# são fixas de propósito: lint que muda de regra sozinho quebra CI em PR que não
+# mexeu no código apontado.
+dev = [
+    "ruff==0.16.6",
+    "coverage>=7.6",
+]
 
 [project.scripts]
 sparquet = "sparquet.cli:main"
@@ -62,3 +69,35 @@ version = { attr = "sparquet.__version__" }
 # para que os outros projetos do repositório — `sparquet-studio/` (frontend) — e
 # qualquer pasta nova nunca entrem no wheel/sdist por acidente.
 include = ["sparquet", "sparquet.*"]
+
+[tool.ruff]
+# O piso de suporte é 3.9 (ver `requires-python`). Sem isto o ruff assume a
+# versão do interpretador que o está rodando e passa a exigir sintaxe que não
+# existe em 3.9 — `list[str]` em annotation avaliada, `X | None` em assinatura —
+# transformando o gate num pedido de quebra de compatibilidade.
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+# Erro real, não estilo: `E`/`W` (pycodestyle) e `F` (pyflakes) pegam import não
+# usado, nome indefinido, variável sobrescrita, `except` vazio. As famílias de
+# modernização (`UP`) ficam de fora justamente porque reescreveriam o código para
+# sintaxe de 3.10+.
+select = ["E", "W", "F"]
+# Comprimento de linha é decisão de formatação, e o repositório não é formatado
+# por ferramenta. Medido: 25 linhas passam de 100 colunas, nenhuma por descuido.
+ignore = ["E501"]
+
+[tool.coverage.run]
+# `-p` (paralelo) porque a suíte roda um arquivo por processo; `combine` junta.
+source = ["sparquet"]
+parallel = true
+
+[tool.coverage.report]
+exclude_also = [
+    # Trecho que só existe para o type checker.
+    "if TYPE_CHECKING:",
+    # Guarda de execução direta: todo teste tem uma, nenhuma é lógica.
+    'if __name__ == .__main__.:',
+    "raise NotImplementedError",
+]

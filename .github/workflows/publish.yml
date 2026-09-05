@@ -32,6 +32,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
+      # A release publishes whatever is in the tag, and PyPI refuses a second
+      # upload of the same version: a tag that disagrees with `__version__` either
+      # publishes the wrong version or wastes the tag. Cheapest possible gate.
+      - name: Tag matches the packaged version
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          packaged=$(python -c "import sparquet; print(sparquet.__version__)")
+          if [ "$tag" != "$packaged" ]; then
+            echo "::error::tag $GITHUB_REF_NAME says $tag, sparquet.__version__ says $packaged"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME == sparquet $packaged"
+
       - name: Unit tests
         env:
           PYTHONPATH: .

@@ -1,9 +1,19 @@
 name: CI
 
-# Every push/PR on main. Three layers, cheapest first:
-#   test         pure Python on a matrix of versions — no Java, no network
-#   integration  one job with a real JVM: the connectors that need an actual jar
-#   studio       typecheck, lint and unit tests of the visual editor
+# Every push/PR on main. Six layers, cheapest first:
+#   lint           ruff over the package, the tests and the examples
+#   test           pure Python on a matrix of versions — no Java, no network
+#   integration    a real JVM per Spark line: the connectors that need an actual jar
+#   services-tier  the connectors that need a server: containers from the compose
+#   comet          the DataFusion Comet plugin, which only has a Linux binary
+#   studio         typecheck, lint, unit tests and a build of the visual editor
+#
+# The three JVM layers run once per supported Spark line, 4.1 and 3.5. The
+# package declares `pyspark>=3.4`, and a connector jar is published per line and
+# per Scala binary — 2.13 on Spark 4.x, 2.12 on 3.5 — so a suite that only ever
+# ran on 4.1 said nothing about the line most managed runtimes still ship. The
+# coordinates themselves live in `tests/io/integration/harness.py` (`_LINHAS`)
+# and `services.py`, not here: this file only picks the pyspark version.
 #
 # A red integration job does not block the pure layer and vice versa
 # (`fail-fast: false` inside the matrix, separate jobs outside it): knowing that
@@ -22,6 +32,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # The ruff version is pinned in the `dev` extra: a linter that changes its
+      # own rules on release turns a PR red for code it did not touch.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Rules are configured in `[tool.ruff.lint]`: `E`/`W`/`F` only, and
+      # `target-version = "py39"`. Scoped that way on purpose — the modernization
+      # families would rewrite the code to syntax that does not exist on the 3.9
+      # floor this package supports. `ruff format` is deliberately not a gate:
+      # the repository is not tool-formatted and reformatting it would bury the
+      # real history under a diff nobody reviewed.
+      - name: Ruff
+        run: ruff check --output-format=github .
+
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -38,10 +76,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # `[dev]` for coverage — the floor below is the only thing that notices a
+      # module that quietly stopped being exercised.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[dev]"
 
       - name: Import the package the way a user does
         # Catches a broken import chain (a module renamed, a dependency dropped
@@ -68,9 +108,12 @@ jobs:
           fi
           echo "running $count test files"
           fail=0
+          # Each file is its own process, so coverage is written in parallel mode
+          # (`[tool.coverage.run] parallel = true`) and combined below.
+          python -m coverage erase
           for f in $files; do
             echo "::group::$f"
-            python "$f" 2>&1 | tee "/tmp/$(basename "$f").log" || fail=1
+            python -m coverage run "$f" 2>&1 | tee "/tmp/$(basename "$f").log" || fail=1
             echo "::endgroup::"
           done
           # Skips are legitimate here (no JVM), but silent ones hide a suite that
@@ -78,18 +121,38 @@ jobs:
           # `|| true`: with a JVM on the runner nothing skips, and a grep that
           # matches nothing would take the whole step down under `set -e`.
           skipped=$(grep -ho 'skipped=[0-9]*' /tmp/*.log 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}' || true)
-          echo "### Python ${{ matrix.python-version }}: $count files, ${skipped:-0} skipped tests" >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage combine
+          total=$(python -m coverage report --precision=1 | tail -1 | awk '{print $NF}')
+          echo "### Python ${{ matrix.python-version }}: $count files, ${skipped:-0} skipped tests, coverage $total" >> "$GITHUB_STEP_SUMMARY"
+          # The floor sits well under the measured number on purpose. This job has
+          # no Java, so every branch that needs a live SparkSession is unreachable
+          # here: measured 69.6% without a JVM against 76.9% with one. The
+          # floor is here to catch a module that dropped out of the suite entirely,
+          # not to police a percentage point of drift — tightening it to the
+          # current number would make an honest refactor red.
+          python -m coverage report --precision=1 --fail-under=65 > /dev/null || fail=1
           exit $fail
 
   integration:
-    name: Connectors with a real jar
+    name: Connectors with a real jar (Spark ${{ matrix.spark }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The line the framework is developed on. Scala 2.13.
+          - spark: "4.1.1"
+            python: "3.12"
+          # The line the managed runtimes are on. Scala 2.12, and pyspark 3.5 is
+          # not tested against Python 3.12 upstream, so this leg stays on 3.11.
+          - spark: "3.5.9"
+            python: "3.11"
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -98,28 +161,32 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Pinned on purpose. A connector jar is compiled against one Spark line
-      # and breaks on the next with a binary incompatibility, so the pyspark
-      # version has to match the coordinates in the harness. Unpinned, this job
-      # installed a newer Spark and the Iceberg tests died with
-      # `IncompatibleClassChangeError`. Move both together.
+      # Pinned to an exact patch, not a range. A connector jar is compiled
+      # against one Spark line and breaks on the next with a binary
+      # incompatibility; unpinned, this job installed a newer Spark and the
+      # Iceberg tests died with `IncompatibleClassChangeError`. The jars that go
+      # with each line are in the harness, so a new line is added there first and
+      # only then gets a row in the matrix above.
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-          pip install "pyspark==4.1.1"
+          pip install "pyspark==${{ matrix.spark }}"
 
       # The jars come from Maven Central on the first run only. Ivy's cache
-      # directory changed with Spark 4 (~/.ivy2.5.2); both are cached so the
-      # workflow keeps working if the pinned pyspark moves back to the 3.x line.
+      # directory changed with Spark 4 (~/.ivy2.5.2), so both are cached: the 4.1
+      # leg fills the first, the 3.5 leg the second.
       - name: Cache the Spark jars
         uses: actions/cache@v4
         with:
           path: |
             ~/.ivy2.5.2
             ~/.ivy2
-          key: ivy-${{ runner.os }}-4.1.1-${{ hashFiles('tests/io/integration/harness.py') }}
-          restore-keys: ivy-${{ runner.os }}-4.1.1-
+          # The pyspark version is part of the key, not decoration: the two legs
+          # download different jars into the same directory, and one shared key
+          # would have each leg restoring the other's Scala binary.
+          key: ivy-${{ runner.os }}-${{ matrix.spark }}-${{ hashFiles('tests/io/integration/harness.py') }}
+          restore-keys: ivy-${{ runner.os }}-${{ matrix.spark }}-
 
       - name: Integration tests
         env:
@@ -131,7 +198,7 @@ jobs:
           set -o pipefail
           # A tier that skips is a green job proving nothing, and the gate skips
           # on a Spark/jar mismatch. Say so and fail instead.
-          python -c "import sys; sys.path.insert(0, 'tests/io/integration'); import harness; print('pyspark', harness.spark_version()); sys.exit(harness.skip_reason() or 0)"
+          python -c "import sys; sys.path.insert(0, 'tests/io/integration'); import harness; print('pyspark', harness.spark_version(), '| line', harness.spark_line(), '| scala', harness.scala_binary()); sys.exit(harness.skip_reason() or 0)"
           fail=0
           for f in $(find tests/io/integration -name 'test_*.py' | sort); do
             echo "::group::$f"
@@ -141,6 +208,186 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+
+  services-tier:
+    name: Connectors with a real service (Spark ${{ matrix.spark }})
+    runs-on: ubuntu-latest
+    # The 3.5 leg reports, it does not gate. Its connector coordinates were
+    # verified as published — the pom of each one names the Spark line it was
+    # built against — but never run against these containers, because no Docker
+    # was available on the machine where the line was added. Two green runs in a
+    # row and this line goes away.
+    continue-on-error: ${{ matrix.spark != '4.1.1' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spark: "4.1.1"
+            python: "3.12"
+          - spark: "3.5.9"
+            python: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Same pin as the job above, for the same reason: the connector jars in
+      # `services.py` are compiled against one Spark line, and on 3.5 several of
+      # them are a different artifact and not just a different suffix.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pyspark==${{ matrix.spark }}"
+
+      - name: Cache the Spark jars
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ivy2.5.2
+            ~/.ivy2
+          key: ivy-services-${{ runner.os }}-${{ matrix.spark }}-${{ hashFiles('tests/io/integration/services.py', 'tests/io/integration/harness.py') }}
+          restore-keys: ivy-services-${{ runner.os }}-${{ matrix.spark }}-
+
+      # A subset on purpose. These seven boot in well under a minute; SQL Server,
+      # Oracle and Cassandra take minutes each and stay a local-only run until
+      # this job proves itself cheap enough to grow. Elasticsearch is in the list
+      # even though no Elasticsearch connector runs on Spark 4: the route that
+      # works there is the OpenSearch connector pointed at it, and that route has
+      # a test (`ElasticsearchViaOpenSearchTest`), so it is worth a container. On
+      # the 3.5 leg the native `elasticsearch-spark-30` does run, so that leg is
+      # also the first place where the two search connectors share a classpath.
+      - name: Boot the services
+        run: |
+          docker compose -f tests/io/integration/docker-compose.yml up -d --wait \
+            postgres mysql mariadb mongodb kafka opensearch elasticsearch
+
+      - name: Service tests
+        env:
+          PYTHONPATH: .
+          SPARQUET_IT: "1"
+        run: |
+          set -o pipefail
+          # A service tier that skips is a green job proving nothing. The tests
+          # skip themselves when a port does not answer — by design, so nobody
+          # needs Docker locally — so here the absence of a service is a failure.
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "tests/io/integration")
+          import harness, services
+          esperados = (
+              "postgres", "mysql", "mariadb", "mongodb", "kafka",
+              "opensearch", "elasticsearch",
+          )
+          motivo = harness.skip_reason()
+          faltando = [n for n in esperados if not services.reachable(n)]
+          if motivo:
+              print(f"::error::the integration gate is closed: {motivo}")
+          if faltando:
+              print("::error::booted but unreachable: " + ", ".join(faltando))
+          if motivo or faltando:
+              sys.exit(1)
+          print("pyspark", harness.spark_version(), "| line", harness.spark_line(),
+                "| services up:", ", ".join(esperados))
+          PY
+          fail=0
+          for f in tests/io/integration/test_jdbc_services_spark.py \
+                   tests/io/integration/test_nosql_services_spark.py \
+                   tests/io/integration/test_kafka_spark.py; do
+            echo "::group::$f"
+            python -u "$f" 2>&1 | grep -vE '^\s+at |^\s+\.\.\. [0-9]+ more$' | tail -150 || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      # The container logs are the only place a boot failure explains itself.
+      - name: Service logs
+        if: failure()
+        run: docker compose -f tests/io/integration/docker-compose.yml logs --tail 40
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f tests/io/integration/docker-compose.yml down -v
+
+  # Comet is a session config, not a connector, so it does not belong in the
+  # tiers above: its jar has to be on the driver's classpath before the JVM
+  # starts, and its native library only exists for Linux. This job is the only
+  # place where the claim "Comet accelerates a Sparquet pipeline without
+  # changing the result" is actually measured instead of skipped.
+  comet:
+    name: DataFusion Comet (Spark ${{ matrix.spark }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spark: "4.1.1"
+            python: "3.12"
+            artifact: comet-spark-spark4.1_2.13
+          - spark: "3.5.9"
+            python: "3.11"
+            artifact: comet-spark-spark3.5_2.12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Same pin as the integration job, for the same reason: the Comet artifact
+      # is built per Spark line and per Scala binary, so the jar and the pyspark
+      # version are one row of the matrix and never move apart.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install "pyspark==${{ matrix.spark }}"
+
+      # ~88 MB, and Maven Central rate-limits. Keyed by the coordinate, so
+      # bumping the version below downloads once and then hits the cache.
+      - name: Cache the Comet jar
+        id: comet-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/comet
+          key: comet-1.0.0-${{ matrix.artifact }}
+
+      - name: Download the Comet jar
+        if: steps.comet-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/comet
+          base=https://repo1.maven.org/maven2/org/apache/datafusion/${{ matrix.artifact }}/1.0.0
+          curl -sSfL -o ~/.cache/comet/comet.jar "$base/${{ matrix.artifact }}-1.0.0.jar"
+
+      - name: Comet tests
+        env:
+          PYTHONPATH: .
+          SPARQUET_IT: "1"
+        run: |
+          set -o pipefail
+          jar="$HOME/.cache/comet/comet.jar"
+          # The test skips itself when the jar is missing, and a skip here would
+          # be a green job proving nothing about Comet. Fail on the download
+          # instead of on nothing.
+          test -s "$jar" || { echo "::error::the Comet jar was not downloaded"; exit 1; }
+          export SPARQUET_IT_COMET_JAR="$jar"
+          python -u tests/io/integration/test_comet_spark.py 2>&1 | grep -vE '^\s+at |^\s+\.\.\. [0-9]+ more$' | tail -120
 
   studio:
     name: Studio
@@ -168,3 +415,16 @@ jobs:
 
       - name: Unit tests
         run: npm run test
+
+      # Typecheck and tests both run on source. This is the only step that proves
+      # the bundle still builds — a broken import path or an oversized asset only
+      # shows up here.
+      - name: Build
+        run: npm run build
+
+      # Drives the built app in a real Chrome (`/usr/bin/google-chrome` on the
+      # runner): the library loads, a template opens, the canvas draws nodes and
+      # edges, and the compiled JSON stays in step with the graph. No unit test
+      # covers the browser side of that.
+      - name: Smoke
+        run: npm run smoke
