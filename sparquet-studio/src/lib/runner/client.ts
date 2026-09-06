@@ -5,7 +5,7 @@
  * message the UI can show verbatim, so an offline Studio degrades cleanly.
  */
 
-import type { PipelineSpec } from '@/types/pipeline'
+import type { PipelineSpec, SparkSettings } from '@/types/pipeline'
 import type {
   PipelineRunResult,
   PipelineStageResult,
@@ -118,6 +118,13 @@ export interface RunnerDatasetSchema {
   fields: RunnerSchemaField[]
   /** When the runner opened the dataset, ISO-8601. */
   readAt: string
+  /**
+   * The runner rebuilt its SparkSession to honour the `spark` block sent with
+   * this request. Worth saying out loud: connector jars and SQL extensions are
+   * read only when a session is created, so the rebuild is what made a Delta or
+   * Iceberg dataset readable at all.
+   */
+  sessionRestarted: boolean
 }
 
 /** The dataset to open, in the same shape a Job's `input` block has. */
@@ -125,8 +132,8 @@ export interface DatasetSchemaRequest {
   format: string
   path: string
   options?: Record<string, unknown>
-  /** Session config, honoured only while the runner has no SparkSession yet. */
-  spark?: Record<string, unknown>
+  /** Session config for this read — see `RunQueryRequest.spark`. */
+  spark?: SparkSettings
 }
 
 /** One dataset the SQL may name: opened by the runner and registered as a temp view. */
@@ -149,8 +156,13 @@ export interface RunQueryRequest {
    */
   queryId?: string
   timeoutSeconds?: number
-  /** Session config, honoured only while the runner has no SparkSession yet. */
-  spark?: Record<string, unknown>
+  /**
+   * Session config the runner should honour for this query. Connector jars and
+   * SQL extensions are read only when a SparkSession is created, so the runner
+   * rebuilds its session when the live one is missing what this asks for, and
+   * says so through `sessionRestarted`.
+   */
+  spark?: SparkSettings
 }
 
 export interface RunnerQueryResult {
@@ -161,6 +173,8 @@ export interface RunnerQueryResult {
   /** The result had more rows than the limit asked for. */
   truncated: boolean
   elapsedMs: number
+  /** The runner rebuilt its SparkSession for this query — see `RunnerDatasetSchema`. */
+  sessionRestarted: boolean
 }
 
 export interface RunnerValidation {
@@ -432,6 +446,7 @@ export async function fetchDatasetSchema(
       }))
       .filter((field) => field.name.length > 0),
     readAt: asString(payload.read_at),
+    sessionRestarted: asBoolean(payload.session_restarted),
   }
 }
 
@@ -493,6 +508,7 @@ export async function runQuery(
     rows: asArray(payload.rows).map((row) => asArray(row)),
     truncated: asBoolean(payload.truncated),
     elapsedMs: asNumber(payload.elapsed_ms),
+    sessionRestarted: asBoolean(payload.session_restarted),
   }
 }
 

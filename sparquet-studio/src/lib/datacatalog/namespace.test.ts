@@ -168,6 +168,26 @@ describe('buildNamespaceTree', () => {
     ])
   })
 
+  it('tiers the levels by depth, whatever the root is called', () => {
+    // Databricks says catalog/schema/table, Athena says catalog/database/table,
+    // and a lake has the same three levels under different words. Anything
+    // deeper than a schema is a folder no metastore would have a name for.
+    const [lake, warehouse] = buildNamespaceTree([
+      ...assets,
+      asset('/lake/silver/curated/orders', 'parquet'),
+    ])
+    expect([lake.tier, lake.depth]).toEqual(['catalog', 0])
+    expect(lake.children.map((child) => [child.label, child.tier, child.depth])).toEqual([
+      ['bronze', 'schema', 1],
+      ['silver', 'schema', 1],
+    ])
+    const curated = lake.children[1].children[0]
+    expect([curated.label, curated.tier, curated.depth]).toEqual(['curated', 'folder', 2])
+    // The warehouse root is the same shape: `analytics.gold.revenue` is a
+    // catalog, a schema and a table, not a path with dots in it.
+    expect([warehouse.tier, warehouse.children[0].tier]).toEqual(['catalog', 'schema'])
+  })
+
   it('gives every node an id unique to its full path', () => {
     const ids = buildNamespaceTree(assets).flatMap((root) => [
       root.id,

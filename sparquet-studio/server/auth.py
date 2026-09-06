@@ -197,6 +197,11 @@ ACTIONS: Dict[str, str] = {
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
     "iam:ManageRoles": "Create and edit roles, and choose the actions each one allows.",
     "iam:ManageTeams": "Create teams, move people between them, give a team roles.",
+    "iam:ManageGrants": (
+        "Grant or deny access to a dataset, a Job or a Pipeline. Separate from "
+        "`workspace:Write` on purpose: whoever may edit a Job must not thereby "
+        "be able to widen their own access to the tables it reads."
+    ),
     "iam:ReadAudit": "Read the audit log: who changed what, and who was refused.",
     "credits:Read": "See every team's execution credits and what they were spent on.",
     "credits:Manage": "Grant execution credits, or take them back.",
@@ -210,6 +215,7 @@ ACTIONS: Dict[str, str] = {
 #: runner passes these to `authorize` as `kind/id`, so a role scoped to
 #: `workflow/w1` allows only what happens inside that Workflow.
 RESOURCE_KINDS: Dict[str, str] = {
+    "dataset": "One dataset address, as the catalog and the SQL editor name it.",
     "workflow": "One Workflow and everything the runner attributes to it.",
     "pipeline": "One Pipeline (an ordered sequence of Jobs).",
     "job": "One Job.",

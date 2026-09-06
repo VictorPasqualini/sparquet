@@ -22,6 +22,11 @@ import 'monaco-editor/esm/vs/editor/contrib/bracketMatching/browser/bracketMatch
 import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController.js'
 import 'monaco-editor/esm/vs/editor/contrib/comment/browser/comment.js'
 import 'monaco-editor/esm/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.js'
+// The suggest widget is a contribution too, and the SQL editor completes table
+// and column names out of the catalog — without these two the provider is
+// registered and nothing ever shows it.
+import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController.js'
+import 'monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2.js'
 
 let configured = false
 

@@ -24,13 +24,18 @@ import {
   type DatasetAnnotation,
   type ProbedField,
 } from '@/lib/datacatalog'
+import { grantsByResource, type DatasetGrant } from '@/lib/iam'
 import { fetchDatasetSchema } from '@/lib/runner/client'
+import { sparkForDatasets } from '@/lib/runner/session'
 import { buildLineage, type DatasetPlace } from '@/lib/lineage'
 import {
   LINEAGE_EXAMPLE_WORKFLOW,
   lineageExampleTemplates,
 } from '@/data/templates'
 import { useCatalogStore } from '@/store/catalog'
+import { useIamStore } from '@/store/iam'
+import { useAuthStore } from '@/store/auth'
+import type { AuthTeam, AuthUser } from '@/types/auth'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 
@@ -88,6 +93,9 @@ const ALL_WORKFLOWS = 'all'
  * looking at is everything the editor cannot see — the OTHER Jobs that touch the
  * same path. Inside one canvas the answer is already on screen.
  */
+/** Stable empty list, so an ungoverned dataset does not remount the panel. */
+const EMPTY_GRANTS: DatasetGrant[] = []
+
 export function Catalog() {
   const navigate = useNavigate()
   const jobs = useLibraryStore((state) => state.jobs)
@@ -96,6 +104,14 @@ export function Catalog() {
   const loadCatalog = useCatalogStore((state) => state.load)
   const annotate = useCatalogStore((state) => state.annotate)
   const forget = useCatalogStore((state) => state.forget)
+  const grants = useIamStore((state) => state.grants)
+  const loadGrants = useIamStore((state) => state.load)
+  const addGrant = useIamStore((state) => state.grant)
+  const revokeGrant = useIamStore((state) => state.revoke)
+  const fetchTeams = useAuthStore((state) => state.fetchTeams)
+  const fetchUsers = useAuthStore((state) => state.fetchUsers)
+  const [teams, setTeams] = useState<AuthTeam[]>([])
+  const [users, setUsers] = useState<AuthUser[]>([])
   const createWorkflow = useLibraryStore((state) => state.createWorkflow)
   const createJob = useLibraryStore((state) => state.createJob)
   const createPipeline = useLibraryStore((state) => state.createPipeline)
@@ -107,11 +123,35 @@ export function Catalog() {
   const [openKey, setOpenKey] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
+  /**
+   * Who exists, for the grant picker. Only while a sheet is open, and a failure
+   * is silent on purpose: a runner with no user records still has a token
+   * identity, and the picker falls back to typing a name.
+   */
+  useEffect(() => {
+    if (!openKey) return
+    let alive = true
+    void (async () => {
+      try {
+        const [nextTeams, nextUsers] = await Promise.all([fetchTeams(), fetchUsers()])
+        if (!alive) return
+        setTeams(nextTeams)
+        setUsers(nextUsers)
+      } catch {
+        /* no IAM on this runner; the picker stays free text */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [openKey, fetchTeams, fetchUsers])
+
   // The catalog is read here rather than at boot: it is only ever needed by this
   // screen, and the editor should not pay for it.
   useEffect(() => {
     void loadCatalog()
-  }, [loadCatalog])
+    void loadGrants()
+  }, [loadCatalog, loadGrants])
 
   /**
    * A workflow scope narrows WHICH Jobs are read, not which datasets are shown.
@@ -134,6 +174,9 @@ export function Catalog() {
   const schemas = useMemo(() => deriveSchemas(scoped), [scoped])
   // Where each column came from and what it feeds, from that same walk.
   const columns = useMemo(() => buildColumnGraph(scoped), [scoped])
+  // Access rules per dataset address. Grouped once here because both the browser
+  // and the sheet want them, and both are keyed by the same address.
+  const datasetGrants = useMemo(() => grantsByResource(grants, 'dataset'), [grants])
 
   const searched = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -222,13 +265,21 @@ export function Catalog() {
     async (key: string, format: string): Promise<ProbedField[]> => {
       const schema = await fetchDatasetSchema(
         runnerUrl,
-        { format, path: key },
+        {
+          format,
+          path: key,
+          // How the Jobs that touch this dataset open it. A Delta table is
+          // unreadable on a SparkSession built without its jars and extensions,
+          // and those are honoured only when a session is created — so the
+          // runner is told what this read needs and rebuilds if it has to.
+          spark: sparkForDatasets(jobs, [key]),
+        },
         undefined,
         runnerToken,
       )
       return schema.fields
     },
-    [runnerUrl, runnerToken],
+    [jobs, runnerUrl, runnerToken],
   )
 
   const save = useCallback(
@@ -452,6 +503,7 @@ export function Catalog() {
           entries={visible}
           searching={query.trim() !== ''}
           schemas={schemas}
+          grants={datasetGrants}
           onOpenDataset={setOpenKey}
           workflowName={workflowName}
         />
@@ -465,6 +517,11 @@ export function Catalog() {
           suggestions={knownTags}
           schema={schemas.get(open.dataset.key) ?? null}
           columns={columns}
+          grants={datasetGrants.get(open.dataset.key) ?? EMPTY_GRANTS}
+          teams={teams}
+          users={users}
+          onGrant={(input) => addGrant({ ...input, resource: 'dataset', resourceId: open.dataset.key })}
+          onRevoke={revokeGrant}
           probe={runnerUrl ? (format) => probe(open.dataset.key, format) : null}
           onClose={() => setOpenKey(null)}
           onSave={(patch) => save(open.dataset.key, patch)}

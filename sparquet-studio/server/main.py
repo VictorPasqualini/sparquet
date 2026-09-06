@@ -129,6 +129,7 @@ workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
 credits = _load_sibling_module("credits")
 audit = _load_sibling_module("audit")
+grants = _load_sibling_module("grants")
 providers = _load_sibling_module("providers")
 
 
@@ -217,10 +218,10 @@ class DatasetSchemaRequest(BaseModel):
     format: str
     path: str
     options: Optional[Dict[str, Any]] = None
-    #: Session config, as in a pipeline's `spark` block. Only honoured while no
-    #: SparkSession exists yet: `spark.jars.packages` and `spark.sql.extensions`
-    #: are read when the session is created and ignored afterwards, so a runner
-    #: that has already executed something keeps the session it has.
+    #: Session config, as in a pipeline's `spark` block. `spark.jars.packages`
+    #: and `spark.sql.extensions` are read when the SparkSession is CREATED and
+    #: ignored afterwards, so asking for a connector the live session was not
+    #: built with restarts that session — see `_ensure_framework`.
     spark: Optional[Dict[str, Any]] = None
 
 
@@ -237,6 +238,9 @@ class DatasetSchemaResponse(BaseModel):
     path: str
     fields: List[SchemaFieldOut]
     read_at: str
+    #: True when the SparkSession had to be rebuilt to load the connector this
+    #: format needs. Worth showing: it is why the call took twenty seconds.
+    session_restarted: bool = False
 
 
 class QuerySource(BaseModel):
@@ -258,7 +262,7 @@ class QueryRequest(BaseModel):
     #: Cancels the query by itself after this many seconds. None leaves it to
     #: run until it finishes or someone cancels it.
     timeout_seconds: Optional[int] = None
-    #: As in `DatasetSchemaRequest`: honoured only while no SparkSession exists.
+    #: As in `DatasetSchemaRequest`: a connector the live session lacks rebuilds it.
     spark: Optional[Dict[str, Any]] = None
 
 
@@ -270,6 +274,9 @@ class QueryResponse(BaseModel):
     #: True when the query had more rows than `limit`, so the table can say so.
     truncated: bool
     elapsed_ms: int
+    #: The SparkSession was rebuilt before this query, to load a connector it
+    #: was missing. Explains an otherwise inexplicable first-query latency.
+    session_restarted: bool = False
 
 
 class ValidationOut(BaseModel):
@@ -856,6 +863,169 @@ def _get_framework() -> Any:
     return _framework
 
 
+#: Configs Spark only reads while the SparkSession is being BUILT. Setting one
+#: on a live session is accepted and then ignored by the JVM, which is what made
+#: "Delta works in a Job but not in the SQL editor" so hard to see: the first
+#: request to reach this process fixed the session for every request after it,
+#: connectors included.
+_CREATION_ONLY = (
+    "spark.jars",
+    "spark.sql.extensions",
+    "spark.sql.catalog.",
+    "spark.serializer",
+    "spark.kryo",
+    "spark.plugins",
+    "spark.driver.",
+    "spark.executor.",
+    "spark.hadoop.",
+)
+
+#: Creation-time configs whose value is a comma-separated LIST. A restart merges
+#: them instead of replacing: rebuilding the session for Delta must not drop the
+#: Iceberg packages an earlier request asked for.
+_LIST_CONFIGS = (
+    "spark.jars.packages",
+    "spark.jars",
+    "spark.jars.repositories",
+    "spark.sql.extensions",
+    "spark.plugins",
+)
+
+#: Queries in flight. A session restart stops the JVM, so it may only happen
+#: while nothing is running — `_RUN_LOCK` covers pipeline runs, this covers
+#: `/query` and `/dataset/schema`, which deliberately do not take that lock.
+_QUERY_COUNT = 0
+_QUERY_COUNT_LOCK = threading.Lock()
+_SESSION_LOCK = threading.RLock()
+
+
+def _query_enter() -> None:
+    """Marks a query as running, so a session restart refuses to interrupt it."""
+    global _QUERY_COUNT
+    with _QUERY_COUNT_LOCK:
+        _QUERY_COUNT += 1
+
+
+def _query_exit() -> None:
+    global _QUERY_COUNT
+    with _QUERY_COUNT_LOCK:
+        _QUERY_COUNT = max(0, _QUERY_COUNT - 1)
+
+
+def _creation_only(key: str) -> bool:
+    return any(key == prefix or key.startswith(prefix) for prefix in _CREATION_ONLY)
+
+
+def _merge_list(current: Optional[str], wanted: str) -> str:
+    """Union of two comma-separated config values, order preserved."""
+    out: List[str] = []
+    for value in (current or "", wanted):
+        for item in value.split(","):
+            item = item.strip()
+            if item and item not in out:
+                out.append(item)
+    return ",".join(out)
+
+
+def _configs_of(spark_settings: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    configs = (spark_settings or {}).get("configs") or {}
+    if not isinstance(configs, dict):
+        return {}
+    return {str(key): str(value) for key, value in configs.items()}
+
+
+def _session_gap(session: Any, wanted: Dict[str, str]) -> Dict[str, str]:
+    """Creation-time configs the live session does not already satisfy."""
+    try:
+        conf = session.sparkContext.getConf()
+    except Exception:
+        return {}
+    gap: Dict[str, str] = {}
+    for key, value in wanted.items():
+        if not _creation_only(key):
+            continue
+        current = conf.get(key, None)
+        if current is None:
+            gap[key] = value
+        elif key in _LIST_CONFIGS:
+            have = {item.strip() for item in str(current).split(",") if item.strip()}
+            missing = [item.strip() for item in value.split(",") if item.strip() and item.strip() not in have]
+            if missing:
+                gap[key] = _merge_list(str(current), value)
+        elif str(current) != value:
+            gap[key] = value
+    return gap
+
+
+def _live_creation_configs(session: Any) -> Dict[str, str]:
+    """What the live session was built with, so a restart keeps it."""
+    try:
+        pairs = session.sparkContext.getConf().getAll()
+    except Exception:
+        return {}
+    return {str(key): str(value) for key, value in pairs if _creation_only(str(key))}
+
+
+def _ensure_framework(spark_settings: Optional[Dict[str, Any]]) -> Tuple[Any, bool]:
+    """The framework, with a SparkSession that can actually open what was asked.
+
+    The session is a process-wide singleton and its connector configs are frozen
+    at creation, so a caller asking for Delta after somebody else created a
+    plain session used to get `[DATA_SOURCE_NOT_FOUND] delta` with nothing in the
+    message pointing at the real cause. When the request needs a creation-time
+    config the live session lacks, the session is rebuilt with the union of both
+    — and refused, loudly, while anything is still running on it.
+
+    Returns the framework and whether a restart happened.
+    """
+    global _framework
+    wanted = _configs_of(spark_settings)
+
+    with _SESSION_LOCK:
+        if _framework is None:
+            _framework = _import("sparquet").Sparquet(spark=spark_settings or None)
+            return _framework, False
+
+        if not wanted:
+            return _framework, False
+
+        session = _framework.spark
+        gap = _session_gap(session, wanted)
+        if not gap:
+            return _framework, False
+
+        busy_query = _QUERY_COUNT > 0
+        acquired = _RUN_LOCK.acquire(blocking=False)
+        if busy_query or not acquired:
+            if acquired:
+                _RUN_LOCK.release()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This SparkSession was created without "
+                    + ", ".join(sorted(gap))
+                    + ", and those only take effect when the session is built. "
+                    "Rebuilding it means stopping the JVM, which would kill the "
+                    "run or query using it right now. Try again when it finishes."
+                ),
+            )
+
+        try:
+            merged = _live_creation_configs(session)
+            for key, value in gap.items():
+                merged[key] = _merge_list(merged.get(key), value) if key in _LIST_CONFIGS else value
+            settings = dict(spark_settings or {})
+            settings["configs"] = merged
+            _import("sparquet.core.context").SparkContextManager.stop()
+            _framework = _import("sparquet").Sparquet(spark=settings)
+            # Touch it here so a failure to build surfaces as this call, not as
+            # an unrelated one two requests later.
+            _framework.spark
+        finally:
+            _RUN_LOCK.release()
+        return _framework, True
+
+
 def _apply_params(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not params:
         return pipeline
@@ -985,6 +1155,56 @@ def _parse_config_error(
 def _describe(exc: Exception) -> str:
     text = str(exc).strip()
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+#: What each format needs in the `spark` block to exist at all. The version is
+#: deliberately left as a placeholder: the right coordinate depends on the Spark
+#: line the runner is on (Scala 2.13 on Spark 4.x, 2.12 on 3.5), and printing a
+#: wrong pin is worse than printing the shape of the right one.
+_CONNECTOR_HINT: Dict[str, str] = {
+    "delta": (
+        "spark.jars.packages=io.delta:delta-spark_<scala>:<version> plus "
+        "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension and "
+        "spark.sql.catalog.spark_catalog="
+        "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    ),
+    "iceberg": (
+        "spark.jars.packages="
+        "org.apache.iceberg:iceberg-spark-runtime-<spark>_<scala>:<version> plus "
+        "spark.sql.extensions="
+        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    ),
+    "hudi": "spark.jars.packages=org.apache.hudi:hudi-spark<spark>-bundle_<scala>:<version>",
+    "kafka": "spark.jars.packages=org.apache.spark:spark-sql-kafka-0-10_<scala>:<version>",
+    "bigquery": "spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_<scala>:<version>",
+    "mongodb": "spark.jars.packages=org.mongodb.spark:mongo-spark-connector_<scala>:<version>",
+    "cassandra": "spark.jars.packages=com.datastax.spark:spark-cassandra-connector_<scala>:<version>",
+    "elasticsearch": "spark.jars.packages=org.elasticsearch:elasticsearch-spark-30_<scala>:<version>",
+    "opensearch": "spark.jars.packages=org.opensearch.client:opensearch-spark-30_<scala>:<version>",
+    "snowflake": "spark.jars.packages=net.snowflake:spark-snowflake_<scala>:<version>",
+}
+
+
+def _describe_io(exc: Exception, fmt: str) -> str:
+    """`_describe`, plus what a missing connector actually means.
+
+    Spark answers a format it cannot load with `[DATA_SOURCE_NOT_FOUND] Failed
+    to find the data source: delta`, which reads as "there is no such thing" when
+    it means "this session was built without the jar". The two are fixed very
+    differently, so the message says which one this is.
+    """
+    text = _describe(exc)
+    name = (fmt or "").strip().lower()
+    marker = "DATA_SOURCE_NOT_FOUND" in text or "ClassNotFoundException" in text
+    if not marker or name not in _CONNECTOR_HINT:
+        return text
+    return (
+        f"{text}\n\nThe {name} connector is not on this SparkSession. Its jars and "
+        "extensions are read only when the session is created, so declaring them "
+        "afterwards has no effect. Put them in the `spark` block of a Job that "
+        f"touches this dataset — {_CONNECTOR_HINT[name]} — and the runner rebuilds "
+        "the session with them the next time nothing is running on it."
+    )
 
 
 def _build_preview(df: Any, limit: int, collector: _LogCollector) -> Optional[PreviewOut]:
@@ -1348,6 +1568,121 @@ def _authorize_run(
     )
 
 
+# ------------------------------------------------------------------- grants
+
+
+def _grants_now() -> List[Any]:
+    """The dataset, Job and Pipeline rules as they stand on disk right now.
+
+    Deliberately not cached: revoking access has to take effect when somebody
+    saves it, not when the runner is next restarted, and re-reading a few
+    kilobytes of JSON beside a query that is about to start a Spark job costs
+    nothing worth measuring.
+    """
+    try:
+        raw = _workspace.read_meta().get("grants")
+    except Exception:  # a missing or unreadable meta file is simply no rules
+        return []
+    return grants.load(raw)
+
+
+def _identity_of(principal: Any) -> Any:
+    """The principals one caller is, in the shape `grants` matches against."""
+    return grants.Identity(
+        user_id=getattr(principal, "user_id", None),
+        username=getattr(principal, "username", None),
+        team_id=getattr(principal, "team_id", None),
+    )
+
+
+def _dataset_id(address: str) -> str:
+    """An address as the Studio catalog keys it: trailing slashes gone, case kept.
+
+    Must agree with `datasetKey` in `src/lib/lineage/lineage.ts`, or a rule
+    written against `/data/orders` would miss a Job that names `/data/orders/`.
+    """
+    trimmed = (address or "").strip()
+    return trimmed.rstrip("/") or trimmed
+
+
+def _authorize_resource(
+    principal: Any,
+    resource: str,
+    resource_id: str,
+    level: str,
+    rules: Optional[List[Any]] = None,
+) -> None:
+    """Refuse when a grant closes this dataset, Job or Pipeline to this caller.
+
+    Skipped on a token-only runner, for the reason `auth.py` gives the shared
+    token the admin policy: no users exist there, so no rule can name anybody,
+    and a `*` deny would lock the single operator out of their own machine.
+    """
+    if getattr(principal, "token_only", False):
+        return
+    scoped = _grants_now() if rules is None else rules
+    if not scoped:
+        return
+    if grants.allows(scoped, resource, resource_id, _identity_of(principal), level):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=grants.refusal(
+            resource, resource_id, level, getattr(principal, "username", "")
+        ),
+    )
+
+
+#: Meta records that are not bookkeeping but policy, and the action each needs.
+#: `workspace:Write` covers the rest of `meta/*`, and an editor holds it — which
+#: must not be a way to rewrite the rules that restrain the editor.
+_META_GUARDS = {"grants": "iam:ManageGrants"}
+
+
+def _guard_meta_key(principal: Any, key: str) -> None:
+    action = _META_GUARDS.get(str(key))
+    if action is None or getattr(principal, "token_only", False):
+        return
+    if principal.allows(action, "*") and not principal.denies(action, "*"):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"'{principal.username}' is not allowed to {action}. Access rules over "
+            "datasets, Jobs and Pipelines are changed by an administrator."
+        ),
+    )
+
+
+def _authorize_datasets(principal: Any, config: Any) -> None:
+    """Check every dataset a submitted JSON reads and writes, before it runs.
+
+    Reading a table through a Job is still reading it: a deny that only covered
+    `/query` would be walked around by running a two-line pipeline that selects
+    from the table and writes it somewhere the caller does own. The addresses
+    come from `history.lineage_of`, which is the same extraction the catalog
+    derives its dataset list from — so a rule written in the catalog names the
+    same string this reads back.
+    """
+    if getattr(principal, "token_only", False):
+        return
+    raw = history.lineage_of(config)
+    if not raw:
+        return
+    try:
+        lineage = json.loads(raw)
+    except ValueError:
+        return
+    rules = _grants_now()
+    if not rules:
+        return
+    for side, level in (("inputs", "read"), ("outputs", "write")):
+        for entry in lineage.get(side) or []:
+            address = _dataset_id(str(entry.get("address") or ""))
+            if address:
+                _authorize_resource(principal, "dataset", address, level, rules)
+
+
 def _workspace_resource(request: Request) -> str:
     """`job/j1` — what a workspace call is actually touching, so a role can be
     scoped to one record without the endpoints changing."""
@@ -1468,7 +1803,9 @@ def validate(body: ValidateRequest) -> ValidateResponse:
     response_model=DatasetSchemaResponse,
     dependencies=[Depends(requires("catalog:Inspect"))],
 )
-def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
+def dataset_schema(
+    body: DatasetSchemaRequest, principal: Any = Depends(current_principal)
+) -> DatasetSchemaResponse:
     """The schema a dataset really has, read from the storage itself.
 
     The catalog in Studio derives a schema from the canvas, which is a claim
@@ -1476,10 +1813,9 @@ def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
     can be compared and a drift can be named. Nothing is written, and no rows
     are collected: a reader is built and only `df.schema` is taken.
     """
-    global _framework
-    if _framework is None and body.spark:
-        _framework = _import("sparquet").Sparquet(spark=body.spark)
-    framework = _get_framework()
+    _authorize_resource(principal, "dataset", _dataset_id(body.path), "read")
+
+    framework, restarted = _ensure_framework(body.spark)
 
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
@@ -1487,12 +1823,16 @@ def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
         config = config_module.InputConfig.from_dict(
             {"format": body.format, "path": body.path, "options": body.options or {}}
         )
-        reader = factory.ReaderFactory.create(framework.spark, config)
-        schema = reader.read().schema
+        _query_enter()
+        try:
+            reader = factory.ReaderFactory.create(framework.spark, config)
+            schema = reader.read().schema
+        finally:
+            _query_exit()
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=_describe(exc)) from exc
+        raise HTTPException(status_code=400, detail=_describe_io(exc, body.format)) from exc
 
     return DatasetSchemaResponse(
         format=config.format,
@@ -1506,6 +1846,7 @@ def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
             for field in schema.fields
         ],
         read_at=_now_iso(),
+        session_restarted=restarted,
     )
 
 
@@ -1625,7 +1966,7 @@ def _check_query_id(query_id: str) -> str:
     response_model=QueryResponse,
     dependencies=[Depends(requires("catalog:Query"))],
 )
-def query(body: QueryRequest) -> QueryResponse:
+def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> QueryResponse:
     """Runs one read-only SQL statement over datasets opened by the framework.
 
     Each source is opened through the same `ReaderFactory` a Job uses and
@@ -1634,9 +1975,7 @@ def query(body: QueryRequest) -> QueryResponse:
     reach the storage. The views are temporary and dropped at the end; nothing
     is written.
     """
-    global _framework
-    if _framework is None and body.spark:
-        _framework = _import("sparquet").Sparquet(spark=body.spark)
+    framework, restarted = _ensure_framework(body.spark)
 
     statement = _read_only_sql(body.sql)
     limit = max(1, min(int(body.limit or DEFAULT_PREVIEW_LIMIT), MAX_PREVIEW_LIMIT))
@@ -1658,7 +1997,14 @@ def query(body: QueryRequest) -> QueryResponse:
             )
         seen[source.alias] = source.path
 
-    framework = _get_framework()
+    # Each source is a table someone may be denied. Checked before any of them is
+    # opened, so a refused query never touches storage at all.
+    rules = _grants_now()
+    for source in body.sources:
+        _authorize_resource(
+            principal, "dataset", _dataset_id(source.path), "read", rules
+        )
+
     spark = framework.spark
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
@@ -1666,6 +2012,9 @@ def query(body: QueryRequest) -> QueryResponse:
     registered: List[str] = []
     timer: Optional[threading.Timer] = None
     started = time.perf_counter()
+    # Counted while it runs so a concurrent request cannot restart the session
+    # under it: rebuilding stops the JVM, which would kill this query.
+    _query_enter()
     try:
         for source in body.sources:
             try:
@@ -1681,7 +2030,10 @@ def query(body: QueryRequest) -> QueryResponse:
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot open {source.path!r} as {source.alias}: {_describe(exc)}",
+                    detail=(
+                        f"Cannot open {source.path!r} as {source.alias}: "
+                        f"{_describe_io(exc, source.format)}"
+                    ),
                 ) from exc
             registered.append(source.alias)
 
@@ -1720,8 +2072,10 @@ def query(body: QueryRequest) -> QueryResponse:
             rows=[[_json_safe(value) for value in row] for row in rows[:limit]],
             truncated=len(rows) > limit,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
+            session_restarted=restarted,
         )
     finally:
+        _query_exit()
         if timer is not None:
             timer.cancel()
         try:
@@ -1788,6 +2142,12 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     _authorize_run(
         principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
     )
+    # Then the second, narrower layer: the rules written in the catalog, which
+    # name the Job itself and every dataset the JSON touches. `run:Execute` says
+    # this person may run things here; these say *what*.
+    if body.job_id:
+        _authorize_resource(principal, "job", body.job_id, "write")
+    _authorize_datasets(principal, body.pipeline)
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -1952,6 +2312,12 @@ def run_stream(
     _authorize_run(
         principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
     )
+    # Then the second, narrower layer: the rules written in the catalog, which
+    # name the Job itself and every dataset the JSON touches. `run:Execute` says
+    # this person may run things here; these say *what*.
+    if body.job_id:
+        _authorize_resource(principal, "job", body.job_id, "write")
+    _authorize_datasets(principal, body.pipeline)
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -2155,6 +2521,8 @@ def run_flow_stream(
         principal, "run:Execute", workflow_id=body.workflow_id,
         pipeline_id=body.pipeline_id,
     )
+    if body.pipeline_id:
+        _authorize_resource(principal, "pipeline", body.pipeline_id, "write")
     started = time.perf_counter()
 
     if not body.stages:
@@ -2164,6 +2532,14 @@ def run_flow_stream(
     # gets that file read now, so a missing or unparseable one is a 400 naming it
     # rather than a flow that dies halfway with earlier stages already written.
     _resolve_staged_files(body.stages)
+
+    # Every stage is a Job with its own datasets, and a flow is not a way around
+    # a rule on any of them. Checked once for the whole flow, before the first
+    # stage starts: a flow that stops halfway has already written something.
+    for stage in body.stages:
+        if stage.job_id:
+            _authorize_resource(principal, "job", stage.job_id, "write")
+        _authorize_datasets(principal, stage.pipeline)
 
     # One check for the flow, against its first stage: a Pipeline whose team has
     # nothing available should not start at all. Nothing is held here — each stage
@@ -2962,10 +3338,13 @@ class WorkspaceMetaRequest(BaseModel):
     response_model=Dict[str, Any],
     dependencies=[Depends(requires("workspace:Write", "meta/*"))],
 )
-def put_workspace_meta(key: str, body: WorkspaceMetaRequest) -> Dict[str, Any]:
+def put_workspace_meta(
+    key: str, body: WorkspaceMetaRequest, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
     """Library-level bookkeeping (storage version, seeded flag). Kept with the files
     rather than in the browser, so the answer to "was this library already
     migrated?" travels with the library."""
+    _guard_meta_key(principal, key)
     _workspace.write_meta(key, body.value)
     return {"key": key, "value": body.value}
 
@@ -2975,7 +3354,10 @@ def put_workspace_meta(key: str, body: WorkspaceMetaRequest) -> Dict[str, Any]:
     response_model=Dict[str, Any],
     dependencies=[Depends(requires("workspace:Write", "meta/*"))],
 )
-def delete_workspace_meta(key: str) -> Dict[str, Any]:
+def delete_workspace_meta(
+    key: str, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
+    _guard_meta_key(principal, key)
     _workspace.delete_meta(key)
     return {"key": key, "deleted": True}
 

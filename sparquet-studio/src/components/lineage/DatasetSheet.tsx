@@ -6,7 +6,7 @@
  * anybody has to type, because it is the only part no pipeline can tell us.
  */
 
-import { ChevronRight, RefreshCw, Trash2, X } from 'lucide-react'
+import { ChevronRight, HardDriveDownload, RefreshCw, Trash2, X } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 
 import {
@@ -16,12 +16,17 @@ import {
   IconButton,
   Input,
   Modal,
+  Segmented,
   Select,
   Textarea,
   type BadgeTone,
+  type SegmentedOption,
   type SelectOption,
 } from '@/components/ui'
+import { GrantsPanel, type NewGrant } from '@/components/catalog/GrantsPanel'
 import { addTag, hasTag, MAX_TAG_LENGTH, MAX_TAGS, removeTag } from '@/lib/tags'
+import type { DatasetGrant } from '@/lib/iam'
+import type { AuthTeam, AuthUser } from '@/types/auth'
 import {
   CLASSIFICATIONS,
   compareSchema,
@@ -362,14 +367,28 @@ function SchemaTable({
             </button>
           ) : null}
           {probe && format ? (
+            /*
+              The one button on this screen that leaves the browser: it opens the
+              dataset on the runner. It says which format it will use and that no
+              rows are read, because "read from storage" on a 2 TB table is a
+              sentence people are right to hesitate over.
+            */
             <Button
               size="sm"
-              variant="secondary"
+              variant={probed ? 'secondary' : 'outline'}
               loading={probing}
               onClick={() => void run()}
-              title={`Open this dataset as ${format} on the runner and read its schema. No rows are read.`}
+              title={`Opens this dataset as ${format} on the runner and reads its schema. No rows are read.`}
+              trailing={
+                <span
+                  className="rounded bg-brand-500/10 px-1 py-px font-mono text-[10px] text-brand-500
+                    dark:text-brand-400"
+                >
+                  {format}
+                </span>
+              }
             >
-              <RefreshCw />
+              {probed ? <RefreshCw /> : <HardDriveDownload />}
               {probed ? 'Read again' : 'Read from storage'}
             </Button>
           ) : null}
@@ -627,6 +646,21 @@ function TagBox({
   )
 }
 
+/**
+ * The three questions people bring to a table, kept apart because they are asked
+ * by different people: what IS it (columns, types, who writes it), what does it
+ * MEAN (the description a person owes the next reader), and who may TOUCH it.
+ * Mixing the three made one long scroll where the access rules read as one more
+ * metadata field.
+ */
+type Tab = 'shape' | 'about' | 'access'
+
+const TABS: SegmentedOption<Tab>[] = [
+  { value: 'shape', label: 'Schema', title: 'Columns, types and who writes them' },
+  { value: 'about', label: 'Documentation', title: 'What the rows mean' },
+  { value: 'access', label: 'Access', title: 'Who may read, write or administer it' },
+]
+
 export interface DatasetSheetProps {
   dataset: LineageDataset | null
   annotation: DatasetAnnotation | null
@@ -643,6 +677,12 @@ export interface DatasetSheetProps {
    * when no runner is configured, and the sheet then shows only what it derived.
    */
   probe: ((format: string) => Promise<ProbedField[]>) | null
+  /** Access rules on this dataset, and the principals a new one can name. */
+  grants: readonly DatasetGrant[]
+  teams: AuthTeam[]
+  users: AuthUser[]
+  onGrant: (grant: NewGrant) => Promise<void> | void
+  onRevoke: (id: string) => Promise<void> | void
   onClose: () => void
   onSave: (patch: Partial<DatasetAnnotation>) => Promise<void>
   onForget: () => Promise<void>
@@ -657,6 +697,11 @@ export function DatasetSheet({
   schema,
   columns,
   probe,
+  grants,
+  teams,
+  users,
+  onGrant,
+  onRevoke,
   onClose,
   onSave,
   onForget,
@@ -664,10 +709,12 @@ export function DatasetSheet({
 }: DatasetSheetProps) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(annotation))
   const [saving, setSaving] = useState(false)
+  const [tab, setTab] = useState<Tab>('shape')
 
   // A different dataset in the same modal is a different form.
   useEffect(() => {
     setDraft(draftOf(annotation))
+    setTab('shape')
   }, [dataset?.key, annotation])
 
   const dirty = useMemo(() => !sameDraft(draft, draftOf(annotation)), [draft, annotation])
@@ -718,6 +765,16 @@ export function DatasetSheet({
       }
     >
       <div className="space-y-5">
+        <Segmented
+          size="sm"
+          ariaLabel="What to look at"
+          value={tab}
+          onChange={setTab}
+          options={TABS}
+        />
+
+        {tab === 'shape' ? (
+          <>
         <section className="space-y-3 rounded-lg border border-line bg-surface-sunken p-3">
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone={PLACE_TONE[dataset.place]}>{PLACE_LABEL[dataset.place]}</Badge>
@@ -759,7 +816,11 @@ export function DatasetSheet({
             onOpenJob={onOpenJob}
           />
         ) : null}
+          </>
+        ) : null}
 
+        {tab === 'about' ? (
+          <>
         <Field
           label="What is it"
           help={`Plain language: what the rows are, and what they are not. ${
@@ -792,28 +853,48 @@ export function DatasetSheet({
           </Field>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="Classification"
-            help="How far the data may travel. Blank is not the same as public."
-          >
-            <Select
-              value={draft.classification}
-              options={CLASSIFICATION_OPTIONS}
-              placeholder="Not classified"
-              onValueChange={(value) =>
-                setDraft({ ...draft, classification: value as DataClassification | '' })
-              }
+        <Field label="Tags" help="Free labels. Enter adds one, Backspace removes the last.">
+          <TagBox
+            tags={draft.tags}
+            suggestions={suggestions}
+            onChange={(tags) => setDraft({ ...draft, tags })}
+          />
+        </Field>
+          </>
+        ) : null}
+
+        {tab === 'access' ? (
+          <>
+            {/*
+              Classification sits here and not with the description: it is what
+              the rules below are usually justified by, and reading "restricted"
+              next to a deny is how somebody checks the two agree.
+            */}
+            <Field
+              label="Classification"
+              help="How far the data may travel. Blank is not the same as public — it only
+                means nobody has said."
+            >
+              <Select
+                value={draft.classification}
+                options={CLASSIFICATION_OPTIONS}
+                placeholder="Not classified"
+                onValueChange={(value) =>
+                  setDraft({ ...draft, classification: value as DataClassification | '' })
+                }
+              />
+            </Field>
+
+            <GrantsPanel
+              resource="dataset"
+              grants={grants}
+              teams={teams}
+              users={users}
+              onGrant={onGrant}
+              onRevoke={onRevoke}
             />
-          </Field>
-          <Field label="Tags" help="Free labels. Enter adds one, Backspace removes the last.">
-            <TagBox
-              tags={draft.tags}
-              suggestions={suggestions}
-              onChange={(tags) => setDraft({ ...draft, tags })}
-            />
-          </Field>
-        </div>
+          </>
+        ) : null}
       </div>
     </Modal>
   )

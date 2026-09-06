@@ -11,6 +11,7 @@ import { ShieldCheck } from 'lucide-react'
 
 import { AccessPanel } from '@/components/auth/AccessPanel'
 import { AuditLogPanel } from '@/components/auth/AuditLogPanel'
+import { ResourceGrantsPanel } from '@/components/auth/ResourceGrantsPanel'
 import { RolesPanel } from '@/components/auth/RolesPanel'
 import { TeamsPanel } from '@/components/auth/TeamsPanel'
 
@@ -24,8 +25,8 @@ export function Access() {
         <div className="space-y-0.5">
           <h1 className="text-lg font-semibold text-content">Access &amp; IAM</h1>
           <p className="text-xs leading-relaxed text-content-muted">
-            Users, teams and roles for this runner, and the audit trail of every
-            change it accepted or refused.
+            Users, teams and roles for this runner, what each of them may run,
+            and the audit trail of every change it accepted or refused.
           </p>
         </div>
       </header>
@@ -35,6 +36,7 @@ export function Access() {
           <AccessPanel />
           <TeamsPanel />
           <RolesPanel />
+          <ResourceGrantsPanel />
         </div>
         <div className="card space-y-5 p-5">
           <AuditLogPanel />

@@ -1,0 +1,28 @@
+export {
+  allows,
+  ANY,
+  decide,
+  grantId,
+  grantsByResource,
+  grantsFor,
+  LEVEL_HINT,
+  LEVEL_RANK,
+  LEVELS,
+  MAX_NOTE,
+  RESOURCE_KINDS,
+  sanitizeGrants,
+  summarizeGrants,
+  withGrant,
+  withoutGrant,
+} from './grants'
+export type {
+  AccessLevel,
+  DatasetGrant,
+  Decision,
+  Grant,
+  GrantEffect,
+  GrantSummary,
+  Identity,
+  PrincipalKind,
+  ResourceKind,
+} from './grants'

@@ -30,6 +30,12 @@ export const KEY = {
    * the same route the library does without a fourth record kind on the server.
    */
   catalog: `${META_PREFIX}catalog`,
+  /**
+   * Access rules over datasets, Jobs and Pipelines. Beside the catalog and for
+   * the same reason: the workspace backend already mirrors meta records into
+   * `.studio/meta.json`, which is the file the runner re-reads to enforce them.
+   */
+  grants: `${META_PREFIX}grants`,
   seeded: `${META_PREFIX}seeded`,
   probe: `${META_PREFIX}probe`,
   backup: `${NS}backup`,

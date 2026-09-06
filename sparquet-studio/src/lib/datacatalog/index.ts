@@ -28,7 +28,7 @@ export {
   kindOfFormat,
   kindOfFormats,
 } from './namespace'
-export type { AssetKind, CatalogAsset, CatalogNode, RootKind } from './namespace'
+export type { AssetKind, CatalogAsset, CatalogNode, NodeTier, RootKind } from './namespace'
 export { compareSchema, normalizeType } from './drift'
 export type { DriftRow, DriftStatus, ProbedField, SchemaDrift } from './drift'
 export {

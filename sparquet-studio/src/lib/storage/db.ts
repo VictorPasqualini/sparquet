@@ -27,6 +27,7 @@ import {
 import { nanoid } from 'nanoid'
 
 import { sanitizeAnnotations, type CatalogAnnotations } from '@/lib/datacatalog'
+import { sanitizeGrants, type Grant } from '@/lib/iam'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { toStorable, type StorageBackend, type StorageKind } from '@/lib/storage/backend'
 import {
@@ -535,6 +536,25 @@ export async function readCatalog(): Promise<CatalogAnnotations> {
 export async function writeCatalog(annotations: CatalogAnnotations): Promise<void> {
   const store = await open()
   await store.set(KEY.catalog, annotations)
+}
+
+/* ------------------------------------------------------------------- iam */
+
+/**
+ * Every grant, as one list.
+ *
+ * Not cleared by `clearAll`: wiping the library is a "start over with the
+ * canvas" gesture, and dropping the access rules along with it would silently
+ * reopen tables that somebody deliberately closed.
+ */
+export async function readGrants(): Promise<Grant[]> {
+  const store = await open()
+  return sanitizeGrants(await store.get(KEY.grants))
+}
+
+export async function writeGrants(grants: readonly Grant[]): Promise<void> {
+  const store = await open()
+  await store.set(KEY.grants, grants)
 }
 
 /* ------------------------------------------------------------------- seed */
