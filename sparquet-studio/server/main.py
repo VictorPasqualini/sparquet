@@ -137,6 +137,10 @@ credits = _load_sibling_module("credits")
 audit = _load_sibling_module("audit")
 grants = _load_sibling_module("grants")
 providers = _load_sibling_module("providers")
+#: Named `vault` and not `secrets` on purpose: `secrets` is the stdlib module
+#: imported above for token generation, and a sibling of that name would replace
+#: it for every module the runner loads.
+vault = _load_sibling_module("vault")
 
 
 # ------------------------------------------------------------------ models
@@ -1931,6 +1935,11 @@ def _parents_of(resource: str, resource_id: str) -> List[tuple]:
     """
     if resource == "dataset":
         return _tags_of(resource_id)
+    if resource == "secret":
+        # A credential carries the catalog's own vocabulary, so one rule on
+        # `tag/pii` closes the table and the password that opens it together.
+        secret = _secrets_now().items.get(vault.normalize(resource_id))
+        return grants.tag_scopes(secret.tags if secret else [], {})
     if resource not in grants.CONTAINED_KINDS or not resource_id:
         return []
     try:
@@ -1941,6 +1950,124 @@ def _parents_of(resource: str, resource_id: str) -> List[tuple]:
         return []
     workflow_id = str((doc.record or {}).get("workflowId") or "").strip()
     return [("workflow", workflow_id)] if workflow_id else []
+
+
+#: What a securable created through this runner is governed by, before anybody
+#: writes a rule. `creator+team` — the default — makes the person who created it
+#: the owner and gives their team `write` over it, so a new Job is administered
+#: by its author and still editable by the people beside them. `creator` leaves
+#: out the team grant, which suits a runner where teams are departments rather
+#: than squads. `off` restores the older behaviour: a new record is ungoverned,
+#: and whoever may run anything may run it.
+_NEW_RESOURCE_DEFAULTS = ("creator+team", "creator", "off")
+
+#: What the team grant is worth, per kind. A credential is the exception: a
+#: teammate may *use* `pg-prod` without being able to repoint it at another
+#: database, which is the difference between `read` and `write` on a secret.
+_TEAM_LEVEL = {
+    "job": "write",
+    "pipeline": "write",
+    "workflow": "write",
+    "dataset": "write",
+    "secret": "read",
+}
+
+
+def _new_resource_policy() -> str:
+    value = os.getenv("SPARQUET_STUDIO_NEW_RESOURCE_DEFAULT", "").strip().lower()
+    return value if value in _NEW_RESOURCE_DEFAULTS else "creator+team"
+
+
+def _claim_new_resources(principal: Any, targets: Iterable[tuple]) -> None:
+    """The default access brand-new securables get, written once, at creation.
+
+    Three conditions, and all three matter.
+
+    It only fires for a **real user**: a token-only runner has no principal to
+    name, and inventing an owner there would govern a record that nobody could
+    then be matched against.
+
+    It only fires when nothing in the securable's chain governs it yet. A Job
+    saved into a Workflow that already has rules inherits them, and writing an
+    owner here would quietly override the Workflow with something narrower —
+    the opposite of what a container is for. `governed` is exactly that
+    question, which is why the decision carries it apart from the level.
+
+    And it writes the whole batch in one pass. A catalog save arrives as a map
+    and can name several new datasets at once; claiming them one at a time would
+    rewrite the meta file once per dataset.
+    """
+    policy = _new_resource_policy()
+    user_id = getattr(principal, "user_id", None)
+    if policy == "off" or not user_id or getattr(principal, "token_only", False):
+        return
+
+    wanted: List[tuple] = []
+    seen = set()
+    for resource, resource_id in targets:
+        resource_id = str(resource_id or "").strip()
+        if not resource_id or resource not in grants.OWNABLE_KINDS:
+            continue
+        if (resource, resource_id) in seen:
+            continue
+        seen.add((resource, resource_id))
+        wanted.append((resource, resource_id))
+    if not wanted:
+        return
+
+    try:
+        meta = _workspace.read_meta()
+    except Exception:  # an unreadable meta file is not worth failing a save over
+        return
+    owner_records = meta.get("owners")
+    owner_records = list(owner_records) if isinstance(owner_records, list) else []
+    grant_records = meta.get("grants")
+    grant_records = list(grant_records) if isinstance(grant_records, list) else []
+
+    rules = grants.load(grant_records)
+    owners = grants.load_owners(owner_records)
+    identity = _identity_of(principal)
+    team_id = getattr(principal, "team_id", None)
+    with_team = policy == "creator+team" and bool(team_id)
+
+    claimed = False
+    for resource, resource_id in wanted:
+        decision = grants.evaluate(
+            rules, owners, resource, resource_id, identity,
+            _parents_of(resource, resource_id),
+        )
+        if decision.governed:
+            continue
+        claimed = True
+        owner_records.append(
+            {
+                "resource": resource,
+                "resourceId": resource_id,
+                "principalKind": "user",
+                "principalId": str(user_id),
+            }
+        )
+        if with_team:
+            grant_records.append(
+                {
+                    "resource": resource,
+                    "resourceId": resource_id,
+                    "principalKind": "team",
+                    "principalId": str(team_id),
+                    "level": _TEAM_LEVEL.get(resource, "write"),
+                    "effect": "allow",
+                }
+            )
+    if not claimed:
+        return
+    _workspace.write_meta("owners", owner_records)
+    if with_team:
+        _workspace.write_meta("grants", grant_records)
+
+
+def _claim_new_resource(principal: Any, resource: str, resource_id: str) -> None:
+    """One securable, by the rules of `_claim_new_resources`."""
+    _claim_new_resources(principal, [(resource, resource_id)])
 
 
 def _identity_of(principal: Any) -> Any:
@@ -1994,13 +2121,94 @@ def _authorize_resource(
     )
 
 
+# ------------------------------------------------------------------ secrets
+
+
+def _secrets_now() -> Any:
+    """The secret store as it stands on disk right now.
+
+    Re-read rather than cached, like the grants beside it: a credential rotated
+    at nine has to be the one used at ten, and the store is a few kilobytes.
+    """
+    try:
+        raw = _workspace.read_meta().get("secrets")
+    except Exception:  # an unreadable meta file is simply no secrets
+        return vault.Store()
+    return vault.load(raw)
+
+
+def _write_secrets(store: Any) -> None:
+    _workspace.write_meta("secrets", store.as_dict())
+
+
+def _resolve_secrets(
+    document: Dict[str, Any], principal: Any
+) -> Tuple[Dict[str, Any], List[str]]:
+    """A copy of a pipeline with its `{secret:...}` references filled in.
+
+    Two things happen here and both matter. Access is checked per secret before
+    anything is decrypted, so a refusal costs nothing and names the secret rather
+    than the database behind it. And the values that were used come back with the
+    document, because the caller has to mask them out of whatever it prints — a
+    driver that cannot connect quotes the URL it tried, password included.
+
+    `read` is the level asked for. On a secret that means "may be used by a run",
+    not "may be looked at": no level returns a value to a person.
+    """
+    if not document:
+        return document, []
+    names = vault.names_in(document)
+    if not names:
+        return document, []
+
+    for name in names:
+        _authorize_resource(principal, "secret", name, "read")
+
+    store = _secrets_now()
+    try:
+        rendered, used = vault.render(
+            document, lambda name, field: vault.value_of(store, name, field)
+        )
+    except vault.SecretError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    _audit.record(
+        actor=getattr(principal, "username", None) or "anonymous",
+        actor_id=getattr(principal, "user_id", None),
+        team_id=getattr(principal, "team_id", None),
+        action="secrets:Use",
+        method="POST",
+        path="/secrets/use",
+        resource=", ".join(f"secret/{name}" for name in names),
+        outcome=audit.ALLOWED,
+    )
+    return rendered, used
+
+
 #: Meta records that are not bookkeeping but policy, and the action each needs.
 #: `workspace:Write` covers the rest of `meta/*`, and an editor holds it — which
 #: must not be a way to rewrite the rules that restrain the editor.
 _META_GUARDS = {"grants": "iam:ManageGrants", "owners": "iam:ManageGrants"}
 
 
+#: Meta records the generic endpoint refuses outright, whoever is asking. The
+#: secret store is written only through `/secrets`, which encrypts, checks access
+#: per secret and keeps the existing material when one field is rotated. A blanket
+#: PUT would do none of that, and would let a caller replace every credential on
+#: the runner with one request.
+_META_SEALED = {"secrets"}
+
+
 def _guard_meta_key(principal: Any, key: str, value: Any = None) -> None:
+    if str(key) in _META_SEALED:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{key}' is not writable here. Connection secrets are managed "
+                "through /secrets, which encrypts the value and checks access to "
+                "each secret on its own."
+            ),
+        )
     action = _META_GUARDS.get(str(key))
     if action is None or getattr(principal, "token_only", False):
         return
@@ -2238,13 +2446,19 @@ def dataset_schema(
     """
     _authorize_resource(principal, "dataset", _dataset_id(body.path), "read")
 
+    # Options are where a connection lives — the JDBC url, the user, the password
+    # — so they carry `{secret:...}` here for the same reason a Job's do. The
+    # values come back to be masked out of the error below: a driver that cannot
+    # connect quotes the whole URL it tried.
+    options, secret_values = _resolve_secrets(dict(body.options or {}), principal)
+
     framework, restarted = _ensure_framework(_spark_for_formats(body.spark, [body.format]))
 
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
     try:
         config = config_module.InputConfig.from_dict(
-            {"format": body.format, "path": body.path, "options": body.options or {}}
+            {"format": body.format, "path": body.path, "options": options}
         )
         _query_enter()
         try:
@@ -2255,7 +2469,10 @@ def dataset_schema(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=_describe_io(exc, body.format)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=vault.mask(_describe_io(exc, body.format), secret_values),
+        ) from exc
 
     return DatasetSchemaResponse(
         format=config.format,
@@ -2432,6 +2649,16 @@ def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> Qu
             principal, "dataset", _dataset_id(source.path), "read", rules
         )
 
+    # Same as a Job: the connection lives in the options, and a reference there is
+    # resolved before any source is opened, so a refused secret costs no storage
+    # access at all. What was used is kept to mask the errors further down.
+    source_options: List[Dict[str, Any]] = []
+    query_secret_values: List[str] = []
+    for source in body.sources:
+        resolved, used = _resolve_secrets(dict(source.options or {}), principal)
+        source_options.append(resolved)
+        query_secret_values.extend(used)
+
     spark = framework.spark
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
@@ -2443,13 +2670,13 @@ def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> Qu
     # under it: rebuilding stops the JVM, which would kill this query.
     _query_enter()
     try:
-        for source in body.sources:
+        for index, source in enumerate(body.sources):
             try:
                 config = config_module.InputConfig.from_dict(
                     {
                         "format": source.format,
                         "path": source.path,
-                        "options": source.options or {},
+                        "options": source_options[index],
                     }
                 )
                 reader = factory.ReaderFactory.create(spark, config)
@@ -2457,9 +2684,10 @@ def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> Qu
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
+                    detail=vault.mask(
                         f"Cannot open {source.path!r} as {source.alias}: "
-                        f"{_describe_io(exc, source.format)}"
+                        f"{_describe_io(exc, source.format)}",
+                        query_secret_values,
                     ),
                 ) from exc
             registered.append(source.alias)
@@ -2483,7 +2711,9 @@ def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> Qu
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=_describe(exc)) from exc
+            raise HTTPException(
+                status_code=400, detail=vault.mask(_describe(exc), query_secret_values)
+            ) from exc
 
         return QueryResponse(
             query_id=query_id,
@@ -2575,6 +2805,10 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     if body.job_id:
         _authorize_resource(principal, "job", body.job_id, "write")
     _authorize_datasets(principal, body.pipeline)
+    # And the credentials the JSON references, before anything is decrypted or
+    # any lock is taken: `rendered` is what Spark receives, `body.pipeline` — the
+    # one with `{secret:...}` still in it — is what history and the screens keep.
+    rendered, secret_values = _resolve_secrets(body.pipeline, principal)
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -2633,7 +2867,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     _ACTIVE_RUN.begin(pipeline_run_id)
     try:
         with _capture_logs(tracker.handle) as collector:
-            response = _execute_run(body, name, started, collector)
+            response = _execute_run(
+                body, name, started, collector, rendered, secret_values
+            )
     finally:
         cancelled = _ACTIVE_RUN.cancelled
         _ACTIVE_RUN.end()
@@ -2680,31 +2916,70 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     return response
 
 
+def _masked(response: RunResponse, values: Iterable[str]) -> RunResponse:
+    """The response with every resolved secret blanked out of it.
+
+    Applied to the whole payload rather than to `error` alone. A JDBC driver
+    quotes the URL it failed to open, password and all, and that string arrives
+    in the error, in a log line, and sometimes in a warning attached to a step —
+    masking only the field where it is expected to appear is how it gets out.
+    """
+    secret_values = [value for value in values if value]
+    if not secret_values:
+        return response
+    return RunResponse(**vault.scrub(response.model_dump(), secret_values))
+
+
+def _scrubbed(entry: Dict[str, Any], values: Iterable[str]) -> Dict[str, Any]:
+    """One event, on its way out of the run queue.
+
+    Applied where the queue is drained rather than where the stream is written,
+    because the same event goes two places: to the browser as SSE and into the
+    run history. A driver that quotes the URL it could not open would otherwise
+    put the password on the screen once and in the database for good.
+    """
+    return vault.scrub(entry, values) if values else entry
+
+
 def _execute_run(
-    body: RunRequest, name: Optional[str], started: float, collector: _LogCollector
+    body: RunRequest,
+    name: Optional[str],
+    started: float,
+    collector: _LogCollector,
+    rendered: Optional[Dict[str, Any]] = None,
+    secret_values: Iterable[str] = (),
 ) -> RunResponse:
     """The body shared by `/run` and `/run/stream`: execute the pipeline and shape
-    the response. The caller owns the run lock and the log capture."""
+    the response. The caller owns the run lock and the log capture.
+
+    `rendered` is the pipeline with its `{secret:...}` references already
+    replaced. It is a separate argument, and not a rewritten `body.pipeline`,
+    because everything else the caller does with the body — history, lineage,
+    the config hash, the credit charge — must keep the references."""
+    document = body.pipeline if rendered is None else rendered
     # The Job's own `spark` block only reaches Spark if the session is built with
     # it, and the session outlives the run before this one. Writing Delta on a
     # runner whose session was created plain failed here for the same reason
     # reading it failed in the SQL editor.
-    pipeline = body.pipeline if isinstance(body.pipeline, dict) else {}
+    pipeline = document if isinstance(document, dict) else {}
     framework, _ = _ensure_framework(
         _spark_for_formats(pipeline.get("spark"), _formats_of(pipeline)),
         run_lock_held=True,
     )
     try:
-        result = framework.run_from_dict(body.pipeline, params=body.params or None)
+        result = framework.run_from_dict(document, params=body.params or None)
     except Exception as exc:
         # Config loading (missing keys, bad $include) raises outside the
         # pipeline's own try block and never reaches PipelineResult.
-        return RunResponse(
-            success=False,
-            pipeline_name=name,
-            duration_ms=_elapsed_ms(started),
-            error=_describe(exc),
-            logs=[LogOut(**entry) for entry in collector.records],
+        return _masked(
+            RunResponse(
+                success=False,
+                pipeline_name=name,
+                duration_ms=_elapsed_ms(started),
+                error=_describe(exc),
+                logs=[LogOut(**entry) for entry in collector.records],
+            ),
+            secret_values,
         )
 
     output_df = getattr(result, "output_df", None)
@@ -2714,7 +2989,7 @@ def _execute_run(
         else None
     )
 
-    return RunResponse(
+    return _masked(RunResponse(
         success=bool(result.success),
         skipped=bool(getattr(result, "skipped", False)),
         pipeline_name=str(getattr(result, "pipeline_name", None) or name or ""),
@@ -2726,7 +3001,7 @@ def _execute_run(
         output_metrics=_map_output_metrics(getattr(result, "output_metrics", [])),
         preview=preview,
         logs=[LogOut(**entry) for entry in collector.records],
-    )
+    ), secret_values)
 
 
 @app.post("/run/stream")
@@ -2753,6 +3028,10 @@ def run_stream(
     if body.job_id:
         _authorize_resource(principal, "job", body.job_id, "write")
     _authorize_datasets(principal, body.pipeline)
+    # And the credentials the JSON references, before anything is decrypted or
+    # any lock is taken: `rendered` is what Spark receives, `body.pipeline` — the
+    # one with `{secret:...}` still in it — is what history and the screens keep.
+    rendered, secret_values = _resolve_secrets(body.pipeline, principal)
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -2800,9 +3079,11 @@ def run_stream(
         log.addHandler(collector)
         try:
             with _capture_streams(events):
-                box["response"] = _execute_run(body, name, started, collector)
+                box["response"] = _execute_run(
+                    body, name, started, collector, rendered, secret_values
+                )
         except Exception as exc:  # pragma: no cover - defensive
-            box["error"] = _describe(exc)
+            box["error"] = vault.mask(_describe(exc), secret_values)
         finally:
             log.removeHandler(collector)
             log.setLevel(previous_level)
@@ -2823,6 +3104,7 @@ def run_stream(
                 entry = events.get()
                 if entry is None:
                     break
+                entry = _scrubbed(entry, secret_values)
                 recorder.add(entry)
                 yield _sse("log", entry)
             recorder.flush()
@@ -2971,10 +3253,18 @@ def run_flow_stream(
     # Every stage is a Job with its own datasets, and a flow is not a way around
     # a rule on any of them. Checked once for the whole flow, before the first
     # stage starts: a flow that stops halfway has already written something.
+    stage_rendered: List[Dict[str, Any]] = []
+    flow_secret_values: List[str] = []
     for stage in body.stages:
         if stage.job_id:
             _authorize_resource(principal, "job", stage.job_id, "write")
         _authorize_datasets(principal, stage.pipeline)
+        # The credentials too, and for the same reason the datasets are checked
+        # here: a flow refused its secret at stage three must not have written
+        # stages one and two first.
+        stage_document, stage_used = _resolve_secrets(stage.pipeline, principal)
+        stage_rendered.append(stage_document)
+        flow_secret_values.extend(stage_used)
 
     # One check for the flow, against its first stage: a Pipeline whose team has
     # nothing available should not start at all. Nothing is held here — each stage
@@ -3080,7 +3370,8 @@ def run_flow_stream(
                 try:
                     with _capture_streams(events):
                         response = _execute_run(
-                            request, stage.name, stage_started, collector
+                            request, stage.name, stage_started, collector,
+                            stage_rendered[index], flow_secret_values,
                         )
                 except Exception as exc:  # pragma: no cover - defensive
                     response = RunResponse(
@@ -3162,7 +3453,7 @@ def run_flow_stream(
                         }})
                     break
         except Exception as exc:  # pragma: no cover - defensive
-            box["error"] = _describe(exc)
+            box["error"] = vault.mask(_describe(exc), flow_secret_values)
         finally:
             log.setLevel(previous_level)
             events.put(None)  # sentinel: work finished
@@ -3180,6 +3471,7 @@ def run_flow_stream(
                 entry = events.get()
                 if entry is None:
                     break
+                entry = _scrubbed(entry, flow_secret_values)
                 marker = entry.get("__stage__")
                 if marker is not None:
                     current = marker["id"]
@@ -3475,6 +3767,9 @@ class WorkspaceSnapshotOut(BaseModel):
     workflows: List[WorkspaceDocumentOut] = Field(default_factory=list)
     jobs: List[WorkspaceDocumentOut] = Field(default_factory=list)
     pipelines: List[WorkspaceDocumentOut] = Field(default_factory=list)
+    #: Saved SQL queries. An older Studio ignores the field; a newer one talking
+    #: to an older runner gets an empty list, which is the same as "none saved".
+    queries: List[WorkspaceDocumentOut] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -3526,6 +3821,22 @@ def _mirror_catalog(doc: Any) -> None:
         _log.warning("Could not index %s %s in the catalog.", doc.kind, doc.id)
 
 
+def _public_meta(meta: Any) -> Dict[str, Any]:
+    """The meta records a browser may load — which is every one but the secrets.
+
+    `workspace:Read` is held by anyone who may open the library, and this is the
+    read Studio starts with. The secret store belongs to a narrower audience and
+    to no browser at all: `/secrets` answers with names, field names and tags,
+    and the runner reads the material straight off disk when a run needs it.
+    Sending the record here would put the ciphertext, the salt and every `env`
+    binding into the browser of everybody who can list Jobs, which is the mirror
+    the whole design refuses to keep.
+    """
+    if not isinstance(meta, dict):
+        return {}
+    return {key: value for key, value in meta.items() if key not in _META_SEALED}
+
+
 @app.get(
     "/workspace",
     response_model=WorkspaceSnapshotOut,
@@ -3542,7 +3853,8 @@ def get_workspace() -> WorkspaceSnapshotOut:
         workflows=[_workspace_doc_out(doc) for doc in snapshot.workflows],
         jobs=[_workspace_doc_out(doc) for doc in snapshot.jobs],
         pipelines=[_workspace_doc_out(doc) for doc in snapshot.pipelines],
-        meta=snapshot.meta,
+        queries=[_workspace_doc_out(doc) for doc in snapshot.queries],
+        meta=_public_meta(snapshot.meta),
     )
 
 
@@ -3764,6 +4076,26 @@ def read_library_file(path: str) -> LibraryFileContentOut:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+def _annotation_keys(value: Any) -> set:
+    """The dataset addresses a catalog map names."""
+    if not isinstance(value, dict):
+        return set()
+    return {str(key).strip() for key in value if str(key).strip()}
+
+
+def _catalog_keys(key: str) -> Optional[set]:
+    """The dataset addresses the stored catalog names, or `None` if there is no
+    stored catalog at all — which is what tells a first sync from a real edit."""
+    if key != "catalog":
+        return None
+    try:
+        meta = _workspace.read_meta()
+    except Exception:
+        return None
+    stored = meta.get("catalog")
+    return _annotation_keys(stored) if isinstance(stored, dict) else None
+
+
 class WorkspaceMetaRequest(BaseModel):
     value: Any = None
 
@@ -3780,7 +4112,19 @@ def put_workspace_meta(
     rather than in the browser, so the answer to "was this library already
     migrated?" travels with the library."""
     _guard_meta_key(principal, key, body.value)
+    before = _catalog_keys(key)
     _workspace.write_meta(key, body.value)
+    if before is not None:
+        # A dataset becomes a securable the moment somebody annotates it, so
+        # "created" here means "appeared in this map and was not in the one
+        # before". The first catalog a library ever writes is exempt: that save
+        # is a browser syncing what it already had, and treating a whole
+        # migrated catalog as a hundred fresh creations would hand one person
+        # every table in it.
+        after = _annotation_keys(body.value)
+        _claim_new_resources(
+            principal, [("dataset", name) for name in after - before]
+        )
     return {"key": key, "value": body.value}
 
 
@@ -3818,9 +4162,20 @@ def get_workspace_document(kind: str, record_id: str) -> WorkspaceDocumentOut:
     dependencies=[Depends(requires("workspace:Write", _workspace_resource))],
 )
 def put_workspace_document(
-    kind: str, record_id: str, body: WorkspaceWriteRequest
+    kind: str,
+    record_id: str,
+    body: WorkspaceWriteRequest,
+    principal: Any = Depends(current_principal),
 ) -> WorkspaceDocumentOut:
     """Saves one record. Writes the file first, then indexes it."""
+    # Asked before the write, because afterwards every save looks like the first
+    # one. Only a record that did not exist gets the default access: claiming an
+    # old shared Job for whoever edited it next would be a transfer of ownership
+    # dressed up as a save.
+    try:
+        existed = _workspace.read(kind, record_id) is not None
+    except Exception:
+        existed = True
     try:
         doc = _workspace.write(
             workspace.Document(
@@ -3833,6 +4188,8 @@ def put_workspace_document(
         raise HTTPException(
             status_code=500, detail=f"Could not write to the workspace: {exc}"
         ) from exc
+    if not existed:
+        _claim_new_resource(principal, kind, record_id)
     _mirror_catalog(doc)
     return _workspace_doc_out(doc)
 
@@ -4529,6 +4886,176 @@ def effective_access(
     return out
 
 
+class SecretOut(BaseModel):
+    """One secret, as a screen may know it.
+
+    There is no field here for a value and there is no endpoint that adds one.
+    `fields` are names, and `binding` — the environment variables an `env` secret
+    reads — is operational information: it says where the runner looks, never
+    what it found.
+    """
+
+    name: str
+    provider: str
+    description: str = ""
+    tags: List[str] = Field(default_factory=list)
+    fields: List[str] = Field(default_factory=list)
+    binding: Dict[str, str] = Field(default_factory=dict)
+    updated_at: float = 0.0
+    updated_by: str = ""
+    #: Layer two, on this secret, for the caller — so the screen can grey out a
+    #: rotate button instead of offering one the runner will refuse.
+    governed: bool = False
+    level: Optional[str] = None
+    owned: bool = False
+
+
+class SecretWriteRequest(BaseModel):
+    provider: str = "local"
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    #: A patch over the fields: a value sets it, `null` removes it, and a field
+    #: left out keeps what it had. Rotating a password means sending that one
+    #: field — the caller could not resend the others, never having read them.
+    values: Dict[str, Optional[str]] = Field(default_factory=dict)
+
+
+class SecretCheckOut(BaseModel):
+    name: str
+    #: Field name to `"ok"` or to what went wrong reading it.
+    fields: Dict[str, str] = Field(default_factory=dict)
+    healthy: bool = False
+
+
+def _secret_out(secret: Any, principal: Any, rules: List[Any], owners: List[Any]) -> SecretOut:
+    token_only = bool(getattr(principal, "token_only", False))
+    decision = grants.evaluate(
+        rules, owners, "secret", secret.name, _identity_of(principal),
+        grants.tag_scopes(secret.tags, {}),
+    )
+    redacted = secret.redacted()
+    return SecretOut(
+        name=redacted["name"],
+        provider=redacted["provider"],
+        description=redacted["description"],
+        tags=redacted["tags"],
+        fields=redacted["fields"],
+        binding=redacted.get("binding") or {},
+        updated_at=redacted["updated_at"],
+        updated_by=redacted["updated_by"],
+        governed=decision.governed,
+        level="admin" if token_only else decision.level,
+        owned=decision.owned,
+    )
+
+
+@app.get(
+    "/secrets",
+    response_model=List[SecretOut],
+    dependencies=[Depends(requires("secrets:Read"))],
+)
+def list_secrets(principal: Any = Depends(current_principal)) -> List[SecretOut]:
+    """Which connection secrets exist, and what this caller may do with each.
+
+    A secret the caller cannot reach is left out rather than shown greyed: the
+    name of a credential is itself information, and a deny on `secret/pg-prod`
+    should not leave the name of the production database on the screen.
+    """
+    store = _secrets_now()
+    rules = _grants_now()
+    owners = _owners_now()
+    out: List[SecretOut] = []
+    for secret in sorted(store.items.values(), key=lambda item: item.name):
+        entry = _secret_out(secret, principal, rules, owners)
+        if entry.governed and not entry.level and not entry.owned:
+            continue
+        out.append(entry)
+    return out
+
+
+@app.put(
+    "/secrets/{name}",
+    response_model=SecretOut,
+    dependencies=[Depends(requires("secrets:Write"))],
+)
+def put_secret(
+    name: str, body: SecretWriteRequest, principal: Any = Depends(current_principal)
+) -> SecretOut:
+    """Create a secret, or change one — including rotating a single field."""
+    try:
+        clean = vault.check_name(name)
+    except vault.SecretError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    store = _secrets_now()
+    existed = clean in store.items
+    if existed:
+        _authorize_resource(principal, "secret", clean, "write")
+
+    try:
+        updated = vault.put(
+            store,
+            clean,
+            provider=body.provider,
+            values=body.values,
+            description=body.description,
+            tags=body.tags,
+            actor=str(getattr(principal, "username", "") or ""),
+        )
+    except vault.SecretError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    _write_secrets(updated)
+    if not existed:
+        _claim_new_resource(principal, "secret", clean)
+    return _secret_out(updated.items[clean], principal, _grants_now(), _owners_now())
+
+
+@app.delete(
+    "/secrets/{name}",
+    response_model=Dict[str, Any],
+    dependencies=[Depends(requires("secrets:Write"))],
+)
+def delete_secret(
+    name: str, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
+    clean = vault.normalize(name)
+    _authorize_resource(principal, "secret", clean, "write")
+    try:
+        _write_secrets(vault.remove(_secrets_now(), clean))
+    except vault.SecretError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"name": clean, "deleted": True}
+
+
+@app.post(
+    "/secrets/{name}/check",
+    response_model=SecretCheckOut,
+    dependencies=[Depends(requires("secrets:Read"))],
+)
+def check_secret(
+    name: str, principal: Any = Depends(current_principal)
+) -> SecretCheckOut:
+    """Whether every field still resolves — the master key, the variable, the file.
+
+    Not a connection test: reaching the database needs its driver and a network
+    route, and a failure there says nothing about the secret. This answers the
+    part the store is responsible for, and answers it without the value leaving
+    the runner.
+    """
+    clean = vault.normalize(name)
+    _authorize_resource(principal, "secret", clean, "read")
+    try:
+        fields = vault.check(_secrets_now(), clean)
+    except vault.SecretError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return SecretCheckOut(
+        name=clean,
+        fields=fields,
+        healthy=all(state == "ok" for state in fields.values()),
+    )
+
+
 #: The grant level the runner demands beside each action, so a simulation asks
 #: layer two the question the endpoints actually ask it. Running a Job needs
 #: `write` on the Job, not `read`: a run writes wherever its JSON points.
@@ -4538,6 +5065,7 @@ _ACTION_LEVEL: Dict[str, str] = {
     "workspace:Write": "write",
     "workspace:Delete": "write",
     "iam:ManageGrants": "admin",
+    "secrets:Write": "write",
 }
 
 

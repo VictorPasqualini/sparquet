@@ -413,7 +413,13 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # The compiler suite round-trips the framework's example configs, which it
+      # finds through `sparquet.examples_path()` or — as here, in the monorepo —
+      # next to the checkout. Without the flag a machine with neither skips those
+      # cases, and a skip in CI is a green job proving nothing about them.
       - name: Unit tests
+        env:
+          SPARQUET_EXAMPLES_REQUIRED: "1"
         run: npm run test
 
       # Typecheck and tests both run on source. This is the only step that proves

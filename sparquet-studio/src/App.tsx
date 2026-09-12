@@ -67,6 +67,9 @@ const router = createHashRouter([
       { path: '/learn/:lessonId', element: lazyRoute(<LessonDetail />) },
       { path: '/billing', element: lazyRoute(<Billing />) },
       { path: '/access', element: lazyRoute(<Access />) },
+      // The sections of Access are routes rather than local state: the audit log
+      // in particular is something people send each other a link to.
+      { path: '/access/:section', element: lazyRoute(<Access />) },
       { path: '/settings', element: lazyRoute(<Settings />) },
       { path: '*', element: <NotFound /> },
     ],

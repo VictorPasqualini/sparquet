@@ -34,6 +34,16 @@ export interface DatasetAnnotation {
   /** Empty means nobody has classified it yet, which is not the same as public. */
   classification: DataClassification | ''
   tags: string[]
+  /**
+   * The connection secret that opens this dataset, by name.
+   *
+   * A name and nothing else: the fields and their values stay on the runner, and
+   * this annotation travels to the browser, to `.studio/meta.json` and into what
+   * the AI is shown. What it buys is the answer to "which credential does this
+   * table need", which today is only discoverable by reading every Job that
+   * touches it. Empty means nobody has said — not that the dataset needs none.
+   */
+  connection: string
   updatedAt: number
 }
 
@@ -61,6 +71,8 @@ export interface CatalogStats {
 export const MAX_DESCRIPTION = 500
 export const MAX_OWNER = 120
 export const MAX_DOMAIN = 60
+/** A secret name, which the runner bounds the same way. */
+export const MAX_CONNECTION = 120
 
 export function emptyAnnotation(key: string): DatasetAnnotation {
   return {
@@ -70,6 +82,7 @@ export function emptyAnnotation(key: string): DatasetAnnotation {
     domain: '',
     classification: '',
     tags: [],
+    connection: '',
     updatedAt: 0,
   }
 }
@@ -87,7 +100,8 @@ export function isBlank(annotation: DatasetAnnotation): boolean {
     annotation.owner.trim() === '' &&
     annotation.domain.trim() === '' &&
     annotation.classification === '' &&
-    annotation.tags.length === 0
+    annotation.tags.length === 0 &&
+    annotation.connection.trim() === ''
   )
 }
 
@@ -109,6 +123,7 @@ export function normalizeAnnotation(
     domain: clamp(String(merged.domain ?? '').trim(), MAX_DOMAIN),
     classification: isClassification(merged.classification) ? merged.classification : '',
     tags: normalizeTags(merged.tags),
+    connection: clamp(String(merged.connection ?? '').trim(), MAX_CONNECTION),
     updatedAt: Date.now(),
   }
 }

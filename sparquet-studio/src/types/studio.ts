@@ -308,6 +308,31 @@ export interface Pipeline {
   revision: number
 }
 
+/**
+ * A saved SQL query — the SQL editor's file.
+ *
+ * It belongs to no Workflow on purpose. A Job reads one dataset and writes
+ * another, so it lives inside the Workflow that owns both; a query is written
+ * against the catalog, which spans every Workflow there is, and filing it under
+ * one of them would be a guess. So queries sit together, the way they do in a
+ * SQL client.
+ *
+ * `sql` is the record and the file at once: the runner writes it to
+ * `queries/<slug>.sql`, so what is committed is the text somebody typed rather
+ * than a JSON document with the text buried in it.
+ */
+export interface SavedQuery {
+  id: string
+  name: string
+  description: string
+  sql: string
+  /** The row cap the query was last run with, so reopening it does not surprise
+   *  somebody with a different one. */
+  limit?: number
+  createdAt: number
+  updatedAt: number
+}
+
 export const WORKFLOW_ACCENTS = ['amber', 'sky', 'violet', 'emerald', 'rose', 'slate'] as const
 
 export type WorkflowAccent = (typeof WORKFLOW_ACCENTS)[number]

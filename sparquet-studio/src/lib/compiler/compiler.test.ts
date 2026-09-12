@@ -4,6 +4,12 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import { autoLayout, compileGraph, pipelineToGraph, serializePipeline } from '@/lib/compiler'
+import {
+  exampleConfigs,
+  examplesRequired,
+  MISSING_EXAMPLES,
+  readExampleConfig,
+} from '@/test/exampleConfigs'
 import type { PipelineSpec } from '@/types/pipeline'
 import type {
   SinkNode,
@@ -1182,20 +1188,23 @@ describe('the executed format fixtures', () => {
  * sentence telling you what happened.
  */
 describe('the shipped example configs', () => {
-  const dir = fileURLToPath(new URL('../../../../examples/', import.meta.url))
-  const examples = readdirSync(dir).filter((name) => name.endsWith('.json')).sort()
+  // Not a path any more: the configs come from whichever `sparquet` this
+  // machine has — the installed package first, the repository next to us only
+  // as the monorepo fallback. See `src/test/exampleConfigs.ts`.
+  const configs = exampleConfigs()
 
-  it('finds the examples directory', () => {
+  it('finds the examples', () => {
+    if (!configs && !examplesRequired()) return
+    expect(configs, MISSING_EXAMPLES).not.toBeNull()
     expect(
-      examples.length,
-      `No .json found in ${dir}. The examples are fixtures for these tests — if they ` +
-        'vanished from your working tree, restore them with `git restore examples`.',
+      configs?.files.length ?? 0,
+      `No .json found in ${configs?.dir} (found via: ${configs?.source}).`,
     ).toBeGreaterThan(0)
   })
 
-  for (const file of examples) {
+  for (const file of configs?.files ?? []) {
     it(`round-trips ${file}`, () => {
-      const original: unknown = JSON.parse(readFileSync(`${dir}${file}`, 'utf8'))
+      const original = readExampleConfig(configs!, file)
       const compiled = expectRoundTrip(original)
       expect(JSON.parse(serializePipeline(compiled))).toEqual(compiled)
     })

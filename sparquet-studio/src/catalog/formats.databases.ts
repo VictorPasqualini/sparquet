@@ -15,8 +15,16 @@ const BOOL_OPTIONS: FieldOption[] = [
   { value: 'false', label: 'false' },
 ]
 
-const PLAINTEXT_SECRET =
-  'Stored in plaintext inside the pipeline JSON — prefer a value injected at runtime (params) over a hard-coded secret.'
+/**
+ * What a credential field says, now that there is somewhere better to put one.
+ *
+ * Typed here, the value is stored in the Job JSON and travels with it — into the
+ * run history, into the lineage, into what the AI is shown. A reference does
+ * not: `{secret:pg-prod/password}` is resolved by the runner on the way to
+ * Spark, and by nothing else.
+ */
+const CREDENTIAL_FIELD =
+  'Prefer a reference to a connection secret — `{secret:name/field}` — over the value itself. Typed in full, it is stored in plaintext inside the pipeline JSON and travels with it; a reference is resolved by the runner on its way to Spark and is kept nowhere else. A `{param}` injected at run time is the other option.'
 
 /* --------------------------------------------------------------------- JDBC */
 
@@ -24,9 +32,10 @@ const jdbcConnectionFields = (driver: string, port: string): FieldSpec[] => [
   {
     key: 'url',
     label: 'JDBC URL',
-    type: 'text',
+    type: 'secret',
     placeholder: `jdbc:...:${port}/db`,
     help: 'Full JDBC URL. Takes precedence over host/port/database when set.',
+    docs: CREDENTIAL_FIELD,
     supportsRuntimeVars: true,
   },
   {
@@ -39,7 +48,7 @@ const jdbcConnectionFields = (driver: string, port: string): FieldSpec[] => [
   { key: 'port', label: 'Port', type: 'text', placeholder: port },
   { key: 'database', label: 'Database', type: 'text', placeholder: 'app' },
   { key: 'user', label: 'User', type: 'text', placeholder: 'sparquet' },
-  { key: 'password', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET },
+  { key: 'password', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD },
   {
     key: 'driver',
     label: 'Driver class',
@@ -264,7 +273,7 @@ const jdbcFormat = (opts: {
     'lowerBound/upperBound do not filter: they are just the ruler the range is split by. Rows outside the interval land in the edge partitions.',
     'query and dbtable are mutually exclusive, and so are query and partitionColumn. A filtered parallel read has to be written as a dbtable subquery with an alias.',
     'The partition column must be indexed on the database side: N range queries against an unindexed column are N full scans.',
-    `Credentials in user/password are plaintext in the JSON — ${PLAINTEXT_SECRET.toLowerCase()}`,
+    'Credentials typed into user/password are plaintext in the JSON and travel with it. A `{secret:name/field}` reference is resolved by the runner on its way to Spark and stored nowhere else — the Connections tab of the Catalog is where those are created.',
     ...(opts.extraGotchas ?? []),
   ],
   examples: [
@@ -379,7 +388,7 @@ const snowflake: FormatDef = {
   readOptions: [
     { key: 'sfUrl', label: 'Account URL', type: 'text', placeholder: 'org-conta.snowflakecomputing.com' },
     { key: 'sfUser', label: 'User', type: 'text' },
-    { key: 'sfPassword', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET },
+    { key: 'sfPassword', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD },
     { key: 'sfDatabase', label: 'Database', type: 'text' },
     { key: 'sfSchema', label: 'Schema', type: 'text', placeholder: 'PUBLIC' },
     { key: 'sfWarehouse', label: 'Warehouse', type: 'text' },
@@ -389,7 +398,7 @@ const snowflake: FormatDef = {
   writeOptions: [
     { key: 'sfUrl', label: 'Account URL', type: 'text', placeholder: 'org-conta.snowflakecomputing.com' },
     { key: 'sfUser', label: 'User', type: 'text' },
-    { key: 'sfPassword', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET },
+    { key: 'sfPassword', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD },
     { key: 'sfDatabase', label: 'Database', type: 'text' },
     { key: 'sfSchema', label: 'Schema', type: 'text', placeholder: 'PUBLIC' },
     { key: 'sfWarehouse', label: 'Warehouse', type: 'text' },
@@ -436,7 +445,7 @@ const redshift: FormatDef = {
     { key: 'url', label: 'JDBC URL', type: 'text', placeholder: 'jdbc:redshift://host:5439/db' },
     { key: 'tempdir', label: 'S3 tempdir', type: 'text', placeholder: 's3://bucket/staging', help: 'S3 prefix used to stage UNLOAD/COPY files. Required.' },
     { key: 'user', label: 'User', type: 'text' },
-    { key: 'password', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET },
+    { key: 'password', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD },
     { key: 'aws_iam_role', label: 'IAM role ARN', type: 'text', placeholder: 'arn:aws:iam::123:role/redshift', help: 'Alternative to S3 keys for UNLOAD/COPY.', group: 'advanced' },
     { key: 'forward_spark_s3_credentials', label: 'Forward Spark S3 creds', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
     { key: 'query', label: 'Query', type: 'sql', rows: 3, placeholder: 'SELECT ...', group: 'advanced' },
@@ -445,7 +454,7 @@ const redshift: FormatDef = {
     { key: 'url', label: 'JDBC URL', type: 'text', placeholder: 'jdbc:redshift://host:5439/db' },
     { key: 'tempdir', label: 'S3 tempdir', type: 'text', placeholder: 's3://bucket/staging', help: 'S3 prefix used to stage the COPY. Required.' },
     { key: 'user', label: 'User', type: 'text' },
-    { key: 'password', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET },
+    { key: 'password', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD },
     { key: 'aws_iam_role', label: 'IAM role ARN', type: 'text', group: 'advanced' },
     { key: 'diststyle', label: 'Dist style', type: 'select', options: [{ value: 'EVEN', label: 'EVEN' }, { value: 'KEY', label: 'KEY' }, { value: 'ALL', label: 'ALL' }], group: 'advanced' },
     { key: 'distkey', label: 'Dist key', type: 'text', group: 'advanced' },
@@ -476,14 +485,14 @@ const redshift: FormatDef = {
 /* ---------------------------------------------------------- NoSQL / search */
 
 const mongoReadOptions: FieldSpec[] = [
-  { key: 'connection.uri', label: 'Connection URI', type: 'text', placeholder: 'mongodb://user:pass@host:27017', docs: PLAINTEXT_SECRET, supportsRuntimeVars: true },
+  { key: 'connection.uri', label: 'Connection URI', type: 'secret', placeholder: 'mongodb://user:pass@host:27017', docs: CREDENTIAL_FIELD, supportsRuntimeVars: true },
   { key: 'database', label: 'Database', type: 'text', placeholder: 'app' },
   { key: 'collection', label: 'Collection', type: 'text', help: 'Overrides the path.', group: 'advanced' },
   { key: 'aggregation.pipeline', label: 'Aggregation pipeline', type: 'json', rows: 4, placeholder: '[ { "$match": { "ativo": true } } ]', group: 'advanced' },
 ]
 
 const mongoWriteOptions: FieldSpec[] = [
-  { key: 'connection.uri', label: 'Connection URI', type: 'text', placeholder: 'mongodb://user:pass@host:27017', docs: PLAINTEXT_SECRET, supportsRuntimeVars: true },
+  { key: 'connection.uri', label: 'Connection URI', type: 'secret', placeholder: 'mongodb://user:pass@host:27017', docs: CREDENTIAL_FIELD, supportsRuntimeVars: true },
   { key: 'database', label: 'Database', type: 'text', placeholder: 'app' },
   { key: 'collection', label: 'Collection', type: 'text', help: 'Overrides the path.', group: 'advanced' },
   { key: 'operationType', label: 'Operation', type: 'select', options: [{ value: 'insert', label: 'insert' }, { value: 'replace', label: 'replace' }, { value: 'update', label: 'update' }], group: 'advanced' },
@@ -641,14 +650,14 @@ const cassandra: FormatDef = {
     { key: 'spark.cassandra.connection.host', label: 'Contact points', type: 'text', placeholder: 'node1,node2' },
     { key: 'spark.cassandra.connection.port', label: 'Port', type: 'text', placeholder: '9042', group: 'advanced' },
     { key: 'spark.cassandra.auth.username', label: 'Username', type: 'text', group: 'advanced' },
-    { key: 'spark.cassandra.auth.password', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'spark.cassandra.auth.password', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD, group: 'advanced' },
     { key: 'keyspace', label: 'Keyspace', type: 'text', help: 'Overrides the keyspace parsed from the path.', group: 'advanced' },
   ],
   writeOptions: [
     { key: 'spark.cassandra.connection.host', label: 'Contact points', type: 'text', placeholder: 'node1,node2' },
     { key: 'spark.cassandra.connection.port', label: 'Port', type: 'text', placeholder: '9042', group: 'advanced' },
     { key: 'spark.cassandra.auth.username', label: 'Username', type: 'text', group: 'advanced' },
-    { key: 'spark.cassandra.auth.password', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'spark.cassandra.auth.password', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD, group: 'advanced' },
     { key: 'spark.cassandra.output.consistency.level', label: 'Consistency level', type: 'select', options: [{ value: 'ONE', label: 'ONE' }, { value: 'QUORUM', label: 'QUORUM' }, { value: 'LOCAL_QUORUM', label: 'LOCAL_QUORUM' }, { value: 'ALL', label: 'ALL' }], group: 'advanced' },
   ],
   gotchas: [
@@ -688,7 +697,7 @@ const elasticsearch: FormatDef = {
     { key: 'es.nodes', label: 'Nodes', type: 'text', placeholder: 'es.internal' },
     { key: 'es.port', label: 'Port', type: 'text', placeholder: '9200' },
     { key: 'es.net.http.auth.user', label: 'User', type: 'text', group: 'advanced' },
-    { key: 'es.net.http.auth.pass', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'es.net.http.auth.pass', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD, group: 'advanced' },
     { key: 'es.nodes.wan.only', label: 'WAN only', type: 'select', options: BOOL_OPTIONS, help: 'true for managed/cloud clusters behind a proxy.', group: 'advanced' },
     { key: 'es.query', label: 'Query DSL', type: 'json', rows: 4, placeholder: '{ "query": { "match_all": {} } }', group: 'advanced' },
   ],
@@ -696,7 +705,7 @@ const elasticsearch: FormatDef = {
     { key: 'es.nodes', label: 'Nodes', type: 'text', placeholder: 'es.internal' },
     { key: 'es.port', label: 'Port', type: 'text', placeholder: '9200' },
     { key: 'es.net.http.auth.user', label: 'User', type: 'text', group: 'advanced' },
-    { key: 'es.net.http.auth.pass', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'es.net.http.auth.pass', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD, group: 'advanced' },
     { key: 'es.nodes.wan.only', label: 'WAN only', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
     { key: 'es.mapping.id', label: 'Id column', type: 'text', help: 'DataFrame column used as the document _id.', group: 'advanced' },
     { key: 'es.write.operation', label: 'Write operation', type: 'select', options: [{ value: 'index', label: 'index' }, { value: 'create', label: 'create' }, { value: 'update', label: 'update' }, { value: 'upsert', label: 'upsert' }], group: 'advanced' },
@@ -740,7 +749,7 @@ const opensearch: FormatDef = {
     { key: 'opensearch.nodes', label: 'Nodes', type: 'text', placeholder: 'os.internal' },
     { key: 'opensearch.port', label: 'Port', type: 'text', placeholder: '9200' },
     { key: 'opensearch.net.http.auth.user', label: 'User', type: 'text', group: 'advanced' },
-    { key: 'opensearch.net.http.auth.pass', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'opensearch.net.http.auth.pass', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD, group: 'advanced' },
     { key: 'opensearch.nodes.wan.only', label: 'WAN only', type: 'select', options: BOOL_OPTIONS, help: 'true for managed/cloud clusters behind a proxy.', group: 'advanced' },
     { key: 'opensearch.query', label: 'Query DSL', type: 'json', rows: 4, placeholder: '{ "query": { "match_all": {} } }', group: 'advanced' },
   ],
@@ -748,7 +757,7 @@ const opensearch: FormatDef = {
     { key: 'opensearch.nodes', label: 'Nodes', type: 'text', placeholder: 'os.internal' },
     { key: 'opensearch.port', label: 'Port', type: 'text', placeholder: '9200' },
     { key: 'opensearch.net.http.auth.user', label: 'User', type: 'text', group: 'advanced' },
-    { key: 'opensearch.net.http.auth.pass', label: 'Password', type: 'text', docs: PLAINTEXT_SECRET, group: 'advanced' },
+    { key: 'opensearch.net.http.auth.pass', label: 'Password', type: 'secret', docs: CREDENTIAL_FIELD, group: 'advanced' },
     { key: 'opensearch.nodes.wan.only', label: 'WAN only', type: 'select', options: BOOL_OPTIONS, group: 'advanced' },
     { key: 'opensearch.mapping.id', label: 'Id column', type: 'text', help: 'DataFrame column used as the document _id.', group: 'advanced' },
     { key: 'opensearch.write.operation', label: 'Write operation', type: 'select', options: [{ value: 'index', label: 'index' }, { value: 'create', label: 'create' }, { value: 'update', label: 'update' }, { value: 'upsert', label: 'upsert' }], group: 'advanced' },

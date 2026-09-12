@@ -39,6 +39,7 @@ import * as db from '@/lib/storage/db'
 import { useAuthStore } from '@/store/auth'
 import { useCatalogStore } from '@/store/catalog'
 import { useLibraryStore } from '@/store/library'
+import { useSecretsStore } from '@/store/secrets'
 
 interface IamState {
   grants: Grant[]
@@ -145,6 +146,12 @@ export function parentsOf(resource: ResourceKind, resourceId: string): Scope[] {
           domain: annotation.domain,
         })
       : []
+  }
+  if (resource === 'secret') {
+    // A credential joins the same tag chain a table does, so a deny on
+    // `tag/pii` closes the connection as well as what it reaches.
+    const secret = useSecretsStore.getState().byName(resourceId)
+    return secret ? tagScopes(secret.tags, {}) : []
   }
   if (!CONTAINED_KINDS.includes(resource) || !resourceId) return []
   const library = useLibraryStore.getState()

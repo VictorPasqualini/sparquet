@@ -15,7 +15,7 @@
  * anything. What this screen adds is the resource picker.
  */
 
-import { Boxes, FolderTree, Tag, Workflow } from 'lucide-react'
+import { Boxes, FolderTree, KeyRound, Tag, Workflow } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
@@ -27,15 +27,17 @@ import { useAuthStore } from '@/store/auth'
 import { useCatalogStore } from '@/store/catalog'
 import { accessTo, effectiveOwnerOf, mayAdministerResource, useIamStore } from '@/store/iam'
 import { useLibraryStore } from '@/store/library'
+import { useSecretsStore } from '@/store/secrets'
 import type { AuthTeam, AuthUser } from '@/types/auth'
 
-type Kind = Extract<ResourceKind, 'job' | 'pipeline' | 'workflow' | 'tag'>
+type Kind = Extract<ResourceKind, 'job' | 'pipeline' | 'workflow' | 'tag' | 'secret'>
 
 const NOUN: Record<Kind, string> = {
   job: 'Job',
   pipeline: 'Pipeline',
   workflow: 'Workflow',
   tag: 'Tag',
+  secret: 'Secret',
 }
 
 const ICON: Record<Kind, typeof Boxes> = {
@@ -43,6 +45,7 @@ const ICON: Record<Kind, typeof Boxes> = {
   pipeline: Workflow,
   workflow: FolderTree,
   tag: Tag,
+  secret: KeyRound,
 }
 
 function messageOf(error: unknown): string {
@@ -61,6 +64,9 @@ export function ResourceGrantsPanel() {
 
   const annotations = useCatalogStore((state) => state.annotations)
   const loadCatalog = useCatalogStore((state) => state.load)
+
+  const secrets = useSecretsStore((state) => state.items)
+  const loadSecrets = useSecretsStore((state) => state.load)
 
   const grants = useIamStore((state) => state.grants)
   const owners = useIamStore((state) => state.owners)
@@ -81,7 +87,10 @@ export function ResourceGrantsPanel() {
     // The tag list comes from the catalog: a tag exists because a dataset was
     // annotated with it, and this panel is often the first screen opened.
     void loadCatalog()
-  }, [load, loadCatalog])
+    // Secrets live only on the runner, so the list has to be fetched before a
+    // rule can name one. A caller without `secrets:Read` simply sees none.
+    void loadSecrets()
+  }, [load, loadCatalog, loadSecrets])
 
   useEffect(() => {
     if (!can('iam:ReadUsers')) return
@@ -130,7 +139,9 @@ export function ResourceGrantsPanel() {
           ? pipelines.map((pipeline) => ({ id: pipeline.id, name: pipeline.name }))
           : kind === 'tag'
             ? tags.map((tag) => ({ id: tag, name: tag }))
-            : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
+            : kind === 'secret'
+              ? secrets.map((secret) => ({ id: secret.name, name: secret.name }))
+              : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
     const counted = source.map((item) => {
       const rules = grantsFor(grants, kind, item.id)
       const denies = rules.filter((rule) => rule.effect === 'deny').length
@@ -147,7 +158,7 @@ export function ResourceGrantsPanel() {
       }
     })
     return counted.sort((left, right) => left.label.localeCompare(right.label))
-  }, [grants, jobs, kind, owners, pipelines, tags, workflows])
+  }, [grants, jobs, kind, owners, pipelines, secrets, tags, workflows])
 
   // Keep the picker on something that exists: switching kind, or deleting the
   // record, must not leave the panel editing rules for nothing.
@@ -260,7 +271,7 @@ export function ResourceGrantsPanel() {
   const inherited = mine?.source && mine.source !== `${kind}/${selected}` ? mine.source : null
 
   return (
-    <div className="space-y-4 border-t border-line pt-4">
+    <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-0.5">
           <p className="text-sm text-content">Who can run what</p>
@@ -284,7 +295,7 @@ export function ResourceGrantsPanel() {
         </div>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-[16rem_minmax(0,1fr)]">
+      <div className="grid gap-2 lg:grid-cols-[auto_minmax(12rem,1fr)]">
         <Field label="Kind">
           <Segmented
             size="sm"
@@ -308,6 +319,11 @@ export function ResourceGrantsPanel() {
                 label: 'Tags',
                 title: 'Every dataset the catalog gives this tag, including later ones',
               },
+              {
+                value: 'secret',
+                label: 'Secrets',
+                title: 'A connection credential — read here means "a run may use it"',
+              },
             ]}
           />
         </Field>
@@ -317,7 +333,9 @@ export function ResourceGrantsPanel() {
               <Icon className="h-3.5 w-3.5" />
               {kind === 'tag'
                 ? 'No dataset in the catalog carries a tag yet.'
-                : `The library has no ${NOUN[kind]} to restrict yet.`}
+                : kind === 'secret'
+                  ? 'This runner holds no connection secrets yet.'
+                  : `The library has no ${NOUN[kind]} to restrict yet.`}
             </p>
           ) : (
             <Select

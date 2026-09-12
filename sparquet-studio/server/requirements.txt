@@ -8,3 +8,8 @@
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 pydantic>=2.6,<3.0
+
+# Encrypts the local secret store. Optional at runtime rather than required: a
+# runner without it still boots and still serves secrets whose provider is `env`
+# — it refuses only to seal or open a `local` one.
+cryptography>=42.0

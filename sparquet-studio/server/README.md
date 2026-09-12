@@ -168,6 +168,44 @@ exposed:
 - An unknown username costs the same time as a wrong password, so the endpoint
   does not answer "does this person exist?".
 
+### Default access
+
+A record that nobody has written a rule about is **ungoverned**, and ungoverned
+means anybody holding the matching action may use it. That is the right default
+for a laptop and the wrong one for a shared runner, so a securable created
+through this runner gets an owner at the moment it is created.
+
+By default (`creator+team`) two records are written once, on creation:
+
+- the creator becomes the **owner** — admin over it, and able to grant;
+- their **team** gets `write`, so the people beside them can still edit it.
+
+A secret is the one exception: the team gets `read`, not `write`. On a
+credential `read` means *a run of theirs may use it* — which is what a teammate
+needs — while `write` would let them repoint `pg-prod` at a different database.
+
+It fires for a **Job, Pipeline or Workflow** the first time `PUT /workspace/...`
+sees that id, for a **dataset** the first time an address appears in the
+catalog, and for a **secret** when it is created.
+
+Three conditions hold it back, and each one is deliberate:
+
+- **A token-only caller claims nothing.** A shared runner token is not a person;
+  naming it as an owner would govern a record against a principal that does not
+  exist.
+- **A record whose chain is already governed is left alone.** A Job saved into a
+  Workflow that has rules inherits them, and writing an owner here would
+  silently narrow the Workflow — the opposite of what a container is for.
+- **The first catalog a library ever writes claims nothing.** That save is a
+  browser syncing a catalog it already had, and treating a migrated catalog as a
+  hundred fresh creations would hand one person every table in it.
+
+Naming an owner does more than grant admin: it makes the record **governed**,
+which closes it to everybody the rules do not mention. That is why the
+conditions above matter more than the defaults do, and why
+`SPARQUET_STUDIO_NEW_RESOURCE_DEFAULT=off` exists for a deployment that would
+rather keep the older, open behaviour.
+
 ### Password recovery
 
 There is no "email me a reset link", because the runner has no mail server and
@@ -341,6 +379,8 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_FREE_MONTHLY` | `40` | Writes a team gets for free each calendar month (UTC). Does not accumulate. |
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
+| `SPARQUET_STUDIO_SECRET_KEY` | unset | Master key the `local` connection secrets are encrypted with. Without it the runner still boots and still serves `env` secrets — it refuses only to seal or open a `local` one. Changing it makes every existing `local` secret unreadable. |
+| `SPARQUET_STUDIO_NEW_RESOURCE_DEFAULT` | `creator+team` | What a newly created Job, Pipeline, Workflow, dataset or secret is governed by. `creator+team` makes its author the owner and gives their team `write` (`read` on a secret). `creator` writes the ownership only. `off` leaves new records ungoverned. See **Default access**. |
 | `SPARQUET_STUDIO_WORKSPACE` | unset | Pins the library directory. Set it and the interface may not change it — a deployment that decides centrally decides centrally. Unset, the runner uses what was chosen in Settings, falling back to the per-user default. |
 | `SPARQUET_HOME` | `%APPDATA%\Sparquet` on Windows, `$XDG_DATA_HOME/sparquet` (or `~/.local/share/sparquet`) elsewhere | Per-user data directory. Holds `studio.json` and, unless told otherwise, `workspace/` — the library. |
 | `SPARQUET_STUDIO_CREDITS_PROVIDER` | unset (SQLite) | `module:factory` building the credit ledger instead of the local one. See **Replaceable pieces**. |
@@ -351,6 +391,98 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_HISTORY_MAX_DAYS` | `365` | After this many days the run row itself goes — but only with `SPARQUET_STUDIO_HISTORY_DELETE` on. |
 | `SPARQUET_STUDIO_HISTORY_KEEP_RUNS` | `10` | The newest N executions of each Job and each Pipeline are never expired, however old they are. |
 | `SPARQUET_STUDIO_HISTORY_DELETE` | unset (thin only) | `on`/`1`/`true`/`yes` lets the second stage delete run rows. Off, history thins but never shrinks in row count. |
+
+## Connection secrets
+
+A JDBC URL, the user and the password that go with it, a token — the things a Job
+needs to open a source and must not carry inside its JSON. They live here, on the
+runner, and a Job refers to one by writing `{secret:name/field}` wherever the
+value would have gone:
+
+```json
+{ "format": "postgres", "path": "public.clientes",
+  "options": { "url": "{secret:pg-prod/url}",
+               "user": "{secret:pg-prod/user}",
+               "password": "{secret:pg-prod/password}" } }
+```
+
+**The framework knows nothing about this.** `apply_template` matches
+`(?<!\{)\{(\w+)\}(?!\})`, and `\w` covers neither `:` nor `/`, so the reference
+is invisible to `{param}` substitution and to the `{{var}}` the transformation
+engine resolves. The runner replaces it on the way to Spark and hands the
+framework a finished document; nothing in `sparquet/` changed to make this work.
+
+What is stored is the unresolved document, everywhere it matters: the run
+history, the lineage, the config hash the credits are keyed by, and the JSON the
+AI is shown. Only the copy given to Spark carries values.
+
+### Where the material is
+
+| Provider | What it is | When |
+|---|---|---|
+| `local` | Encrypted in the library's meta file with Fernet, the key from `SPARQUET_STUDIO_SECRET_KEY` and a per-store scrypt salt. Needs `cryptography`. | One team, one runner, a laptop. |
+| `env` | A named environment variable this process reads. | Everything else — Vault, AWS/GCP/Azure secret managers, Kubernetes and CI all end by injecting a variable, and the runner only has to know the name. |
+
+A third provider is one entry in `vault._RESOLVERS`: a callable taking the stored
+binding and returning the value. Nothing else in the runner changes.
+
+### Access
+
+`secret` is a securable like a dataset or a Job, with an owner and grants over
+it, and the levels mean something specific:
+
+- **read** — a run of yours may *use* it. It never means "may be looked at": no
+  endpoint returns a value at any level, to anybody, including the owner.
+- **write** — rotate a field, retag it, delete it.
+- **admin** — decide who else may use it.
+
+Tags work as they do everywhere else, so a deny on `tag/pii` closes the
+credential as well as the tables it reaches. A secret the caller may not reach is
+absent from `GET /secrets` rather than shown greyed out: the name of a credential
+is itself information.
+
+Two things are deliberately sealed. `PUT /workspace/meta/secrets` is refused for
+everyone — a blanket write would skip the encryption, the per-secret access check
+and the keep-what-you-did-not-send behaviour of a rotation. And `GET /workspace`,
+which is how Studio loads, strips the record out: `workspace:Read` is held by
+anyone who may open the library, and the browser has no business holding the
+ciphertext, the salt or the `env` bindings.
+
+### Masking
+
+A JDBC driver that cannot connect quotes the whole URL it tried, password
+included. Every resolved value is therefore scrubbed out of the run response, out
+of each SSE event **as it leaves the queue** — which is the same point the run
+history is written from, so one pass covers the screen and the database — and out
+of the error text of `/dataset/schema` and `/query`.
+
+### `GET /secrets`
+
+Every secret this caller may reach: `name`, `provider`, `description`, `tags`,
+`fields` (names only), `binding` (for `env`, which variable each field reads),
+`updated_at`, `updated_by`, and the caller's own `governed`/`level`/`owned`.
+Needs `secrets:Read`.
+
+### `PUT /secrets/{name}`
+
+Creates or changes one. `values` is a patch over the fields — a value sets it,
+`null` removes it, a field left out keeps what it had — which is what makes
+rotating a single password possible from a browser that never read the others.
+Needs `secrets:Write`, and `write` on the secret when it already exists. Creating
+one makes the caller its owner.
+
+```json
+{ "provider": "env", "description": "Production Postgres", "tags": ["pii"],
+  "values": { "url": "PG_URL", "user": "PG_USER", "password": "PG_PASSWORD" } }
+```
+
+### `DELETE /secrets/{name}` · `POST /secrets/{name}/check`
+
+Deleting needs `write` on the secret. The check answers whether every field still
+resolves — the master key is there, the variable is set — field by field, without
+returning any of them. It is **not** a connection test: reaching the database
+needs the driver on the classpath and a network route, and a failure there says
+nothing about the secret.
 
 ## Replaceable pieces
 
@@ -980,6 +1112,9 @@ instead of leaving a stale copy next to the new one, and renaming a Workflow
 moves everything under it. The same write mirrors the record into the catalog
 tables below.
 
+The **first** write of an id also claims it under **Default access** above; later
+writes of the same id do not, so editing somebody's Job is not a way to take it.
+
 ### `DELETE /workspace/{kind}/{record_id}`
 
 Removes both files and soft-deletes the catalog row → `{ "deleted": true }`.
@@ -991,6 +1126,11 @@ Small values that belong to the library rather than to a record — which storag
 version wrote it, whether the examples were seeded — kept in `.studio/meta.json`.
 Body for `PUT`: `{ "value": <anything JSON> }`. They travel with the workspace so
 a second checkout does not re-seed or re-migrate a library that is current.
+
+`catalog` is the exception to "small": it holds every dataset annotation, and a
+`PUT` of it claims the addresses it added that were not in the stored map — see
+**Default access**. `secrets` is refused outright; it is written only through the
+endpoints above.
 
 ### `GET /workspace/root`
 

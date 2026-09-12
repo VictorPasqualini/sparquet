@@ -203,6 +203,15 @@ ACTIONS: Dict[str, str] = {
         "be able to widen their own access to the tables it reads."
     ),
     "iam:ReadAudit": "Read the audit log: who changed what, and who was refused.",
+    "secrets:Read": (
+        "See which connection secrets exist, what they are called and which fields "
+        "they carry. Never the values: no action, and no access level, returns one."
+    ),
+    "secrets:Write": (
+        "Create, rotate and delete connection secrets. Separate from using one: a "
+        "Job may read a database through `pg-prod` without anybody on that team "
+        "being able to change what `pg-prod` points at."
+    ),
     "credits:Read": "See every team's execution credits and what they were spent on.",
     "credits:Manage": "Grant execution credits, or take them back.",
     # Deliberately not under `workspace:*`: moving the whole library to another
@@ -219,6 +228,7 @@ RESOURCE_KINDS: Dict[str, str] = {
     "workflow": "One Workflow and everything the runner attributes to it.",
     "pipeline": "One Pipeline (an ordered sequence of Jobs).",
     "job": "One Job.",
+    "secret": "One connection secret, by name.",
     "team": "One team, for the IAM actions that act on a team.",
     "user": "One user account.",
 }
@@ -241,6 +251,11 @@ BUILTIN_ROLES: Dict[str, Role] = {
                     "workspace:*", "run:*", "catalog:Inspect", "catalog:Query",
                     "history:Read",
                     "history:Pin", "history:Ingest", "credits:Read",
+                    # Reading the list, so a Job can reference a secret by name.
+                    # `secrets:Write` is deliberately not here: whoever builds the
+                    # Jobs must not also be able to repoint a connection at a
+                    # database of their choosing.
+                    "secrets:Read",
                 ],
                 "resources": ["*"],
             }

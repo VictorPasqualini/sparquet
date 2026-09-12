@@ -22,10 +22,12 @@ Layout::
         workflow/<id>.json              the Studio records, authoritative on read
         job/<id>.json
         pipeline/<id>.json
+        query/<id>.json
       <workflow-slug>/
         workflow.json
         jobs/<job-slug>.json            runnable Sparquet config
         pipelines/<pipeline-slug>.json  stage order, by job id
+      queries/<query-slug>.sql          the SQL itself, readable and diffable
 
 Storage is kept behind `WorkspaceStore` for the same reason `ExecutionRepository`
 is: an `S3WorkspaceStore` or a `GitWorkspaceStore` replaces `FileWorkspaceStore`
@@ -45,12 +47,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
-# The three record kinds a Studio library is made of. Plural forms are only ever
-# used in URLs and directory names; the singular is the kind itself.
+# The record kinds a Studio library is made of. Plural forms are only ever used
+# in URLs and directory names; the singular is the kind itself.
 WORKFLOW = "workflow"
 JOB = "job"
 PIPELINE = "pipeline"
-KINDS = (WORKFLOW, JOB, PIPELINE)
+#: A saved SQL query. Unlike the other three it belongs to no Workflow — a query
+#: is written against the catalog, which spans all of them — and its readable
+#: file is `.sql` rather than `.json`, because the artefact here is the text a
+#: person wrote, not a document a machine assembled.
+QUERY = "query"
+KINDS = (WORKFLOW, JOB, PIPELINE, QUERY)
 
 _STUDIO_DIR = ".studio"
 _INDEX_FILE = "index.json"
@@ -216,6 +223,9 @@ class WorkspaceSnapshot:
     workflows: List[Document] = field(default_factory=list)
     jobs: List[Document] = field(default_factory=list)
     pipelines: List[Document] = field(default_factory=list)
+    #: Saved SQL queries. Last in the list because it was added last, and older
+    #: clients that do not read it are not wrong — they just have no SQL editor.
+    queries: List[Document] = field(default_factory=list)
     #: Small bookkeeping values that belong to the library rather than to a record:
     #: which storage version wrote it, whether the examples were already seeded.
     #: They travel with the workspace so a second machine does not re-migrate or
@@ -228,6 +238,7 @@ class WorkspaceSnapshot:
             "workflows": [doc.to_json() for doc in self.workflows],
             "jobs": [doc.to_json() for doc in self.jobs],
             "pipelines": [doc.to_json() for doc in self.pipelines],
+            "queries": [doc.to_json() for doc in self.queries],
             "meta": self.meta,
         }
 
@@ -341,6 +352,28 @@ def _write_json(path: Path, payload: Any) -> None:
         raise
 
 
+def _write_text(path: Path, text: str) -> None:
+    """The same atomic write as `_write_json`, for a file that is not JSON.
+
+    One trailing newline and nothing else added: this file is what somebody
+    typed, and a writer that reformats it would make the editor and the
+    repository disagree about what the query is.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not text.endswith("\n"):
+        text += "\n"
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=".tmp-", suffix=".txt", delete=False
+    )
+    try:
+        with handle as out:
+            out.write(text)
+        os.replace(handle.name, path)
+    except BaseException:
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+
+
 def _read_json(path: Path) -> Optional[Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -410,6 +443,10 @@ class FileWorkspaceStore:
         name = str(record.get("name") or doc.id)
         if doc.kind == WORKFLOW:
             return f"{slugify(name, fallback=slugify(doc.id))}/workflow.json"
+        if doc.kind == QUERY:
+            # No Workflow above it, so no folder to inherit: queries sit together
+            # at the root of the library the way they do in a SQL client.
+            return f"queries/{slugify(name, fallback=slugify(doc.id))}.sql"
         folder = self._workflow_dir(record.get("workflowId"), names)
         sub = "jobs" if doc.kind == JOB else "pipelines"
         return f"{folder}/{sub}/{slugify(name, fallback=slugify(doc.id))}.json"
@@ -427,7 +464,8 @@ class FileWorkspaceStore:
 
         A Job's is its compiled Sparquet JSON, so the file in the repository is the
         file the framework runs. A Pipeline's is its stage order by job id. A
-        Workflow's is its own small record: there is nothing else to it.
+        Workflow's is its own small record: there is nothing else to it. A
+        query's is the SQL, as text — see `_readable_text`.
         """
         if doc.kind == JOB:
             if doc.config is not None:
@@ -480,6 +518,7 @@ class FileWorkspaceStore:
                 workflows=by_kind[WORKFLOW],
                 jobs=by_kind[JOB],
                 pipelines=by_kind[PIPELINE],
+                queries=by_kind[QUERY],
                 meta=self.read_meta(),
             )
 
@@ -588,7 +627,10 @@ class FileWorkspaceStore:
 
             _write_json(self._sidecar(kind, doc_id), doc.record)
             target = self._resolve(relative)
-            _write_json(target, self._readable_payload(doc))
+            if kind == QUERY:
+                _write_text(target, str(doc.record.get("sql") or ""))
+            else:
+                _write_json(target, self._readable_payload(doc))
 
             # A rename leaves the old file behind unless it is removed here, and a
             # stale `orders.json` next to `orders-daily.json` is exactly the kind of

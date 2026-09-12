@@ -88,7 +88,7 @@ export function RolesPanel() {
 
   return (
     <>
-      <div className="flex items-center justify-between gap-4 border-t border-line pt-4">
+      <div className="flex items-center justify-between gap-4">
         <div className="space-y-0.5">
           <p className="text-sm text-content">Roles</p>
           <p className="max-w-md text-2xs leading-relaxed text-content-subtle">

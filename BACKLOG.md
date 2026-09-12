@@ -573,6 +573,20 @@ Pendente:
       fica fora: reformataria 56 arquivos de uma vez, enterrando o histórico num diff que
       ninguém revisou. Versão do ruff fixada no extra `dev` — linter que muda de regra
       sozinho deixa vermelho um PR que não tocou no código apontado.
+- ✅ **`examples/` viaja dentro da wheel** — o Studio é instalado com `sparquet` como
+      dependência, não clonando o monorepo, e os testes de round-trip do compilador liam
+      as confs de exemplo por caminho relativo dentro do checkout: fora dele, a suíte
+      silenciosamente não tinha o que testar. `[tool.setuptools.package-dir]` mapeia
+      `examples/` para o pacote `sparquet.examples` e `sparquet.examples_path()` devolve o
+      diretório empacotado (com fallback para o repositório, para quem trabalha no
+      monorepo). Como `package-dir` fora da árvore impede o `packages.find`, a lista de
+      pacotes virou explícita — e `tests/test_packaging.py` falha se um subpacote no disco
+      não estiver declarado, que é o único jeito de uma lista manual não apodrecer. Do
+      lado JS, `src/test/exampleConfigs.ts` resolve em ordem: `SPARQUET_EXAMPLES_DIR` ›
+      pacote instalado (`python -c "import sparquet; print(sparquet.examples_path())"`) ›
+      repositório; não achando, os casos se pulam — exceto onde `SPARQUET_EXAMPLES_REQUIRED`
+      está ligado, que é o CI, porque uma suíte que se pula em CI não prova nada. A amarração
+      de versão vem de graça: as fixtures são as do `sparquet` que está instalado.
 - Base atual: versão única via `__version__` (pyproject `dynamic`); publicação no
   PyPI documentada e automatizada via CI.
 
@@ -812,6 +826,33 @@ Pendente aqui:
       recurso, desfecho, prefixo de ação (`iam:*`) e data em `GET /audit`, atrás de
       `iam:ReadAudit`; corpo de requisição nunca é gravado, só os campos nomeados. Na
       interface: **Access & IAM › Audit log**.
+- ✅ **Dono e concessões por recurso, e permissão padrão para o que acaba de nascer** —
+      papel responde "esta pessoa pode executar alguma coisa"; concessão responde "quais".
+      São duas camadas de propósito (`server/grants.py`, `src/lib/iam/grants.ts`):
+      `grants.evaluate()` devolve `Decision(governed, level, owned, source)` percorrendo a
+      cadeia de escopo, nomear um dono passa a **governar** o recurso, e `deny` explícito
+      fecha de novo o que uma concessão mais larga tinha aberto. `OWNABLE_KINDS` é
+      `dataset`, `job`, `pipeline`, `workflow` e `secret`. O que estava faltando era o
+      começo: recurso criado nascia sem dono, então ou ficava aberto a todos ou dependia de
+      alguém lembrar de configurá-lo. Agora nasce com dono (quem criou) e leitura/escrita
+      para o time, controlado por `SPARQUET_STUDIO_NEW_RESOURCE_DEFAULT`
+      (`creator+team`, o default; `creator`; `off`) — com `read` em vez de `write` no time
+      quando é `secret`. Quatro guardas: pessoa real (token compartilhado não vira dono),
+      id novo, nada acima já governando, e no catálogo só o que é novo.
+- ✅ **IAM dividido em seções com endereço, e o log de auditoria em página própria** —
+      a tela empilhava cinco assuntos sem relação numa coluna só (pessoas, papéis, regras
+      por recurso, simulador e o log), e o log ficava embaixo: toda visita para cadastrar
+      um usuário buscava cem eventos que ninguém tinha pedido. Viraram cinco rotas
+      (`/access`, `/access/roles`, `/access/rules`, `/access/simulator`, `/access/audit`)
+      sob o mesmo cabeçalho, com uma faixa de abas nova — `components/layout/PageTabs.tsx`,
+      um `nav` de `NavLink` e **não** um `tablist`, porque aba que navega mente para o
+      leitor de tela sobre o que acontece ao ser apertada. São rotas, e não estado local,
+      justamente porque o log é a coisa que uma pessoa manda para outra por link. O log
+      ganhou a largura da página e o que faltava para ser lido: janela de tempo (`since`),
+      limite de linhas, busca livre sobre o que já veio (filtrar no cliente, sem uma
+      requisição por tecla), linha que abre mostrando `detail`/`ip`/`roles`/`resource`, e
+      export CSV do que está na tela — no formato RFC 4180 que o framework lê e escreve
+      (`lib/utils/csv.ts`).
 - [ ] **SSO / OIDC** e senha gerenciada fora do runner — para instalação corporativa,
       onde criar mais um usuário/senha local é justamente o que não se quer.
 - [ ] **Expiração e rotação de sessão por política** — hoje é só
@@ -1055,26 +1096,68 @@ Pendente aqui:
       negócio ligado à coluna); e os **exportadores** que a decisão acima deixa em aberto —
       `GlueTable`/`CreateTable`, MCE do DataHub, eventos OpenLineage e `schema.yml` do dbt.
 
-- [ ] **Editor SQL sobre o catálogo.** Uma aba onde se escreve `SELECT` contra os
-      endereços que o catálogo já conhece, e o runner executa. O catálogo é o que torna
-      isso barato: ele já tem endereço, formato e schema (derivado e observado), então o
-      editor sabe o que existe sem ninguém digitar caminho — autocomplete de dataset e de
-      coluna sai direto de `deriveSchemas`/`/dataset/schema`, e clicar numa tabela na
-      árvore abre a consulta já escrita.
+- ✅ **Editor SQL sobre o catálogo** (`/sql`, `src/screens/SqlEditor.tsx`). Escreve-se
+      `SELECT` contra os endereços que o catálogo já conhece e o runner executa, abrindo
+      cada dataset pelo **`ReaderFactory` do próprio framework** — o mesmo caminho de um
+      Job, que é o que torna Delta e Iceberg consultáveis aqui sem esta tela saber nada
+      sobre nenhum dos dois. `POST /query` com ação própria `catalog:Query`, só leitura
+      por construção (SELECT/WITH/EXPLAIN/DESCRIBE/SHOW; os endereços viram temp views
+      derrubadas no fim), **cap de linhas sempre imposto** pelo servidor e timeout, que é
+      o controle que de fato limita custo — `LIMIT 20` num `GROUP BY` ainda varre o ano
+      inteiro. O bloco `spark` viaja com a consulta (`sparkForDatasets`), porque jars e
+      extensões só são lidos na criação da sessão.
 
-      Desenho: endpoint `POST /query` no runner, com ação própria (`catalog:Query`,
-      separada de `run:Execute` porque consultar não é executar pipeline), que registra
-      como temp view cada endereço citado — usando o mesmo `ReaderFactory` da inspeção de
-      schema — roda a consulta e devolve as linhas. Guardas obrigatórias: só leitura (nada
-      de DDL/DML nem `INSERT`), `LIMIT` imposto pelo servidor, timeout, e cancelamento
-      pelo mesmo caminho do `/runs/{id}/cancel`, já que a SparkSession é a mesma do
-      processo e uma consulta boba pode ocupar o runner inteiro.
+      Entregue junto, por item:
 
-      O que dá valor de verdade depois: **salvar a consulta como Job** — a consulta vira
-      um JSON com `input`, uma transformação `sql` e um `output`, que abre no canvas e
-      passa a ser versionado como qualquer outro Job. Ou seja, o editor não é um brinquedo
-      de exploração: é a porta de entrada mais curta entre "olhei os dados" e "isto virou
-      pipeline".
+      - **Consulta é arquivo** (estilo Databricks/Athena): quarto tipo de registro no
+        workspace, `queries/<slug>.sql` com o SQL cru em UTF-8 mais o sidecar
+        `.studio/query/<id>.json` com nome, cap e datas. Várias abas abertas ao mesmo
+        tempo, rascunho não salvo preservado em `localStorage`, Ctrl/Cmd+S salva. Ficam
+        fora de `list_files()` de propósito: consulta não é Job e não pode ser oferecida
+        como algo a executar.
+      - **Executar só a seleção** — o que está selecionado roda sozinho, e o botão passa a
+        dizer *Run selection*; é o que permite manter vários statements num buffer só.
+      - **Autocomplete no Monaco** — provider registrado na linguagem `sql` e lido por
+        ref, então sobrevive a qualquer mudança de catálogo sem re-registrar: tabelas,
+        colunas qualificadas depois de `alias.`, todas as colunas e as palavras-chave,
+        nessa ordem de prioridade.
+      - **Cancelar consulta em andamento** — `cancelQuery` primeiro, `abort()` depois:
+        abortar a requisição só fecha esta ponta do socket, e o Spark continuaria
+        calculando uma consulta que ninguém espera.
+      - **Exportar o resultado** — CSV (RFC 4180, `lib/utils/csv.ts`) e JSON (um objeto
+        por linha, para ser lido por programa). Exporta o que voltou, já limitado pelo
+        cap: exportar mais seria uma segunda consulta invisível, e um preview de 20 linhas
+        viraria varredura completa sem ninguém pedir.
+      - **Histórico de execuções por consulta** (`lib/sql/history.ts`) — cada execução
+        guarda o statement exato enviado, quando, quanto demorou, quantas linhas vieram e
+        o erro quando houve; as que falharam também, que é metade das perguntas. A chave é
+        o arquivo quando a consulta tem um, e a aba enquanto não tem — salvar pela primeira
+        vez carrega o histórico junto em vez de descartá-lo. Fica em `localStorage`, por
+        navegador: é registro da tarde de alguém, não do workspace; o que merece ser
+        compartilhado é a consulta, e a consulta já é arquivo.
+      - **Grid melhor** (`components/panels/RunResultTable.tsx`, tudo opcional para não
+        mexer no preview de execução) — tipo de cada coluna no cabeçalho vindo do schema
+        que o runner devolve, número alinhado à direita, ordenação client-side com nulo
+        sempre no fim (nulo é dado ausente; enterrar os extremos sob uma página de branco
+        é o que torna coluna ordenada inútil) e painel de célula para ler o valor que não
+        coube, com JSON formatado e copiar. A ordenação acontece **depois** do corte:
+        continuam sendo as linhas que o runner mandou, reordenadas, e não "as 50 maiores".
+      - **EXPLAIN como árvore** (`lib/sql/plan.ts` + `components/sql/PlanTree.tsx`) — o
+        desenho de `+-`/`:-` e três espaços por nível é lido de volta como a árvore que
+        ele representa, com subárvore colapsável e marcação do que se procura num plano:
+        onde os dados são lidos e onde há shuffle. Ordem preservada (plano do Spark se lê
+        de baixo para cima), `EXPLAIN EXTENDED` mantido como seções separadas, e o que o
+        parser não entende (`FORMATTED`, `COST`) volta como texto — errar sobre um plano é
+        pior do que mostrá-lo cru. Resultado, plano e histórico dividem uma faixa de abas
+        (`WorkspaceTabs`) abaixo do editor.
+
+      Falta: **salvar a consulta como Job** — vira um JSON com `input`, uma transformação
+      `sql` e um `output`, que abre no canvas e passa a ser versionado como qualquer outro
+      Job (é a ponte mais curta entre "olhei os dados" e "isto virou pipeline");
+      consulta como **securable** do IAM (hoje `OWNABLE_KINDS` não inclui `query`, então
+      quem pode ler o workspace lê todas); histórico compartilhado pelo runner em vez de
+      por navegador; e amostra/preview a partir da ficha do dataset reaproveitando este
+      mesmo caminho.
 
 ### 9.6 Biblioteca e arquivos
 

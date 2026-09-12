@@ -42,8 +42,14 @@
  * classified as such, including the ones written next month — which is the only
  * way a rule keeps up with a lake that grows. Nothing is ever asked about a tag
  * directly either: it reaches a decision through the dataset that carries it.
+ *
+ * `secret` is the credential behind a connection, and it is governed here rather
+ * than by a role because the question is the one datasets already ask: who may
+ * reach this particular thing. `read` on a secret means "may be used by a run
+ * this person starts" — never "may be looked at". No level, and no endpoint,
+ * returns a value to anybody.
  */
-export type ResourceKind = 'dataset' | 'job' | 'pipeline' | 'workflow' | 'tag'
+export type ResourceKind = 'dataset' | 'job' | 'pipeline' | 'workflow' | 'tag' | 'secret'
 
 /** What the holder may do. Cumulative: admin implies write implies read. */
 export type AccessLevel = 'read' | 'write' | 'admin'
@@ -105,6 +111,7 @@ export const RESOURCE_KINDS: ResourceKind[] = [
   'pipeline',
   'workflow',
   'tag',
+  'secret',
 ]
 
 /** The kinds that live inside a Workflow, and therefore inherit from one. */
@@ -118,7 +125,13 @@ export const CONTAINED_KINDS: ResourceKind[] = ['job', 'pipeline']
  * classified restricted" names no object anybody can hand over, and it would
  * hand out an admin nothing can deny on tables the owner has never seen.
  */
-export const OWNABLE_KINDS: ResourceKind[] = ['dataset', 'job', 'pipeline', 'workflow']
+export const OWNABLE_KINDS: ResourceKind[] = [
+  'dataset',
+  'job',
+  'pipeline',
+  'workflow',
+  'secret',
+]
 
 export const LEVELS: AccessLevel[] = ['read', 'write', 'admin']
 
@@ -150,6 +163,11 @@ export const LEVEL_HINT: Record<ResourceKind, Record<AccessLevel, string>> = {
     read: 'Query every dataset the catalog gives this tag, and read its schema.',
     write: 'Everything read allows, on every dataset with this tag, including the ones tagged later.',
     admin: 'Everything write allows, plus editing those catalog entries and their grants.',
+  },
+  secret: {
+    read: 'Reference it from a Job, a query or a schema read — the run gets the value, the person never does.',
+    write: 'Everything read allows, plus rotating its fields, retagging it and deleting it.',
+    admin: 'Everything write allows, plus deciding who else may use it.',
   },
 }
 

@@ -19,6 +19,11 @@
  *     `LIMIT`. It bounds what is RETURNED, not what is scanned — a `GROUP BY`
  *     over a year of data still reads the year — so a timeout goes with it, and
  *     that is the control that actually bounds what a query can cost.
+ *   - **A query is a file.** Several can be open at once, each a tab, and saving
+ *     one writes `queries/<slug>.sql` into the library through the same backend
+ *     every other record uses — so a query is reviewable, diffable and shared
+ *     rather than stuck in one browser profile. A tab nobody has saved is still
+ *     only a draft, kept in `localStorage` so a reload does not lose it.
  *   - **The `spark` block travels with the query.** Connector jars and SQL
  *     extensions are honoured only when a SparkSession is created, so a Delta
  *     table is unreadable on a session built without them. The settings are not
@@ -31,11 +36,15 @@ import type { editor as MonacoEditor, IDisposable } from 'monaco-editor/esm/vs/e
 import {
   Copy,
   Database,
+  Download,
   Gauge,
+  History,
+  Network,
   Play,
   RotateCcw,
   Search,
   SquareTerminal,
+  Table2,
   TableProperties,
   Timer,
   TriangleAlert,
@@ -45,9 +54,28 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } 
 import { useNavigate } from 'react-router-dom'
 
 import { ASSET_HINT, NamespaceTree } from '@/components/catalog/NamespaceTree'
+import { PlanTree } from '@/components/sql/PlanTree'
+import { QueryHistory } from '@/components/sql/QueryHistory'
+import { QueryTabs, type QueryTabView } from '@/components/sql/QueryTabs'
 import { PageHeader, PageShell } from '@/components/layout/PageShell'
+import {
+  WorkspaceTabs,
+  workspacePanelId,
+  workspaceTabId,
+  type WorkspaceTab,
+} from '@/components/layout/WorkspaceTabs'
 import { RunResultTable } from '@/components/panels/RunResultTable'
-import { Badge, Button, EmptyState, Input, Kbd, Select, Spinner } from '@/components/ui'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  Input,
+  Kbd,
+  Modal,
+  Select,
+  Spinner,
+  useConfirm,
+} from '@/components/ui'
 import { buildNamespaceTree, describeAsset, deriveSchemas, type CatalogAsset } from '@/lib/datacatalog'
 import { buildLineage } from '@/lib/lineage'
 import { configureMonaco } from '@/lib/monaco'
@@ -59,13 +87,34 @@ import {
   type RunnerQueryResult,
 } from '@/lib/runner/client'
 import { sparkForDatasets } from '@/lib/runner/session'
+import {
+  addRun,
+  clearHistory,
+  historyKey,
+  moveHistory,
+  readHistory,
+  type QueryRun,
+} from '@/lib/sql/history'
+import { isPlanResult } from '@/lib/sql/plan'
 import { mentionedAliases, viewAlias } from '@/lib/sql/views'
+import { timestampedName, toCsv } from '@/lib/utils/csv'
+import { downloadText } from '@/lib/utils/download'
 import { useLibraryStore } from '@/store/library'
+import { UNTITLED, useQueriesStore } from '@/store/queries'
 import { useSettingsStore } from '@/store/settings'
 
 configureMonaco()
 
-/** Where the draft survives a reload. One editor, one draft — no history yet. */
+/**
+ * Where the open tabs survive a reload — the unsaved ones included.
+ *
+ * Deliberately `localStorage` and not the library: a tab nobody has named is a
+ * scratchpad, and writing a file for every keystroke would fill the library with
+ * `untitled-3.sql`. What is in the library is what somebody chose to save.
+ */
+const TABS_KEY = 'sparquet-studio:sql-tabs'
+
+/** The single draft this screen kept before tabs existed, read once to migrate it. */
 const DRAFT_KEY = 'sparquet-studio:sql-draft'
 
 /** How tall the editor was left, so the split survives a reload. */
@@ -162,13 +211,75 @@ interface Attachable {
   columns: string[]
 }
 
-function readDraft(): string {
-  try {
-    return localStorage.getItem(DRAFT_KEY) ?? ''
-  } catch {
-    // A browser with storage disabled still gets an editor, just no draft.
-    return ''
+/**
+ * One open buffer.
+ *
+ * `tabId` identifies the tab and `queryId` the file, and they are separate
+ * because a tab outlives both a rename and a first save: the same buffer starts
+ * as a draft, becomes `queries/orders.sql`, and is still the tab the person was
+ * typing in. `savedSql` is what the library last accepted, so "unsaved" is a
+ * comparison rather than a flag somebody has to remember to clear.
+ */
+interface SqlTab {
+  tabId: string
+  queryId: string | null
+  name: string
+  sql: string
+  limit: number
+  savedSql: string
+}
+
+/**
+ * What the space under the editor is showing.
+ *
+ * Three answers to one run — the rows, the plan behind them, and every earlier
+ * version of the statement — and they each want the whole width, so they take
+ * turns rather than stack.
+ */
+type Surface = 'result' | 'plan' | 'history'
+
+let tabSeq = 0
+
+function newTab(fields: Partial<SqlTab> = {}): SqlTab {
+  tabSeq += 1
+  return {
+    tabId: `t${Date.now().toString(36)}${tabSeq}`,
+    queryId: null,
+    name: UNTITLED,
+    sql: '',
+    limit: DEFAULT_LIMIT,
+    savedSql: '',
+    ...fields,
   }
+}
+
+function isTab(value: unknown): value is SqlTab {
+  if (typeof value !== 'object' || value === null) return false
+  const tab = value as Record<string, unknown>
+  return (
+    typeof tab.tabId === 'string' &&
+    typeof tab.name === 'string' &&
+    typeof tab.sql === 'string' &&
+    typeof tab.savedSql === 'string' &&
+    (tab.queryId === null || typeof tab.queryId === 'string')
+  )
+}
+
+function readTabs(): SqlTab[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(TABS_KEY) ?? 'null')
+    const tabs = Array.isArray(stored) ? stored.filter(isTab) : []
+    if (tabs.length > 0) {
+      return tabs.map((tab) => ({ ...tab, limit: Number(tab.limit) || DEFAULT_LIMIT }))
+    }
+    // Nothing to restore. The screen used to keep one unnamed draft, and losing
+    // it to an upgrade would be the rudest possible way to announce tabs.
+    const draft = localStorage.getItem(DRAFT_KEY) ?? ''
+    if (draft.trim()) return [newTab({ sql: draft })]
+  } catch {
+    // A browser with storage disabled still gets an editor, just no drafts.
+  }
+  return [newTab()]
 }
 
 function readHeight(): number {
@@ -190,8 +301,17 @@ export function SqlEditor() {
   const runnerToken = useSettingsStore((state) => state.runnerToken)
   const theme = useSettingsStore((state) => state.theme)
 
-  const [sql, setSql] = useState(readDraft)
-  const [limit, setLimit] = useState<number>(DEFAULT_LIMIT)
+  const saved = useQueriesStore((state) => state.items)
+  const loadQueries = useQueriesStore((state) => state.load)
+  const createQuery = useQueriesStore((state) => state.create)
+  const updateQuery = useQueriesStore((state) => state.update)
+  const removeQuery = useQueriesStore((state) => state.remove)
+
+  const [tabs, setTabs] = useState<SqlTab[]>(readTabs)
+  const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0]?.tabId ?? '')
+  const [naming, setNaming] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [confirm, confirmDialog] = useConfirm()
   const [timeoutSeconds, setTimeoutSeconds] = useState<number>(DEFAULT_TIMEOUT)
   const [query, setQuery] = useState('')
   const [running, setRunning] = useState(false)
@@ -199,14 +319,52 @@ export function SqlEditor() {
   const [error, setError] = useState<string | null>(null)
   const [selection, setSelection] = useState('')
   const [height, setHeight] = useState(readHeight)
+  const [surface, setSurface] = useState<Surface>('result')
+  const [history, setHistory] = useState<QueryRun[]>([])
 
   const abortRef = useRef<AbortController | null>(null)
   const queryIdRef = useRef<string | null>(null)
   // Monaco binds the shortcut once, so the command has to reach the CURRENT run.
   const runRef = useRef<() => void>(() => {})
+  const saveRef = useRef<() => void>(() => {})
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
   const completionRef = useRef<IDisposable | null>(null)
   const dragRef = useRef<{ from: number; height: number } | null>(null)
+
+  const active = tabs.find((tab) => tab.tabId === activeTabId) ?? tabs[0]
+  const sql = active?.sql ?? ''
+  const limit = active?.limit ?? DEFAULT_LIMIT
+  /** Which history this buffer writes to: its file when it has one, itself when not. */
+  const runsKey = historyKey(active?.queryId ?? null, active?.tabId ?? '')
+
+  /** Edits the tab being typed in. Everything that changes a buffer goes here. */
+  const patchActive = useCallback(
+    (patch: Partial<SqlTab>) => {
+      setTabs((current) =>
+        current.map((tab) => (tab.tabId === activeTabId ? { ...tab, ...patch } : tab)),
+      )
+    },
+    [activeTabId],
+  )
+
+  /** Kept as a setter so the call sites that fold over the current text still can. */
+  const setSql = useCallback(
+    (next: string | ((current: string) => string)) => {
+      setTabs((current) =>
+        current.map((tab) =>
+          tab.tabId === activeTabId
+            ? { ...tab, sql: typeof next === 'function' ? next(tab.sql) : next }
+            : tab,
+        ),
+      )
+    },
+    [activeTabId],
+  )
+
+  const setLimit = useCallback(
+    (value: number) => patchActive({ limit: value }),
+    [patchActive],
+  )
 
   const index = useMemo(() => buildLineage(jobs), [jobs])
   const schemas = useMemo(() => deriveSchemas(jobs), [jobs])
@@ -269,12 +427,17 @@ export function SqlEditor() {
   catalogRef.current = attachables
 
   useEffect(() => {
+    void loadQueries()
+  }, [loadQueries])
+
+  useEffect(() => {
     try {
-      localStorage.setItem(DRAFT_KEY, sql)
+      localStorage.setItem(TABS_KEY, JSON.stringify(tabs))
     } catch {
-      // Nothing to do: the draft is a convenience, not the user's data.
+      // Nothing to do: the tab strip is a convenience, not the user's data —
+      // what was saved is in the library, and that is the copy that matters.
     }
-  }, [sql])
+  }, [tabs])
 
   useEffect(() => {
     try {
@@ -283,6 +446,12 @@ export function SqlEditor() {
       // Same.
     }
   }, [height])
+
+  // Switching tab switches history with it — a run belongs to the query it was
+  // run from, not to the screen.
+  useEffect(() => {
+    setHistory(readHistory(runsKey))
+  }, [runsKey])
 
   useEffect(() => () => completionRef.current?.dispose(), [])
 
@@ -303,6 +472,7 @@ export function SqlEditor() {
     queryIdRef.current = queryId
     setRunning(true)
     setError(null)
+    const startedAt = Date.now()
 
     try {
       const answer = await runQuery(
@@ -322,15 +492,43 @@ export function SqlEditor() {
         runnerToken,
       )
       setResult(answer)
+      // An EXPLAIN comes back as one cell of text; showing it as a one-row
+      // table is showing the plan in a window the width of a column.
+      setSurface(isPlanResult(answer.columns, answer.rows) ? 'plan' : 'result')
+      setHistory(
+        addRun(runsKey, {
+          sql: statement,
+          limit,
+          elapsedMs: answer.elapsedMs,
+          rows: answer.rows.length,
+          truncated: answer.truncated,
+          error: null,
+        }),
+      )
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === 'AbortError') {
-        setError('Query cancelled.')
-      } else if (isRunnerError(caught)) {
-        setError(caught.message)
-      } else {
-        setError(caught instanceof Error ? caught.message : 'The query failed.')
-      }
+      const message =
+        caught instanceof DOMException && caught.name === 'AbortError'
+          ? 'Query cancelled.'
+          : isRunnerError(caught)
+            ? caught.message
+            : caught instanceof Error
+              ? caught.message
+              : 'The query failed.'
+      setError(message)
       setResult(null)
+      setSurface('result')
+      // A failed run is kept too: "what did I run that broke" is asked at least
+      // as often as "what did I run that worked".
+      setHistory(
+        addRun(runsKey, {
+          sql: statement,
+          limit,
+          elapsedMs: Date.now() - startedAt,
+          rows: 0,
+          truncated: false,
+          error: message.split('\n')[0],
+        }),
+      )
     } finally {
       abortRef.current = null
       queryIdRef.current = null
@@ -344,6 +542,7 @@ export function SqlEditor() {
     running,
     runnerToken,
     runnerUrl,
+    runsKey,
     selection,
     sql,
     timeoutSeconds,
@@ -351,6 +550,10 @@ export function SqlEditor() {
 
   runRef.current = () => {
     void run()
+  }
+
+  saveRef.current = () => {
+    void saveActive()
   }
 
   const stop = useCallback(() => {
@@ -364,6 +567,9 @@ export function SqlEditor() {
   const handleMount = useCallback<OnMount>((editor, monaco) => {
     editorRef.current = editor
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runRef.current())
+    // Ctrl/Cmd+S inside the editor saves the query rather than offering to save
+    // the page, which is what the browser would otherwise do with it.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())
     editor.onDidChangeCursorSelection(() => {
       const model = editor.getModel()
       const range = editor.getSelection()
@@ -462,7 +668,7 @@ export function SqlEditor() {
     }
     editor.executeEdits('catalog', [{ range, text, forceMoveMarkers: true }])
     editor.focus()
-  }, [])
+  }, [setSql])
 
   /** Clicking a table with an empty editor writes the query nobody wants to type. */
   const attachTable = useCallback(
@@ -473,8 +679,195 @@ export function SqlEditor() {
       }
       insert(entry.alias)
     },
-    [insert, sql],
+    [insert, setSql, sql],
   )
+
+  /* ------------------------------------------------------------- the files */
+
+  /** Unsaved means "the library does not have this". A never-saved empty tab is
+   *  not unsaved — there is nothing in it to lose. */
+  const isDirty = useCallback(
+    (tab: SqlTab) => (tab.queryId === null ? tab.sql.trim().length > 0 : tab.sql !== tab.savedSql),
+    [],
+  )
+
+  const openTab = useCallback(() => {
+    const tab = newTab()
+    setTabs((current) => [...current, tab])
+    setActiveTabId(tab.tabId)
+  }, [])
+
+  /** Opening a query already on screen focuses it instead of opening it twice. */
+  const openSaved = useCallback(
+    (queryId: string) => {
+      const existing = tabs.find((tab) => tab.queryId === queryId)
+      if (existing) {
+        setActiveTabId(existing.tabId)
+        return
+      }
+      const query = saved.find((item) => item.id === queryId)
+      if (!query) return
+      const tab = newTab({
+        queryId: query.id,
+        name: query.name,
+        sql: query.sql,
+        savedSql: query.sql,
+        limit: query.limit ?? DEFAULT_LIMIT,
+      })
+      setTabs((current) => [...current, tab])
+      setActiveTabId(tab.tabId)
+    },
+    [saved, tabs],
+  )
+
+  const closeTab = useCallback(
+    async (tabId: string) => {
+      const tab = tabs.find((item) => item.tabId === tabId)
+      if (!tab) return
+      if (isDirty(tab)) {
+        const ok = await confirm({
+          title: `Close ${tab.name}?`,
+          message:
+            tab.queryId === null
+              ? 'This query was never saved, so closing it loses what is in it.'
+              : 'The changes since the last save are not in the library and will be lost.',
+          confirmLabel: 'Close',
+          variant: 'danger',
+        })
+        if (!ok) return
+      }
+      setTabs((current) => {
+        const next = current.filter((item) => item.tabId !== tabId)
+        // The strip is never empty: an editor with no buffer has nothing to show
+        // and no obvious way back to one.
+        const tabsLeft = next.length > 0 ? next : [newTab()]
+        if (tabId === activeTabId) setActiveTabId(tabsLeft[tabsLeft.length - 1].tabId)
+        return tabsLeft
+      })
+    },
+    [activeTabId, confirm, isDirty, tabs],
+  )
+
+  /** Writes the current tab to the library, asking for a name the first time. */
+  const saveActive = useCallback(
+    async (name?: string) => {
+      const tab = tabs.find((item) => item.tabId === activeTabId)
+      if (!tab || saving) return
+      if (tab.queryId === null && name === undefined) {
+        setNaming(tab.name === UNTITLED ? '' : tab.name)
+        return
+      }
+      setSaving(true)
+      try {
+        const fields = { name: name ?? tab.name, sql: tab.sql, limit: tab.limit }
+        // `update` answers null when the query is gone — deleted from another
+        // tab, or from another browser against the same runner. Saving it again
+        // as a new file is better than telling somebody their work has no home.
+        const stored =
+          (tab.queryId !== null ? await updateQuery(tab.queryId, fields) : null) ??
+          (await createQuery(fields))
+        // The buffer just acquired a file, and the history follows the file from
+        // now on: without this, saving would drop everything run to get here.
+        moveHistory(historyKey(tab.queryId, tab.tabId), historyKey(stored.id, tab.tabId))
+        setTabs((current) =>
+          current.map((item) =>
+            item.tabId === tab.tabId
+              ? { ...item, queryId: stored.id, name: stored.name, savedSql: stored.sql }
+              : item,
+          ),
+        )
+        setNaming(null)
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught))
+      } finally {
+        setSaving(false)
+      }
+    },
+    [activeTabId, createQuery, saving, tabs, updateQuery],
+  )
+
+  const deleteActive = useCallback(async () => {
+    const tab = tabs.find((item) => item.tabId === activeTabId)
+    if (!tab?.queryId) return
+    const ok = await confirm({
+      title: `Delete ${tab.name}?`,
+      message: 'The file goes from the library. The tab stays open as a draft.',
+      confirmLabel: 'Delete',
+      variant: 'danger',
+    })
+    if (!ok) return
+    await removeQuery(tab.queryId)
+    setTabs((current) =>
+      current.map((item) =>
+        item.tabId === tab.tabId ? { ...item, queryId: null, savedSql: '' } : item,
+      ),
+    )
+  }, [activeTabId, confirm, removeQuery, tabs])
+
+  const tabViews = useMemo<QueryTabView[]>(
+    () =>
+      tabs.map((tab) => ({
+        tabId: tab.tabId,
+        queryId: tab.queryId,
+        name: tab.name,
+        dirty: isDirty(tab),
+      })),
+    [isDirty, tabs],
+  )
+
+  /* ----------------------------------------------------------- the results */
+
+  /** The plan, when the runner answered with one instead of with rows. */
+  const planText = useMemo(
+    () =>
+      result && isPlanResult(result.columns, result.rows) ? String(result.rows[0][0]) : null,
+    [result],
+  )
+
+  /**
+   * The result as a file.
+   *
+   * What is written is what came back — the rows already capped by the limit,
+   * not the query re-run without one. Exporting more than was asked for would
+   * make a download a second, invisible query, and a 20-row preview would
+   * quietly become a full scan.
+   */
+  const exportResult = useCallback(
+    (format: 'csv' | 'json') => {
+      if (!result) return
+      const stem = active && active.name !== UNTITLED ? active.name : 'query-result'
+      if (format === 'csv') {
+        downloadText(
+          timestampedName(stem, 'csv'),
+          toCsv(result.columns, result.rows),
+          'text/csv;charset=utf-8',
+        )
+        return
+      }
+      // Objects rather than arrays of cells: a JSON export is read by a program,
+      // and a program that has to remember column order is reading a CSV badly.
+      const objects = result.rows.map((row) =>
+        Object.fromEntries(result.columns.map((column, index) => [column, row[index] ?? null])),
+      )
+      downloadText(timestampedName(stem, 'json'), JSON.stringify(objects, null, 2))
+    },
+    [active, result],
+  )
+
+  const surfaceTabs = useMemo<WorkspaceTab<Surface>[]>(() => {
+    const list: WorkspaceTab<Surface>[] = [{ id: 'result', label: 'Result', icon: Table2 }]
+    if (planText) list.push({ id: 'plan', label: 'Plan', icon: Network })
+    list.push({
+      id: 'history',
+      label: 'History',
+      icon: History,
+      badge:
+        history.length > 0 ? (
+          <span className="tabular-nums text-content-subtle">{history.length}</span>
+        ) : undefined,
+    })
+    return list
+  }, [history.length, planText])
 
   const startDrag = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -572,6 +965,9 @@ export function SqlEditor() {
   const statement = (selection.trim() || sql).trim()
   const named = new Set(mentionedAliases(statement, aliases))
   const attached = attachables.filter((entry) => named.has(entry.alias))
+  // The plan tab exists only while there is a plan, so a run that returns rows
+  // after an EXPLAIN must not leave the screen pointing at a tab that is gone.
+  const shownSurface: Surface = surface === 'plan' && !planText ? 'result' : surface
 
   return (
     <PageShell width="full">
@@ -624,6 +1020,19 @@ export function SqlEditor() {
 
         <section className="min-w-0 space-y-3">
           <div className="card flex flex-col p-0">
+            <QueryTabs
+              tabs={tabViews}
+              activeTabId={active?.tabId ?? ''}
+              saved={saved}
+              saving={saving}
+              onSelect={setActiveTabId}
+              onClose={(tabId) => void closeTab(tabId)}
+              onNew={openTab}
+              onOpen={openSaved}
+              onSave={() => void saveActive()}
+              onRename={() => setNaming(active?.name === UNTITLED ? '' : (active?.name ?? ''))}
+              onDelete={() => void deleteActive()}
+            />
             <header className="flex flex-wrap items-center gap-2 border-b border-line px-2.5 py-2">
               <Button size="sm" onClick={() => void run()} disabled={running || !statement}>
                 {running ? <Spinner className="h-3.5 w-3.5" /> : <Play />}
@@ -773,46 +1182,125 @@ export function SqlEditor() {
             </div>
           )}
 
-          {result && !error && (
-            <div className="space-y-2">
-              <p className="flex flex-wrap items-center gap-2 text-[11px] text-content-subtle">
-                <span className="tabular-nums">{result.rows.length} rows</span>
-                <span aria-hidden>·</span>
-                <span className="tabular-nums">{result.elapsedMs} ms</span>
-                <span aria-hidden>·</span>
-                <span className="tabular-nums">{result.columns.length} columns</span>
-                {result.truncated && (
-                  <Badge tone="warning">cut at {limit} — there are more rows</Badge>
-                )}
-                {result.sessionRestarted && (
-                  <span
-                    className="flex items-center gap-1"
-                    title="The SparkSession was rebuilt so this query's connectors — Delta,
-                      Iceberg, a JDBC driver — were on it. Jars and SQL extensions are read only
-                      when a session is created, so an existing session cannot pick them up."
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    <Badge tone="info">Spark session rebuilt</Badge>
-                  </span>
-                )}
-                {attached.length > 0 && (
-                  <span title={attached.map((entry) => `${entry.alias} → ${entry.key}`).join('\n')}>
-                    {attached.map((entry) => entry.alias).join(', ')}
-                  </span>
-                )}
-              </p>
-              <RunResultTable
-                columns={result.columns}
-                rows={result.rows}
-                truncated={result.truncated}
-                maxRows={limit}
-                emptyMessage="The query returned no rows."
-                heightClass="max-h-[26rem]"
+          {/*
+            The rows, the plan and the runs are three answers about the same
+            statement, and each wants the full width — so they take turns under
+            one strip instead of stacking into a page nobody scrolls twice.
+          */}
+          {(result || history.length > 0) && (
+            <div className="card overflow-hidden p-0">
+              <WorkspaceTabs
+                value={shownSurface}
+                onChange={setSurface}
+                tabs={surfaceTabs}
+                ariaLabel="Query output"
+                actions={
+                  result && shownSurface === 'result' ? (
+                    <span className="flex items-center gap-1">
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => exportResult('csv')}
+                        icon={<Download className="h-3 w-3" />}
+                        title="Download these rows as CSV — what came back, capped as it was run"
+                      >
+                        CSV
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => exportResult('json')}
+                        icon={<Download className="h-3 w-3" />}
+                        title="Download these rows as JSON, one object per row"
+                      >
+                        JSON
+                      </Button>
+                    </span>
+                  ) : null
+                }
               />
+
+              <div
+                role="tabpanel"
+                id={workspacePanelId(shownSurface)}
+                aria-labelledby={workspaceTabId(shownSurface)}
+                className="space-y-2 p-2.5"
+              >
+                {shownSurface === 'result' ? (
+                  result && !error ? (
+                    <>
+                      <p className="flex flex-wrap items-center gap-2 text-[11px] text-content-subtle">
+                        <span className="tabular-nums">{result.rows.length} rows</span>
+                        <span aria-hidden>·</span>
+                        <span className="tabular-nums">{result.elapsedMs} ms</span>
+                        <span aria-hidden>·</span>
+                        <span className="tabular-nums">{result.columns.length} columns</span>
+                        {result.truncated && (
+                          <Badge tone="warning">cut at {limit} — there are more rows</Badge>
+                        )}
+                        {result.sessionRestarted && (
+                          <span
+                            className="flex items-center gap-1"
+                            title="The SparkSession was rebuilt so this query's connectors — Delta,
+                              Iceberg, a JDBC driver — were on it. Jars and SQL extensions are read
+                              only when a session is created, so an existing session cannot pick
+                              them up."
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            <Badge tone="info">Spark session rebuilt</Badge>
+                          </span>
+                        )}
+                        {attached.length > 0 && (
+                          <span
+                            title={attached
+                              .map((entry) => `${entry.alias} → ${entry.key}`)
+                              .join('\n')}
+                          >
+                            {attached.map((entry) => entry.alias).join(', ')}
+                          </span>
+                        )}
+                      </p>
+                      <RunResultTable
+                        columns={result.columns}
+                        rows={result.rows}
+                        fields={result.fields}
+                        truncated={result.truncated}
+                        maxRows={limit}
+                        sortable
+                        inspectable
+                        emptyMessage="The query returned no rows."
+                        heightClass="max-h-[26rem]"
+                      />
+                    </>
+                  ) : (
+                    <p className="rounded-xl border border-dashed border-line px-3 py-8 text-center text-xs text-content-subtle">
+                      {error
+                        ? 'The last run failed — the message is above, and the statement is under History.'
+                        : 'Nothing run in this tab yet.'}
+                    </p>
+                  )
+                ) : null}
+
+                {shownSurface === 'plan' && planText ? <PlanTree text={planText} /> : null}
+
+                {shownSurface === 'history' ? (
+                  <QueryHistory
+                    runs={history}
+                    onRestore={(text) => {
+                      setSql(text)
+                      setSurface('result')
+                    }}
+                    onClear={() => {
+                      clearHistory(runsKey)
+                      setHistory([])
+                    }}
+                  />
+                ) : null}
+              </div>
             </div>
           )}
 
-          {!result && !error && (
+          {!result && !error && history.length === 0 && (
             <p className="rounded-xl border border-dashed border-line px-3 py-8 text-center text-xs text-content-subtle">
               Pick a table on the left, or write a query. Results appear here.{' '}
               <span title={ASSET_HINT.table}>Tables, folders and topics all read the same way.</span>
@@ -820,6 +1308,44 @@ export function SqlEditor() {
           )}
         </section>
       </div>
+
+      {/* Naming is a dialog rather than an editable tab label because the name
+          becomes a file name — `queries/<slug>.sql` — and a rename that happens
+          by accident renames a file in somebody's repository. */}
+      <Modal
+        open={naming !== null}
+        onOpenChange={(open) => !open && setNaming(null)}
+        title={active?.queryId ? 'Rename query' : 'Save query'}
+        description="The name becomes the file name in the library."
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setNaming(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void saveActive(naming ?? '')}
+              disabled={saving || !(naming ?? '').trim()}
+            >
+              {saving ? <Spinner className="h-3.5 w-3.5" /> : null}
+              Save
+            </Button>
+          </>
+        }
+      >
+        <Input
+          value={naming ?? ''}
+          onChange={(event) => setNaming(event.target.value)}
+          placeholder="Orders by day"
+          aria-label="Query name"
+          autoFocus
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && (naming ?? '').trim()) void saveActive(naming ?? '')
+          }}
+        />
+      </Modal>
+
+      {confirmDialog}
     </PageShell>
   )
 }

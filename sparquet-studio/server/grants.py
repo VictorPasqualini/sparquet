@@ -50,7 +50,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 #: because somebody filed it there, a tag contains a dataset because somebody
 #: described it that way in the catalog. One rule on `tag/pii` governs every
 #: table classified as such, including the ones written next month.
-RESOURCE_KINDS = ("dataset", "job", "pipeline", "workflow", "tag")
+#: `secret` is the credential behind a connection. It is governed here rather
+#: than by a role because the question is the same one datasets ask — who may
+#: reach this particular thing — and because `read` on a secret means "may be
+#: used by a run this person starts", never "may be looked at".
+RESOURCE_KINDS = ("dataset", "job", "pipeline", "workflow", "tag", "secret")
 
 #: The kinds that live inside a Workflow, and therefore inherit from one.
 CONTAINED_KINDS = ("job", "pipeline")
@@ -58,7 +62,7 @@ CONTAINED_KINDS = ("job", "pipeline")
 #: The kinds a deed can be written on. A tag is not one: ownership is
 #: responsibility for a thing, and a tag is a word that is true of several. See
 #: `OWNABLE_KINDS` in `src/lib/iam/grants.ts`.
-OWNABLE_KINDS = ("dataset", "job", "pipeline", "workflow")
+OWNABLE_KINDS = ("dataset", "job", "pipeline", "workflow", "secret")
 
 LEVELS = ("read", "write", "admin")
 

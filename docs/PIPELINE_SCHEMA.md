@@ -168,6 +168,13 @@ durante as transformações).
 As duas sintaxes **não colidem**: `{{nome}}` fica intacto mesmo quando `params` tem uma chave
 `nome`. São as chaves duplas que distinguem as duas — o template só substitui `{nome}` sozinha.
 
+Uma terceira forma pode aparecer num JSON escrito pelo Sparquet Studio:
+`{secret:nome/campo}`, uma credencial de conexão. **O framework não a resolve** — o
+runner do Studio a substitui antes de entregar o documento. Ela não colide com
+nenhuma das duas acima porque `apply_template` casa `(?<!\{)\{(\w+)\}(?!\})`, e `\w`
+não cobre `:` nem `/`. Do ponto de vista do framework é texto literal, e nada em
+`sparquet/` precisou mudar para isso funcionar.
+
 ---
 
 ## Reutilização de transformações com `$include`

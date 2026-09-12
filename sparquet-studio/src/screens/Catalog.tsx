@@ -1,4 +1,4 @@
-import { Database, Network, Search, Share2, Sparkles, Table2, X } from 'lucide-react'
+import { Database, KeyRound, Network, Search, Share2, Sparkles, Table2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -14,6 +14,7 @@ import {
   type SegmentedOption,
 } from '@/components/ui'
 import { PageHeader, PageShell } from '@/components/layout/PageShell'
+import { SecretsPanel } from '@/components/catalog/SecretsPanel'
 import { CatalogBrowser } from '@/components/lineage/CatalogBrowser'
 import { DatasetSheet } from '@/components/lineage/DatasetSheet'
 import { LineageGraph } from '@/components/lineage/LineageGraph'
@@ -101,7 +102,7 @@ function matchesGovernance(filter: GovFilter, decision: Decision | undefined): b
   return false
 }
 
-type View = 'list' | 'graph'
+type View = 'list' | 'graph' | 'connections'
 
 const VIEWS: SegmentedOption<View>[] = [
   {
@@ -121,6 +122,16 @@ const VIEWS: SegmentedOption<View>[] = [
       <span className="flex items-center gap-1.5">
         <Share2 className="h-3 w-3" />
         Lineage
+      </span>
+    ),
+  },
+  {
+    value: 'connections',
+    title: 'The credentials that open those datasets — named here, never shown',
+    label: (
+      <span className="flex items-center gap-1.5">
+        <KeyRound className="h-3 w-3" />
+        Connections
       </span>
     ),
   },
@@ -579,6 +590,7 @@ export function Catalog() {
             />
           </>
         ) : null}
+        {view === 'connections' ? null : (
         <div className="relative ml-auto w-full max-w-xs">
           <Input
             ref={searchRef}
@@ -607,9 +619,12 @@ export function Catalog() {
             </span>
           )}
         </div>
+        )}
       </div>
 
-      {view === 'graph' ? (
+      {view === 'connections' ? (
+        <SecretsPanel />
+      ) : view === 'graph' ? (
         <div className="space-y-2">
           <div className="h-[70vh] overflow-hidden rounded-lg border border-line">
             <LineageGraph

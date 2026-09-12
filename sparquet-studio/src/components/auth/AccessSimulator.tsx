@@ -26,7 +26,7 @@ function messageOf(error: unknown): string {
 }
 
 /** The securable kinds layer two knows. `tag` is answered through the datasets that carry it. */
-const KINDS = ['', 'dataset', 'job', 'pipeline', 'workflow'] as const
+const KINDS = ['', 'dataset', 'job', 'pipeline', 'workflow', 'secret'] as const
 
 const LEVELS = ['', 'read', 'write', 'admin'] as const
 
@@ -96,7 +96,7 @@ export function AccessSimulator() {
 
   return (
     <>
-      <div className="space-y-0.5 border-t border-line pt-4">
+      <div className="space-y-0.5">
         <p className="text-sm text-content">Access simulator</p>
         <p className="max-w-md text-2xs leading-relaxed text-content-subtle">
           What somebody else would be allowed to do right now, answered by the runner itself —

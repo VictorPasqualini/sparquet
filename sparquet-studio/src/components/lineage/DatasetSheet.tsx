@@ -28,6 +28,7 @@ import { OwnerPicker, type NewOwner } from '@/components/catalog/OwnerPicker'
 import { addTag, hasTag, MAX_TAG_LENGTH, MAX_TAGS, removeTag } from '@/lib/tags'
 import type { DatasetGrant, Owner } from '@/lib/iam'
 import type { AuthTeam, AuthUser } from '@/types/auth'
+import { useSecretsStore } from '@/store/secrets'
 import {
   CLASSIFICATIONS,
   compareSchema,
@@ -512,6 +513,7 @@ interface Draft {
   domain: string
   classification: DataClassification | ''
   tags: string[]
+  connection: string
 }
 
 function draftOf(annotation: DatasetAnnotation | null): Draft {
@@ -521,6 +523,7 @@ function draftOf(annotation: DatasetAnnotation | null): Draft {
     domain: annotation?.domain ?? '',
     classification: annotation?.classification ?? '',
     tags: annotation?.tags ?? [],
+    connection: annotation?.connection ?? '',
   }
 }
 
@@ -530,6 +533,7 @@ function sameDraft(a: Draft, b: Draft): boolean {
     a.owner === b.owner &&
     a.domain === b.domain &&
     a.classification === b.classification &&
+    a.connection === b.connection &&
     a.tags.length === b.tags.length &&
     a.tags.every((tag, index) => tag === b.tags[index])
   )
@@ -731,12 +735,24 @@ export function DatasetSheet({
   const [draft, setDraft] = useState<Draft>(() => draftOf(annotation))
   const [saving, setSaving] = useState(false)
   const [tab, setTab] = useState<Tab>('shape')
+  const secrets = useSecretsStore((state) => state.items)
+  const loadSecrets = useSecretsStore((state) => state.load)
 
   // A different dataset in the same modal is a different form.
   useEffect(() => {
     setDraft(draftOf(annotation))
     setTab('shape')
   }, [dataset?.key, annotation])
+
+  // Only the names, and only to fill a picker. Nothing here reads a value.
+  useEffect(() => {
+    void loadSecrets()
+  }, [loadSecrets])
+
+  const connectionOptions = useMemo<SelectOption[]>(
+    () => secrets.map((secret) => ({ value: secret.name, label: secret.name })),
+    [secrets],
+  )
 
   const dirty = useMemo(() => !sameDraft(draft, draftOf(annotation)), [draft, annotation])
 
@@ -880,6 +896,34 @@ export function DatasetSheet({
             suggestions={suggestions}
             onChange={(tags) => setDraft({ ...draft, tags })}
           />
+        </Field>
+
+        {/*
+          The name of the credential, and nothing more. It answers "what does
+          this table need to be opened", which today is only findable by reading
+          every Job that touches it. A free text box rather than only a picker,
+          because the runner may hold a secret this person is not allowed to
+          list, and the name is still the right thing to write down.
+        */}
+        <Field
+          label="Connection"
+          help="The secret that opens this dataset, by name. Its fields stay on the runner —
+            a Job references them as {secret:name/field}."
+        >
+          {connectionOptions.length > 0 ? (
+            <Select
+              value={draft.connection}
+              options={connectionOptions}
+              placeholder="No connection named"
+              onValueChange={(value) => setDraft({ ...draft, connection: value })}
+            />
+          ) : (
+            <Input
+              value={draft.connection}
+              placeholder="pg-prod"
+              onChange={(event) => setDraft({ ...draft, connection: event.target.value })}
+            />
+          )}
         </Field>
           </>
         ) : null}

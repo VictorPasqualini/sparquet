@@ -18,9 +18,19 @@ import { useMemo, useState } from 'react'
 import { Badge, Button, Input, Select } from '@/components/ui'
 import { useCatalogStore } from '@/store/catalog'
 import { useLibraryStore } from '@/store/library'
+import { useSecretsStore } from '@/store/secrets'
 
 /** The kinds a statement may scope to, plus the "everything" row that has no id. */
-const KINDS = ['*', 'workflow', 'pipeline', 'job', 'dataset', 'team', 'user'] as const
+const KINDS = [
+  '*',
+  'workflow',
+  'pipeline',
+  'job',
+  'dataset',
+  'secret',
+  'team',
+  'user',
+] as const
 
 type Kind = (typeof KINDS)[number]
 
@@ -41,6 +51,7 @@ export function useResourceChoices(): Record<string, ResourceChoice[]> {
   const jobs = useLibraryStore((state) => state.jobs)
   const pipelines = useLibraryStore((state) => state.pipelines)
   const annotations = useCatalogStore((state) => state.annotations)
+  const secrets = useSecretsStore((state) => state.items)
 
   return useMemo(() => {
     const named = (records: { id: string; name?: string }[]) =>
@@ -50,10 +61,13 @@ export function useResourceChoices(): Record<string, ResourceChoice[]> {
       pipeline: named(pipelines),
       job: named(jobs),
       dataset: Object.keys(annotations).map((key) => ({ id: key, label: key })),
+      // A secret is named by its name, which is also its id — there is no record
+      // behind it to look a label up in.
+      secret: secrets.map((secret) => ({ id: secret.name, label: secret.name })),
       team: [],
       user: [],
     }
-  }, [annotations, jobs, pipelines, workflows])
+  }, [annotations, jobs, pipelines, secrets, workflows])
 }
 
 /** `job/j1` split into its two halves; `*` has no id and no kind to check. */

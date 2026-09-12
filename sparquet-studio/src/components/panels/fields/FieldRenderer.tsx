@@ -26,6 +26,7 @@ import {
   JsonField,
   KeyValueField,
   MultiSelectField,
+  SecretField,
   SourceField,
   SqlListField,
   StringListField,
@@ -240,6 +241,17 @@ function renderControl({
           spellCheck={field.type === 'sql' ? false : undefined}
           onChange={(event) => onChange(event.target.value)}
           className={field.type === 'sql' ? 'px-2.5 py-2' : undefined}
+        />
+      )
+
+    case 'secret':
+      return (
+        <SecretField
+          id={controlId}
+          value={asText(value)}
+          placeholder={field.placeholder}
+          invalid={invalid}
+          onChange={(next) => onChange(next)}
         />
       )
 

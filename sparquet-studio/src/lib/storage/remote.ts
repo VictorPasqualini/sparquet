@@ -155,6 +155,7 @@ export async function workspaceBackend(
   hydrate(documentsOf(snapshot, 'workflows'), 'workflow')
   hydrate(documentsOf(snapshot, 'jobs'), 'job')
   hydrate(documentsOf(snapshot, 'pipelines'), 'pipeline')
+  hydrate(documentsOf(snapshot, 'queries'), 'query')
 
   const meta = isRecord(snapshot.meta) ? snapshot.meta : {}
   for (const [name, value] of Object.entries(meta)) cache.set(`${META_PREFIX}${name}`, value)

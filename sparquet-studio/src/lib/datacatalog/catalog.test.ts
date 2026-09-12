@@ -8,6 +8,7 @@ import {
   emptyAnnotation,
   isBlank,
   knownDomains,
+  MAX_CONNECTION,
   MAX_DESCRIPTION,
   normalizeAnnotation,
   orphanAnnotations,
@@ -24,6 +25,21 @@ const described = (key: string, patch = {}): CatalogAnnotations => ({
 })
 
 describe('normalizeAnnotation', () => {
+  it('keeps the connection as a bounded name and nothing more', () => {
+    const annotation = normalizeAnnotation('/t', {
+      connection: `  ${'p'.repeat(MAX_CONNECTION + 10)}  `,
+    })
+
+    expect(annotation.connection).toHaveLength(MAX_CONNECTION)
+  })
+
+  it('counts a connection on its own as something worth keeping', () => {
+    // Naming the credential is a real statement about the dataset, so an
+    // annotation that says only that must not be swept away as blank.
+    expect(isBlank(normalizeAnnotation('/t', { connection: 'pg-prod' }))).toBe(false)
+    expect(isBlank(normalizeAnnotation('/t', { connection: '   ' }))).toBe(true)
+  })
+
   it('trims, bounds and drops a classification it does not know', () => {
     const annotation = normalizeAnnotation('/t', {
       description: `  ${'x'.repeat(MAX_DESCRIPTION + 40)}  `,
