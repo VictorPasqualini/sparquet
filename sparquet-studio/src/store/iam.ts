@@ -23,6 +23,7 @@ import {
   grantsByResource,
   mayAdminister,
   ownerOf,
+  tagScopes,
   withGrant,
   withOwner,
   withoutGrant,
@@ -36,6 +37,7 @@ import {
 } from '@/lib/iam'
 import * as db from '@/lib/storage/db'
 import { useAuthStore } from '@/store/auth'
+import { useCatalogStore } from '@/store/catalog'
 import { useLibraryStore } from '@/store/library'
 
 interface IamState {
@@ -125,13 +127,25 @@ export const useIamStore = create<IamState>((set, get) => ({
 }))
 
 /**
- * What one resource inherits from — the Workflow a Job or a Pipeline lives in.
+ * What one resource inherits from — the Workflow a Job or a Pipeline lives in,
+ * and the tags the catalog gives a dataset.
  *
- * A dataset needs nothing here: its ancestors are in the address itself, and
- * `scopeChain` derives them without asking anybody. Mirrors `_parents_of` in
- * `server/main.py`, which reads the same `workflowId` off the stored record.
+ * A dataset's path ancestors need nothing here: they are in the address itself,
+ * and `scopeChain` derives them without asking anybody. Its tags are the
+ * opposite — they exist only in the catalog entry somebody typed, which is why
+ * they are looked up here and handed in. Mirrors `_parents_of` in
+ * `server/main.py`, which reads the same two records out of the workspace.
  */
 export function parentsOf(resource: ResourceKind, resourceId: string): Scope[] {
+  if (resource === 'dataset') {
+    const annotation = useCatalogStore.getState().annotations[resourceId]
+    return annotation
+      ? tagScopes(annotation.tags, {
+          classification: annotation.classification,
+          domain: annotation.domain,
+        })
+      : []
+  }
   if (!CONTAINED_KINDS.includes(resource) || !resourceId) return []
   const library = useLibraryStore.getState()
   const record =

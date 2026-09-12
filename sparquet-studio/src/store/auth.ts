@@ -31,6 +31,7 @@ import {
   listTeams,
   listUsers,
   login as apiLogin,
+  simulateAccess as apiSimulateAccess,
   logout as apiLogout,
   recoverPassword as apiRecoverPassword,
   setPassword as apiSetPassword,
@@ -40,7 +41,9 @@ import {
 } from '@/lib/auth/client'
 import { can as evaluate } from '@/lib/auth/permissions'
 import { RunnerError, setRunnerSession } from '@/lib/runner/client'
+import type { AccessLevel } from '@/lib/iam'
 import type {
+  AccessSimulation,
   AuthRole,
   AuthTeam,
   AuthUser,
@@ -78,6 +81,18 @@ interface AuthState {
   fetchTeams: () => Promise<AuthTeam[]>
   /** The actions and resource kinds the runner itself knows, for the role editor. */
   fetchPolicy: () => Promise<PolicyVocabulary>
+  /**
+   * What another person would be allowed to do, answered by the runner rather
+   * than worked out here — the simulator is only worth trusting if it runs the
+   * same code the request itself would.
+   */
+  simulate: (query: {
+    username: string
+    action?: string | null
+    resource?: string
+    resourceId?: string
+    level?: AccessLevel | null
+  }) => Promise<AccessSimulation>
   addUser: (body: {
     username: string
     password: string
@@ -245,6 +260,11 @@ export const useAuthStore = create<AuthState>()(
       fetchPolicy: async () => {
         const { url, token } = runner()
         return getPolicyVocabulary(url, token)
+      },
+
+      simulate: async (query) => {
+        const { url, token } = runner()
+        return apiSimulateAccess(url, query, token)
       },
 
       addUser: async (body) => {

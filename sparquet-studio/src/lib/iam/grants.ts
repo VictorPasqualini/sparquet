@@ -35,8 +35,15 @@
  * A Workflow is in the list but is never asked about directly: it is the
  * container a Job and a Pipeline inherit from, which is what a catalog is to a
  * table.
+ *
+ * `tag` is the same idea turned sideways. A Workflow contains a Job because
+ * somebody filed it there; a tag contains a dataset because somebody described
+ * it that way in the catalog. One rule on `tag/pii` governs every table
+ * classified as such, including the ones written next month — which is the only
+ * way a rule keeps up with a lake that grows. Nothing is ever asked about a tag
+ * directly either: it reaches a decision through the dataset that carries it.
  */
-export type ResourceKind = 'dataset' | 'job' | 'pipeline' | 'workflow'
+export type ResourceKind = 'dataset' | 'job' | 'pipeline' | 'workflow' | 'tag'
 
 /** What the holder may do. Cumulative: admin implies write implies read. */
 export type AccessLevel = 'read' | 'write' | 'admin'
@@ -92,10 +99,26 @@ export interface Owner {
   updatedAt: number
 }
 
-export const RESOURCE_KINDS: ResourceKind[] = ['dataset', 'job', 'pipeline', 'workflow']
+export const RESOURCE_KINDS: ResourceKind[] = [
+  'dataset',
+  'job',
+  'pipeline',
+  'workflow',
+  'tag',
+]
 
 /** The kinds that live inside a Workflow, and therefore inherit from one. */
 export const CONTAINED_KINDS: ResourceKind[] = ['job', 'pipeline']
+
+/**
+ * The kinds a deed can be written on.
+ *
+ * A tag is not one of them. Ownership is responsibility for a thing, and a tag
+ * is a word that happens to be true of several things — "owner of everything
+ * classified restricted" names no object anybody can hand over, and it would
+ * hand out an admin nothing can deny on tables the owner has never seen.
+ */
+export const OWNABLE_KINDS: ResourceKind[] = ['dataset', 'job', 'pipeline', 'workflow']
 
 export const LEVELS: AccessLevel[] = ['read', 'write', 'admin']
 
@@ -122,6 +145,11 @@ export const LEVEL_HINT: Record<ResourceKind, Record<AccessLevel, string>> = {
     read: 'Open the Workflow and everything inside it.',
     write: 'Everything read allows, plus editing and running what is inside it.',
     admin: 'Everything write allows, plus changing who may reach anything in it.',
+  },
+  tag: {
+    read: 'Query every dataset the catalog gives this tag, and read its schema.',
+    write: 'Everything read allows, on every dataset with this tag, including the ones tagged later.',
+    admin: 'Everything write allows, plus editing those catalog entries and their grants.',
   },
 }
 
@@ -162,7 +190,9 @@ export function sanitizeGrants(raw: unknown): Grant[] {
     const level = item.level as AccessLevel
     const principalKind = item.principalKind as PrincipalKind
     if (!KINDS.has(resource) || !LEVEL_SET.has(level) || !PRINCIPALS.has(principalKind)) continue
-    const resourceId = text(item.resourceId, 512)
+    const raw_id = text(item.resourceId, 512)
+    // One spelling per tag, written the same way the lookup will ask for it.
+    const resourceId = resource === 'tag' ? normalizeTag(raw_id) : raw_id
     const principalId = text(item.principalId, 128)
     const principalLabel = text(item.principalLabel, 128)
     if (!resourceId || !principalId) continue
@@ -198,7 +228,8 @@ export function sanitizeOwners(raw: unknown): Owner[] {
     if (!isRecord(item)) continue
     const resource = item.resource as ResourceKind
     const principalKind = item.principalKind as PrincipalKind
-    if (!KINDS.has(resource) || !PRINCIPALS.has(principalKind)) continue
+    // A tag owns nothing and is owned by nobody; see `OWNABLE_KINDS`.
+    if (!OWNABLE_KINDS.includes(resource) || !PRINCIPALS.has(principalKind)) continue
     const resourceId = text(item.resourceId, 512)
     const principalId = text(item.principalId, 128)
     if (!resourceId || !principalId) continue
@@ -262,6 +293,50 @@ export function ancestors(resourceId: string): string[] {
 
 /** A `[kind, id]` pair in the chain. */
 export type Scope = [ResourceKind, string]
+
+/**
+ * The one spelling of a tag the rules are written against.
+ *
+ * Lower-cased and trimmed because the catalog is typed by people: `PII`, `pii `
+ * and `Pii` are one tag to everybody except a string comparison, and a rule
+ * that misses because of a capital letter fails open. Must agree with
+ * `normalize_tag` in `server/grants.py`.
+ */
+export function normalizeTag(tag: string): string {
+  return (tag ?? '').trim().toLowerCase()
+}
+
+/**
+ * The tags of one dataset, as scopes a decision can inherit from.
+ *
+ * Kept here rather than read off the catalog: this module knows nothing about
+ * annotations, and the caller — the browser store or the runner — is the one
+ * that can look them up.
+ *
+ * `attributes` are the catalog fields that are not free tags but describe the
+ * data just as well, and they enter as `field:value` — `classification:restricted`,
+ * `domain:finance`. They are the two people most want a single rule on, and
+ * spelling them into the same namespace means one screen, one rule and one
+ * evaluation instead of a third mechanism.
+ */
+export function tagScopes(
+  tags: readonly string[] = [],
+  attributes: Readonly<Record<string, string | null | undefined>> = {},
+): Scope[] {
+  const out: Scope[] = []
+  const seen = new Set<string>()
+  const add = (value: string) => {
+    const tag = normalizeTag(value)
+    if (!tag || tag === ANY || seen.has(tag)) return
+    seen.add(tag)
+    out.push(['tag', tag])
+  }
+  for (const tag of tags) add(tag)
+  for (const [field, value] of Object.entries(attributes)) {
+    if (value) add(`${field}:${value}`)
+  }
+  return out
+}
 
 /**
  * Every place a rule could be written to reach this securable, nearest first.

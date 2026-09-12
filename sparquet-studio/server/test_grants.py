@@ -503,5 +503,177 @@ class EffectiveAccessEndpointTest(unittest.TestCase):
         self.assertEqual(self.ask(principal(), {"resource": "table", "resourceId": "x"}), [])
 
 
+class TagGrantTest(unittest.TestCase):
+    """A rule written on a tag, reaching every dataset the catalog tags with it.
+
+    The chain a dataset already had is its address; a tag is the one container
+    that is not in the address, so it arrives the same way a Workflow does for a
+    Job — through `parents`.
+    """
+
+    def setUp(self) -> None:
+        main._workspace.write_meta("catalog", {
+            "/data/orders": {
+                "key": "/data/orders",
+                "tags": ["PII", "  Finance  "],
+                "classification": "confidential",
+                "domain": "sales",
+            },
+            "/data/public_holidays": {"key": "/data/public_holidays", "tags": []},
+        })
+        self.addCleanup(lambda: main._workspace.write_meta("catalog", {}))
+        self.addCleanup(lambda: main._workspace.write_meta("grants", []))
+
+    def test_tags_are_normalized_on_both_sides(self) -> None:
+        # Typed with capitals in the catalog, written lowercase in the rule, and
+        # they still have to meet.
+        self.assertEqual(main._tags_of("/data/orders")[0], ("tag", "pii"))
+        self.assertIn(("tag", "finance"), main._tags_of("/data/orders"))
+        self.assertEqual(grants.load([rule(resource="tag", resourceId=" PII ")])[0].resource_id, "pii")
+
+    def test_classification_and_domain_are_tags_too(self) -> None:
+        scopes = main._tags_of("/data/orders")
+        self.assertIn(("tag", "classification:confidential"), scopes)
+        self.assertIn(("tag", "domain:sales"), scopes)
+
+    def test_a_tag_grant_reaches_every_dataset_carrying_it(self) -> None:
+        rules = loaded(rule(resource="tag", resourceId="pii", level="read"))
+        self.assertTrue(grants.allows(
+            rules, "dataset", "/data/orders", ANA, "read",
+            parents=main._tags_of("/data/orders"),
+        ))
+        # And no further: a table without the tag is not governed by that rule.
+        self.assertFalse(grants.evaluate(
+            rules, [], "dataset", "/data/public_holidays", ANA,
+            main._tags_of("/data/public_holidays"),
+        ).governed)
+
+    def test_a_tag_deny_closes_a_table_a_path_rule_opened(self) -> None:
+        rules = loaded(
+            rule(resourceId="/data", level="admin"),
+            rule(resource="tag", resourceId="pii", effect="deny"),
+        )
+        decision = grants.evaluate(
+            rules, [], "dataset", "/data/orders", ANA, main._tags_of("/data/orders"),
+        )
+        self.assertTrue(decision.governed)
+        self.assertIsNone(decision.level)
+        self.assertIn(("tag", "pii"), grants.scope_chain(
+            "dataset", "/data/orders", main._tags_of("/data/orders"),
+        ))
+
+    def test_a_tag_cannot_be_owned(self) -> None:
+        # Ownership is undeniable admin. Handing it out over a label anybody may
+        # type onto a table would be handing out admin over tables never seen.
+        owners = grants.load_owners([
+            {"resource": "tag", "resourceId": "pii",
+             "principalKind": "user", "principalId": "ana"},
+        ])
+        self.assertEqual(owners, [])
+
+    def test_the_runner_refuses_a_query_a_tag_deny_closes(self) -> None:
+        main._workspace.write_meta("grants", [
+            rule(resourceId="/data", level="read"),
+            rule(resource="tag", resourceId="pii", effect="deny"),
+        ])
+        who = principal(username="ana", user_id="u1", team_id="t-analytics")
+        with self.assertRaises(HTTPException) as caught:
+            main._authorize_resource(who, "dataset", "/data/orders", "read")
+        self.assertEqual(caught.exception.status_code, 403)
+        # The sibling without the tag is still readable through the path rule.
+        main._authorize_resource(who, "dataset", "/data/public_holidays", "read")
+
+
+class SimulateEndpointTest(unittest.TestCase):
+    """`POST /iam/simulate` - what somebody else would be allowed to do."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.team = main._auth.create_team("analytics", roles=["viewer"])
+        cls.carla = main._auth.create_user(
+            "carla", "carla-password-123", roles=["operator"], team=cls.team.id,
+        )
+        main._auth.create_user("dan", "dan-password-123", roles=["viewer"])
+
+    def setUp(self) -> None:
+        self.addCleanup(lambda: main._workspace.write_meta("grants", []))
+        self.addCleanup(lambda: main._workspace.write_meta("owners", []))
+        self.addCleanup(lambda: main._workspace.write_meta("catalog", {}))
+
+    def ask(self, **fields: Any) -> Any:
+        return main.simulate_access(main.SimulationRequest(**fields))
+
+    def test_an_unknown_user_is_answered_rather_than_raised(self) -> None:
+        out = self.ask(username="nobody", action="run:Execute")
+        self.assertFalse(out.found)
+        self.assertFalse(out.allowed)
+        self.assertIn("nobody", out.reason)
+
+    def test_it_reports_the_roles_the_team_contributes(self) -> None:
+        out = self.ask(username="carla")
+        self.assertTrue(out.found)
+        self.assertIn("operator", out.roles)
+        self.assertEqual(out.team_roles, ["viewer"])
+
+    def test_layer_one_refuses_an_action_no_role_allows(self) -> None:
+        out = self.ask(username="dan", action="run:Execute")
+        self.assertFalse(out.allowed)
+        self.assertFalse(out.policy.allowed)
+        self.assertIn("run:Execute", out.reason)
+
+    def test_layer_two_refuses_what_layer_one_allows(self) -> None:
+        main._workspace.write_meta("grants", [
+            {"resource": "dataset", "resourceId": "/data/orders",
+             "principalKind": "user", "principalId": "someone-else",
+             "level": "read", "effect": "allow"},
+        ])
+        out = self.ask(
+            username="carla", action="catalog:Query",
+            resource="dataset", resource_id="/data/orders",
+        )
+        self.assertTrue(out.policy.allowed)
+        self.assertTrue(out.access.governed)
+        self.assertIsNone(out.access.level)
+        self.assertFalse(out.allowed)
+        self.assertIn("read access", out.reason)
+
+    def test_an_ungoverned_resource_leaves_the_answer_to_layer_one(self) -> None:
+        out = self.ask(
+            username="carla", action="catalog:Query",
+            resource="dataset", resource_id="/data/orders",
+        )
+        self.assertTrue(out.allowed)
+        self.assertFalse(out.access.governed)
+
+    def test_running_a_job_is_asked_of_layer_two_as_write(self) -> None:
+        # What `/run/job` itself demands. Asking `read` here would report a
+        # person as able to run a Job the runner would refuse them.
+        out = self.ask(
+            username="carla", action="run:Execute", resource="job", resource_id="j1",
+        )
+        self.assertEqual(out.level_asked, "write")
+
+    def test_a_tag_grant_shows_up_as_the_source(self) -> None:
+        main._workspace.write_meta("catalog", {
+            "/data/orders": {"key": "/data/orders", "tags": ["pii"]},
+        })
+        main._workspace.write_meta("grants", [
+            {"resource": "tag", "resourceId": "pii",
+             "principalKind": "user", "principalId": self.carla.id,
+             "level": "write", "effect": "allow"},
+        ])
+        out = self.ask(
+            username="carla", resource="dataset", resource_id="/data/orders",
+        )
+        self.assertEqual(out.access.level, "write")
+        self.assertEqual(out.access.source, "tag/pii")
+        self.assertIn("tag/pii", out.access.chain)
+
+    def test_an_unknown_action_is_a_bad_request_not_a_silent_no(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            self.ask(username="carla", action="run:Everything")
+        self.assertEqual(caught.exception.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

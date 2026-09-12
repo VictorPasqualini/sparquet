@@ -919,6 +919,31 @@ class AuthStore:
             conn.commit()
             return self._user_of(conn, row)
 
+    def principal_for(self, username: str) -> Optional[Principal]:
+        """The principal somebody would be if they logged in right now.
+
+        The same assembly `resolve_session` does — personal roles plus the
+        team's, then the statements of both — without minting or touching a
+        session. It exists so that "what would Ana be allowed to do?" is
+        answered by the code that will actually answer it when Ana asks, rather
+        than by a second implementation that agrees today.
+        """
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM user WHERE username = ? COLLATE NOCASE",
+                ((username or "").strip(),),
+            ).fetchone()
+            if not row:
+                return None
+            user = self._user_of(conn, row)
+            team_roles = self._team_roles_of(conn, user.team_id)
+            effective = sorted(set(user.roles) | set(team_roles))
+            return Principal(
+                username=user.username, display_name=user.display_name, user_id=user.id,
+                roles=user.roles, statements=self._statements_for(conn, effective),
+                team_id=user.team_id, team_name=user.team_name, team_roles=team_roles,
+            )
+
     def find_user(self, username: str) -> Optional[User]:
         """By name, for the operator commands — a person at a terminal knows the
         username, not the id."""

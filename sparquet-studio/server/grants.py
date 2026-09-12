@@ -46,10 +46,19 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 #: and answering it in two places would let the two answers drift. A Workflow is
 #: not asked about directly — it is the container the other two inherit from,
 #: which is exactly what a catalog is to a table.
-RESOURCE_KINDS = ("dataset", "job", "pipeline", "workflow")
+#: `tag` is the same containment turned sideways: a Workflow contains a Job
+#: because somebody filed it there, a tag contains a dataset because somebody
+#: described it that way in the catalog. One rule on `tag/pii` governs every
+#: table classified as such, including the ones written next month.
+RESOURCE_KINDS = ("dataset", "job", "pipeline", "workflow", "tag")
 
 #: The kinds that live inside a Workflow, and therefore inherit from one.
 CONTAINED_KINDS = ("job", "pipeline")
+
+#: The kinds a deed can be written on. A tag is not one: ownership is
+#: responsibility for a thing, and a tag is a word that is true of several. See
+#: `OWNABLE_KINDS` in `src/lib/iam/grants.ts`.
+OWNABLE_KINDS = ("dataset", "job", "pipeline", "workflow")
 
 LEVELS = ("read", "write", "admin")
 
@@ -118,6 +127,46 @@ class Decision:
     source: Optional[str]
 
 
+def normalize_tag(tag: str) -> str:
+    """The one spelling of a tag the rules are written against.
+
+    Lower-cased and trimmed, because the catalog is typed by people: `PII`,
+    `pii ` and `Pii` are one tag to everybody except a string comparison, and a
+    rule that misses because of a capital letter fails open. Must agree with
+    `normalizeTag` in `src/lib/iam/grants.ts`.
+    """
+    return (tag or "").strip().lower()
+
+
+def tag_scopes(
+    tags: Optional[Sequence[str]] = None,
+    attributes: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[str, str]]:
+    """The tags of one dataset, as scopes a decision can inherit from.
+
+    `attributes` are the catalog fields that describe the data as well as a free
+    tag does, and they enter the same namespace as `field:value` —
+    `classification:restricted`, `domain:finance` — so one screen, one rule and
+    one evaluation cover both.
+    """
+    out: List[Tuple[str, str]] = []
+    seen = set()
+
+    def add(value: Any) -> None:
+        tag = normalize_tag(str(value or ""))
+        if not tag or tag == ANY or tag in seen:
+            return
+        seen.add(tag)
+        out.append(("tag", tag))
+
+    for tag in tags or ():
+        add(tag)
+    for field_name, value in (attributes or {}).items():
+        if value:
+            add(f"{field_name}:{value}")
+    return out
+
+
 def load(raw: Any) -> List[Grant]:
     """Reads the stored list, dropping anything that is not a well-formed grant.
 
@@ -138,6 +187,8 @@ def load(raw: Any) -> List[Grant]:
         if principal_kind not in ("team", "user"):
             continue
         resource_id = str(item.get("resourceId") or "").strip()
+        if resource == "tag":
+            resource_id = normalize_tag(resource_id)
         principal_id = str(item.get("principalId") or "").strip()
         if not resource_id or not principal_id:
             continue
@@ -178,7 +229,7 @@ def load_owners(raw: Any) -> List[Owner]:
             continue
         resource = str(item.get("resource") or "")
         principal_kind = str(item.get("principalKind") or "")
-        if resource not in RESOURCE_KINDS or principal_kind not in ("team", "user"):
+        if resource not in OWNABLE_KINDS or principal_kind not in ("team", "user"):
             continue
         resource_id = str(item.get("resourceId") or "").strip()
         principal_id = str(item.get("principalId") or "").strip()

@@ -25,7 +25,13 @@ import {
   type DatasetAnnotation,
   type ProbedField,
 } from '@/lib/datacatalog'
-import { decide, grantsByResource, type DatasetGrant, type Decision } from '@/lib/iam'
+import {
+  decide,
+  grantsByResource,
+  tagScopes,
+  type DatasetGrant,
+  type Decision,
+} from '@/lib/iam'
 import { fetchDatasetSchema } from '@/lib/runner/client'
 import { sparkForDatasets } from '@/lib/runner/session'
 import { buildLineage, type DatasetPlace } from '@/lib/lineage'
@@ -225,8 +231,10 @@ export function Catalog() {
    *
    * Not `accessTo` from the store: this screen already subscribes to the grants
    * and the owners, and a helper that reads them through `getState` would leave
-   * the badges showing yesterday's rules until something else re-rendered.
-   * Datasets need no parent scopes — their chain is in the address.
+   * the badges showing yesterday's rules until something else re-rendered. The
+   * scopes a dataset inherits from are its own address, which `scopeChain`
+   * derives, plus the tags its catalog entry gives it, which only the catalog
+   * knows — so those are handed in, exactly as `parentsOf` does elsewhere.
    */
   const identity = useMemo(
     () => ({
@@ -239,8 +247,14 @@ export function Catalog() {
 
   const decisions = useMemo(() => {
     const map = new Map<string, Decision>()
-    for (const { dataset } of entries) {
-      map.set(dataset.key, decide(grants, 'dataset', dataset.key, identity, owners))
+    for (const { dataset, annotation } of entries) {
+      const tags = annotation
+        ? tagScopes(annotation.tags, {
+            classification: annotation.classification,
+            domain: annotation.domain,
+          })
+        : []
+      map.set(dataset.key, decide(grants, 'dataset', dataset.key, identity, owners, tags))
     }
     return map
   }, [entries, grants, owners, identity])

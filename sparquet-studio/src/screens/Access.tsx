@@ -10,6 +10,7 @@
 import { ShieldCheck } from 'lucide-react'
 
 import { AccessPanel } from '@/components/auth/AccessPanel'
+import { AccessSimulator } from '@/components/auth/AccessSimulator'
 import { AuditLogPanel } from '@/components/auth/AuditLogPanel'
 import { ResourceGrantsPanel } from '@/components/auth/ResourceGrantsPanel'
 import { PageHeader, PageShell } from '@/components/layout/PageShell'
@@ -32,6 +33,7 @@ export function Access() {
           <TeamsPanel />
           <RolesPanel />
           <ResourceGrantsPanel />
+          <AccessSimulator />
         </div>
         <div className="card space-y-5 p-5">
           <AuditLogPanel />

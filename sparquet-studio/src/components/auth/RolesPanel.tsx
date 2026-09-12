@@ -17,6 +17,7 @@ import { Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
+import { PolicyResourcePicker } from '@/components/auth/PolicyResourcePicker'
 import { Badge, Button, Field, Input, Modal, Select, Spinner, useConfirm } from '@/components/ui'
 import { useAuthStore } from '@/store/auth'
 import type { AuthRole, PolicyAction, PolicyStatement, PolicyVocabulary } from '@/types/auth'
@@ -304,7 +305,7 @@ function RoleDialog({
 
         {statements.map((statement, index) => (
           <div key={index} className="space-y-3 rounded-lg border border-line px-3 py-3">
-            <div className="flex items-center gap-3">
+            <div className="flex items-start gap-3">
               <Select
                 ariaLabel="Effect"
                 className="w-28"
@@ -318,21 +319,13 @@ function RoleDialog({
                   patch(index, { effect: value === 'deny' ? 'deny' : 'allow' })
                 }
               />
-              <Input
-                aria-label="Resources"
-                className="flex-1"
-                placeholder="*"
-                disabled={readOnly}
-                value={(statement.resources ?? ['*']).join(', ')}
-                onChange={(event) =>
-                  patch(index, {
-                    resources: event.target.value
-                      .split(',')
-                      .map((part) => part.trim())
-                      .filter((part) => part.length > 0),
-                  })
-                }
-              />
+              <div className="flex-1">
+                <PolicyResourcePicker
+                  value={statement.resources ?? ['*']}
+                  disabled={readOnly}
+                  onChange={(resources) => patch(index, { resources })}
+                />
+              </div>
               {!readOnly && statements.length > 1 ? (
                 <Button
                   size="sm"

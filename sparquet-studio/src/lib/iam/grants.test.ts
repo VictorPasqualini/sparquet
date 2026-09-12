@@ -18,6 +18,7 @@ import {
   owns,
   sanitizeOwners,
   scopeChain,
+  tagScopes,
   withoutOwner,
   withOwner,
   type Grant,
@@ -251,5 +252,65 @@ describe('mayAdminister', () => {
     expect(mayAdminister([grant('job', 'j1', 't1', 'write')], [], 'job', 'j1', ANA)).toBe(false)
     // Ungoverned is "the action-level policy decides", not "anybody may re-grant".
     expect(mayAdminister([], [], 'job', 'j1', ANA)).toBe(false)
+  })
+})
+
+describe('tagScopes', () => {
+  it('normalizes what somebody typed in the catalog', () => {
+    // Twin of `test_tags_are_normalized_on_both_sides` in server/test_grants.py:
+    // a tag typed with capitals has to meet a rule written in lower case.
+    expect(tagScopes([' PII ', 'Finance'])).toEqual([
+      ['tag', 'pii'],
+      ['tag', 'finance'],
+    ])
+  })
+
+  it('drops blanks, duplicates and the wildcard', () => {
+    // `*` as a resource id means "every tag", which is a rule, not a label a
+    // dataset may claim for itself.
+    expect(tagScopes(['pii', 'PII', '', '  ', '*'])).toEqual([['tag', 'pii']])
+  })
+
+  it('carries classification and domain as tags of their own', () => {
+    expect(tagScopes([], { classification: 'confidential', domain: 'sales' })).toEqual([
+      ['tag', 'classification:confidential'],
+      ['tag', 'domain:sales'],
+    ])
+    expect(tagScopes([], { classification: '', domain: null })).toEqual([])
+  })
+})
+
+describe('grants written on a tag', () => {
+  const tags = tagScopes(['pii'], { domain: 'sales' })
+
+  it('reaches every dataset the catalog tags with it', () => {
+    const rules = [grant('tag', 'pii', 't1', 'read')]
+
+    expect(allows(rules, 'dataset', '/data/orders', ANA, 'read', true, [], tags)).toBe(true)
+    // And no further: a table without the tag is not governed by that rule.
+    expect(decide(rules, 'dataset', '/data/holidays', ANA, [], []).governed).toBe(false)
+  })
+
+  it('names the tag as the source, so a screen can say which rule answered', () => {
+    const rules = [grant('tag', 'domain:sales', 't1', 'write')]
+
+    expect(decide(rules, 'dataset', '/data/orders', ANA, [], tags).source).toBe('tag/domain:sales')
+  })
+
+  it('lets a tag deny close a table a path rule opened', () => {
+    const rules = [
+      grant('dataset', '/data', 't1', 'admin'),
+      grant('tag', 'pii', 't1', 'read', 'deny'),
+    ]
+
+    expect(decide(rules, 'dataset', '/data/orders', ANA, [], tags).level).toBeNull()
+    // The sibling without the tag keeps what the path rule gave it.
+    expect(decide(rules, 'dataset', '/data/holidays', ANA, [], []).level).toBe('admin')
+  })
+
+  it('refuses to let a tag be owned', () => {
+    // Ownership is undeniable admin. Handing it out over a label anybody may
+    // type onto a table would be handing out admin over tables never seen.
+    expect(sanitizeOwners([owner('tag', 'pii', 't1')])).toEqual([])
   })
 })

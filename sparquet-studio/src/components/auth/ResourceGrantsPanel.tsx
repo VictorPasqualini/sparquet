@@ -15,27 +15,34 @@
  * anything. What this screen adds is the resource picker.
  */
 
-import { Boxes, FolderTree, Workflow } from 'lucide-react'
+import { Boxes, FolderTree, Tag, Workflow } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { GrantsPanel, type NewGrant } from '@/components/catalog/GrantsPanel'
 import { OwnerPicker, type NewOwner } from '@/components/catalog/OwnerPicker'
 import { Badge, Field, Segmented, Select, Spinner, type SelectOption } from '@/components/ui'
-import { grantsFor, type ResourceKind } from '@/lib/iam'
+import { grantsFor, tagScopes, type ResourceKind } from '@/lib/iam'
 import { useAuthStore } from '@/store/auth'
+import { useCatalogStore } from '@/store/catalog'
 import { accessTo, effectiveOwnerOf, mayAdministerResource, useIamStore } from '@/store/iam'
 import { useLibraryStore } from '@/store/library'
 import type { AuthTeam, AuthUser } from '@/types/auth'
 
-type Kind = Extract<ResourceKind, 'job' | 'pipeline' | 'workflow'>
+type Kind = Extract<ResourceKind, 'job' | 'pipeline' | 'workflow' | 'tag'>
 
-const NOUN: Record<Kind, string> = { job: 'Job', pipeline: 'Pipeline', workflow: 'Workflow' }
+const NOUN: Record<Kind, string> = {
+  job: 'Job',
+  pipeline: 'Pipeline',
+  workflow: 'Workflow',
+  tag: 'Tag',
+}
 
 const ICON: Record<Kind, typeof Boxes> = {
   job: Boxes,
   pipeline: Workflow,
   workflow: FolderTree,
+  tag: Tag,
 }
 
 function messageOf(error: unknown): string {
@@ -51,6 +58,9 @@ export function ResourceGrantsPanel() {
   const jobs = useLibraryStore((state) => state.jobs)
   const pipelines = useLibraryStore((state) => state.pipelines)
   const workflows = useLibraryStore((state) => state.workflows)
+
+  const annotations = useCatalogStore((state) => state.annotations)
+  const loadCatalog = useCatalogStore((state) => state.load)
 
   const grants = useIamStore((state) => state.grants)
   const owners = useIamStore((state) => state.owners)
@@ -68,7 +78,10 @@ export function ResourceGrantsPanel() {
 
   useEffect(() => {
     void load()
-  }, [load])
+    // The tag list comes from the catalog: a tag exists because a dataset was
+    // annotated with it, and this panel is often the first screen opened.
+    void loadCatalog()
+  }, [load, loadCatalog])
 
   useEffect(() => {
     if (!can('iam:ReadUsers')) return
@@ -84,13 +97,40 @@ export function ResourceGrantsPanel() {
     })()
   }, [can, fetchTeams, fetchUsers])
 
+  /**
+   * Every tag anybody could write a rule on: the ones the catalog actually uses,
+   * plus the ones a rule already names.
+   *
+   * The second half matters more than it looks. A tag is not a record — it
+   * exists only while some dataset claims it — so a rule on `pii` would vanish
+   * from this list the moment the last table lost the tag, taking with it the
+   * only way to revoke the rule.
+   */
+  const tags = useMemo(() => {
+    const found = new Set<string>()
+    for (const annotation of Object.values(annotations)) {
+      for (const [, id] of tagScopes(annotation.tags, {
+        classification: annotation.classification,
+        domain: annotation.domain,
+      })) {
+        found.add(id)
+      }
+    }
+    for (const grant of grants) {
+      if (grant.resource === 'tag') found.add(grant.resourceId)
+    }
+    return [...found].sort((left, right) => left.localeCompare(right))
+  }, [annotations, grants])
+
   const options = useMemo<SelectOption[]>(() => {
     const source =
       kind === 'job'
         ? jobs.map((job) => ({ id: job.id, name: job.name }))
         : kind === 'pipeline'
           ? pipelines.map((pipeline) => ({ id: pipeline.id, name: pipeline.name }))
-          : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
+          : kind === 'tag'
+            ? tags.map((tag) => ({ id: tag, name: tag }))
+            : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
     const counted = source.map((item) => {
       const rules = grantsFor(grants, kind, item.id)
       const denies = rules.filter((rule) => rule.effect === 'deny').length
@@ -107,7 +147,7 @@ export function ResourceGrantsPanel() {
       }
     })
     return counted.sort((left, right) => left.label.localeCompare(right.label))
-  }, [grants, jobs, kind, owners, pipelines, workflows])
+  }, [grants, jobs, kind, owners, pipelines, tags, workflows])
 
   // Keep the picker on something that exists: switching kind, or deleting the
   // record, must not leave the panel editing rules for nothing.
@@ -228,7 +268,7 @@ export function ResourceGrantsPanel() {
             Roles say whether somebody may run anything on this runner. These say which Jobs and
             Pipelines in particular — and which they may never touch, whatever else grants it. A
             rule on a Workflow reaches everything inside it. Datasets are governed the same way,
-            from the catalog.
+            from the catalog — or all at once, by the tag the catalog gives them.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -263,6 +303,11 @@ export function ResourceGrantsPanel() {
                 label: 'Workflows',
                 title: 'The container everything inside it inherits from',
               },
+              {
+                value: 'tag',
+                label: 'Tags',
+                title: 'Every dataset the catalog gives this tag, including later ones',
+              },
             ]}
           />
         </Field>
@@ -270,7 +315,9 @@ export function ResourceGrantsPanel() {
           {options.length === 0 ? (
             <p className="flex items-center gap-1.5 py-1.5 text-xs italic text-content-subtle">
               <Icon className="h-3.5 w-3.5" />
-              The library has no {NOUN[kind]} to restrict yet.
+              {kind === 'tag'
+                ? 'No dataset in the catalog carries a tag yet.'
+                : `The library has no ${NOUN[kind]} to restrict yet.`}
             </p>
           ) : (
             <Select
@@ -285,6 +332,10 @@ export function ResourceGrantsPanel() {
 
       {selected ? (
         <div className="space-y-3">
+          {/* A tag has no owner on purpose: ownership is admin that no deny can
+              reach, and handing that out over a label anybody may type onto a
+              table would be handing out admin over tables never seen. */}
+          {kind === 'tag' ? null : (
           <OwnerPicker
             resource={kind}
             owner={ownRecord}
@@ -295,6 +346,7 @@ export function ResourceGrantsPanel() {
             onClear={onClearOwner}
             editable={mayManage}
           />
+          )}
 
           {inherited ? (
             <p className="rounded-lg border border-dashed border-line px-3 py-2 text-2xs leading-relaxed text-content-subtle">

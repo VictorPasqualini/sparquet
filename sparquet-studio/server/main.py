@@ -1886,13 +1886,51 @@ def _owners_now() -> List[Any]:
     return grants.load_owners(raw)
 
 
+def _catalog_now() -> Dict[str, Any]:
+    """The dataset annotations as they stand on disk right now.
+
+    Same record the Studio writes from the catalog screen, and re-read for the
+    same reason the grants are: a tag added this morning has to govern this
+    afternoon's query, not the one after the next restart.
+    """
+    try:
+        raw = _workspace.read_meta().get("catalog")
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _tags_of(address: str) -> List[tuple]:
+    """The tag scopes one dataset carries, from its catalog entry.
+
+    A tag is the one container a dataset has that is not in its address: the
+    catalog says `pii`, and a rule written on `tag/pii` reaches every table that
+    says so, including the ones described after the rule was written.
+    """
+    entry = _catalog_now().get(_dataset_id(address))
+    if not isinstance(entry, dict):
+        return []
+    tags = entry.get("tags")
+    return grants.tag_scopes(
+        tags if isinstance(tags, list) else [],
+        {
+            "classification": entry.get("classification"),
+            "domain": entry.get("domain"),
+        },
+    )
+
+
 def _parents_of(resource: str, resource_id: str) -> List[tuple]:
     """The containers one securable inherits from — the Workflow a Job or a
-    Pipeline lives in.
+    Pipeline lives in, and the tags the catalog gives a dataset.
 
-    A dataset has no container the runner knows about: its ancestors are in the
-    address itself, and `grants.scope_chain` derives them without asking anybody.
+    A dataset's path ancestors need nothing here: they are in the address
+    itself, and `grants.scope_chain` derives them without asking anybody. Its
+    tags are the opposite — they exist only in the catalog entry somebody typed.
+    Mirrors `parentsOf` in `src/store/iam.ts`.
     """
+    if resource == "dataset":
+        return _tags_of(resource_id)
     if resource not in grants.CONTAINED_KINDS or not resource_id:
         return []
     try:
@@ -4416,6 +4454,46 @@ class AccessDecisionOut(BaseModel):
     chain: List[str] = Field(default_factory=list)
 
 
+def _access_decision_out(
+    principal: Any,
+    kind: str,
+    resource_id: str,
+    rules: List[Any],
+    owners: List[Any],
+    token_only: bool = False,
+) -> AccessDecisionOut:
+    """Layer two's whole answer on one securable, in the shape the screens read.
+
+    Shared by `/iam/access`, which asks it about the caller, and `/iam/simulate`,
+    which asks it about somebody else. The two have to agree, and the only way
+    to be sure they do is for there to be one of them.
+    """
+    identity = _identity_of(principal)
+    parents = _parents_of(kind, resource_id)
+    decision = grants.evaluate(rules, owners, kind, resource_id, identity, parents)
+    owner = grants.owner_of(owners, kind, resource_id)
+    return AccessDecisionOut(
+        resource=kind,
+        resource_id=resource_id,
+        governed=decision.governed,
+        # The shared token is the identity on a runner with no users, and
+        # `_authorize_resource` never refuses it. Reporting anything narrower
+        # here would grey out controls that in fact work.
+        level="admin" if token_only else decision.level,
+        owned=decision.owned,
+        source=decision.source,
+        owner_kind=owner.principal_kind if owner else None,
+        owner_id=owner.principal_id if owner else None,
+        may_administer=token_only or grants.may_administer(
+            rules, owners, kind, resource_id, identity, parents
+        ) or (
+            principal.allows("iam:ManageGrants", "*")
+            and not principal.denies("iam:ManageGrants", "*")
+        ),
+        chain=[f"{k}/{i}" for k, i in grants.scope_chain(kind, resource_id, parents)],
+    )
+
+
 class AccessQueryRequest(BaseModel):
     #: `[{"resource": "dataset", "resourceId": "/lake/silver/orders"}, ...]`
     resources: List[Dict[str, str]] = Field(default_factory=list)
@@ -4435,7 +4513,6 @@ def effective_access(
     """
     rules = _grants_now()
     owners = _owners_now()
-    identity = _identity_of(principal)
     token_only = bool(getattr(principal, "token_only", False))
 
     out: List[AccessDecisionOut] = []
@@ -4446,29 +4523,203 @@ def effective_access(
             continue
         if kind == "dataset":
             ident = _dataset_id(ident)
-        parents = _parents_of(kind, ident)
-        decision = grants.evaluate(rules, owners, kind, ident, identity, parents)
-        owner = grants.owner_of(owners, kind, ident)
-        out.append(AccessDecisionOut(
-            resource=kind,
-            resource_id=ident,
-            governed=decision.governed,
-            # The shared token is the identity on a runner with no users, and
-            # `_authorize_resource` never refuses it. Reporting anything narrower
-            # here would grey out controls that in fact work.
-            level="admin" if token_only else decision.level,
-            owned=decision.owned,
-            source=decision.source,
-            owner_kind=owner.principal_kind if owner else None,
-            owner_id=owner.principal_id if owner else None,
-            may_administer=token_only or grants.may_administer(
-                rules, owners, kind, ident, identity, parents
-            ) or (
-                principal.allows("iam:ManageGrants", "*")
-                and not principal.denies("iam:ManageGrants", "*")
-            ),
-            chain=[f"{k}/{i}" for k, i in grants.scope_chain(kind, ident, parents)],
-        ))
+        out.append(
+            _access_decision_out(principal, kind, ident, rules, owners, token_only)
+        )
+    return out
+
+
+#: The grant level the runner demands beside each action, so a simulation asks
+#: layer two the question the endpoints actually ask it. Running a Job needs
+#: `write` on the Job, not `read`: a run writes wherever its JSON points.
+_ACTION_LEVEL: Dict[str, str] = {
+    "run:Execute": "write",
+    "run:Cancel": "write",
+    "workspace:Write": "write",
+    "workspace:Delete": "write",
+    "iam:ManageGrants": "admin",
+}
+
+
+def _policy_targets(resource: str, resource_id: str) -> List[str]:
+    """The `kind/id` strings layer one is asked about for one securable.
+
+    A Job is reached by a role written on the Job or on the Workflow that holds
+    it — the same pair `_run_targets` builds for a real run. A dataset is reached
+    by neither: policy actions are the platform's verbs, and which table they
+    touch is layer two's question, so the action is checked against `*` alone.
+    """
+    if not resource or not resource_id or resource == "dataset":
+        return ["*"]
+    targets = [f"{resource}/{resource_id}"]
+    targets += [
+        f"{kind}/{ident}"
+        for kind, ident in _parents_of(resource, resource_id)
+        if kind == "workflow"
+    ]
+    return targets
+
+
+class PolicyVerdictOut(BaseModel):
+    action: str
+    #: True when a statement allows the action on one of `targets` and none denies it.
+    allowed: bool
+    #: The target an explicit deny matched. It settles the verdict whatever else allows.
+    denied_on: Optional[str] = None
+    #: The target that carried the allow, so a screen can name the rule that answered.
+    allowed_on: Optional[str] = None
+    #: Everything the action was checked against, nearest first.
+    targets: List[str] = Field(default_factory=list)
+
+
+class SimulationRequest(BaseModel):
+    #: Whose access to answer for — somebody else. The caller's own is `/iam/access`.
+    username: str
+    #: A platform action, for layer one. Optional: asking only about a securable
+    #: is a fair question on its own ("what does Ana hold on this table?").
+    action: Optional[str] = None
+    #: A securable, for layer two. Also optional, for the mirror-image question.
+    resource: str = ""
+    resource_id: str = ""
+    #: read / write / admin. Defaults to whatever the runner demands for `action`.
+    level: Optional[str] = None
+
+
+class SimulationOut(BaseModel):
+    username: str
+    #: False when no such user. The answer is then "nothing", which is more useful
+    #: to show than a 404 in a screen whose whole job is answering questions.
+    found: bool = False
+    #: A disabled account is refused at login, whatever its roles say.
+    disabled: bool = False
+    display_name: Optional[str] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    #: The roles that come from the team rather than from the account itself,
+    #: because "why can she do that?" is usually answered by this list.
+    team_roles: List[str] = Field(default_factory=list)
+    policy: Optional[PolicyVerdictOut] = None
+    access: Optional[AccessDecisionOut] = None
+    #: The level layer two was asked for, once `action` had been taken into account.
+    level_asked: Optional[str] = None
+    #: Both layers together: what would happen if this person tried it right now.
+    allowed: bool = False
+    #: Why, in the words the refusal itself would use.
+    reason: str = ""
+
+
+@app.post(
+    "/iam/simulate",
+    response_model=SimulationOut,
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def simulate_access(body: SimulationRequest) -> SimulationOut:
+    """What somebody else would be allowed to do, and which layer decides it.
+
+    Almost every refusal involves both layers, and they refuse for unrelated
+    reasons: a missing action is a role to fix, a missing level is an owner to
+    ask. Showing them side by side is the difference between an administrator
+    knowing what to change and guessing.
+
+    Answered by the same code the request itself would take — `principal_for`
+    assembles the principal exactly as a login does, and layer two runs through
+    `_access_decision_out` — so the simulation cannot drift from the runner it
+    is describing.
+    """
+    username = (body.username or "").strip()
+    principal = _auth.principal_for(username) if username else None
+    if principal is None:
+        return SimulationOut(
+            username=username,
+            reason=f"No user named '{username}' on this runner.",
+        )
+
+    user = _auth.find_user(username)
+    disabled = bool(getattr(user, "disabled", False))
+    out = SimulationOut(
+        username=principal.username,
+        found=True,
+        disabled=disabled,
+        display_name=principal.display_name,
+        team_id=principal.team_id,
+        team_name=principal.team_name,
+        roles=list(principal.roles),
+        team_roles=list(principal.team_roles),
+    )
+
+    kind = (body.resource or "").strip()
+    resource_id = (body.resource_id or "").strip()
+    if kind and kind not in grants.RESOURCE_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown resource kind '{kind}'.")
+    if kind == "dataset":
+        resource_id = _dataset_id(resource_id)
+
+    action = (body.action or "").strip()
+    if action:
+        if action not in auth.ACTIONS:
+            raise HTTPException(status_code=400, detail=f"Unknown action '{action}'.")
+        targets = _policy_targets(kind, resource_id)
+        # Same rule as `_authorize_run`: one allow among the targets is enough,
+        # but a deny on any of them is final, or a deny could be widened away by
+        # a broader grant written somewhere else.
+        denied_on = next((t for t in targets if principal.denies(action, t)), None)
+        allowed_on = next((t for t in targets if principal.allows(action, t)), None)
+        out.policy = PolicyVerdictOut(
+            action=action,
+            allowed=denied_on is None and allowed_on is not None,
+            denied_on=denied_on,
+            allowed_on=None if denied_on else allowed_on,
+            targets=targets,
+        )
+
+    if kind and resource_id:
+        level = (body.level or _ACTION_LEVEL.get(action, "read")).strip()
+        if level not in grants.LEVELS:
+            raise HTTPException(status_code=400, detail=f"Unknown level '{level}'.")
+        out.level_asked = level
+        out.access = _access_decision_out(
+            principal, kind, resource_id, _grants_now(), _owners_now()
+        )
+
+    policy_ok = out.policy is None or out.policy.allowed
+    access_ok = True
+    if out.access is not None and out.access.governed:
+        held = out.access.level
+        access_ok = held is not None and (
+            grants.LEVEL_RANK[held] >= grants.LEVEL_RANK[out.level_asked or "read"]
+        )
+    out.allowed = policy_ok and access_ok and not disabled
+
+    if disabled:
+        out.reason = f"'{out.username}' is disabled and cannot sign in at all."
+    elif not policy_ok and out.policy is not None:
+        held_roles = ", ".join(principal.roles) or "none"
+        where = out.policy.denied_on
+        out.reason = (
+            f"Denied by a role on '{where}': no role may {action} there. "
+            f"Roles held: {held_roles}."
+            if where
+            else f"No role held allows {action}. Roles held: {held_roles}."
+        )
+    elif not access_ok and out.access is not None:
+        out.reason = grants.refusal(
+            kind, resource_id, out.level_asked or "read", out.username
+        )
+    elif out.access is not None and not out.access.governed:
+        out.reason = (
+            f"Allowed. Nothing governs '{kind}/{resource_id}', "
+            "so layer one decides on its own."
+        )
+    elif out.access is not None:
+        via = f" via {out.access.source}" if out.access.source else ""
+        holds = "owns it" if out.access.owned else f"holds {out.access.level}"
+        out.reason = f"Allowed. {out.username} {holds} on '{kind}/{resource_id}'{via}."
+    else:
+        out.reason = (
+            f"Allowed. A role held permits {action}." if action else "Nothing asked."
+        )
+
     return out
 
 
