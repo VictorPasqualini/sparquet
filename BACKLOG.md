@@ -4,7 +4,7 @@ Melhorias e pendências de desenvolvimento **do framework e do Studio** (não de
 de uso específico). Cada item é uma capacidade genérica, ortogonal e sem acoplamento de
 domínio.
 
-Atualizado em 2026-08-28.
+Atualizado em 2026-09-06.
 
 **Como ler as marcas:**
 
@@ -734,8 +734,38 @@ Pendente aqui:
   conta; a senha nova é validada **antes** de o código ser queimado (senha curta não
   gasta o código); conta desabilitada não é recuperável; e toda recusa tem a mesma
   mensagem — o endpoint não diz se o código era desconhecido, expirado ou já usado.
-  Rotas `POST /auth/users/{id}/recovery` e `POST /auth/recover` (esta exige o token
-  compartilhado e **nenhuma** sessão, já que vem da tela de login).
+  Rotas `POST /auth/users/{id}/recovery` e `POST /auth/recover` (esta não exige sessão,
+  já que vem da tela de login, nem token quando o runner tem usuários — ver o item do
+  laço fechado abaixo).
+- ✅ **O laço fechado entre o token e a tela de login** — o token compartilhado se digita
+  em **Settings → Local runner**, Settings fica atrás do login, e o login exigia o
+  token: trocar o token do runner (ou reiniciá-lo sem `SPARQUET_STUDIO_TOKEN`, já que
+  cada processo sorteia o seu) trancava todo mundo fora da única tela capaz de receber o
+  valor novo, sem saída pela interface — só editando o `localStorage` na mão. Três
+  mudanças, em `server/main.py` e `components/auth/LoginGate.tsx`:
+  1. **Sessão vale como token.** `require_token` aceita uma sessão viva no lugar do
+     token. Compra a mesma coisa — viaja em header próprio, que o navegador não anexa
+     cross-origin sem o preflight que o check de `Origin` recusa — e é a credencial que
+     a pessoa logada de fato tem. Sessão presente mas inválida responde
+     `SESSION_EXPIRED_HELP`, não "falta token": mandar quem tem sessão vencida procurar
+     um token é mandar procurar a coisa errada. O principal resolvido na porta é
+     reaproveitado por `current_principal`, sem segunda leitura do store.
+  2. **As três rotas de saída deixam de exigir token quando há usuário.**
+     `GET /auth/status`, `POST /auth/login` e `POST /auth/recover` passam por
+     `require_token_unless_users`: o check de `Origin` continua, a senha vira a parede.
+     Runner sem usuário segue exigindo o token nas três — não há mais nada a exigir.
+  3. **Rate limit no que ficou alcançável sem segredo.** `_LoginThrottle`, janela
+     deslizante em memória, conta **só falhas**, por chamador **e** por conta (uma delas
+     sozinha tem buraco: por conta, um chamador varre todas; por IP, uma botnet espalha).
+     Acerto esquece as falhas anteriores. `SPARQUET_STUDIO_LOGIN_ATTEMPTS` (10) por
+     `SPARQUET_STUDIO_LOGIN_WINDOW` segundos (300); estouro responde `429` com
+     `Retry-After`. No `/auth/recover` conta só por chamador, porque o código não nomeia
+     conta nenhuma antes de ser resgatado.
+
+  A tela de login ganhou também o campo do token, recolhido atrás de *The runner is
+  asking for a token*, como rede de segurança para runner em modo token-only ou token
+  rotacionado com o navegador segurando o anterior. Verificado em
+  `server/test_login_guard.py` (23 testes).
 - ✅ **Step-up para emitir código de recuperação** — emitir um código é, na prática,
   virar a conta de outra pessoa; por isso a rota exige **a senha de quem está pedindo**,
   além da sessão e da permissão `iam:ManageUsers`. Sessão roubada ou máquina destravada
@@ -1089,9 +1119,50 @@ Pendente aqui:
       observabilidade agregada, colaboração, IA com chave da plataforma, catálogo como
       serviço) vive em repositório privado próprio (`../sparquet-cloud`), consumindo o
       runner aberto pelos slots acima. Escopo e backlog lá, em `SCOPE.md` e `BACKLOG.md`.
-- [ ] **`sparquet-lite`** — versão que roda puramente em Python **sem Spark**
-      (duckdb / polars / pandas), para volumes pequenos e dev local rápido. Reusar o
-      mesmo schema JSON de pipeline e, idealmente, o `sparquet_cola` nas validações.
+- [ ] **`sparquet-lite` — um segundo motor, sem JVM** (nome provisório; ver *Nome* no fim
+      do item). Hoje todo JSON precisa de Spark, e Spark cobra caro pelo que não usa: uns
+      poucos segundos de JVM subindo, Java instalado, jar do Maven baixado na primeira
+      execução. Para um preview de 10 mil linhas no SQL editor isso é o custo inteiro da
+      operação. A ideia é um **backend alternativo**, não um fork: os mesmos contratos
+      `BaseReader` / `BaseWriter` / `BaseTransformation`, registrados nas mesmas factories,
+      implementados sobre **pyarrow + DuckDB**. O `PipelineConfig`, o `TransformationEngine`,
+      o `$include`, o `{param}` e o `sparquet_cola` continuam sendo os mesmos objetos —
+      só o executor por baixo muda.
+
+      **Onde paga a conta:**
+      - preview do SQL editor e do catálogo no Studio (o caso que motivou o item);
+      - testes do framework que hoje se pulam sozinhos quando não há Java — passariam a
+        rodar de verdade no CI, cobrindo transformação e validação;
+      - demo hospedada em `sparquet.web.app` sem JVM nenhuma no servidor;
+      - CLI em arquivo pequeno, onde subir Spark é mais caro que o trabalho.
+
+      **Como escolher o motor.** Por execução, nunca por instalação, e só quando *todas*
+      as pontas couberem: formato em `parquet`, `csv`, `json` ou `delta`, e caminho local
+      (ou `file://`). Qualquer outra coisa — Kafka, JDBC, BigQuery, Snowflake, Mongo,
+      Cassandra, caminho remoto — cai para o Spark sem perguntar. O Studio mostra em qual
+      motor a consulta rodou com um badge e oferece **"rodar no Spark"** em um clique, para
+      o caso de o resultado divergir.
+
+      **O custo real é a suíte de compatibilidade**, não o motor. Sem ela o `lite` é uma
+      armadilha: responde parecido e erra no caso de borda, sempre em produção. O que
+      torna o item confiável é uma suíte que roda **o mesmo JSON nos dois motores** e faz
+      o diff dos resultados (schema, ordem, tipos, nulos), rodando no CI a cada mudança de
+      transformação. Sem isso, não entregar.
+
+      **Riscos conhecidos:**
+      - *Divergência de dialeto* — `date_format`, `to_date`, casts de decimal e ordenação
+        de nulos não batem entre Spark SQL e DuckDB. Cada um precisa de tradução explícita
+        e de um caso na suíte de compatibilidade.
+      - *"Python puro" quer dizer **sem JVM**, não sem binário nativo* — DuckDB é C++,
+        `deltalake` é Rust. O ganho é não depender de Java e de download de jar, não é
+        virar dependência zero.
+
+      **Nome.** `lite` sugere "versão capada", e não é isso: o motor não tem menos
+      framework, tem menos máquina. Sugestão principal **`sparquet-solo`** — roda sozinho,
+      no chão, sem cluster, e faz par com `sparquet-cloud` no extremo oposto da mesma
+      linha. Alternativas: **`sparquet-brasa`** (brasa queima sem chama; Spark é a
+      faísca), **`sparquet-seta`** (Arrow, que é o substrato de verdade) e
+      **`sparquet-lume`**.
 
 ---
 

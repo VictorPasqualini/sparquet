@@ -39,6 +39,7 @@ import {
   Textarea,
   useConfirm,
 } from '@/components/ui'
+import { PageShell } from '@/components/layout/PageShell'
 import { TagsPopover } from '@/components/library/TagsPopover'
 import { TEMPLATES } from '@/data/templates'
 import { usePermission } from '@/lib/auth/usePermission'
@@ -130,7 +131,7 @@ export function WorkflowDetail() {
 
   if (!workflow) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-6 py-6">
+      <PageShell width="default">
         <div className="card">
           <EmptyState
             icon={<JobIcon />}
@@ -146,7 +147,7 @@ export function WorkflowDetail() {
             }
           />
         </div>
-      </div>
+      </PageShell>
     )
   }
 
@@ -230,7 +231,7 @@ export function WorkflowDetail() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6 px-6 py-6 animate-fade-in">
+    <PageShell className="space-y-6">
       <nav className="flex items-center gap-1 text-2xs text-content-subtle">
         <Link
           to="/"
@@ -472,7 +473,7 @@ export function WorkflowDetail() {
       )}
       {moving && <MoveJobModal job={moving} onClose={() => setMoving(null)} />}
       {confirmDialog}
-    </div>
+    </PageShell>
   )
 }
 

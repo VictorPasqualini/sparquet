@@ -22,9 +22,13 @@ store your machine can reach.
 
 `POST /run` and `POST /validate` are therefore protected by two checks:
 
-1. **A shared token.** Each request must carry the runner's token in the
-   `X-Sparquet-Token` header. Requests without it get `401` and a body
-   explaining where to find the token.
+1. **A credential in a header of its own.** Either the runner's token in
+   `X-Sparquet-Token`, or a live session in `X-Sparquet-Session` for a runner
+   that has users. Requests carrying neither get `401` and a body explaining
+   where to find the token. A session is accepted in the token's place because
+   it buys the same thing — a custom header the browser will not attach
+   cross-origin without a preflight — and it is the credential a logged-in
+   person actually holds.
 2. **An `Origin` allow-list.** A request whose `Origin` header is present and
    outside `SPARQUET_STUDIO_ORIGINS` gets `403` — an actual refusal, not just
    missing CORS response headers.
@@ -38,6 +42,16 @@ preflight, and the `Origin` check refuses the request outright.
 
 `GET /health` and `GET /capabilities` stay open so Studio can detect the runner
 and prompt for the token.
+
+Once the runner has users, three more stop asking for the token: `GET
+/auth/status`, `POST /auth/login` and `POST /auth/recover`. The token is typed
+into Settings, Settings is behind the login, and the login demanding the token
+is a closed loop — rotating the token would lock everybody out of the only
+screen that can accept the new one. The `Origin` check still covers all three,
+the password is the wall, and failed attempts are rate-limited
+(`SPARQUET_STUDIO_LOGIN_ATTEMPTS`, default 10, per `SPARQUET_STUDIO_LOGIN_WINDOW`
+seconds, default 300, counted per caller **and** per account). A runner with no
+users still demands the token on all three: there is nothing else to ask for.
 
 - Keep it bound to `127.0.0.1` (the default).
 - Never put it behind a public address, a tunnel, or a reverse proxy.
@@ -86,9 +100,10 @@ of the authentication: whoever holds it can do everything. That is fine for one
 person on one laptop, and it stays the default so that upgrading never locks
 anybody out.
 
-Create a user and the runner switches modes: from then on it wants a **session**
-in addition to the token, and each request is authorized against the roles that
-user holds. Create the first one on the machine the runner runs on:
+Create a user and the runner switches modes: from then on it wants a **session**,
+and each request is authorized against the roles that user holds. The session
+replaces the token rather than joining it — Studio keeps sending both, and either
+one satisfies the guard. Create the first user on the machine the runner runs on:
 
 ```bash
 python server/auth.py create-admin      # prompts for a username and password
@@ -195,7 +210,7 @@ the execution history: they have different lifetimes, and a history database is
 something you might copy around.
 
 None of this makes the runner safe to expose. It is still bound to `127.0.0.1`,
-and the token is still required on every call.
+and every call still has to carry a credential — the token, or a session.
 
 ## Execution credits
 

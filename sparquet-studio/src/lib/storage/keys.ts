@@ -36,6 +36,12 @@ export const KEY = {
    * `.studio/meta.json`, which is the file the runner re-reads to enforce them.
    */
   grants: `${META_PREFIX}grants`,
+  /**
+   * Who owns each dataset, Job, Pipeline and Workflow. A separate record from
+   * the grants because it answers a different question and changes far less
+   * often: a grant is traffic, ownership is the deed.
+   */
+  owners: `${META_PREFIX}owners`,
   seeded: `${META_PREFIX}seeded`,
   probe: `${META_PREFIX}probe`,
   backup: `${NS}backup`,

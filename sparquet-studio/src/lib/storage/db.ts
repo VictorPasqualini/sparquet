@@ -27,7 +27,7 @@ import {
 import { nanoid } from 'nanoid'
 
 import { sanitizeAnnotations, type CatalogAnnotations } from '@/lib/datacatalog'
-import { sanitizeGrants, type Grant } from '@/lib/iam'
+import { sanitizeGrants, sanitizeOwners, type Grant, type Owner } from '@/lib/iam'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { toStorable, type StorageBackend, type StorageKind } from '@/lib/storage/backend'
 import {
@@ -555,6 +555,16 @@ export async function readGrants(): Promise<Grant[]> {
 export async function writeGrants(grants: readonly Grant[]): Promise<void> {
   const store = await open()
   await store.set(KEY.grants, grants)
+}
+
+export async function readOwners(): Promise<Owner[]> {
+  const store = await open()
+  return sanitizeOwners(await store.get(KEY.owners))
+}
+
+export async function writeOwners(owners: readonly Owner[]): Promise<void> {
+  const store = await open()
+  await store.set(KEY.owners, owners)
 }
 
 /* ------------------------------------------------------------------- seed */

@@ -263,5 +263,245 @@ class MetaGuardTest(unittest.TestCase):
         self.assertIn("dataset", auth.RESOURCE_KINDS)
 
 
+def owner(**fields: Any) -> Dict[str, Any]:
+    base: Dict[str, Any] = {
+        "resource": "dataset",
+        "resourceId": "/data/orders",
+        "principalKind": "user",
+        "principalId": "u1",
+    }
+    base.update(fields)
+    return base
+
+
+class AncestorTest(unittest.TestCase):
+    """How an address says what contains it."""
+
+    def test_a_path_nests_by_slash(self) -> None:
+        self.assertEqual(
+            grants.ancestors("/lake/silver/orders"), ["/lake/silver", "/lake"]
+        )
+
+    def test_a_qualified_name_nests_by_dot(self) -> None:
+        self.assertEqual(
+            grants.ancestors("main.silver.orders"), ["main.silver", "main"]
+        )
+
+    def test_an_address_with_both_nests_by_its_path(self) -> None:
+        # `s3://bucket/main.db/orders` is one table in one bucket, not a column
+        # of something called `db`.
+        self.assertEqual(
+            grants.ancestors("s3://bucket/main.db/orders")[0], "s3://bucket/main.db"
+        )
+
+    def test_a_single_segment_has_no_ancestors(self) -> None:
+        self.assertEqual(grants.ancestors("orders"), [])
+        self.assertEqual(grants.ancestors("*"), [])
+
+
+class InheritanceTest(unittest.TestCase):
+    """A grant on the container reaches what is inside it."""
+
+    def test_a_grant_on_the_parent_folder_reaches_the_table(self) -> None:
+        rules = loaded(rule(resourceId="/lake/silver", level="read"))
+        self.assertTrue(
+            grants.allows(rules, "dataset", "/lake/silver/orders", ANA, "read")
+        )
+
+    def test_and_says_where_it_came_from(self) -> None:
+        rules = loaded(rule(resourceId="/lake/silver", level="read"))
+        decision = grants.evaluate(rules, [], "dataset", "/lake/silver/orders", ANA)
+        self.assertEqual(decision.source, "dataset//lake/silver")
+
+    def test_the_best_level_in_the_chain_wins(self) -> None:
+        rules = loaded(
+            rule(resourceId="/lake", level="read"),
+            rule(resourceId="/lake/silver/orders", level="write"),
+        )
+        self.assertTrue(
+            grants.allows(rules, "dataset", "/lake/silver/orders", ANA, "write")
+        )
+
+    def test_a_deny_on_the_parent_closes_the_child(self) -> None:
+        rules = loaded(
+            rule(resourceId="/lake/silver/orders", level="write"),
+            rule(resourceId="/lake", level="read", effect="deny"),
+        )
+        self.assertFalse(
+            grants.allows(rules, "dataset", "/lake/silver/orders", ANA, "read")
+        )
+
+    def test_a_rule_on_a_sibling_leaves_this_one_ungoverned(self) -> None:
+        rules = loaded(rule(resourceId="/lake/bronze/events"))
+        governed, level = grants.decide(rules, "dataset", "/warehouse/orders", ANA)
+        self.assertFalse(governed)
+        self.assertIsNone(level)
+
+    def test_a_job_inherits_from_the_workflow_it_lives_in(self) -> None:
+        rules = loaded(rule(resource="workflow", resourceId="w1", level="write"))
+        self.assertTrue(
+            grants.allows(
+                rules, "job", "j1", ANA, "write", parents=[("workflow", "w1")]
+            )
+        )
+        # And the Job of another Workflow is untouched by it.
+        self.assertTrue(
+            grants.allows(
+                rules, "job", "j9", BRUNO, "write", parents=[("workflow", "w2")]
+            )
+        )
+
+
+class OwnershipTest(unittest.TestCase):
+    """The owner holds everything, and a deny cannot take it away."""
+
+    def test_the_owner_holds_admin_without_any_grant(self) -> None:
+        owners = grants.load_owners([owner()])
+        self.assertTrue(
+            grants.allows([], "dataset", "/data/orders", ANA, "admin", owners=owners)
+        )
+
+    def test_a_deny_does_not_reach_the_owner(self) -> None:
+        owners = grants.load_owners([owner()])
+        rules = loaded(rule(principalId="*", principalKind="user", effect="deny"))
+        self.assertTrue(
+            grants.allows(rules, "dataset", "/data/orders", ANA, "admin", owners=owners)
+        )
+        # ...and still reaches everybody else.
+        self.assertFalse(
+            grants.allows(rules, "dataset", "/data/orders", BRUNO, "read", owners=owners)
+        )
+
+    def test_owning_the_container_owns_what_is_inside_it(self) -> None:
+        owners = grants.load_owners([owner(resourceId="/lake/silver")])
+        decision = grants.evaluate(
+            [], owners, "dataset", "/lake/silver/orders", ANA
+        )
+        self.assertTrue(decision.owned)
+        self.assertEqual(decision.source, "dataset//lake/silver")
+
+    def test_a_team_can_own(self) -> None:
+        owners = grants.load_owners(
+            [owner(principalKind="team", principalId="t-analytics")]
+        )
+        self.assertTrue(
+            grants.allows([], "dataset", "/data/orders", ANA, "admin", owners=owners)
+        )
+        self.assertFalse(
+            grants.allows([], "dataset", "/data/orders", BRUNO, "read", owners=owners)
+        )
+
+    def test_an_owner_record_closes_the_resource_to_everyone_else(self) -> None:
+        # Naming an owner is itself a decision about the resource, so it governs
+        # it: otherwise declaring ownership would leave it wide open.
+        owners = grants.load_owners([owner()])
+        governed, level = grants.decide(
+            [], "dataset", "/data/orders", BRUNO, owners=owners
+        )
+        self.assertTrue(governed)
+        self.assertIsNone(level)
+
+    def test_the_stored_map_shape_reads_back(self) -> None:
+        parsed = grants.load_owners({"dataset:/data/orders": owner()})
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].resource_id, "/data/orders")
+
+    def test_a_malformed_owner_is_dropped(self) -> None:
+        self.assertEqual(grants.load_owners([{"resource": "nope", "resourceId": "x"}]), [])
+        self.assertEqual(grants.load_owners([{"resource": "dataset"}]), [])
+
+
+class AdministrationTest(unittest.TestCase):
+    """Who may change the rules on one resource without running the platform."""
+
+    def test_the_owner_may(self) -> None:
+        owners = grants.load_owners([owner()])
+        self.assertTrue(grants.may_administer([], owners, "dataset", "/data/orders", ANA))
+
+    def test_an_admin_grant_may(self) -> None:
+        rules = loaded(rule(level="admin"))
+        self.assertTrue(grants.may_administer(rules, [], "dataset", "/data/orders", ANA))
+
+    def test_a_write_grant_may_not(self) -> None:
+        rules = loaded(rule(level="write"))
+        self.assertFalse(grants.may_administer(rules, [], "dataset", "/data/orders", ANA))
+
+    def test_nobody_administers_a_resource_no_rule_names(self) -> None:
+        self.assertFalse(grants.may_administer([], [], "dataset", "/nothing", ANA))
+
+
+class OwnerMetaGuardTest(unittest.TestCase):
+    """An owner grants on what they own, without `iam:ManageGrants`."""
+
+    EDITOR = [{"effect": "allow", "actions": ["workspace:*", "run:*"], "resources": ["*"]}]
+
+    def setUp(self) -> None:
+        main._workspace.write_meta("owners", [
+            {"resource": "dataset", "resourceId": "/owned/table",
+             "principalKind": "user", "principalId": "u2"},
+        ])
+        main._workspace.write_meta("grants", [])
+        self.addCleanup(lambda: main._workspace.write_meta("owners", []))
+        self.addCleanup(lambda: main._workspace.write_meta("grants", []))
+
+    def test_the_owner_may_grant_on_their_own_table(self) -> None:
+        main._guard_meta_key(
+            principal(statements=self.EDITOR),
+            "grants",
+            [rule(resourceId="/owned/table", level="read")],
+        )
+
+    def test_but_not_on_a_table_somebody_else_owns(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            main._guard_meta_key(
+                principal(statements=self.EDITOR),
+                "grants",
+                [rule(resourceId="/not-yours", level="read")],
+            )
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_and_deleting_the_whole_record_stays_with_an_administrator(self) -> None:
+        with self.assertRaises(HTTPException):
+            main._guard_meta_key(principal(statements=self.EDITOR), "grants", None)
+
+
+class EffectiveAccessEndpointTest(unittest.TestCase):
+    """`POST /iam/access` - the explanation a screen shows."""
+
+    def setUp(self) -> None:
+        main._workspace.write_meta("grants", [
+            rule(resourceId="/lake/silver", level="read"),
+        ])
+        main._workspace.write_meta("owners", [
+            {"resource": "dataset", "resourceId": "/lake/gold",
+             "principalKind": "team", "principalId": "t-analytics"},
+        ])
+        self.addCleanup(lambda: main._workspace.write_meta("grants", []))
+        self.addCleanup(lambda: main._workspace.write_meta("owners", []))
+
+    def ask(self, who: auth.Principal, *resources: Dict[str, str]) -> List[Any]:
+        return main.effective_access(
+            main.AccessQueryRequest(resources=list(resources)), who
+        )
+
+    def test_it_reports_the_inherited_level_and_its_source(self) -> None:
+        ana = principal(username="ana", user_id="u1", team_id="t-analytics")
+        [out] = self.ask(ana, {"resource": "dataset", "resourceId": "/lake/silver/orders"})
+        self.assertTrue(out.governed)
+        self.assertEqual(out.level, "read")
+        self.assertEqual(out.source, "dataset//lake/silver")
+        self.assertIn("dataset//lake/silver", out.chain)
+
+    def test_it_reports_ownership(self) -> None:
+        ana = principal(username="ana", user_id="u1", team_id="t-analytics")
+        [out] = self.ask(ana, {"resource": "dataset", "resourceId": "/lake/gold/revenue"})
+        self.assertTrue(out.owned)
+        self.assertEqual(out.level, "admin")
+        self.assertTrue(out.may_administer)
+
+    def test_an_unknown_kind_is_skipped_rather_than_guessed_at(self) -> None:
+        self.assertEqual(self.ask(principal(), {"resource": "table", "resourceId": "x"}), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

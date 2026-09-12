@@ -6,6 +6,7 @@ import {
   Copy,
   FolderKanban,
   GraduationCap,
+  LayoutDashboard,
   LayoutTemplate,
   MoreHorizontal,
   Pencil,
@@ -18,6 +19,7 @@ import { useId, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import {
   Button,
   EmptyState,
@@ -135,35 +137,35 @@ export function Dashboard() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-8 px-6 py-6 animate-fade-in">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div className="space-y-1.5">
-          <h1 className="text-lg font-semibold tracking-tight text-content">Overview</h1>
-          <p className="max-w-2xl text-xs leading-relaxed text-content-muted">
-            Sparquet Studio turns a pipeline into a canvas you can read — drop in sources,
-            transformations and destinations, and Studio writes the JSON that Sparquet runs.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            icon={<LayoutTemplate className="h-4 w-4" />}
-            disabled={!mayWrite}
-            onClick={() => navigate('/templates')}
-          >
-            Start from template
-          </Button>
-          <Button
-            size="sm"
-            variant="primary"
-            icon={<Plus className="h-4 w-4" />}
-            disabled={!mayWrite}
-            onClick={() => setCreatingJob(true)}
-          >
-            New job
-          </Button>
-        </div>
-      </header>
+    <PageShell className="space-y-8">
+      <PageHeader
+        icon={<LayoutDashboard />}
+        title="Overview"
+        description="Sparquet Studio turns a pipeline into a canvas you can read — drop in sources,
+          transformations and destinations, and Studio writes the JSON that Sparquet runs."
+        className="mb-0"
+        actions={
+          <>
+            <Button
+              size="sm"
+              icon={<LayoutTemplate className="h-4 w-4" />}
+              disabled={!mayWrite}
+              onClick={() => navigate('/templates')}
+            >
+              Start from template
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<Plus className="h-4 w-4" />}
+              disabled={!mayWrite}
+              onClick={() => setCreatingJob(true)}
+            >
+              New job
+            </Button>
+          </>
+        }
+      />
 
       {firstRun && <GettingStarted onCreateWorkflow={() => setCreatingWorkflow(true)} />}
 
@@ -275,7 +277,7 @@ export function Dashboard() {
         <RenameJobModal job={renaming} onClose={() => setRenaming(null)} />
       )}
       {confirmDialog}
-    </div>
+    </PageShell>
   )
 }
 

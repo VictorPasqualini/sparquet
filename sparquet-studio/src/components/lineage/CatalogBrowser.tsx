@@ -11,7 +11,7 @@
  * view, and the descriptions people attach to it.
  */
 
-import { Pencil, ShieldCheck, Slash } from 'lucide-react'
+import { Crown, Pencil, ShieldCheck, Slash } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { ASSET_HINT, ASSET_ICON, NamespaceTree, tierLabel } from '@/components/catalog/NamespaceTree'
@@ -24,8 +24,8 @@ import {
   type CatalogNode,
   type DatasetSchema,
 } from '@/lib/datacatalog'
-import type { DatasetGrant } from '@/lib/iam'
-import { summarizeGrants } from '@/lib/iam'
+import type { DatasetGrant, Owner } from '@/lib/iam'
+import { effectiveOwner, summarizeGrants } from '@/lib/iam'
 import type { DatasetPlace } from '@/lib/lineage'
 
 const PLACE_LABEL: Record<DatasetPlace, string> = {
@@ -73,6 +73,8 @@ export interface CatalogBrowserProps {
   schemas: ReadonlyMap<string, DatasetSchema>
   /** Access rules per dataset address, so a card can say who may read it. */
   grants: ReadonlyMap<string, DatasetGrant[]>
+  /** Every ownership record, of any kind — a dataset inherits from its path. */
+  owners: readonly Owner[]
   /** True while a search is running: everything expands so matches are not hidden. */
   searching: boolean
   onOpenDataset: (key: string) => void
@@ -83,6 +85,7 @@ export function CatalogBrowser({
   entries,
   schemas,
   grants,
+  owners,
   searching,
   onOpenDataset,
   workflowName,
@@ -183,10 +186,11 @@ export function CatalogBrowser({
             const entry = byKey.get(asset.key)
             if (!entry) return null
             const { dataset, annotation } = entry
-            // Only the part of the address the selected node does not already say.
-            const prefix = asset.namespace.join('/')
             const schema = schemas.get(dataset.key)
             const access = summarizeGrants(grants.get(dataset.key) ?? [])
+            // Not the annotation's `owner`, which is a name somebody typed. This one
+            // holds every privilege on the dataset and may re-grant it.
+            const held = effectiveOwner(owners, 'dataset', dataset.key)
 
             return (
               <li key={asset.key} className="px-4 py-3 transition hover:bg-surface-raised/50">
@@ -202,11 +206,6 @@ export function CatalogBrowser({
                   >
                     {asset.name}
                   </button>
-                  {prefix ? (
-                    <code className="min-w-0 truncate font-mono text-[11px] text-content-subtle">
-                      {prefix}
-                    </code>
-                  ) : null}
                   <span title={ASSET_HINT[asset.kind]}>
                     <Badge tone="neutral">{asset.kind}</Badge>
                   </span>
@@ -285,9 +284,25 @@ export function CatalogBrowser({
                       Access
                     </dt>
                     <dd className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-content-subtle">
+                      {held ? (
+                        <span
+                          title={
+                            held.source === `dataset/${dataset.key}`
+                              ? 'Owner of this dataset: holds every level on it and may re-grant it.'
+                              : `Inherited from ${held.source}: whoever owns the path owns what is under it.`
+                          }
+                        >
+                          <Badge
+                            tone={held.source === `dataset/${dataset.key}` ? 'success' : 'neutral'}
+                            icon={<Crown />}
+                          >
+                            {held.owner.principalLabel ?? held.owner.principalId}
+                          </Badge>
+                        </span>
+                      ) : null}
                       {annotation?.owner ? (
                         <span>owner {annotation.owner}</span>
-                      ) : (
+                      ) : held ? null : (
                         <span className="italic">no owner</span>
                       )}
                       {annotation?.domain ? <span>· {annotation.domain}</span> : null}

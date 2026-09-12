@@ -29,6 +29,7 @@
 import Editor, { type EditorProps, type OnMount } from '@monaco-editor/react'
 import type { editor as MonacoEditor, IDisposable } from 'monaco-editor/esm/vs/editor/editor.api'
 import {
+  Copy,
   Database,
   Gauge,
   Play,
@@ -37,12 +38,14 @@ import {
   SquareTerminal,
   TableProperties,
   Timer,
+  TriangleAlert,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { ASSET_HINT, NamespaceTree } from '@/components/catalog/NamespaceTree'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { RunResultTable } from '@/components/panels/RunResultTable'
 import { Badge, Button, EmptyState, Input, Kbd, Select, Spinner } from '@/components/ui'
 import { buildNamespaceTree, describeAsset, deriveSchemas, type CatalogAsset } from '@/lib/datacatalog'
@@ -546,7 +549,7 @@ export function SqlEditor() {
 
   if (attachables.length === 0) {
     return (
-      <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
+      <PageShell>
         <div className="card">
           <EmptyState
             icon={<SquareTerminal />}
@@ -562,7 +565,7 @@ export function SqlEditor() {
             }
           />
         </div>
-      </div>
+      </PageShell>
     )
   }
 
@@ -571,15 +574,14 @@ export function SqlEditor() {
   const attached = attachables.filter((entry) => named.has(entry.alias))
 
   return (
-    <div className="mx-auto w-full max-w-[100rem] px-6 py-6 animate-fade-in">
-      <header className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h1 className="text-sm font-semibold text-content">SQL editor</h1>
-        <p className="max-w-3xl text-xs leading-relaxed text-content-muted">
-          The runner opens each dataset with the same reader a Job uses — Delta and Iceberg
-          included — and registers it as a temporary view named after its address. Reads only:
-          SELECT, WITH, EXPLAIN, DESCRIBE and SHOW.
-        </p>
-      </header>
+    <PageShell width="full">
+      <PageHeader
+        icon={<SquareTerminal />}
+        title="SQL editor"
+        description="The runner opens each dataset with the same reader a Job uses — Delta and
+          Iceberg included — and registers it as a temporary view named after its address. Reads
+          only: SELECT, WITH, EXPLAIN, DESCRIBE and SHOW."
+      />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
         <aside className="card flex max-h-[44rem] flex-col p-0">
@@ -736,12 +738,39 @@ export function SqlEditor() {
           </div>
 
           {error && (
-            <p
-              className="whitespace-pre-wrap rounded-xl border border-state-danger/40 bg-state-danger/10 px-3 py-2 text-xs text-state-danger"
+            /*
+              A Spark error is a Java stack trace with a Python one wrapped around
+              it — hundreds of lines. Left to grow it pushes the editor and the
+              results off the screen, so it lives in a box of its own height and
+              scrolls. The first line is the one that says what happened, so it
+              is also shown on its own, above the trace.
+            */
+            <div
+              className="overflow-hidden rounded-xl border border-state-danger/40 bg-state-danger/10"
               role="alert"
             >
-              {error}
-            </p>
+              <div className="flex items-start gap-2 border-b border-state-danger/25 px-3 py-2">
+                <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-state-danger" />
+                <p className="min-w-0 flex-1 break-words text-xs font-medium text-state-danger">
+                  {error.split('\n')[0]}
+                </p>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => void navigator.clipboard?.writeText(error)}
+                  title="Copy the whole message"
+                >
+                  <Copy />
+                  Copy
+                </Button>
+                <Button size="xs" variant="ghost" onClick={() => setError(null)} title="Dismiss">
+                  <X />
+                </Button>
+              </div>
+              <pre className="max-h-56 overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed text-state-danger/90">
+                {error}
+              </pre>
+            </div>
           )}
 
           {result && !error && (
@@ -791,6 +820,6 @@ export function SqlEditor() {
           )}
         </section>
       </div>
-    </div>
+    </PageShell>
   )
 }

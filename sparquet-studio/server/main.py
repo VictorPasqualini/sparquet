@@ -9,12 +9,18 @@ SECURITY WARNING
 Every request executes arbitrary Spark work: arbitrary SQL, arbitrary reads and
 arbitrary writes on the machine (and on any warehouse this machine can reach).
 
-`/run` and `/validate` therefore require a shared secret in the `X-Sparquet-Token`
-header, printed on startup (or taken from `SPARQUET_STUDIO_TOKEN`), and reject any
-request whose `Origin` is outside the allow-list. Without that, any web page the
-developer happens to visit could drive this runner: CORS withholds the *response*
-from the attacker but never stops the request from executing. `/health` stays open
-so Studio can detect the runner and prompt for the token.
+`/run` and `/validate` therefore require a credential in a header of their own —
+the shared secret in `X-Sparquet-Token`, printed on startup (or taken from
+`SPARQUET_STUDIO_TOKEN`), or a live session — and reject any request whose
+`Origin` is outside the allow-list. Without that, any web page the developer
+happens to visit could drive this runner: CORS withholds the *response* from the
+attacker but never stops the request from executing. `/health` stays open so
+Studio can detect the runner and prompt for the token.
+
+The three endpoints somebody locked out has to reach — `/auth/status`,
+`/auth/login` and `/auth/recover` — ask for no token once the runner has users,
+or the token would guard the only screen that can hand it back. The Origin check
+still covers them, and `_LoginThrottle` caps how fast a password can be guessed.
 
 This is still a single-developer tool: keep it bound to 127.0.0.1 and never expose
 it to a network or the public internet.
@@ -45,7 +51,7 @@ from datetime import date, datetime, timezone
 from datetime import time as clock_time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -891,6 +897,105 @@ _LIST_CONFIGS = (
     "spark.plugins",
 )
 
+#: The connector coordinates the runner falls back to when nobody told it any.
+#:
+#: A Job carries its own `spark` block, and that is the right place for it. But
+#: the SQL editor and the schema probe open datasets that no Job may mention yet
+#: — somebody points at a Delta table on disk and asks what is in it — and with
+#: no coordinate anywhere the read fails with `[DATA_SOURCE_NOT_FOUND] delta`,
+#: which reads as "there is no such format".
+#:
+#: So the runner keeps a default per format, applied only when a request
+#: actually asks for that format. A plain Parquet runner never downloads a jar
+#: it has no use for, and a runner that has no network still starts.
+#:
+#: The pins are the ones the Spark line ships against. Override either with
+#: `SPARQUET_STUDIO_DELTA_PACKAGE` / `SPARQUET_STUDIO_ICEBERG_PACKAGE`, or turn
+#: the whole fallback off with `SPARQUET_STUDIO_NO_AUTO_CONNECTORS=1`.
+_DELTA_PACKAGE = {4: "io.delta:delta-spark_2.13:4.3.1", 3: "io.delta:delta-spark_2.12:3.3.2"}
+_ICEBERG_PACKAGE = {
+    4: "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
+    3: "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0",
+}
+
+
+def _spark_line() -> int:
+    """The major version of the PySpark in this environment, 4 if unreadable."""
+    try:
+        return int(str(_import("pyspark").__version__).split(".")[0])
+    except Exception:
+        return 4
+
+
+def _connector_configs(formats: Iterable[str]) -> Dict[str, str]:
+    """The creation-time configs these formats need, as far as the runner knows.
+
+    Empty for every format that needs nothing beyond what Spark ships — Parquet,
+    CSV, JSON — and empty for all of them when the fallback is turned off.
+    """
+    if os.environ.get("SPARQUET_STUDIO_NO_AUTO_CONNECTORS", "").strip().lower() in ("1", "true", "yes"):
+        return {}
+
+    wanted = {str(name or "").strip().lower() for name in formats}
+    line = _spark_line()
+    configs: Dict[str, str] = {}
+
+    def add(key: str, value: str) -> None:
+        configs[key] = _merge_list(configs.get(key), value) if key in _LIST_CONFIGS else value
+
+    if "delta" in wanted:
+        add("spark.jars.packages", os.environ.get("SPARQUET_STUDIO_DELTA_PACKAGE")
+            or _DELTA_PACKAGE.get(line, _DELTA_PACKAGE[4]))
+        add("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        add("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+    if "iceberg" in wanted:
+        add("spark.jars.packages", os.environ.get("SPARQUET_STUDIO_ICEBERG_PACKAGE")
+            or _ICEBERG_PACKAGE.get(line, _ICEBERG_PACKAGE[4]))
+        add("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+    return configs
+
+
+def _formats_of(config: Any) -> List[str]:
+    """Every format a submitted JSON reads or writes.
+
+    Same reading as the lineage the run is recorded with, so a Job that reaches a
+    Delta table through a join is counted like one that reads it directly.
+    """
+    raw = history.lineage_of(config)
+    if not raw:
+        return []
+    try:
+        lineage = json.loads(raw)
+    except ValueError:
+        return []
+    out: List[str] = []
+    for side in ("inputs", "outputs"):
+        for entry in lineage.get(side) or []:
+            fmt = entry.get("format")
+            if isinstance(fmt, str) and fmt:
+                out.append(fmt)
+    return out
+
+
+def _spark_for_formats(
+    spark_settings: Optional[Dict[str, Any]], formats: Iterable[str]
+) -> Optional[Dict[str, Any]]:
+    """What the caller asked for, plus whatever these formats need to load at all.
+
+    The caller wins on every key it set: a Job pinned to one Delta version must
+    not be quietly moved to another because the runner has a newer default.
+    """
+    fallback = _connector_configs(formats)
+    if not fallback:
+        return spark_settings
+    settings = dict(spark_settings or {})
+    configs = dict(fallback)
+    for key, value in _configs_of(spark_settings).items():
+        configs[key] = _merge_list(fallback.get(key), value) if key in _LIST_CONFIGS else value
+    settings["configs"] = configs
+    return settings
+
+
 #: Queries in flight. A session restart stops the JVM, so it may only happen
 #: while nothing is running — `_RUN_LOCK` covers pipeline runs, this covers
 #: `/query` and `/dataset/schema`, which deliberately do not take that lock.
@@ -966,7 +1071,46 @@ def _live_creation_configs(session: Any) -> Dict[str, str]:
     return {str(key): str(value) for key, value in pairs if _creation_only(str(key))}
 
 
-def _ensure_framework(spark_settings: Optional[Dict[str, Any]]) -> Tuple[Any, bool]:
+def _release_jvm() -> None:
+    """Shut the py4j gateway down so the next session starts a NEW JVM.
+
+    `SparkSession.stop()` stops the context and leaves the JVM running, and
+    `spark.jars.packages` is resolved by SparkSubmit *while the JVM is starting*
+    — never afterwards. So a session rebuilt over a live gateway comes back
+    reporting the packages it was asked for and still cannot open the format:
+
+        Py4JJavaError: An error occurred while calling o67.load
+
+    with a `DATA_SOURCE_NOT_FOUND` or an EOFException from the Python data
+    source lookup underneath, depending on the Spark line. Dropping the gateway
+    is what makes the restart real; the next `getOrCreate` relaunches it with
+    the merged submit arguments.
+
+    Not done where the session belongs to someone else: on Databricks the
+    cluster owns the JVM, and killing it is not this process's business.
+    """
+    context = _import("sparquet.core.context")
+    try:
+        if context.SparkContextManager.current_environment() == "databricks":
+            return
+    except Exception:  # an older framework without the accessor: assume ours
+        pass
+
+    from pyspark import SparkContext  # local import: the runner may have no Spark
+
+    gateway = getattr(SparkContext, "_gateway", None)
+    if gateway is not None:
+        try:
+            gateway.shutdown()
+        except Exception:  # already gone, or the JVM died on its own
+            pass
+    SparkContext._gateway = None
+    SparkContext._jvm = None
+
+
+def _ensure_framework(
+    spark_settings: Optional[Dict[str, Any]], *, run_lock_held: bool = False
+) -> Tuple[Any, bool]:
     """The framework, with a SparkSession that can actually open what was asked.
 
     The session is a process-wide singleton and its connector configs are frozen
@@ -977,6 +1121,10 @@ def _ensure_framework(spark_settings: Optional[Dict[str, Any]]) -> Tuple[Any, bo
     — and refused, loudly, while anything is still running on it.
 
     Returns the framework and whether a restart happened.
+
+    `run_lock_held` is for the run path, which already owns `_RUN_LOCK`: it is
+    the thing the restart would otherwise wait for, and re-taking a lock you
+    hold refuses your own run.
     """
     global _framework
     wanted = _configs_of(spark_settings)
@@ -995,9 +1143,9 @@ def _ensure_framework(spark_settings: Optional[Dict[str, Any]]) -> Tuple[Any, bo
             return _framework, False
 
         busy_query = _QUERY_COUNT > 0
-        acquired = _RUN_LOCK.acquire(blocking=False)
+        acquired = True if run_lock_held else _RUN_LOCK.acquire(blocking=False)
         if busy_query or not acquired:
-            if acquired:
+            if acquired and not run_lock_held:
                 _RUN_LOCK.release()
             raise HTTPException(
                 status_code=409,
@@ -1005,7 +1153,7 @@ def _ensure_framework(spark_settings: Optional[Dict[str, Any]]) -> Tuple[Any, bo
                     "This SparkSession was created without "
                     + ", ".join(sorted(gap))
                     + ", and those only take effect when the session is built. "
-                    "Rebuilding it means stopping the JVM, which would kill the "
+                    "Rebuilding it means restarting the JVM, which would kill the "
                     "run or query using it right now. Try again when it finishes."
                 ),
             )
@@ -1017,12 +1165,14 @@ def _ensure_framework(spark_settings: Optional[Dict[str, Any]]) -> Tuple[Any, bo
             settings = dict(spark_settings or {})
             settings["configs"] = merged
             _import("sparquet.core.context").SparkContextManager.stop()
+            _release_jvm()
             _framework = _import("sparquet").Sparquet(spark=settings)
             # Touch it here so a failure to build surfaces as this call, not as
             # an unrelated one two requests later.
             _framework.spark
         finally:
-            _RUN_LOCK.release()
+            if not run_lock_held:
+                _RUN_LOCK.release()
         return _framework, True
 
 
@@ -1293,13 +1443,12 @@ def _announce_token() -> None:
 _announce_token()
 
 
-def require_token(request: Request) -> None:
-    """Blocks drive-by requests from any page the developer happens to visit.
+def _check_origin(request: Request) -> None:
+    """The half of the guard that is not about a secret at all.
 
-    CORS cannot do this: for a request with no custom header and no JSON content
-    type the browser skips the preflight, the app runs, and only the *response*
-    is withheld from the attacker. A header the browser refuses to attach
-    cross-origin without a preflight, plus a server-side Origin check, do.
+    A browser will not send a request carrying a custom header cross-origin
+    without asking first, and this refuses the asking. It runs on every guarded
+    endpoint, whatever credential the caller goes on to present.
     """
     origin = request.headers.get("origin")
     if origin is not None and origin not in _allowed_origins():
@@ -1311,8 +1460,9 @@ def require_token(request: Request) -> None:
             ),
         )
 
-    if not secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), AUTH_TOKEN):
-        raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
+
+def _token_matches(request: Request) -> bool:
+    return secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), AUTH_TOKEN)
 
 
 # ------------------------------------------------------------------ identity
@@ -1345,6 +1495,50 @@ def _session_token(request: Request) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
+def require_token(request: Request) -> None:
+    """Blocks drive-by requests from any page the developer happens to visit.
+
+    CORS cannot do this: for a request with no custom header and no JSON content
+    type the browser skips the preflight, the app runs, and only the *response*
+    is withheld from the attacker. A header the browser refuses to attach
+    cross-origin without a preflight, plus a server-side Origin check, do.
+
+    A live session is taken in the token's place, because it buys the very same
+    thing: it also travels in a header of its own, so a browser will not attach
+    it cross-origin without the preflight the Origin check refuses. Demanding
+    both would mean that rotating the runner's token locks every user out of a
+    screen whose only purpose is to let them back in — and once someone has
+    logged in, the session is the credential they actually hold.
+    """
+    _check_origin(request)
+    if _token_matches(request):
+        return
+    session = _session_token(request)
+    if not session:
+        raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
+    principal = _auth.resolve_session(session)
+    if principal is None:
+        # Name the credential that went stale. Answering "no token" to somebody
+        # holding an expired session sends them looking for the wrong thing.
+        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_HELP)
+    request.state.principal = principal
+
+
+def require_token_unless_users(request: Request) -> None:
+    """The guard on the three endpoints a locked-out person has to reach.
+
+    `/auth/status`, `/auth/login` and `/auth/recover` behind the shared token is
+    a closed loop: the token is typed in Settings, and Settings is behind the
+    login. So on a runner that has users these ask for no token — the login is
+    the wall, and the Origin check still stands in front of it. With no users
+    there is nothing else to ask for, and the token stays mandatory.
+    """
+    _check_origin(request)
+    if _auth.has_users() or _token_matches(request):
+        return
+    raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
+
+
 def current_principal(request: Request) -> Any:
     """Who is calling, after `require_token` has already vouched for the request.
 
@@ -1353,6 +1547,11 @@ def current_principal(request: Request) -> Any:
     rights — that runner has one operator, and upgrading must not lock them out.
     With users, a session is required for everything but logging in.
     """
+    resolved = getattr(request.state, "principal", None)
+    if resolved is not None:
+        # `require_token` already looked this session up on the way in, and a
+        # second lookup would only cost another read of the identity store.
+        return resolved
     token = _session_token(request)
     if token:
         principal = _auth.resolve_session(token)
@@ -1364,6 +1563,94 @@ def current_principal(request: Request) -> Any:
         raise HTTPException(status_code=401, detail=LOGIN_REQUIRED_HELP)
     request.state.principal = auth.TOKEN_PRINCIPAL
     return auth.TOKEN_PRINCIPAL
+
+
+class _LoginThrottle:
+    """A sliding window over failed credential attempts.
+
+    `/auth/login` and `/auth/recover` stopped needing the shared token, so what
+    used to gate a guesser is now only the password itself. This puts a ceiling
+    on how fast one can be guessed. It counts failures only — someone who logs in
+    is forgotten immediately, so a person who mistypes twice and then succeeds
+    pays nothing.
+
+    Deliberately in memory and per process: a restart clears it, which is the
+    right trade for a single-developer runner, and there is no second process to
+    keep in step with.
+    """
+
+    def __init__(self, limit: int, window: int) -> None:
+        self._limit = max(1, limit)
+        self._window = max(1, window)
+        self._hits: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
+
+    def _fresh(self, key: str, now: float) -> List[float]:
+        hits = [at for at in self._hits.get(key, []) if now - at < self._window]
+        if hits:
+            self._hits[key] = hits
+        else:
+            self._hits.pop(key, None)
+        return hits
+
+    def retry_after(self, keys: Iterable[str]) -> int:
+        """Seconds to wait, or 0 to go ahead. The longest wait of any key wins."""
+        now = time.time()
+        wait = 0
+        with self._lock:
+            for key in keys:
+                hits = self._fresh(key, now)
+                if len(hits) >= self._limit:
+                    wait = max(wait, int(hits[0] + self._window - now) + 1)
+        return wait
+
+    def record_failure(self, keys: Iterable[str]) -> None:
+        now = time.time()
+        with self._lock:
+            for key in keys:
+                self._hits.setdefault(key, []).append(now)
+
+    def forget(self, keys: Iterable[str]) -> None:
+        with self._lock:
+            for key in keys:
+                self._hits.pop(key, None)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, "").strip() or default))
+    except ValueError:
+        return default
+
+
+_LOGIN_THROTTLE = _LoginThrottle(
+    _int_env("SPARQUET_STUDIO_LOGIN_ATTEMPTS", 10),
+    _int_env("SPARQUET_STUDIO_LOGIN_WINDOW", 300),
+)
+
+
+def _throttle_keys(request: Request, username: Optional[str] = None) -> List[str]:
+    """Both axes, because either alone has a hole: counting only the caller lets
+    a botnet spread the guessing across addresses, and counting only the account
+    lets one caller sweep every account at full speed."""
+    client = request.client.host if request.client else "unknown"
+    keys = [f"ip:{client}"]
+    if username and username.strip():
+        keys.append(f"user:{username.strip().lower()}")
+    return keys
+
+
+def _refuse_if_throttled(keys: List[str]) -> None:
+    wait = _LOGIN_THROTTLE.retry_after(keys)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many failed attempts. Try again in {wait} seconds, or restart "
+                "the runner if you are the operator and locked yourself out."
+            ),
+            headers={"Retry-After": str(wait)},
+        )
 
 
 def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
@@ -1586,6 +1873,38 @@ def _grants_now() -> List[Any]:
     return grants.load(raw)
 
 
+def _owners_now() -> List[Any]:
+    """Who owns each dataset, Job, Pipeline and Workflow, as it stands on disk.
+
+    Read beside the grants and never cached, for the same reason: a transfer of
+    ownership has to take effect when it is saved.
+    """
+    try:
+        raw = _workspace.read_meta().get("owners")
+    except Exception:  # a missing or unreadable meta file is simply no owners
+        return []
+    return grants.load_owners(raw)
+
+
+def _parents_of(resource: str, resource_id: str) -> List[tuple]:
+    """The containers one securable inherits from — the Workflow a Job or a
+    Pipeline lives in.
+
+    A dataset has no container the runner knows about: its ancestors are in the
+    address itself, and `grants.scope_chain` derives them without asking anybody.
+    """
+    if resource not in grants.CONTAINED_KINDS or not resource_id:
+        return []
+    try:
+        doc = _workspace.read(resource, resource_id)
+    except Exception:
+        return []
+    if doc is None:
+        return []
+    workflow_id = str((doc.record or {}).get("workflowId") or "").strip()
+    return [("workflow", workflow_id)] if workflow_id else []
+
+
 def _identity_of(principal: Any) -> Any:
     """The principals one caller is, in the shape `grants` matches against."""
     return grants.Identity(
@@ -1621,9 +1940,13 @@ def _authorize_resource(
     if getattr(principal, "token_only", False):
         return
     scoped = _grants_now() if rules is None else rules
-    if not scoped:
+    owners = _owners_now()
+    if not scoped and not owners:
         return
-    if grants.allows(scoped, resource, resource_id, _identity_of(principal), level):
+    if grants.allows(
+        scoped, resource, resource_id, _identity_of(principal), level,
+        owners=owners, parents=_parents_of(resource, resource_id),
+    ):
         return
     raise HTTPException(
         status_code=403,
@@ -1636,22 +1959,84 @@ def _authorize_resource(
 #: Meta records that are not bookkeeping but policy, and the action each needs.
 #: `workspace:Write` covers the rest of `meta/*`, and an editor holds it — which
 #: must not be a way to rewrite the rules that restrain the editor.
-_META_GUARDS = {"grants": "iam:ManageGrants"}
+_META_GUARDS = {"grants": "iam:ManageGrants", "owners": "iam:ManageGrants"}
 
 
-def _guard_meta_key(principal: Any, key: str) -> None:
+def _guard_meta_key(principal: Any, key: str, value: Any = None) -> None:
     action = _META_GUARDS.get(str(key))
     if action is None or getattr(principal, "token_only", False):
         return
     if principal.allows(action, "*") and not principal.denies(action, "*"):
         return
+    # Not a platform administrator — but possibly the owner of the securables
+    # being changed, which in this model is the whole point: whoever owns a table
+    # grants on that table without being handed the runner. So the change is
+    # inspected rather than the caller, and it passes only if every securable it
+    # touches is one this caller owns or holds admin on.
+    if _owner_may_change_meta(principal, str(key), value):
+        return
     raise HTTPException(
         status_code=403,
         detail=(
-            f"'{principal.username}' is not allowed to {action}. Access rules over "
-            "datasets, Jobs and Pipelines are changed by an administrator."
+            f"'{principal.username}' is not allowed to {action}, and does not own "
+            "every resource this change touches. Access rules are changed by an "
+            "administrator, or by the owner of the resource itself."
         ),
     )
+
+
+def _meta_entry_keys(key: str, value: Any) -> set:
+    """The `(kind, id)` securables one stored `grants`/`owners` value names."""
+    records: List[Any]
+    if isinstance(value, dict):
+        records = list(value.values())
+    elif isinstance(value, list):
+        records = list(value)
+    else:
+        records = []
+    out = set()
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("resource") or "")
+        ident = str(item.get("resourceId") or "").strip()
+        if kind in grants.RESOURCE_KINDS and ident:
+            out.add((kind, ident))
+    return out
+
+
+def _owner_may_change_meta(principal: Any, key: str, value: Any) -> bool:
+    """Whether this caller owns everything a `grants`/`owners` write changes.
+
+    Deleting the whole record is never an owner's call: it would drop rules over
+    resources they have nothing to do with, so it stays with `iam:ManageGrants`.
+    Transferring ownership away is not one either — an owner may hand out
+    privileges on what they own, and giving away the object itself is a change
+    only an administrator or the current owner of that exact object can make,
+    which is what `may_administer` already answers.
+    """
+    if key not in ("grants", "owners") or value is None:
+        return False
+    try:
+        current_raw = _workspace.read_meta().get(key)
+    except Exception:
+        return False
+
+    before = _meta_entry_keys(key, current_raw)
+    after = _meta_entry_keys(key, value)
+    touched = before.symmetric_difference(after) or before.union(after)
+    if not touched:
+        return False
+
+    rules = _grants_now()
+    owners = _owners_now()
+    identity = _identity_of(principal)
+    for kind, ident in touched:
+        if not grants.may_administer(
+            rules, owners, kind, ident, identity, parents=_parents_of(kind, ident)
+        ):
+            return False
+    return True
 
 
 def _authorize_datasets(principal: Any, config: Any) -> None:
@@ -1815,7 +2200,7 @@ def dataset_schema(
     """
     _authorize_resource(principal, "dataset", _dataset_id(body.path), "read")
 
-    framework, restarted = _ensure_framework(body.spark)
+    framework, restarted = _ensure_framework(_spark_for_formats(body.spark, [body.format]))
 
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
@@ -1975,7 +2360,11 @@ def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> Qu
     reach the storage. The views are temporary and dropped at the end; nothing
     is written.
     """
-    framework, restarted = _ensure_framework(body.spark)
+    # The formats the query names decide what the session has to be able to open,
+    # so a Delta table is readable here even when no Job has ever mentioned it.
+    framework, restarted = _ensure_framework(
+        _spark_for_formats(body.spark, [source.format for source in body.sources])
+    )
 
     statement = _read_only_sql(body.sql)
     limit = max(1, min(int(body.limit or DEFAULT_PREVIEW_LIMIT), MAX_PREVIEW_LIMIT))
@@ -2258,7 +2647,15 @@ def _execute_run(
 ) -> RunResponse:
     """The body shared by `/run` and `/run/stream`: execute the pipeline and shape
     the response. The caller owns the run lock and the log capture."""
-    framework = _get_framework()
+    # The Job's own `spark` block only reaches Spark if the session is built with
+    # it, and the session outlives the run before this one. Writing Delta on a
+    # runner whose session was created plain failed here for the same reason
+    # reading it failed in the SQL editor.
+    pipeline = body.pipeline if isinstance(body.pipeline, dict) else {}
+    framework, _ = _ensure_framework(
+        _spark_for_formats(pipeline.get("spark"), _formats_of(pipeline)),
+        run_lock_held=True,
+    )
     try:
         result = framework.run_from_dict(body.pipeline, params=body.params or None)
     except Exception as exc:
@@ -3344,7 +3741,7 @@ def put_workspace_meta(
     """Library-level bookkeeping (storage version, seeded flag). Kept with the files
     rather than in the browser, so the answer to "was this library already
     migrated?" travels with the library."""
-    _guard_meta_key(principal, key)
+    _guard_meta_key(principal, key, body.value)
     _workspace.write_meta(key, body.value)
     return {"key": key, "value": body.value}
 
@@ -3890,7 +4287,11 @@ def _entry_out(entry: Any) -> LedgerEntryOut:
     )
 
 
-@app.get("/auth/status", response_model=AuthStatusOut, dependencies=[Depends(require_token)])
+@app.get(
+    "/auth/status",
+    response_model=AuthStatusOut,
+    dependencies=[Depends(require_token_unless_users)],
+)
 def auth_status(request: Request) -> AuthStatusOut:
     """Whether a login is needed here, and who the caller already is.
 
@@ -3909,20 +4310,37 @@ def auth_status(request: Request) -> AuthStatusOut:
     )
 
 
-@app.post("/auth/login", response_model=SessionOut, dependencies=[Depends(require_token)])
-def auth_login(body: LoginRequest) -> SessionOut:
+@app.post(
+    "/auth/login",
+    response_model=SessionOut,
+    dependencies=[Depends(require_token_unless_users)],
+)
+def auth_login(request: Request, body: LoginRequest) -> SessionOut:
     """Exchanges a username and password for a session.
 
     One message for every kind of failure — unknown user, wrong password, disabled
-    account — because saying which one is a free answer to somebody guessing.
+    account — because saying which one is a free answer to somebody guessing. And
+    a ceiling on how many guesses fit in a window, because this endpoint is
+    reachable without the shared token.
     """
+    keys = _throttle_keys(request, body.username)
+    _refuse_if_throttled(keys)
     session = _auth.login(body.username, body.password)
     if session is None:
+        _LOGIN_THROTTLE.record_failure(keys)
         raise HTTPException(status_code=401, detail="Wrong username or password.")
+    _LOGIN_THROTTLE.forget(keys)
+    # Resolved rather than built from the user record: a principal is roles AND
+    # the statements behind them, plus the team the roles are widened by. Studio
+    # uses this answer to decide what to offer, so a login that reported only the
+    # role names left an administrator looking at an empty policy — every control
+    # greyed out with "your role does not allow ..." until the next reload asked
+    # `/auth/status`, which always answered in full.
+    principal = _auth.resolve_session(session.token)
     return SessionOut(
         token=session.token,
         expires_at=session.expires_at,
-        user=PrincipalOut(
+        user=_principal_out(principal) if principal else PrincipalOut(
             username=session.user.username, display_name=session.user.display_name,
             user_id=session.user.id, roles=list(session.user.roles),
         ),
@@ -3975,6 +4393,83 @@ def policy_vocabulary() -> PolicyVocabularyOut:
             for name, description in sorted(auth.RESOURCE_KINDS.items())
         ],
     )
+
+
+class AccessDecisionOut(BaseModel):
+    resource: str
+    resource_id: str
+    #: Whether any rule or owner names this securable or a container of it.
+    governed: bool
+    #: read / write / admin, or null for "governed and nothing left".
+    level: Optional[str] = None
+    #: True when the level comes from owning it, or owning what contains it.
+    owned: bool = False
+    #: The `kind/id` the winning rule sits on — itself, or the ancestor it was
+    #: inherited from. What the screen needs to send somebody to the right row.
+    source: Optional[str] = None
+    #: Who owns it, as recorded directly on it (not inherited).
+    owner_kind: Optional[str] = None
+    owner_id: Optional[str] = None
+    #: Whether this caller may change the rules on it.
+    may_administer: bool = False
+    #: Every `kind/id` a rule could be written on to reach it, nearest first.
+    chain: List[str] = Field(default_factory=list)
+
+
+class AccessQueryRequest(BaseModel):
+    #: `[{"resource": "dataset", "resourceId": "/lake/silver/orders"}, ...]`
+    resources: List[Dict[str, str]] = Field(default_factory=list)
+
+
+@app.post("/iam/access", response_model=List[AccessDecisionOut])
+def effective_access(
+    body: AccessQueryRequest, principal: Any = Depends(current_principal)
+) -> List[AccessDecisionOut]:
+    """What this caller actually holds on each securable, and why.
+
+    Studio can evaluate the same rules in the browser and does, to grey out a
+    control rather than let somebody find out from a 403. This endpoint exists
+    for the other half: inheritance needs the Workflow a Job belongs to, and
+    that is a workspace record. Asking here means the explanation the screen
+    shows is the one the runner will act on.
+    """
+    rules = _grants_now()
+    owners = _owners_now()
+    identity = _identity_of(principal)
+    token_only = bool(getattr(principal, "token_only", False))
+
+    out: List[AccessDecisionOut] = []
+    for item in body.resources[:500]:
+        kind = str(item.get("resource") or "")
+        ident = str(item.get("resourceId") or "").strip()
+        if kind not in grants.RESOURCE_KINDS or not ident:
+            continue
+        if kind == "dataset":
+            ident = _dataset_id(ident)
+        parents = _parents_of(kind, ident)
+        decision = grants.evaluate(rules, owners, kind, ident, identity, parents)
+        owner = grants.owner_of(owners, kind, ident)
+        out.append(AccessDecisionOut(
+            resource=kind,
+            resource_id=ident,
+            governed=decision.governed,
+            # The shared token is the identity on a runner with no users, and
+            # `_authorize_resource` never refuses it. Reporting anything narrower
+            # here would grey out controls that in fact work.
+            level="admin" if token_only else decision.level,
+            owned=decision.owned,
+            source=decision.source,
+            owner_kind=owner.principal_kind if owner else None,
+            owner_id=owner.principal_id if owner else None,
+            may_administer=token_only or grants.may_administer(
+                rules, owners, kind, ident, identity, parents
+            ) or (
+                principal.allows("iam:ManageGrants", "*")
+                and not principal.denies("iam:ManageGrants", "*")
+            ),
+            chain=[f"{k}/{i}" for k, i in grants.scope_chain(kind, ident, parents)],
+        ))
+    return out
 
 
 @app.post(
@@ -4217,20 +4712,26 @@ def issue_recovery(
     )
 
 
-@app.post("/auth/recover", dependencies=[Depends(require_token)])
-def recover_password(body: RecoverRequest) -> Dict[str, bool]:
+@app.post("/auth/recover", dependencies=[Depends(require_token_unless_users)])
+def recover_password(request: Request, body: RecoverRequest) -> Dict[str, bool]:
     """Trades a recovery code for a new password. No session required — the
-    caller is by definition locked out — but the shared token still is, because
-    this endpoint is on the same runner as everything else.
+    caller is by definition locked out — and on a runner with users no shared
+    token either, since somebody locked out of Settings cannot read one.
 
     Every failure reads the same, deliberately: unknown code, expired code, code
-    already used, account disabled. A specific answer would make this an oracle
-    for someone holding the token and guessing.
+    already used, account disabled. A specific answer would turn this into an
+    oracle for somebody guessing. The rate limit is what keeps the guessing slow;
+    it counts against the caller only, since the code names no account until it
+    is redeemed.
     """
+    keys = _throttle_keys(request)
+    _refuse_if_throttled(keys)
     try:
         _auth.redeem_recovery(body.code, body.password)
     except auth.AuthError as error:
+        _LOGIN_THROTTLE.record_failure(keys)
         raise HTTPException(status_code=400, detail=str(error)) from error
+    _LOGIN_THROTTLE.forget(keys)
     return {"changed": True}
 
 

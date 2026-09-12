@@ -1,4 +1,4 @@
-import { Network, Search, Share2, Sparkles, Table2, X } from 'lucide-react'
+import { Database, Network, Search, Share2, Sparkles, Table2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -13,6 +13,7 @@ import {
   Select,
   type SegmentedOption,
 } from '@/components/ui'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { CatalogBrowser } from '@/components/lineage/CatalogBrowser'
 import { DatasetSheet } from '@/components/lineage/DatasetSheet'
 import { LineageGraph } from '@/components/lineage/LineageGraph'
@@ -33,7 +34,11 @@ import {
   lineageExampleTemplates,
 } from '@/data/templates'
 import { useCatalogStore } from '@/store/catalog'
-import { useIamStore } from '@/store/iam'
+import {
+  effectiveOwnerOf,
+  mayAdministerResource,
+  useIamStore,
+} from '@/store/iam'
 import { useAuthStore } from '@/store/auth'
 import type { AuthTeam, AuthUser } from '@/types/auth'
 import { useLibraryStore } from '@/store/library'
@@ -108,6 +113,9 @@ export function Catalog() {
   const loadGrants = useIamStore((state) => state.load)
   const addGrant = useIamStore((state) => state.grant)
   const revokeGrant = useIamStore((state) => state.revoke)
+  const owners = useIamStore((state) => state.owners)
+  const setOwner = useIamStore((state) => state.setOwner)
+  const clearOwner = useIamStore((state) => state.clearOwner)
   const fetchTeams = useAuthStore((state) => state.fetchTeams)
   const fetchUsers = useAuthStore((state) => state.fetchUsers)
   const [teams, setTeams] = useState<AuthTeam[]>([])
@@ -351,7 +359,7 @@ export function Catalog() {
 
   if (jobs.length === 0) {
     return (
-      <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
+      <PageShell>
         <div className="card">
           <EmptyState
             icon={<Network />}
@@ -371,34 +379,28 @@ export function Catalog() {
             }
           />
         </div>
-      </div>
+      </PageShell>
     )
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
-      <header className="mb-6 flex items-start gap-4">
-        <div className="space-y-1">
-          <h1 className="text-sm font-semibold text-content">Data catalog</h1>
-          <p className="max-w-2xl text-xs leading-relaxed text-content-muted">
-            Every table, bucket and topic your Jobs touch, grouped the way a metastore groups
-            them — except nothing was registered anywhere: the hierarchy is read back out of the
-            addresses. Lineage is the same inventory seen edge-first, which is why it lives here:
-            two Jobs are linked by the address alone, one writes a path and another reads it. What
-            the data MEANS is the one thing no pipeline can say, so it is the one thing you type.
-          </p>
-        </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="ml-auto shrink-0"
-          onClick={loadExample}
-          loading={loadingExample}
-        >
-          <Sparkles />
-          Load example
-        </Button>
-      </header>
+    <PageShell>
+      <PageHeader
+        icon={<Database />}
+        title="Data catalog"
+        description="Every table, bucket and topic your Jobs touch, grouped the way a metastore
+          groups them — except nothing was registered anywhere: the hierarchy is read back out of
+          the addresses. Lineage is the same inventory seen edge-first, which is why it lives
+          here: two Jobs are linked by the address alone, one writes a path and another reads it.
+          What the data MEANS is the one thing no pipeline can say, so it is the one thing you
+          type."
+        actions={
+          <Button size="sm" variant="secondary" onClick={loadExample} loading={loadingExample}>
+            <Sparkles />
+            Load example
+          </Button>
+        }
+      />
 
       <dl className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {(
@@ -504,6 +506,7 @@ export function Catalog() {
           searching={query.trim() !== ''}
           schemas={schemas}
           grants={datasetGrants}
+          owners={owners}
           onOpenDataset={setOpenKey}
           workflowName={workflowName}
         />
@@ -522,6 +525,17 @@ export function Catalog() {
           users={users}
           onGrant={(input) => addGrant({ ...input, resource: 'dataset', resourceId: open.dataset.key })}
           onRevoke={revokeGrant}
+          owner={
+            owners.find(
+              (owner) => owner.resource === 'dataset' && owner.resourceId === open.dataset.key,
+            ) ?? null
+          }
+          ownerEffective={effectiveOwnerOf('dataset', open.dataset.key)}
+          onAssignOwner={(input) =>
+            setOwner({ ...input, resource: 'dataset', resourceId: open.dataset.key })
+          }
+          onClearOwner={() => clearOwner('dataset', open.dataset.key)}
+          mayManageAccess={mayAdministerResource('dataset', open.dataset.key)}
           probe={runnerUrl ? (format) => probe(open.dataset.key, format) : null}
           onClose={() => setOpenKey(null)}
           onSave={(patch) => save(open.dataset.key, patch)}
@@ -529,6 +543,6 @@ export function Catalog() {
           onOpenJob={openJob}
         />
       ) : null}
-    </div>
+    </PageShell>
   )
 }

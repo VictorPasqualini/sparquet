@@ -24,8 +24,9 @@ import {
   type SelectOption,
 } from '@/components/ui'
 import { GrantsPanel, type NewGrant } from '@/components/catalog/GrantsPanel'
+import { OwnerPicker, type NewOwner } from '@/components/catalog/OwnerPicker'
 import { addTag, hasTag, MAX_TAG_LENGTH, MAX_TAGS, removeTag } from '@/lib/tags'
-import type { DatasetGrant } from '@/lib/iam'
+import type { DatasetGrant, Owner } from '@/lib/iam'
 import type { AuthTeam, AuthUser } from '@/types/auth'
 import {
   CLASSIFICATIONS,
@@ -683,6 +684,21 @@ export interface DatasetSheetProps {
   users: AuthUser[]
   onGrant: (grant: NewGrant) => Promise<void> | void
   onRevoke: (id: string) => Promise<void> | void
+  /** The ownership record on this dataset itself, or null when it has none. */
+  owner: Owner | null
+  /**
+   * The owner that actually applies and where it sits — a table under an owned
+   * folder has one without a record of its own.
+   */
+  ownerEffective: { owner: Owner; source: string } | null
+  onAssignOwner: (owner: NewOwner) => Promise<void> | void
+  onClearOwner: () => Promise<void> | void
+  /**
+   * Whether this reader may write the rules here: an administrator of the
+   * runner, or the owner of the dataset. False still shows them — hiding who
+   * can reach a table is how people assume nobody can.
+   */
+  mayManageAccess?: boolean
   onClose: () => void
   onSave: (patch: Partial<DatasetAnnotation>) => Promise<void>
   onForget: () => Promise<void>
@@ -702,6 +718,11 @@ export function DatasetSheet({
   users,
   onGrant,
   onRevoke,
+  owner,
+  ownerEffective,
+  onAssignOwner,
+  onClearOwner,
+  mayManageAccess = true,
   onClose,
   onSave,
   onForget,
@@ -885,6 +906,17 @@ export function DatasetSheet({
               />
             </Field>
 
+            <OwnerPicker
+              resource="dataset"
+              owner={owner}
+              effective={ownerEffective}
+              teams={teams}
+              users={users}
+              onAssign={onAssignOwner}
+              onClear={onClearOwner}
+              editable={mayManageAccess}
+            />
+
             <GrantsPanel
               resource="dataset"
               grants={grants}
@@ -892,6 +924,7 @@ export function DatasetSheet({
               users={users}
               onGrant={onGrant}
               onRevoke={onRevoke}
+              editable={mayManageAccess}
             />
           </>
         ) : null}

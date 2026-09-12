@@ -1,29 +1,42 @@
 /**
- * Access rules over Jobs and Pipelines, in the screen where access lives.
+ * Access rules over Workflows, Jobs and Pipelines, in the screen where access lives.
  *
  * Datasets are edited in the catalog, on the dataset itself — that is where
  * somebody asks "who can read this table?". A Job or a Pipeline is asked about
  * from the other direction, usually as "what may this team run?", so the rules
  * for those are gathered here, next to the users and teams they name.
  *
+ * The Workflow is in the picker because it is the container the other two
+ * inherit from: one rule there governs everything inside it, which is the whole
+ * reason a catalog-shaped model beats a rule per object.
+ *
  * The same list, the same evaluation and the same enforcement as the catalog's:
  * one record in the workspace, re-read by the runner before it executes
  * anything. What this screen adds is the resource picker.
  */
 
-import { Boxes, Workflow } from 'lucide-react'
+import { Boxes, FolderTree, Workflow } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { GrantsPanel, type NewGrant } from '@/components/catalog/GrantsPanel'
+import { OwnerPicker, type NewOwner } from '@/components/catalog/OwnerPicker'
 import { Badge, Field, Segmented, Select, Spinner, type SelectOption } from '@/components/ui'
 import { grantsFor, type ResourceKind } from '@/lib/iam'
 import { useAuthStore } from '@/store/auth'
-import { useIamStore } from '@/store/iam'
+import { accessTo, effectiveOwnerOf, mayAdministerResource, useIamStore } from '@/store/iam'
 import { useLibraryStore } from '@/store/library'
 import type { AuthTeam, AuthUser } from '@/types/auth'
 
-type Kind = Extract<ResourceKind, 'job' | 'pipeline'>
+type Kind = Extract<ResourceKind, 'job' | 'pipeline' | 'workflow'>
+
+const NOUN: Record<Kind, string> = { job: 'Job', pipeline: 'Pipeline', workflow: 'Workflow' }
+
+const ICON: Record<Kind, typeof Boxes> = {
+  job: Boxes,
+  pipeline: Workflow,
+  workflow: FolderTree,
+}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -31,27 +44,27 @@ function messageOf(error: unknown): string {
 
 export function ResourceGrantsPanel() {
   const can = useAuthStore((state) => state.can)
+  const principal = useAuthStore((state) => state.principal)
   const fetchTeams = useAuthStore((state) => state.fetchTeams)
   const fetchUsers = useAuthStore((state) => state.fetchUsers)
 
   const jobs = useLibraryStore((state) => state.jobs)
   const pipelines = useLibraryStore((state) => state.pipelines)
+  const workflows = useLibraryStore((state) => state.workflows)
 
   const grants = useIamStore((state) => state.grants)
+  const owners = useIamStore((state) => state.owners)
   const loading = useIamStore((state) => state.loading)
   const load = useIamStore((state) => state.load)
   const addGrant = useIamStore((state) => state.grant)
   const revokeGrant = useIamStore((state) => state.revoke)
+  const setOwner = useIamStore((state) => state.setOwner)
+  const clearOwner = useIamStore((state) => state.clearOwner)
 
   const [kind, setKind] = useState<Kind>('job')
   const [selected, setSelected] = useState('')
   const [teams, setTeams] = useState<AuthTeam[]>([])
   const [users, setUsers] = useState<AuthUser[]>([])
-
-  // Reading the rules needs nothing special — they are workspace data, and a
-  // person who cannot see them cannot tell whether they are governed at all.
-  // Changing them is the administrator's action, and the runner refuses it too.
-  const mayManage = can('iam:ManageGrants')
 
   useEffect(() => {
     void load()
@@ -75,21 +88,26 @@ export function ResourceGrantsPanel() {
     const source =
       kind === 'job'
         ? jobs.map((job) => ({ id: job.id, name: job.name }))
-        : pipelines.map((pipeline) => ({ id: pipeline.id, name: pipeline.name }))
+        : kind === 'pipeline'
+          ? pipelines.map((pipeline) => ({ id: pipeline.id, name: pipeline.name }))
+          : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
     const counted = source.map((item) => {
       const rules = grantsFor(grants, kind, item.id)
       const denies = rules.filter((rule) => rule.effect === 'deny').length
+      const owned = owners.some((owner) => owner.resource === kind && owner.resourceId === item.id)
+      const parts: string[] = []
+      if (owned) parts.push('owned')
+      if (rules.length > 0) {
+        parts.push(`${rules.length - denies} allow${denies > 0 ? `, ${denies} deny` : ''}`)
+      }
       return {
         value: item.id,
         label: item.name,
-        hint:
-          rules.length === 0
-            ? 'no rules'
-            : `${rules.length - denies} allow${denies > 0 ? `, ${denies} deny` : ''}`,
+        hint: parts.length > 0 ? parts.join(' · ') : 'no rules',
       }
     })
     return counted.sort((left, right) => left.label.localeCompare(right.label))
-  }, [grants, jobs, kind, pipelines])
+  }, [grants, jobs, kind, owners, pipelines, workflows])
 
   // Keep the picker on something that exists: switching kind, or deleting the
   // record, must not leave the panel editing rules for nothing.
@@ -104,6 +122,41 @@ export function ResourceGrantsPanel() {
   const scoped = useMemo(
     () => (selected ? grantsFor(grants, kind, selected) : []),
     [grants, kind, selected],
+  )
+
+  /*
+   * Reading the rules needs nothing special — they are workspace data, and a
+   * person who cannot see them cannot tell whether they are governed at all.
+   * Changing them takes `iam:ManageGrants` over the runner OR ownership of this
+   * particular resource, which is the point of having owners: the team that owns
+   * a Workflow re-grants it without anybody handing them the whole platform.
+   * `_owner_may_change_meta` in `server/main.py` checks exactly this again.
+   *
+   * The three memos below read the stores directly instead of subscribing, so
+   * `grants`, `owners` and `principal` are in the deps to make them recompute.
+   */
+  const mayManage = useMemo(
+    () => (selected ? mayAdministerResource(kind, selected) : can('iam:ManageGrants')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [can, grants, kind, owners, principal, selected],
+  )
+
+  const ownership = useMemo(
+    () => (selected ? effectiveOwnerOf(kind, selected) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [kind, owners, selected],
+  )
+
+  const ownRecord = useMemo(
+    () => owners.find((owner) => owner.resource === kind && owner.resourceId === selected) ?? null,
+    [kind, owners, selected],
+  )
+
+  /** What the person at the keyboard ends up with here, and where it came from. */
+  const mine = useMemo(
+    () => (selected ? accessTo(kind, selected) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [grants, kind, owners, principal, selected],
   )
 
   const onGrant = useCallback(
@@ -129,12 +182,42 @@ export function ResourceGrantsPanel() {
     [revokeGrant],
   )
 
+  const onAssignOwner = useCallback(
+    async (input: NewOwner) => {
+      if (!selected) return
+      try {
+        await setOwner({ ...input, resource: kind, resourceId: selected })
+      } catch (error) {
+        toast.error(messageOf(error))
+      }
+    },
+    [kind, selected, setOwner],
+  )
+
+  const onClearOwner = useCallback(async () => {
+    if (!selected) return
+    try {
+      await clearOwner(kind, selected)
+    } catch (error) {
+      toast.error(messageOf(error))
+    }
+  }, [clearOwner, kind, selected])
+
   const governed = useMemo(() => {
     const ids = new Set(
       grants.filter((grant) => grant.resource === kind).map((grant) => grant.resourceId),
     )
+    for (const owner of owners) {
+      if (owner.resource === kind) ids.add(owner.resourceId)
+    }
     return ids.size
-  }, [grants, kind])
+  }, [grants, kind, owners])
+
+  const Icon = ICON[kind]
+  // An inherited rule is the one thing a per-resource list cannot show: the
+  // grant is written somewhere else, so the list here looks empty while the
+  // answer is not. Say where it comes from instead of letting the page lie.
+  const inherited = mine?.source && mine.source !== `${kind}/${selected}` ? mine.source : null
 
   return (
     <div className="space-y-4 border-t border-line pt-4">
@@ -143,14 +226,15 @@ export function ResourceGrantsPanel() {
           <p className="text-sm text-content">Who can run what</p>
           <p className="max-w-md text-2xs leading-relaxed text-content-subtle">
             Roles say whether somebody may run anything on this runner. These say which Jobs and
-            Pipelines in particular — and which they may never touch, whatever else grants it.
-            Datasets are governed the same way, from the catalog.
+            Pipelines in particular — and which they may never touch, whatever else grants it. A
+            rule on a Workflow reaches everything inside it. Datasets are governed the same way,
+            from the catalog.
           </p>
         </div>
         <div className="flex items-center gap-2">
           {governed > 0 ? (
             <Badge tone="brand">
-              {governed} {kind === 'job' ? 'Job' : 'Pipeline'}
+              {governed} {NOUN[kind]}
               {governed === 1 ? '' : 's'} restricted
             </Badge>
           ) : (
@@ -160,7 +244,7 @@ export function ResourceGrantsPanel() {
         </div>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-[13rem_minmax(0,1fr)]">
+      <div className="grid gap-2 sm:grid-cols-[16rem_minmax(0,1fr)]">
         <Field label="Kind">
           <Segmented
             size="sm"
@@ -174,24 +258,25 @@ export function ResourceGrantsPanel() {
                 label: 'Pipelines',
                 title: 'An ordered sequence of Jobs',
               },
+              {
+                value: 'workflow',
+                label: 'Workflows',
+                title: 'The container everything inside it inherits from',
+              },
             ]}
           />
         </Field>
-        <Field label={kind === 'job' ? 'Job' : 'Pipeline'}>
+        <Field label={NOUN[kind]}>
           {options.length === 0 ? (
             <p className="flex items-center gap-1.5 py-1.5 text-xs italic text-content-subtle">
-              {kind === 'job' ? (
-                <Boxes className="h-3.5 w-3.5" />
-              ) : (
-                <Workflow className="h-3.5 w-3.5" />
-              )}
-              The library has no {kind === 'job' ? 'Job' : 'Pipeline'} to restrict yet.
+              <Icon className="h-3.5 w-3.5" />
+              The library has no {NOUN[kind]} to restrict yet.
             </p>
           ) : (
             <Select
               value={selected}
               options={options}
-              ariaLabel={kind === 'job' ? 'Job to restrict' : 'Pipeline to restrict'}
+              ariaLabel={`${NOUN[kind]} to restrict`}
               onValueChange={setSelected}
             />
           )}
@@ -199,15 +284,36 @@ export function ResourceGrantsPanel() {
       </div>
 
       {selected ? (
-        <GrantsPanel
-          resource={kind}
-          teams={teams}
-          users={users}
-          grants={scoped}
-          onGrant={onGrant}
-          onRevoke={onRevoke}
-          editable={mayManage}
-        />
+        <div className="space-y-3">
+          <OwnerPicker
+            resource={kind}
+            owner={ownRecord}
+            effective={ownership}
+            teams={teams}
+            users={users}
+            onAssign={onAssignOwner}
+            onClear={onClearOwner}
+            editable={mayManage}
+          />
+
+          {inherited ? (
+            <p className="rounded-lg border border-dashed border-line px-3 py-2 text-2xs leading-relaxed text-content-subtle">
+              Your own access here — <strong className="text-content">{mine?.level}</strong> — comes
+              from a rule on <code className="text-content-muted">{inherited}</code>, not from this{' '}
+              {NOUN[kind]}. Change it there, or write a rule here to override it.
+            </p>
+          ) : null}
+
+          <GrantsPanel
+            resource={kind}
+            teams={teams}
+            users={users}
+            grants={scoped}
+            onGrant={onGrant}
+            onRevoke={onRevoke}
+            editable={mayManage}
+          />
+        </div>
       ) : null}
     </div>
   )
