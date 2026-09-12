@@ -24,6 +24,7 @@ import {
   Plug,
   RotateCcw,
   ShieldAlert,
+  SlidersHorizontal,
   Sun,
   Terminal,
   Trash2,
@@ -54,6 +55,7 @@ import {
   Toggle,
 } from '@/components/ui'
 import { sendAiRequest } from '@/lib/ai/client'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { AI_PROVIDER_INFO } from '@/lib/ai/providers'
 import {
   checkRunnerHealth,
@@ -189,15 +191,14 @@ export function Settings() {
   const active = useActiveSection()
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-6 py-8 animate-fade-in">
-      <header className="space-y-1">
-        <h1 className="text-lg font-semibold text-content">Settings</h1>
-        <p className="text-xs text-content-muted">
-          Preferences, keys and data for this browser. Nothing here syncs to a server.
-        </p>
-      </header>
+    <PageShell width="default">
+      <PageHeader
+        icon={<SlidersHorizontal />}
+        title="Settings"
+        description="Preferences, keys and data for this browser. Nothing here syncs to a server."
+      />
 
-      <div className="mt-8 flex items-start gap-10">
+      <div className="flex items-start gap-10">
         <SectionNav active={active} />
 
         <div className="min-w-0 flex-1 space-y-10">
@@ -208,7 +209,7 @@ export function Settings() {
           <AboutSection />
         </div>
       </div>
-    </div>
+    </PageShell>
   )
 }
 

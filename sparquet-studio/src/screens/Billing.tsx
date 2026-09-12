@@ -22,27 +22,22 @@ import { useState } from 'react'
 import { CreditsPanel } from '@/components/credits/CreditsPanel'
 import { SpendBreakdown } from '@/components/credits/SpendBreakdown'
 import { SpendTrend } from '@/components/credits/SpendTrend'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { currentPeriod } from '@/lib/billing'
 
 export function Billing() {
   const [period, setPeriod] = useState(currentPeriod)
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-6 py-8 animate-fade-in">
-      <header className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-surface-sunken text-content-muted">
-          <Coins className="h-4 w-4" aria-hidden />
-        </span>
-        <div className="space-y-0.5">
-          <h1 className="text-lg font-semibold text-content">Billing</h1>
-          <p className="text-xs leading-relaxed text-content-muted">
-            Execution credits. One per successful write that lands away from this
-            machine — local runs and runs that failed before writing are free.
-          </p>
-        </div>
-      </header>
+    <PageShell width="default">
+      <PageHeader
+        icon={<Coins />}
+        title="Billing"
+        description="Execution credits. One per successful write that lands away from this machine
+          — local runs and runs that failed before writing are free."
+      />
 
-      <div className="mt-8 space-y-6">
+      <div className="space-y-6">
         <div className="card space-y-5 p-5">
           <CreditsPanel />
         </div>
@@ -53,6 +48,6 @@ export function Billing() {
           <SpendBreakdown period={period} />
         </div>
       </div>
-    </div>
+    </PageShell>
   )
 }

@@ -20,6 +20,7 @@ import {
   renderInlineCode,
   SectionTitle,
 } from '@/components/ui'
+import { PageShell } from '@/components/layout/PageShell'
 import { LESSONS, type Lesson, type LessonSection } from '@/data/lessons'
 import { TEMPLATES } from '@/data/templates'
 import { cn } from '@/lib/utils/cn'
@@ -48,7 +49,7 @@ export function LessonDetail() {
 
   if (!lesson) {
     return (
-      <div className="mx-auto w-full max-w-3xl px-6 py-8">
+      <PageShell width="narrow">
         <div className="card">
           <EmptyState
             icon={<ListChecks />}
@@ -61,7 +62,7 @@ export function LessonDetail() {
             }
           />
         </div>
-      </div>
+      </PageShell>
     )
   }
 
@@ -73,7 +74,7 @@ export function LessonDetail() {
     : null
 
   return (
-    <div ref={rootRef} className="mx-auto w-full max-w-5xl px-6 py-8 animate-fade-in">
+    <div ref={rootRef} className="mx-auto w-full max-w-5xl px-6 py-6 animate-fade-in">
       <Button
         size="xs"
         variant="ghost"
