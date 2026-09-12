@@ -24,7 +24,7 @@ import {
   type CatalogNode,
   type DatasetSchema,
 } from '@/lib/datacatalog'
-import type { DatasetGrant, Owner } from '@/lib/iam'
+import type { DatasetGrant, Decision, Owner } from '@/lib/iam'
 import { effectiveOwner, summarizeGrants } from '@/lib/iam'
 import type { DatasetPlace } from '@/lib/lineage'
 
@@ -40,6 +40,51 @@ const PLACE_TONE: Record<DatasetPlace, BadgeTone> = {
   intermediate: 'brand',
   terminal: 'success',
   isolated: 'warning',
+}
+
+/**
+ * What the person at the keyboard holds on a dataset, said the way the question
+ * is asked — "can I read this?" — with where the answer came from in the title,
+ * since a level with no source sends people to the wrong screen to change it.
+ */
+function standing(
+  decision: Decision | undefined,
+  key: string,
+): { tone: BadgeTone; label: string; title: string } {
+  const own = `dataset/${key}`
+  if (!decision || !decision.governed) {
+    return {
+      tone: 'neutral',
+      label: 'ungoverned',
+      title:
+        'No rule names this dataset or any path above it. Access to it is whatever the runner already allows — naming an owner is enough to start governing it.',
+    }
+  }
+  if (decision.owned) {
+    return {
+      tone: 'success',
+      label: 'you own it',
+      title:
+        decision.source === own
+          ? 'You own this dataset: every level on it, and a deny cannot reach you.'
+          : `You own ${decision.source}, and ownership reaches everything under it.`,
+    }
+  }
+  if (!decision.level) {
+    return {
+      tone: 'danger',
+      label: 'no access',
+      title: 'Governed, and no rule here reaches you. The owner is who to ask.',
+    }
+  }
+  return {
+    tone: decision.level === 'admin' ? 'success' : 'brand',
+    label: `you: ${decision.level}`,
+    title:
+      decision.source === own
+        ? `Granted ${decision.level} on this dataset.`
+        : `Granted ${decision.level} on ${decision.source} — inherited from there, so that is where to change it.`,
+  }
 }
 
 /** Every asset in this node and everything under it, in tree order. */
@@ -75,6 +120,8 @@ export interface CatalogBrowserProps {
   grants: ReadonlyMap<string, DatasetGrant[]>
   /** Every ownership record, of any kind — a dataset inherits from its path. */
   owners: readonly Owner[]
+  /** What the current identity holds per dataset address, decided by the screen. */
+  decisions: ReadonlyMap<string, Decision>
   /** True while a search is running: everything expands so matches are not hidden. */
   searching: boolean
   onOpenDataset: (key: string) => void
@@ -86,6 +133,7 @@ export function CatalogBrowser({
   schemas,
   grants,
   owners,
+  decisions,
   searching,
   onOpenDataset,
   workflowName,
@@ -191,6 +239,8 @@ export function CatalogBrowser({
             // Not the annotation's `owner`, which is a name somebody typed. This one
             // holds every privilege on the dataset and may re-grant it.
             const held = effectiveOwner(owners, 'dataset', dataset.key)
+            const decision = decisions.get(dataset.key)
+            const mine = standing(decision, dataset.key)
 
             return (
               <li key={asset.key} className="px-4 py-3 transition hover:bg-surface-raised/50">
@@ -284,6 +334,9 @@ export function CatalogBrowser({
                       Access
                     </dt>
                     <dd className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-content-subtle">
+                      <span title={mine.title}>
+                        <Badge tone={mine.tone}>{mine.label}</Badge>
+                      </span>
                       {held ? (
                         <span
                           title={
@@ -313,22 +366,20 @@ export function CatalogBrowser({
                           {annotation.classification}
                         </Badge>
                       ) : null}
-                      {access.total === 0 ? (
-                        <span
-                          className="italic"
-                          title="No rule names this dataset, so whoever may query the runner
-                            at all can read it."
-                        >
-                          open to anyone with catalog access
-                        </span>
-                      ) : (
+                      {/*
+                        Only the rules written against this address. The badge above
+                        already answers the reader's own case, inheritance included —
+                        saying "0 granted" beside it would read as "nobody", when an
+                        inherited rule may be granting the whole team.
+                      */}
+                      {access.total > 0 ? (
                         <>
                           <Badge tone="brand">{access.allowed} granted</Badge>
                           {access.denied > 0 ? (
                             <Badge tone="danger">{access.denied} denied</Badge>
                           ) : null}
                         </>
-                      )}
+                      ) : null}
                       {annotation?.tags.map((tag) => (
                         <Badge key={tag} tone="neutral">
                           {tag}

@@ -25,7 +25,7 @@ import {
   type DatasetAnnotation,
   type ProbedField,
 } from '@/lib/datacatalog'
-import { grantsByResource, type DatasetGrant } from '@/lib/iam'
+import { decide, grantsByResource, type DatasetGrant, type Decision } from '@/lib/iam'
 import { fetchDatasetSchema } from '@/lib/runner/client'
 import { sparkForDatasets } from '@/lib/runner/session'
 import { buildLineage, type DatasetPlace } from '@/lib/lineage'
@@ -62,6 +62,38 @@ const PLACE_HINT: Record<DatasetPlace, string> = {
 }
 
 const FILTERS: PlaceFilter[] = ['all', 'intermediate', 'external', 'terminal', 'isolated']
+
+/**
+ * Governance, filtered the way it is asked about: what is mine, what is closed
+ * to me, and what nobody has claimed yet. The last one is the working list for
+ * anyone rolling governance out — everything on it is still open.
+ */
+type GovFilter = 'all' | 'mine' | 'closed' | 'ungoverned'
+
+const GOV_FILTERS: GovFilter[] = ['all', 'mine', 'closed', 'ungoverned']
+
+const GOV_LABEL: Record<GovFilter, string> = {
+  all: 'Any access',
+  mine: 'Mine',
+  closed: 'Closed to me',
+  ungoverned: 'Ungoverned',
+}
+
+const GOV_HINT: Record<GovFilter, string> = {
+  all: 'Every dataset, whatever its rules say.',
+  mine: 'You own it, or hold admin on it — the ones whose rules you can change yourself.',
+  closed: 'A rule governs it and none of them reaches you. Ask whoever owns it.',
+  ungoverned: 'No owner and no rule, here or on any path above it: open to anyone who may query the runner.',
+}
+
+/** Whether a dataset belongs on the list this filter is asking for. */
+function matchesGovernance(filter: GovFilter, decision: Decision | undefined): boolean {
+  if (filter === 'all') return true
+  if (!decision || !decision.governed) return filter === 'ungoverned'
+  if (filter === 'mine') return decision.owned || decision.level === 'admin'
+  if (filter === 'closed') return decision.level === null
+  return false
+}
 
 type View = 'list' | 'graph'
 
@@ -116,6 +148,7 @@ export function Catalog() {
   const owners = useIamStore((state) => state.owners)
   const setOwner = useIamStore((state) => state.setOwner)
   const clearOwner = useIamStore((state) => state.clearOwner)
+  const principal = useAuthStore((state) => state.principal)
   const fetchTeams = useAuthStore((state) => state.fetchTeams)
   const fetchUsers = useAuthStore((state) => state.fetchUsers)
   const [teams, setTeams] = useState<AuthTeam[]>([])
@@ -127,6 +160,7 @@ export function Catalog() {
   const [view, setView] = useState<View>('list')
   const [scope, setScope] = useState<string>(ALL_WORKFLOWS)
   const [place, setPlace] = useState<PlaceFilter>('all')
+  const [governance, setGovernance] = useState<GovFilter>('all')
   const [query, setQuery] = useState('')
   const [openKey, setOpenKey] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -186,6 +220,31 @@ export function Catalog() {
   // and the sheet want them, and both are keyed by the same address.
   const datasetGrants = useMemo(() => grantsByResource(grants, 'dataset'), [grants])
 
+  /**
+   * The access answer for every dataset on screen, decided once.
+   *
+   * Not `accessTo` from the store: this screen already subscribes to the grants
+   * and the owners, and a helper that reads them through `getState` would leave
+   * the badges showing yesterday's rules until something else re-rendered.
+   * Datasets need no parent scopes — their chain is in the address.
+   */
+  const identity = useMemo(
+    () => ({
+      userId: principal?.userId ?? null,
+      username: principal?.username ?? null,
+      teamId: principal?.teamId ?? null,
+    }),
+    [principal],
+  )
+
+  const decisions = useMemo(() => {
+    const map = new Map<string, Decision>()
+    for (const { dataset } of entries) {
+      map.set(dataset.key, decide(grants, 'dataset', dataset.key, identity, owners))
+    }
+    return map
+  }, [entries, grants, owners, identity])
+
   const searched = useMemo(() => {
     const needle = query.trim().toLowerCase()
     if (!needle) return entries
@@ -209,8 +268,12 @@ export function Catalog() {
 
   const visible = useMemo(
     () =>
-      place === 'all' ? searched : searched.filter((entry) => entry.dataset.place === place),
-    [searched, place],
+      searched.filter(
+        (entry) =>
+          (place === 'all' || entry.dataset.place === place) &&
+          matchesGovernance(governance, decisions.get(entry.dataset.key)),
+      ),
+    [searched, place, governance, decisions],
   )
 
   const open = useMemo(
@@ -239,13 +302,25 @@ export function Catalog() {
     [workflows],
   )
 
+  // Each filter counts what the OTHER one is already showing, so the numbers add
+  // up to the list on screen rather than to a list nobody is looking at.
+  const byGovernance = useMemo(
+    () => searched.filter((entry) => matchesGovernance(governance, decisions.get(entry.dataset.key))),
+    [searched, governance, decisions],
+  )
+
+  const byPlace = useMemo(
+    () => searched.filter((entry) => place === 'all' || entry.dataset.place === place),
+    [searched, place],
+  )
+
   const options: SegmentedOption<PlaceFilter>[] = useMemo(
     () =>
       FILTERS.map((value) => {
         const count =
           value === 'all'
-            ? searched.length
-            : searched.filter((entry) => entry.dataset.place === value).length
+            ? byGovernance.length
+            : byGovernance.filter((entry) => entry.dataset.place === value).length
         return {
           value,
           title: value === 'all' ? 'Every dataset' : PLACE_HINT[value],
@@ -257,7 +332,29 @@ export function Catalog() {
           ),
         }
       }),
-    [searched],
+    [byGovernance],
+  )
+
+  const govOptions: SegmentedOption<GovFilter>[] = useMemo(
+    () =>
+      GOV_FILTERS.map((value) => {
+        const count =
+          value === 'all'
+            ? byPlace.length
+            : byPlace.filter((entry) => matchesGovernance(value, decisions.get(entry.dataset.key)))
+                .length
+        return {
+          value,
+          title: GOV_HINT[value],
+          label: (
+            <span className="flex items-center gap-1.5">
+              {GOV_LABEL[value]}
+              <span className="tabular-nums text-content-subtle">{count}</span>
+            </span>
+          ),
+        }
+      }),
+    [byPlace, decisions],
   )
 
   const openJob = useCallback((jobId: string) => navigate(`/jobs/${jobId}`), [navigate])
@@ -354,8 +451,16 @@ export function Catalog() {
   const clear = useCallback(() => {
     setQuery('')
     setPlace('all')
+    setGovernance('all')
     searchRef.current?.focus()
   }, [])
+
+  // How much of the catalog anybody has claimed. The complement is the backlog:
+  // every dataset with no rule is open to whoever may query the runner.
+  const governed = useMemo(
+    () => [...decisions.values()].filter((decision) => decision.governed).length,
+    [decisions],
+  )
 
   if (jobs.length === 0) {
     return (
@@ -402,11 +507,16 @@ export function Catalog() {
         }
       />
 
-      <dl className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <dl className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {(
           [
             ['Datasets', String(index.datasets.length), 'Every address these Jobs read or write.'],
             ['Jobs', String(index.jobs.length), 'Jobs in scope.'],
+            [
+              'Governed',
+              `${governed}/${entries.length}`,
+              'Datasets an owner or a grant names, here or on a path above them. The rest are open to anyone who may query the runner.',
+            ],
             [
               'Handoffs between Jobs',
               String(index.edges.length),
@@ -438,7 +548,22 @@ export function Catalog() {
           />
         ) : null}
         {view === 'list' ? (
-          <Segmented value={place} onChange={setPlace} options={options} size="sm" />
+          <>
+            <Segmented
+              value={place}
+              onChange={setPlace}
+              options={options}
+              size="sm"
+              ariaLabel="Placement"
+            />
+            <Segmented
+              value={governance}
+              onChange={setGovernance}
+              options={govOptions}
+              size="sm"
+              ariaLabel="Governance"
+            />
+          </>
         ) : null}
         <div className="relative ml-auto w-full max-w-xs">
           <Input
@@ -507,6 +632,7 @@ export function Catalog() {
           schemas={schemas}
           grants={datasetGrants}
           owners={owners}
+          decisions={decisions}
           onOpenDataset={setOpenKey}
           workflowName={workflowName}
         />
