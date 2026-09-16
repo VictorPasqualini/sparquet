@@ -486,12 +486,15 @@ async function sendGoogle(request: AiRequest, baseUrl: string): Promise<AiRespon
  * what came back, which is why there is no request builder and no parser — the
  * runner already normalized both.
  *
- * The system prompt is not sent. The runner writes its own, because the prompt
- * has to describe the tools the runner actually has, and a browser cannot know
- * which formats that Python environment installed.
+ * The system prompt does not replace the runner's. The runner writes its own —
+ * it has to describe the tools that Python environment actually installed, which
+ * a browser cannot know — and what is sent from here is appended to it as
+ * instructions. That is what keeps the canvas panel working on this provider:
+ * its prompt is built from the catalog and asks for a JSON envelope back, and
+ * dropping it would turn the panel into a chat that proposes nothing.
  */
 async function sendRunner(request: AiRequest): Promise<AiResponse> {
-  const { settings, messages, onToken, onTool, signal } = request
+  const { settings, system, messages, onToken, onTool, signal } = request
   const target = request.runner ?? { baseUrl: DEFAULT_RUNNER_URL, token: '' }
 
   let text = ''
@@ -501,6 +504,7 @@ async function sendRunner(request: AiRequest): Promise<AiResponse> {
   await streamAssistant(
     {
       messages,
+      instructions: system,
       model: settings.model.trim() || undefined,
       workflowId: target.workflowId,
     },

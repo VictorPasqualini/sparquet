@@ -1532,6 +1532,7 @@ Requires `assistant:Ask`. Server-sent events, same framing as `/run/stream`.
 
 ```json
 { "messages": [{ "role": "user", "content": "which formats can I write?" }],
+  "instructions": "Answer with a JSON envelope the canvas can apply.",
   "model": "qwen2.5-coder:7b",
   "workflow_id": "w1" }
 ```
@@ -1541,6 +1542,16 @@ runner's default for this turn; `workflow_id` is what the question is about, so
 the cost lands on the right line of the bill — optional, because a question
 asked from the assistant screen belongs to no Workflow and saying so is more
 honest than guessing.
+
+`instructions` is how the caller shapes the answer, and it is **appended** to the
+runner's prompt rather than replacing it — appended after, and cut at 24,000
+characters. The part it cannot drop is the part that lists the tools this
+installation has, which is the only reason to ask the runner instead of a
+vendor, and which a browser cannot write because it does not know what is
+installed. The Studio's canvas panel is what this is for: its prompt is built
+from the catalog that drives the forms and asks for a very specific JSON
+envelope back, so without this, pointing the panel at the runner would quietly
+turn it into a chat that cannot propose anything.
 
 | Event | Payload |
 |---|---|

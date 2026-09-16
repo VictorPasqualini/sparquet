@@ -7409,6 +7409,10 @@ class AssistRequest(BaseModel):
     #: bill. Optional, because a question asked from the assistant screen belongs
     #: to no Workflow and saying so is more honest than guessing.
     workflow_id: Optional[str] = None
+    #: Extra guidance appended to the runner's own prompt — how the caller wants
+    #: the answer shaped, which the canvas panel uses to ask for the JSON
+    #: envelope it knows how to apply. It never replaces the prompt.
+    instructions: Optional[str] = None
 
 
 class AssistantInfo(BaseModel):
@@ -7527,7 +7531,8 @@ def assistant_stream(
     def _stream() -> Iterator[str]:
         usage: Optional[Any] = None
         try:
-            for event in backend.stream(turns, model=body.model):
+            system = assistant.prompt_with(body.instructions or "")
+            for event in backend.stream(turns, model=body.model, system=system):
                 if event.kind == "done":
                     usage = event.usage
                 yield _sse(event.kind, event.payload())

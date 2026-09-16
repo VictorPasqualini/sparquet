@@ -163,12 +163,13 @@ describe('streamAssistant', () => {
     expect(handlers.usage).toMatchObject({ local: true, inputTokens: 120, toolCalls: 1 })
   })
 
-  it('sends only the transcript, the model and what the question is about', async () => {
+  it('sends the transcript, the model, what the question is about and nothing else', async () => {
     fetchMock.mockResolvedValue(sseResponse([{ event: 'done', data: {} }]))
 
     await streamAssistant(
       {
         messages: [{ role: 'user', content: 'hi' }],
+        instructions: 'answer with a JSON envelope',
         model: 'llama3.1:8b',
         workflowId: 'w1',
       },
@@ -180,9 +181,19 @@ describe('streamAssistant', () => {
     expect(url).toBe(`${DEFAULT_RUNNER_URL}/assistant/stream`)
     expect(JSON.parse(String(init.body))).toEqual({
       messages: [{ role: 'user', content: 'hi' }],
+      instructions: 'answer with a JSON envelope',
       model: 'llama3.1:8b',
       workflow_id: 'w1',
     })
+  })
+
+  it('omits instructions entirely when the caller has none, rather than sending empty', async () => {
+    fetchMock.mockResolvedValue(sseResponse([{ event: 'done', data: {} }]))
+
+    await streamAssistant({ messages: [{ role: 'user', content: 'hi' }] }, DEFAULT_RUNNER_URL, '')
+
+    const body = JSON.parse(String(lastCall()[1].body)) as Record<string, unknown>
+    expect('instructions' in body).toBe(false)
   })
 
   it('throws what the error frame said, so a half-written answer explains itself', async () => {

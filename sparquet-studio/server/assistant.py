@@ -148,6 +148,31 @@ Answer in the language the question was asked in. Be concrete: show the JSON.
 """
 
 
+#: Characters of caller instructions kept. The Studio's canvas prompt is built
+#: from its catalog and runs to a few thousand; a caller sending more than this
+#: is sending a document, and the tail of a document is not guidance.
+MAX_INSTRUCTIONS = 24_000
+
+
+def prompt_with(instructions: str = "") -> str:
+    """The runner's prompt, plus whatever the caller wants the model to also do.
+
+    Appended rather than replaced, and appended *after*, so a caller cannot drop
+    the part that describes the tools this installation has — that section is the
+    only reason to ask the runner instead of a vendor, and a browser cannot write
+    it because it does not know what is installed.
+
+    The Studio's canvas panel is why this exists: its prompt is generated from
+    the catalog that drives the forms, and it asks for a very specific JSON
+    envelope back. Without it, choosing the runner would quietly turn the panel
+    into a chat that cannot propose anything.
+    """
+    extra = (instructions or "").strip()[:MAX_INSTRUCTIONS]
+    if not extra:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}\n\nThe caller added these instructions:\n\n{extra}"
+
+
 # --------------------------------------------------------------------- tools
 
 

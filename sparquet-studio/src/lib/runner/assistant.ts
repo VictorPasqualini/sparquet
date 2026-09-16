@@ -210,6 +210,13 @@ function toUsage(value: unknown): AssistantUsage | null {
 
 export interface AssistantRequest {
   messages: { role: 'user' | 'assistant'; content: string }[]
+  /**
+   * How the caller wants the answer shaped, appended to the runner's own
+   * prompt. The canvas panel sends its catalog-built prompt here, which is what
+   * keeps a proposal parseable when the provider is the runner; the assistant
+   * screen sends nothing and lets the runner speak for itself.
+   */
+  instructions?: string
   /** Overrides the runner's default for this turn only. */
   model?: string
   /** What the question is about, so the cost lands on the right line of the bill. */
@@ -237,6 +244,7 @@ export async function streamAssistant(
     '/assistant/stream',
     {
       messages: request.messages,
+      instructions: request.instructions,
       model: request.model,
       workflow_id: request.workflowId,
     },

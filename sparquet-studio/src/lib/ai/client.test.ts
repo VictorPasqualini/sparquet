@@ -102,21 +102,24 @@ describe('sendAiRequest', () => {
     await expect(ask('anthropic')).rejects.toThrow(/\[redacted\]/)
   })
 
-  it('sends no key and no system prompt to the runner, which writes its own', async () => {
+  it('sends the caller prompt to the runner as instructions, never as the prompt', async () => {
     const calls = stubFetch('event: delta\ndata: {"text":"ok"}\n\nevent: done\ndata: {}\n\n')
 
     const response = await sendAiRequest({
       settings: settingsFor('runner'),
-      system: 'a prompt the runner must ignore',
+      system: 'answer with a JSON envelope',
       messages: [{ role: 'user', content: 'hi' }],
       runner: { baseUrl: 'http://127.0.0.1:8787', token: 'runner-token' },
     })
 
     expect(response.text).toBe('ok')
     expect(calls[0].url).toBe('http://127.0.0.1:8787/assistant/stream')
-    // The prompt has to describe the tools that Python environment actually has,
-    // which a browser cannot know.
-    expect(calls[0].body).not.toContain('must ignore')
+    // The runner's own prompt describes the tools that Python environment has,
+    // which a browser cannot know — so the caller's rides on top of it, under its
+    // own key, instead of replacing it.
+    const body = JSON.parse(calls[0].body) as Record<string, unknown>
+    expect(body.instructions).toBe('answer with a JSON envelope')
+    expect(body.system).toBeUndefined()
     expect(JSON.stringify(calls[0].headers)).not.toContain(KEY)
     expect(calls[0].headers['x-sparquet-token']).toBe('runner-token')
   })

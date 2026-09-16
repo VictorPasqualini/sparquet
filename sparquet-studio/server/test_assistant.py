@@ -97,6 +97,25 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(assistant.ollama_url(), "http://gpu.local:11434")
 
 
+class PromptTests(unittest.TestCase):
+    """What a caller can and cannot do to the prompt."""
+
+    def test_nothing_added_leaves_the_prompt_alone(self):
+        self.assertEqual(assistant.prompt_with(), assistant.SYSTEM_PROMPT)
+        self.assertEqual(assistant.prompt_with(""), assistant.SYSTEM_PROMPT)
+        self.assertEqual(assistant.prompt_with("   \n "), assistant.SYSTEM_PROMPT)
+
+    def test_instructions_land_after_the_prompt_so_they_cannot_drop_it(self):
+        prompt = assistant.prompt_with("Answer with a JSON envelope.")
+        self.assertTrue(prompt.startswith(assistant.SYSTEM_PROMPT))
+        self.assertTrue(prompt.endswith("Answer with a JSON envelope."))
+
+    def test_a_document_is_cut_rather_than_refused(self):
+        prompt = assistant.prompt_with("x" * (assistant.MAX_INSTRUCTIONS + 500))
+        added = prompt[len(assistant.SYSTEM_PROMPT):]
+        self.assertEqual(added.count("x"), assistant.MAX_INSTRUCTIONS)
+
+
 class TranscriptTests(unittest.TestCase):
     """What survives the trip from the browser."""
 
