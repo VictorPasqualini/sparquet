@@ -400,6 +400,37 @@ export async function saveJob(job: Job): Promise<Job> {
   return record
 }
 
+/**
+ * Lets the next `saveJob`/`savePipeline` for this record land even though the
+ * copy on disk moved since it was read — the answer to a conflict banner where
+ * the person chose their own version over the other machine's. One record, one
+ * write: the save after it is guarded again.
+ */
+export async function overwriteNext(kind: 'job' | 'pipeline', id: string): Promise<void> {
+  const store = await open()
+  store.overwriteNext?.(kind === 'job' ? KEY.workflow(id) : KEY.flow(id))
+}
+
+/**
+ * Re-reads one record from the store of record and returns it, bypassing any
+ * cache — "what is on the disk right now", the question a conflict raises. On a
+ * backend the browser owns, that is what `getJob` already answers; `null` means
+ * the record is no longer there.
+ */
+export async function refreshJob(id: string): Promise<Job | null> {
+  const store = await open()
+  const key = KEY.workflow(id)
+  const value = store.refresh ? await store.refresh(key) : await store.get(key)
+  return isJob(value) ? value : null
+}
+
+export async function refreshPipeline(id: string): Promise<Pipeline | null> {
+  const store = await open()
+  const key = KEY.flow(id)
+  const value = store.refresh ? await store.refresh(key) : await store.get(key)
+  return isPipeline(value) ? value : null
+}
+
 export async function deleteJob(id: string): Promise<void> {
   const store = await open()
   await store.del(KEY.workflow(id))

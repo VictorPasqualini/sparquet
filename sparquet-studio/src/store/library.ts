@@ -44,7 +44,7 @@ interface LibraryState {
   }) => Promise<Job>
   updateJobMeta: (
     id: string,
-    patch: Partial<Pick<Job, 'name' | 'description' | 'tags' | 'workflowId'>>,
+    patch: Partial<Pick<Job, 'name' | 'description' | 'tags' | 'workflowId' | 'schedule'>>,
   ) => Promise<void>
   deleteJob: (id: string) => Promise<void>
   duplicateJob: (id: string) => Promise<Job | null>
@@ -60,7 +60,7 @@ interface LibraryState {
   }) => Promise<Pipeline>
   updatePipelineMeta: (
     id: string,
-    patch: Partial<Pick<Pipeline, 'name' | 'description' | 'tags' | 'workflowId'>>,
+    patch: Partial<Pick<Pipeline, 'name' | 'description' | 'tags' | 'workflowId' | 'schedule'>>,
   ) => Promise<void>
   deletePipeline: (id: string) => Promise<void>
   /** Called by the pipeline editor after a save, mirroring `upsertJob`. */

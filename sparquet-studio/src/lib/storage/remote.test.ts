@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { keyOf, KEY } from '@/lib/storage/keys'
-import { workspaceBackend } from '@/lib/storage/remote'
+import { isWorkspaceConflict, workspaceBackend } from '@/lib/storage/remote'
 
 const fetchMock = vi.fn()
 
@@ -105,6 +105,9 @@ describe('workspaceBackend', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       record: { id: 'w2', name: 'Compras' },
       config: null,
+      // Never seen before, so there is no revision to write from: `''` claims a
+      // record that must not already be on disk.
+      revision: '',
     })
     expect(await backend?.get(keyOf('workflow', 'w2'))).toEqual({ id: 'w2', name: 'Compras' })
   })
@@ -174,6 +177,160 @@ describe('workspaceBackend', () => {
     // something anyone should find in a diff.
     expect(calls()).toHaveLength(1)
     expect(await backend?.get(KEY.backup)).toEqual({ records: [] })
+  })
+
+  /* ------------------------------------------- two machines, one directory */
+
+  it('writes from the revision it read the record at', async () => {
+    // The whole check rests on this: a write states which version it edited, and
+    // the runner refuses it if the file has moved on since.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...SNAPSHOT, jobs: [{ ...SNAPSHOT.jobs[0], revision: 'rev-1' }] }),
+    )
+    const backend = await workspaceBackend({})
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ kind: 'job', id: 'j1', record: {} }))
+    await backend?.set(keyOf('job', 'j1'), { ...SNAPSHOT.jobs[0].record, name: 'Editado' })
+
+    expect(JSON.parse(String(lastCall()[1].body)).revision).toBe('rev-1')
+  })
+
+  it('writes from the revision the last write returned', async () => {
+    // Without this every second save in a row would conflict with the first.
+    fetchMock.mockResolvedValueOnce(jsonResponse(SNAPSHOT))
+    const backend = await workspaceBackend({})
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ kind: 'job', id: 'j1', record: {}, revision: 'rev-2' }),
+    )
+    await backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'Um' })
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ kind: 'job', id: 'j1', record: {} }))
+    await backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'Dois' })
+
+    expect(JSON.parse(String(lastCall()[1].body)).revision).toBe('rev-2')
+  })
+
+  it('turns the runner 409 into a conflict carrying the record on disk', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(SNAPSHOT))
+    const backend = await workspaceBackend({})
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          detail: {
+            message: 'job/j1 changed on disk since it was read.',
+            kind: 'job',
+            id: 'j1',
+            revision: 'rev-9',
+            record: { id: 'j1', name: 'Da outra maquina' },
+          },
+        },
+        409,
+      ),
+    )
+
+    const refused = await backend
+      ?.set(keyOf('job', 'j1'), { id: 'j1', name: 'O meu' })
+      .then(() => null)
+      .catch((error: unknown) => error)
+
+    expect(isWorkspaceConflict(refused)).toBe(true)
+    if (!isWorkspaceConflict(refused)) throw new Error('unreachable')
+    expect(refused.kind).toBe('job')
+    expect(refused.id).toBe('j1')
+    // The banner names the version on disk; a bare status code cannot.
+    expect(refused.record).toEqual({ id: 'j1', name: 'Da outra maquina' })
+    expect(refused.message).toMatch(/changed on disk/)
+  })
+
+  it('leaves the cache alone when a write is refused as a conflict', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(SNAPSHOT))
+    const backend = await workspaceBackend({})
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ detail: { message: 'changed', kind: 'job', id: 'j1', record: {} } }, 409),
+    )
+    await expect(backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'O meu' })).rejects.toThrow()
+
+    expect(await backend?.get(keyOf('job', 'j1'))).toEqual(SNAPSHOT.jobs[0].record)
+  })
+
+  it('keeps refusing until somebody chooses: a retry still states the old revision', async () => {
+    // Adopting the server's revision on a 409 would make the next autosave land
+    // on top of the other machine's work without anybody deciding to.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...SNAPSHOT, jobs: [{ ...SNAPSHOT.jobs[0], revision: 'rev-1' }] }),
+    )
+    const backend = await workspaceBackend({})
+
+    const conflict = jsonResponse(
+      { detail: { message: 'changed', kind: 'job', id: 'j1', revision: 'rev-9', record: {} } },
+      409,
+    )
+    fetchMock.mockResolvedValueOnce(conflict.clone())
+    await expect(backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'O meu' })).rejects.toThrow()
+
+    fetchMock.mockResolvedValueOnce(conflict.clone())
+    await expect(backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'O meu' })).rejects.toThrow()
+
+    expect(JSON.parse(String(lastCall()[1].body)).revision).toBe('rev-1')
+  })
+
+  it('overwriteNext drops the revision for exactly one write', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...SNAPSHOT, jobs: [{ ...SNAPSHOT.jobs[0], revision: 'rev-1' }] }),
+    )
+    const backend = await workspaceBackend({})
+
+    backend?.overwriteNext?.(keyOf('job', 'j1'))
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ kind: 'job', id: 'j1', record: {}, revision: 'rev-2' }),
+    )
+    await backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'O meu' })
+    // No revision at all: the runner takes the write whatever is on disk.
+    expect('revision' in JSON.parse(String(lastCall()[1].body))).toBe(false)
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ kind: 'job', id: 'j1', record: {} }))
+    await backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'Outra edicao' })
+    // Guarded again straight after, from the revision the overwrite returned.
+    expect(JSON.parse(String(lastCall()[1].body)).revision).toBe('rev-2')
+  })
+
+  it('refresh reads one record back from the runner, revision included', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...SNAPSHOT, jobs: [{ ...SNAPSHOT.jobs[0], revision: 'rev-1' }] }),
+    )
+    const backend = await workspaceBackend({})
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        kind: 'job',
+        id: 'j1',
+        record: { id: 'j1', name: 'Da outra maquina' },
+        revision: 'rev-9',
+      }),
+    )
+    const fresh = await backend?.refresh?.(keyOf('job', 'j1'))
+
+    expect(lastCall()[1].method).toBe('GET')
+    expect(fresh).toEqual({ id: 'j1', name: 'Da outra maquina' })
+    // Cached too, so the editor and the library list agree with the disk.
+    expect(await backend?.get(keyOf('job', 'j1'))).toEqual({ id: 'j1', name: 'Da outra maquina' })
+
+    // And the revision came with it: the save after adopting must not be refused.
+    fetchMock.mockResolvedValueOnce(jsonResponse({ kind: 'job', id: 'j1', record: {} }))
+    await backend?.set(keyOf('job', 'j1'), { id: 'j1', name: 'Editado a partir do disco' })
+    expect(JSON.parse(String(lastCall()[1].body)).revision).toBe('rev-9')
+  })
+
+  it('refresh treats a 404 as the record being gone', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(SNAPSHOT))
+    const backend = await workspaceBackend({})
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: 'Record not found' }, 404))
+    expect(await backend?.refresh?.(keyOf('job', 'j1'))).toBeUndefined()
+    expect(await backend?.get(keyOf('job', 'j1'))).toBeUndefined()
   })
 
   it('lists the keys it holds under a prefix', async () => {

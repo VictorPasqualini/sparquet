@@ -38,6 +38,33 @@ interface WorkspaceDocument {
   id: string
   record: Record<string, unknown>
   path: string | null
+  /** Hash of the record's bytes on disk. Absent from an older runner. */
+  revision?: string | null
+}
+
+/**
+ * The library moved under us: another Studio on the same directory, a `git
+ * pull`, the file edited by hand. Distinct from `RunnerError` because it is not
+ * a failure of the runner and not something to retry — the save was refused on
+ * purpose, and the answer is to look at what arrived.
+ */
+export class WorkspaceConflictError extends Error {
+  readonly kind: string
+  readonly id: string
+  /** The record as it now stands on disk, when the runner sent it. */
+  readonly record: Record<string, unknown> | null
+
+  constructor(kind: string, id: string, record: Record<string, unknown> | null, message: string) {
+    super(message)
+    this.name = 'WorkspaceConflictError'
+    this.kind = kind
+    this.id = id
+    this.record = record
+  }
+}
+
+export function isWorkspaceConflict(value: unknown): value is WorkspaceConflictError {
+  return value instanceof WorkspaceConflictError
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -116,11 +143,23 @@ export async function workspaceBackend(
     }
     if (!response.ok) {
       let detail = `HTTP ${response.status}`
+      let body: unknown
       try {
-        const body = (await response.json()) as unknown
-        if (isRecord(body) && typeof body.detail === 'string') detail = body.detail
+        body = (await response.json()) as unknown
       } catch {
         /* the status is all there is */
+      }
+      const payload = isRecord(body) ? body.detail : undefined
+      if (typeof payload === 'string') detail = payload
+      // 409 is the only status the workspace uses to mean "somebody else wrote
+      // here first", and its detail is an object rather than a sentence.
+      if (response.status === 409 && isRecord(payload)) {
+        throw new WorkspaceConflictError(
+          String(payload.kind ?? ''),
+          String(payload.id ?? ''),
+          isRecord(payload.record) ? payload.record : null,
+          typeof payload.message === 'string' ? payload.message : 'The record changed on disk.',
+        )
       }
       throw new RunnerError(
         `The workspace refused the write: ${detail}`,
@@ -149,8 +188,20 @@ export async function workspaceBackend(
   // writes update it only after the server has accepted them, so a failed save
   // never leaves the UI showing a value the files do not have.
   const cache = new Map<string, unknown>()
+  // What each record hashed to when we last saw it. Sent back on the next save so
+  // the runner can refuse a write that would land on top of somebody else's — the
+  // cache above cannot notice that on its own, because a second machine writing
+  // the same directory never touches this process.
+  const revisions = new Map<string, string>()
+  // Keys whose next write states no revision at all, because somebody looked at
+  // the conflict and chose to overwrite. Cleared by that write, so the one after
+  // it is guarded again.
+  const unguarded = new Set<string>()
   const hydrate = (docs: WorkspaceDocument[], kind: RecordKind): void => {
-    for (const doc of docs) cache.set(keyOf(kind, doc.id), doc.record)
+    for (const doc of docs) {
+      cache.set(keyOf(kind, doc.id), doc.record)
+      if (typeof doc.revision === 'string') revisions.set(keyOf(kind, doc.id), doc.revision)
+    }
   }
   hydrate(documentsOf(snapshot, 'workflows'), 'workflow')
   hydrate(documentsOf(snapshot, 'jobs'), 'job')
@@ -171,14 +222,28 @@ export async function workspaceBackend(
 
       if (address) {
         const record = isRecord(stored) ? stored : {}
-        await request(`/workspace/${address.kind}/${encodeURIComponent(address.id)}`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            record,
-            config: address.kind === 'job' ? compiledConfig(record) : null,
-          }),
-        })
+        // No revision known means we have never seen this record — `''` says so,
+        // and the runner turns it into a conflict if the file is in fact there.
+        const answer = await request(
+          `/workspace/${address.kind}/${encodeURIComponent(address.id)}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              record,
+              config: address.kind === 'job' ? compiledConfig(record) : null,
+              ...(unguarded.has(key) ? {} : { revision: revisions.get(key) ?? '' }),
+            }),
+          },
+        )
+        unguarded.delete(key)
         cache.set(key, stored)
+        // The revision the write returned is the one the next write starts from;
+        // without this every second save in a row would conflict with the first.
+        if (isRecord(answer) && typeof answer.revision === 'string') {
+          revisions.set(key, answer.revision)
+        } else {
+          revisions.delete(key)
+        }
         return
       }
 
@@ -205,6 +270,7 @@ export async function workspaceBackend(
           method: 'DELETE',
         })
         cache.delete(key)
+        revisions.delete(key)
         return
       }
       const metaKey = metaKeyOf(key)
@@ -215,6 +281,40 @@ export async function workspaceBackend(
     },
 
     keys: async (prefix) => [...cache.keys()].filter((key) => key.startsWith(prefix)),
+
+    overwriteNext: (key) => {
+      unguarded.add(key)
+    },
+
+    refresh: async (key) => {
+      const address = addressOf(key)
+      if (!address) return cache.get(key)
+      let answer: unknown
+      try {
+        answer = await request(
+          `/workspace/${address.kind}/${encodeURIComponent(address.id)}`,
+          { method: 'GET' },
+        )
+      } catch (error) {
+        // A record deleted on the other machine answers 404. That is an answer,
+        // not a failure: the cache is wrong and the caller wants to know.
+        if (error instanceof RunnerError && error.status === 404) {
+          cache.delete(key)
+          revisions.delete(key)
+          return undefined
+        }
+        throw error
+      }
+      if (!isRecord(answer)) return cache.get(key)
+      const record = isRecord(answer.record) ? answer.record : undefined
+      if (record === undefined) return cache.get(key)
+      cache.set(key, record)
+      // The revision read together with the record — the pair is the point. A
+      // record adopted without its revision would be refused on the next save.
+      if (typeof answer.revision === 'string') revisions.set(key, answer.revision)
+      else revisions.delete(key)
+      return record
+    },
   }
 }
 

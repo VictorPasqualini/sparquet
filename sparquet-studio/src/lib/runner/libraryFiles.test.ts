@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_RUNNER_URL, RUNNER_TOKEN_HEADER, RunnerError } from '@/lib/runner/client'
-import { listLibraryFiles, readLibraryFile } from '@/lib/runner/libraryFiles'
+import {
+  deleteLibraryFile,
+  listLibraryFiles,
+  readLibraryFile,
+} from '@/lib/runner/libraryFiles'
 
 const fetchMock = vi.fn()
 
@@ -135,6 +139,82 @@ describe('readLibraryFile', () => {
     await expect(readLibraryFile(DEFAULT_RUNNER_URL, '../outside.json')).rejects.toMatchObject({
       status: 400,
       message: 'Give a path relative to the library root.',
+    })
+  })
+})
+
+describe('the record behind a file', () => {
+  it('carries the owner the runner named', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        root: '/library',
+        files: [{ ...LISTING.files[0], owner_kind: 'job', owner_id: 'j1' }],
+      }),
+    )
+
+    const listing = await listLibraryFiles()
+
+    expect(listing.files[0].ownerKind).toBe('job')
+    expect(listing.files[0].ownerId).toBe('j1')
+  })
+
+  it('leaves a file nobody wrote without one', async () => {
+    // The interesting case: no canvas behind it, and the only kind that deletes.
+    fetchMock.mockResolvedValue(jsonResponse({ root: '/library', files: [LISTING.files[0]] }))
+
+    const listing = await listLibraryFiles()
+
+    expect(listing.files[0].ownerKind).toBeUndefined()
+    expect(listing.files[0].ownerId).toBeUndefined()
+  })
+
+  it('ignores half an owner rather than linking nowhere', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ root: '/library', files: [{ ...LISTING.files[0], owner_kind: 'job' }] }),
+    )
+
+    const listing = await listLibraryFiles()
+
+    expect(listing.files[0].ownerKind).toBeUndefined()
+  })
+})
+
+describe('deleteLibraryFile', () => {
+  it('asks the runner to remove the file and says it is gone', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ path: 'compras/limpeza.json', deleted: true }))
+
+    await expect(
+      deleteLibraryFile(DEFAULT_RUNNER_URL, 'compras/limpeza.json', 'secret'),
+    ).resolves.toBe(true)
+
+    const [url, init] = lastCall()
+    expect(url).toBe(`${DEFAULT_RUNNER_URL}/workspace/files/compras/limpeza.json`)
+    expect(init.method).toBe('DELETE')
+    expect((init.headers as Record<string, string>)[RUNNER_TOKEN_HEADER]).toBe('secret')
+  })
+
+  it('reports a file that was already gone as not deleted', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ path: 'a.json', deleted: false }))
+
+    await expect(deleteLibraryFile(DEFAULT_RUNNER_URL, 'a.json')).resolves.toBe(false)
+  })
+
+  it('keeps the reason a refusal gave', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ detail: "'vendas/jobs/x.json' is the file of job j1." }, 400),
+    )
+
+    await expect(deleteLibraryFile(DEFAULT_RUNNER_URL, 'vendas/jobs/x.json')).rejects.toMatchObject({
+      status: 400,
+      message: "'vendas/jobs/x.json' is the file of job j1.",
+    })
+  })
+
+  it('reports a runner that is not running as unreachable', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    await expect(deleteLibraryFile(DEFAULT_RUNNER_URL, 'a.json')).rejects.toMatchObject({
+      kind: 'unreachable',
     })
   })
 })
