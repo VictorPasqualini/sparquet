@@ -383,15 +383,14 @@ from the browser with the user's own key and never learn any of that.
 no egress. Pull a model once and the assistant works:
 
 ```bash
-ollama pull llama3.1:8b
+ollama pull qwen3:8b
 ```
 
 Any pulled model is offered — `GET /assistant` lists what `/api/tags` reports.
-`llama3.1:8b` is the default because it fits in 8 GB of RAM *and* was measured
-calling this runner's tools; a coder-tuned model reads JSON better but several
-of them, `qwen2.5-coder:7b` included, print the tool call instead of making it
-(see [Omnigent](#omnigent)). A machine with more room does better with
-`llama3.1:70b`.
+`qwen3:8b` is the default because it fits in 8 GB of RAM *and* was the only
+small model measured calling this runner's tools every time (see
+[Omnigent](#omnigent) for the numbers). A machine with more room does better
+with `qwen3:30b`.
 
 `/api/chat` is used rather than Ollama's OpenAI-compatible `/v1` route, because
 only the native one reports `prompt_eval_count` and `eval_count` while
@@ -454,14 +453,25 @@ that outgrows the built-in prompt writes its own agent YAML and points
 `SPARQUET_STUDIO_OMNIGENT_AGENT` at it.
 
 **Pick a model that calls tools.** The loop is only as good as the weights
-behind it, and "supports tools" is not a yes/no the tag list can be trusted on.
-`qwen2.5-coder:7b` reports `tools` in `ollama show` and still answers a tool
-question by *printing* `{"name": "validate_config", "arguments": {…}}` as prose:
-nothing is dispatched, the user reads a JSON blob, and the runner meters a turn
-with zero tool calls. `llama3.1:8b` was measured doing the same turn properly —
-tool call, tool result, answer. Anything smaller than 7B is not worth trying;
-if the assistant answers with JSON instead of running anything, the model is the
-thing to change, not the wiring.
+behind it, and `tools` in `ollama show` is not evidence that they will be used.
+A model that does not use them answers by *printing*
+`{"name": "validate_config", "arguments": {…}}` as prose: nothing is dispatched,
+the user reads a JSON blob, and the runner meters a turn with zero tool calls.
+The same question — one that cannot be answered without `validate_config` —
+through this runner's own prompt and tools:
+
+| Model | Called the tool | Note |
+|---|---|---|
+| `qwen3:8b` | 5 of 5 | The default. Thinks first, so a turn is tens of seconds. |
+| `llama3-groq-tool-use:8b` | 3 of 6 | Fine-tuned for tool use and still a coin flip. Fast when it works. |
+| `llama3.1:8b` | 0 of 2 | Emits Llama's `{"name", "parameters"}` shape as text. |
+| `qwen2.5-coder:7b` | 0 of 2 | Best at JSON of the four, and never calls anything. |
+
+Not a property of the route or of the adapter: measured against Ollama's raw
+`/v1/chat/completions` and its native `/api/chat`, streaming and not, at
+temperature 0, the failures put the call in `content` and leave `tool_calls`
+empty. If the assistant answers with JSON instead of running anything, change
+the model, not the wiring.
 
 ### What a turn costs
 
@@ -552,7 +562,7 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_PER_ASSIST` | `1` | Credits one assistant turn costs when it was **not** answered on this machine. A local turn is recorded at zero whatever this says. |
 | `SPARQUET_STUDIO_ASSISTANT` | `ollama` | Which runtime answers questions. `omnigent` uses Omnigent instead; `off`/`none`/`disabled` turns the assistant off and makes the routes say so rather than never replying. |
 | `SPARQUET_STUDIO_OLLAMA_URL` | `http://127.0.0.1:11434` | Where Ollama is. Both backends talk to it. |
-| `SPARQUET_STUDIO_ASSISTANT_MODEL` | `llama3.1:8b` | Model used when the caller names none. Free text — any pulled model works, but pick one that calls tools. |
+| `SPARQUET_STUDIO_ASSISTANT_MODEL` | `qwen3:8b` | Model used when the caller names none. Free text — any pulled model works, but pick one that calls tools. |
 | `SPARQUET_STUDIO_ASSISTANT_KEY` | unset | API key for the assistant endpoint, for the deployment that points `SPARQUET_STUDIO_OLLAMA_URL` at something that wants one. Ollama itself ignores it. |
 | `SPARQUET_STUDIO_OMNIGENT_AGENT` | unset | Path to an Omnigent agent YAML. Unset, the runner builds one from its own prompt and tools. |
 | `SPARQUET_STUDIO_SECRET_KEY` | unset | Master key the `local` connection secrets are encrypted with. Without it the runner still boots and still serves `env` secrets — it refuses only to seal or open a `local` one. Changing it makes every existing `local` secret unreadable. |

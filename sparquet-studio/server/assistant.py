@@ -54,14 +54,18 @@ DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 
 #: The model asked for when the operator has not chosen. Small enough for the
 #: laptop of somebody who just wanted to try it, and — the part that is not
-#: obvious — one that actually emits tool calls. A code-shaped model reads and
-#: writes JSON better, but `qwen2.5-coder:7b` answers a tool question by printing
-#: the call as prose while reporting `tools` in `ollama show`: nothing runs, the
-#: user reads a JSON blob, and the turn is metered with zero tool calls. Tools
-#: are what this backend is for, so the default is the model measured using them.
+#: obvious — one that actually emits tool calls rather than printing them.
+#: `ollama show` announcing `tools` is not evidence: `qwen2.5-coder:7b`,
+#: `llama3.1:8b` and even `llama3-groq-tool-use:8b` all announce it and all
+#: answer a tool question, some or all of the time, by writing
+#: `{"name": "validate_config", …}` as prose. Nothing is dispatched, the user
+#: reads a JSON blob, and the turn is metered with zero tool calls. Measured on
+#: this runner's own prompt and tools: qwen3 5/5, groq-tool-use 3/6,
+#: llama3.1 0/2, qwen2.5-coder 0/2. It thinks before answering, so a turn takes
+#: tens of seconds — slower than a model that gets it wrong quickly.
 #: Free text, like every model id in this product: a model released tomorrow
 #: works by typing its name.
-DEFAULT_MODEL = "llama3.1:8b"
+DEFAULT_MODEL = "qwen3:8b"
 
 #: Long enough for a cold model to load off disk, short enough that a runner does
 #: not hold a connection open all afternoon for a model nobody is serving.
