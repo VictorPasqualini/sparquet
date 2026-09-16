@@ -910,7 +910,7 @@ export function createStepTimer(): {
   }
 }
 
-interface SseFrame {
+export interface SseFrame {
   event: string
   data: string
 }
@@ -1007,10 +1007,11 @@ function dispatchSseFrame(frame: SseFrame, handlers: JobStreamHandlers): void {
  * POSTs to an SSE endpoint and hands every frame to `onFrame`. Resolves when the
  * stream ends; the outcome arrives through the frames, never as a return value.
  *
- * Shared by the job and the pipeline streams: they differ only in the path they
- * open and the events they understand, never in the transport or its failures.
+ * Shared by the job, pipeline and assistant streams: they differ only in the
+ * path they open and the events they understand, never in the transport or its
+ * failures.
  */
-async function postEventStream(
+export async function postEventStream(
   baseUrl: string,
   path: string,
   body: unknown,

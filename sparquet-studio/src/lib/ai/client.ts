@@ -7,6 +7,8 @@
  */
 
 import { getProviderInfo, resolveBaseUrl, resolveModel } from '@/lib/ai/providers'
+import { DEFAULT_RUNNER_URL } from '@/lib/runner/client'
+import { streamAssistant } from '@/lib/runner/assistant'
 import type { AiRequest, AiResponse, AiSettings } from '@/types/ai'
 
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -474,6 +476,53 @@ async function sendGoogle(request: AiRequest, baseUrl: string): Promise<AiRespon
   return { text, usage: usageOf(inputTokens, outputTokens) }
 }
 
+/* ------------------------------------------------------------------- the runner */
+
+/**
+ * The one provider that is not a browser talking to a vendor.
+ *
+ * Everything that makes it different lives on the other side: the key, the
+ * tools, the metering. What is left here is forwarding the turn and unpacking
+ * what came back, which is why there is no request builder and no parser — the
+ * runner already normalized both.
+ *
+ * The system prompt is not sent. The runner writes its own, because the prompt
+ * has to describe the tools the runner actually has, and a browser cannot know
+ * which formats that Python environment installed.
+ */
+async function sendRunner(request: AiRequest): Promise<AiResponse> {
+  const { settings, messages, onToken, onTool, signal } = request
+  const target = request.runner ?? { baseUrl: DEFAULT_RUNNER_URL, token: '' }
+
+  let text = ''
+  let usage: AiResponse['usage']
+  let local: boolean | undefined
+
+  await streamAssistant(
+    {
+      messages,
+      model: settings.model.trim() || undefined,
+      workflowId: target.workflowId,
+    },
+    target.baseUrl,
+    target.token,
+    {
+      onToken: (chunk) => {
+        text += chunk
+        onToken?.(chunk)
+      },
+      onTool: (call) => onTool?.(call),
+      onUsage: (reported) => {
+        local = reported.local
+        usage = usageOf(reported.inputTokens, reported.outputTokens)
+      },
+    },
+    signal,
+  )
+
+  return { text, usage, local }
+}
+
 /* ------------------------------------------------------------------ entry point */
 
 function usageOf(inputTokens?: number, outputTokens?: number): AiResponse['usage'] {
@@ -484,6 +533,14 @@ function usageOf(inputTokens?: number, outputTokens?: number): AiResponse['usage
 export async function sendAiRequest(request: AiRequest): Promise<AiResponse> {
   const { settings } = request
   const info = getProviderInfo(settings.provider)
+
+  // The runner chooses its own model and its own endpoint, so none of the checks
+  // below apply: an empty model field here means "whatever it was started with",
+  // which is the setting most people will never touch.
+  if (settings.provider === 'runner') {
+    request.signal?.throwIfAborted()
+    return sendRunner(request)
+  }
 
   if (info.requiresKey && !settings.apiKey.trim()) {
     throw new Error(`Add your ${info.label} API key in Settings before asking the assistant.`)
@@ -506,7 +563,10 @@ export async function sendAiRequest(request: AiRequest): Promise<AiResponse> {
       return sendAnthropic(request, baseUrl)
     case 'openai':
       return sendOpenAi(request, baseUrl, true)
+    // Ollama speaks the Chat Completions API; its own entry exists to pre-fill
+    // the address and say out loud that it costs nothing, not to branch here.
     case 'openai-compatible':
+    case 'ollama':
       return sendOpenAi(request, baseUrl, false)
     case 'google':
       return sendGoogle(request, baseUrl)

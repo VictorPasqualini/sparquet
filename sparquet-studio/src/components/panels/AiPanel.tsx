@@ -147,6 +147,8 @@ export function AiPanel() {
 
   const ai = useSettingsStore((state) => state.ai)
   const setAi = useSettingsStore((state) => state.setAi)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
 
   const applyPipeline = useEditorStore((state) => state.applyPipeline)
   const undo = useEditorStore((state) => state.undo)
@@ -231,6 +233,7 @@ export function AiPanel() {
           { role: 'user', content: buildUserPrompt(turnIntent, text, context) },
         ],
         signal: controller.signal,
+        runner: { baseUrl: runnerUrl, token: runnerToken },
         onToken: (chunk) =>
           setMessages((previous) =>
             previous.map((message) =>

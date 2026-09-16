@@ -15,15 +15,18 @@
  * same question asked at two zoom levels: the bars say which month is worth
  * looking at, and clicking one is what points the breakdown at it.
  *
- * The last card reads the same month from the execution history instead of the
- * ledger. Cost and activity are different questions with different answers — a
- * month of local development costs nothing and still ran hundreds of times — and
- * putting them on one screen is what lets one be read against the other.
+ * The last two cards read the same month from somewhere other than the ledger.
+ * Cost and activity are different questions with different answers — a month of
+ * local development costs nothing and still ran hundreds of times — and putting
+ * them on one screen is what lets one be read against the other. The assistant is
+ * the same story told about turns instead of runs: a model answering on this
+ * machine is work that happened and money that did not move.
  */
 
 import { Coins } from 'lucide-react'
 import { useState } from 'react'
 
+import { AssistActivity } from '@/components/credits/AssistActivity'
 import { CreditsPanel } from '@/components/credits/CreditsPanel'
 import { RunActivity } from '@/components/credits/RunActivity'
 import { SpendBreakdown } from '@/components/credits/SpendBreakdown'
@@ -56,6 +59,9 @@ export function Billing() {
         </div>
         <div className="card space-y-5 p-5">
           <RunActivity period={period} />
+        </div>
+        <div className="card space-y-5 p-5">
+          <AssistActivity period={period} />
         </div>
       </div>
     </PageShell>

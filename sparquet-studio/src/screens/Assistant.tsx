@@ -30,10 +30,12 @@ import {
   KeyRound,
   Radio,
   Send,
+  ServerCog,
   ShieldCheck,
   Sparkles,
   Square,
   Trash2,
+  Wrench,
   type LucideIcon,
 } from 'lucide-react'
 import { nanoid } from 'nanoid'
@@ -46,8 +48,10 @@ import { Button, IconButton, Spinner, Textarea, renderInlineCode } from '@/compo
 import { sendAiRequest } from '@/lib/ai/client'
 import { buildSystemPrompt, buildUserPrompt } from '@/lib/ai/prompt'
 import { AI_PROVIDER_INFO } from '@/lib/ai/providers'
+import { getAssistantInfo } from '@/lib/runner/assistant'
 import { cn } from '@/lib/utils/cn'
 import { useSettingsStore } from '@/store/settings'
+import type { AssistantInfo } from '@/types/assistant'
 
 /** Six rows of composer, in pixels — past this the textarea scrolls. */
 const COMPOSER_MAX_HEIGHT = 152
@@ -93,6 +97,12 @@ interface Message {
   content: string
   /** Set when the request failed; the bubble then explains instead of answering. */
   error?: string
+  /**
+   * Tools the runner ran while writing this answer. Shown because an answer that
+   * checked the installed formats is worth more than one that recalled them, and
+   * the reader cannot tell the two apart from the prose.
+   */
+  tools?: string[]
 }
 
 /** The last turns that fit the budget, oldest dropped first. */
@@ -111,12 +121,16 @@ function budgeted(messages: Message[]): { role: 'user' | 'assistant'; content: s
 
 export function Assistant() {
   const ai = useSettingsStore((state) => state.ai)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
   const provider = AI_PROVIDER_INFO[ai.provider]
   const needsKey = provider.requiresKey && !ai.apiKey.trim()
+  const usingRunner = ai.provider === 'runner'
 
   const [messages, setMessages] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  const [assistant, setAssistant] = useState<AssistantInfo | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -128,6 +142,21 @@ export function Assistant() {
   }, [messages])
 
   useEffect(() => () => abortRef.current?.abort(), [])
+
+  // Asked once per provider change, not per question: the answer only moves when
+  // somebody restarts the runner, and a screen that probes a port on every
+  // keystroke is a screen that logs a failed connection on every keystroke.
+  useEffect(() => {
+    if (!usingRunner) {
+      setAssistant(null)
+      return
+    }
+    const controller = new AbortController()
+    getAssistantInfo(runnerUrl, runnerToken, controller.signal)
+      .then(setAssistant)
+      .catch(() => setAssistant(null))
+    return () => controller.abort()
+  }, [usingRunner, runnerUrl, runnerToken])
 
   function grow(element: HTMLTextAreaElement): void {
     element.style.height = 'auto'
@@ -164,6 +193,15 @@ export function Assistant() {
         // and an empty context is the honest way to say so.
         messages: [...history, { role: 'user', content: buildUserPrompt('chat', question, {}) }],
         signal: controller.signal,
+        runner: { baseUrl: runnerUrl, token: runnerToken },
+        onTool: (call) =>
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === answerId
+                ? { ...message, tools: [...(message.tools ?? []), call.name] }
+                : message,
+            ),
+          ),
         onToken: (chunk) =>
           setMessages((previous) =>
             previous.map((message) =>
@@ -228,6 +266,27 @@ export function Assistant() {
         />
       )}
 
+      {usingRunner && assistant && !assistant.available && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-line bg-surface-sunken p-3 text-xs text-content-muted">
+          <ServerCog className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          <p>
+            The runner cannot answer yet. {assistant.error || ''}{' '}
+            {assistant.hint || (
+              <>
+                Choose another provider in{' '}
+                <Link
+                  to="/settings"
+                  className="text-brand-600 hover:underline dark:text-brand-400"
+                >
+                  Settings
+                </Link>
+                .
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
       {needsKey && (
         <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-line bg-surface-sunken p-3 text-xs text-content-muted">
           <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -287,7 +346,9 @@ export function Assistant() {
         </div>
         <p className="mt-1.5 text-2xs text-content-subtle">
           Enter sends, Shift+Enter breaks the line. Answers come from{' '}
-          {provider.label} and can be wrong — check the JSON before you run it.
+          {usingRunner && assistant?.model ? `${provider.label} (${assistant.model})` : provider.label}
+          {usingRunner && assistant?.local ? ', run on the runner’s machine at no cost,' : ''} and
+          can be wrong — check the JSON before you run it.
         </p>
       </div>
     </PageShell>
@@ -366,6 +427,14 @@ function Bubble({ message }: { message: Message }) {
             : 'border border-line bg-surface-raised text-content-muted',
         )}
       >
+        {message.tools && message.tools.length > 0 && (
+          <p className="mb-1.5 flex flex-wrap items-center gap-1 text-2xs text-content-subtle">
+            <Wrench className="h-3 w-3" aria-hidden />
+            {/* Named, not counted: "checked the installed formats" and "validated
+                the config" are different claims about how much to trust this. */}
+            {[...new Set(message.tools)].join(', ')}
+          </p>
+        )}
         {message.error ? (
           <p className="text-state-danger">{message.error}</p>
         ) : message.content ? (

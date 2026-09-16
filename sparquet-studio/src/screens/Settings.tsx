@@ -62,6 +62,7 @@ import {
   RUNNER_INSTALL_COMMAND,
   RUNNER_START_COMMAND,
 } from '@/lib/runner/client'
+import { getAssistantInfo } from '@/lib/runner/assistant'
 import { getWorkspaceRoot, setWorkspaceRoot } from '@/lib/runner/workspaceRoot'
 import { clearAll, exportAll, importAll } from '@/lib/storage/db'
 import { cn } from '@/lib/utils/cn'
@@ -70,6 +71,7 @@ import { useAuthStore } from '@/store/auth'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore, type CanvasPreferences, type Theme } from '@/store/settings'
 import type { AiProviderId } from '@/types/ai'
+import type { AssistantInfo } from '@/types/assistant'
 import type { WorkspaceLocation } from '@/types/workspace'
 
 /** Matches the `version` field of package.json. */
@@ -361,6 +363,8 @@ function AiSection() {
   const setAi = useSettingsStore((state) => state.setAi)
   const persistApiKey = useSettingsStore((state) => state.persistApiKey)
   const setPersistApiKey = useSettingsStore((state) => state.setPersistApiKey)
+  const runnerUrl = useSettingsStore((state) => state.runnerUrl)
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
 
   const ids = {
     provider: useId(),
@@ -374,13 +378,34 @@ function AiSection() {
   const [showKey, setShowKey] = useState(false)
   const [customModel, setCustomModel] = useState(false)
   const [probe, setProbe] = useState<Probe<string>>(IDLE)
+  const [assistant, setAssistant] = useState<AssistantInfo | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => () => abortRef.current?.abort(), [])
 
   const info = AI_PROVIDER_INFO[ai.provider]
   const providers = Object.values(AI_PROVIDER_INFO)
-  const knownModel = info.models.some((model) => model.id === ai.model)
+  const usingRunner = ai.provider === 'runner'
+
+  // The runner's models are whatever that machine has pulled, so they are asked
+  // for rather than listed here — and only while the runner is the provider, so
+  // a Studio pointed at Anthropic never probes a port nobody is listening on.
+  useEffect(() => {
+    if (!usingRunner) {
+      setAssistant(null)
+      return
+    }
+    const controller = new AbortController()
+    getAssistantInfo(runnerUrl, runnerToken, controller.signal)
+      .then(setAssistant)
+      .catch(() => setAssistant(null))
+    return () => controller.abort()
+  }, [usingRunner, runnerUrl, runnerToken])
+
+  const offered = usingRunner
+    ? (assistant?.models ?? []).map((id) => ({ id, label: id, hint: undefined }))
+    : info.models
+  const knownModel = offered.some((model) => model.id === ai.model)
   const usingCustomModel = customModel || !knownModel
 
   function changeProvider(next: string) {
@@ -418,14 +443,19 @@ function AiSection() {
         system: 'Reply with the single word OK.',
         messages: [{ role: 'user', content: 'ping' }],
         signal: controller.signal,
+        runner: { baseUrl: runnerUrl, token: runnerToken },
       })
       // A newer probe superseded this one; its result is the one that counts.
       if (abortRef.current !== controller) return
       const used = response.usage?.inputTokens
+      // "Billed" is the wrong word for a model running on the asker's own
+      // hardware, and saying it anyway is how a free setup gets mistaken for an
+      // expensive one.
+      const cost = response.local === true ? 'free' : 'billed'
       setProbe({
         status: 'ok',
-        value: `${info.label} answered as ${ai.model || info.defaultModel}${
-          used ? ` (${used} prompt tokens billed)` : ''
+        value: `${info.label} answered as ${ai.model || assistant?.model || info.defaultModel}${
+          used ? ` (${used} prompt tokens, ${cost})` : ''
         }.`,
       })
     } catch (error) {
@@ -442,7 +472,7 @@ function AiSection() {
   }
 
   const modelOptions = [
-    ...info.models.map((model) => ({ value: model.id, label: model.label, hint: model.hint })),
+    ...offered.map((model) => ({ value: model.id, label: model.label, hint: model.hint })),
     {
       value: CUSTOM_MODEL,
       label: 'Custom model',
@@ -497,9 +527,12 @@ function AiSection() {
         </Field>
       )}
 
+      {usingRunner && <RunnerAssistantStatus info={assistant} />}
+
       <Field
         label="Base URL"
         htmlFor={ids.baseUrl}
+        hidden={usingRunner}
         help="Point this at a gateway or a self-hosted endpoint to route requests elsewhere."
       >
         <Input
@@ -515,6 +548,7 @@ function AiSection() {
       <Field
         label="API key"
         htmlFor={ids.apiKey}
+        hidden={usingRunner}
         help={
           info.requiresKey
             ? 'Sent as a header on each request and nowhere else.'
@@ -557,7 +591,7 @@ function AiSection() {
         </div>
       </Field>
 
-      <div className="rounded-lg border border-line bg-surface-sunken p-3">
+      <div className="rounded-lg border border-line bg-surface-sunken p-3" hidden={usingRunner}>
         <Toggle
           checked={persistApiKey}
           onCheckedChange={setPersistApiKey}
@@ -634,6 +668,69 @@ function AiSection() {
 }
 
 /* --------------------------------------------------------------- runner */
+
+/**
+ * What the runner says about its own assistant.
+ *
+ * Shown instead of the endpoint and key fields, because neither is this
+ * browser's to set: the runner was started with a model and an address, and the
+ * useful thing here is reading them back — most of all whether the turn is going
+ * to cost anything, which is the one question the other providers cannot answer.
+ */
+function RunnerAssistantStatus({ info }: { info: AssistantInfo | null }) {
+  if (!info) {
+    return (
+      <div className="rounded-lg border border-line bg-surface-sunken p-3 text-xs text-content-muted">
+        No answer from the runner. Start it, then check the address in the Runner
+        section below.
+      </div>
+    )
+  }
+
+  const rows: { label: string; value: string }[] = [
+    { label: 'Backend', value: info.backend },
+    { label: 'Model', value: info.model || '—' },
+    { label: 'Endpoint', value: info.baseUrl || '—' },
+    { label: 'Tools', value: info.tools.join(', ') || 'none' },
+  ]
+  if (info.agent) rows.push({ label: 'Agent', value: info.agent })
+
+  return (
+    <div className="space-y-2 rounded-lg border border-line bg-surface-sunken p-3">
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            'inline-flex items-center rounded-full px-2 py-0.5 text-2xs font-medium',
+            info.available
+              ? 'bg-state-success/10 text-state-success'
+              : 'bg-state-danger/10 text-state-danger',
+          )}
+        >
+          {info.available ? 'Ready' : 'Unavailable'}
+        </span>
+        <span className="text-2xs text-content-muted">
+          {info.local
+            ? 'Runs on the runner’s machine — metered in Billing at no cost.'
+            : 'Points at a remote model — every turn is charged.'}
+        </span>
+      </div>
+
+      <dl className="grid gap-x-4 gap-y-1 text-2xs sm:grid-cols-2">
+        {rows.map((row) => (
+          <div key={row.label} className="flex gap-2">
+            <dt className="shrink-0 text-content-subtle">{row.label}</dt>
+            <dd className="truncate font-mono text-content-muted" title={row.value}>
+              {row.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      {info.hint && <p className="text-2xs text-content-muted">{info.hint}</p>}
+      {info.error && <p className="text-2xs text-state-danger">{info.error}</p>}
+    </div>
+  )
+}
 
 function RunnerSection() {
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)

@@ -8,13 +8,18 @@ const KEY = 'secret-key-1234'
 interface Call {
   url: string
   headers: Record<string, string>
+  body: string
 }
 
 function stubFetch(body: string, init?: ResponseInit): Call[] {
   const calls: Call[] = []
   vi.stubGlobal('fetch', (input: RequestInfo | URL, request?: RequestInit) => {
     const headers = new Headers(request?.headers)
-    calls.push({ url: String(input), headers: Object.fromEntries(headers.entries()) })
+    calls.push({
+      url: String(input),
+      headers: Object.fromEntries(headers.entries()),
+      body: typeof request?.body === 'string' ? request.body : '',
+    })
     return Promise.resolve(new Response(body, init))
   })
   return calls
@@ -95,5 +100,51 @@ describe('sendAiRequest', () => {
     stubFetch(JSON.stringify({ error: { message: `bad key ${KEY}` } }), { status: 401 })
 
     await expect(ask('anthropic')).rejects.toThrow(/\[redacted\]/)
+  })
+
+  it('sends no key and no system prompt to the runner, which writes its own', async () => {
+    const calls = stubFetch('event: delta\ndata: {"text":"ok"}\n\nevent: done\ndata: {}\n\n')
+
+    const response = await sendAiRequest({
+      settings: settingsFor('runner'),
+      system: 'a prompt the runner must ignore',
+      messages: [{ role: 'user', content: 'hi' }],
+      runner: { baseUrl: 'http://127.0.0.1:8787', token: 'runner-token' },
+    })
+
+    expect(response.text).toBe('ok')
+    expect(calls[0].url).toBe('http://127.0.0.1:8787/assistant/stream')
+    // The prompt has to describe the tools that Python environment actually has,
+    // which a browser cannot know.
+    expect(calls[0].body).not.toContain('must ignore')
+    expect(JSON.stringify(calls[0].headers)).not.toContain(KEY)
+    expect(calls[0].headers['x-sparquet-token']).toBe('runner-token')
+  })
+
+  it('answers whether the runner turn was free, which no other provider can', async () => {
+    stubFetch('event: done\ndata: {"usage":{"local":true,"inputTokens":9,"outputTokens":2}}\n\n')
+
+    const response = await sendAiRequest({
+      settings: settingsFor('runner'),
+      system: 'system',
+      messages: [{ role: 'user', content: 'hi' }],
+      runner: { baseUrl: 'http://127.0.0.1:8787', token: '' },
+    })
+
+    expect(response.local).toBe(true)
+    expect(response.usage).toEqual({ inputTokens: 9, outputTokens: 2 })
+  })
+
+  it('reaches Ollama on its own address without asking for a key', async () => {
+    const calls = stubFetch('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+
+    const response = await sendAiRequest({
+      settings: { ...settingsFor('ollama'), apiKey: '' },
+      system: 'system',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+
+    expect(response.text).toBe('ok')
+    expect(calls[0].url).toBe('http://localhost:11434/v1/chat/completions')
   })
 })
