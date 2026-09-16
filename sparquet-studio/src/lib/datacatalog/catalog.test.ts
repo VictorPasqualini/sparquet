@@ -5,15 +5,22 @@ import { buildLineage } from '@/lib/lineage'
 import {
   buildCatalog,
   catalogStats,
+  columnAnnotationOf,
+  columnKey,
+  columnRaisesClassification,
+  effectiveClassification,
   emptyAnnotation,
   isBlank,
   knownDomains,
+  MAX_COLUMN_DESCRIPTION,
   MAX_CONNECTION,
   MAX_DESCRIPTION,
   normalizeAnnotation,
+  normalizeColumns,
   orphanAnnotations,
   sanitizeAnnotations,
   withAnnotation,
+  withColumnAnnotation,
   withoutAnnotation,
   type CatalogAnnotations,
 } from './catalog'
@@ -147,5 +154,153 @@ describe('knownDomains', () => {
       ...described('/c', { domain: 'sales' }),
     }
     expect(knownDomains(annotations)).toEqual(['finance', 'sales'])
+  })
+})
+
+describe('column annotations', () => {
+  const withCpf = (patch = {}) =>
+    withColumnAnnotation(described('/t'), '/t', 'CPF', {
+      classification: 'restricted',
+      tags: ['pii'],
+      ...patch,
+    })
+
+  it('keys a column by its lower-cased name and keeps the spelling typed', () => {
+    const columns = withCpf()['/t'].columns
+    expect(Object.keys(columns)).toEqual(['cpf'])
+    expect(columns.cpf.column).toBe('CPF')
+    expect(columnKey('  Amount  ')).toBe('amount')
+  })
+
+  it('finds a column whatever case it is asked about', () => {
+    const annotation = withCpf()['/t']
+    expect(columnAnnotationOf(annotation, 'cpf')?.classification).toBe('restricted')
+    expect(columnAnnotationOf(annotation, 'CpF')?.classification).toBe('restricted')
+    expect(columnAnnotationOf(annotation, 'total')).toBeNull()
+  })
+
+  it('bounds the description like every other free text in the catalog', () => {
+    const annotations = withColumnAnnotation(described('/t'), '/t', 'notes', {
+      description: 'x'.repeat(MAX_COLUMN_DESCRIPTION + 40),
+    })
+    expect(annotations['/t'].columns.notes.description).toHaveLength(MAX_COLUMN_DESCRIPTION)
+  })
+
+  it('drops a column that says nothing rather than storing an empty row', () => {
+    const annotations = withColumnAnnotation(withCpf(), '/t', 'cpf', {
+      classification: '',
+      tags: [],
+    })
+    expect(annotations['/t'].columns).toEqual({})
+    // An entry whose columns all went away is still the table's own entry.
+    expect(isBlank(annotations['/t'])).toBe(false)
+  })
+
+  it('an entry with a described column is not blank even with nothing else in it', () => {
+    const bare = withColumnAnnotation({ '/t': emptyAnnotation('/t') }, '/t', 'cpf', {
+      classification: 'restricted',
+    })
+    expect(isBlank(bare['/t'])).toBe(false)
+    expect(isBlank(emptyAnnotation('/t'))).toBe(true)
+  })
+
+  it('refuses a column with no name at all', () => {
+    const annotations = described('/t')
+    expect(withColumnAnnotation(annotations, '/t', '   ', { classification: 'public' })).toBe(
+      annotations,
+    )
+  })
+
+  it('reads a stored map back through the same sanitizing as the rest', () => {
+    const columns = normalizeColumns({
+      CPF: {
+        column: 'CPF',
+        description: '  The document number.  ',
+        classification: 'nonsense',
+        tags: ['pii', 'pii'],
+      },
+      '': { column: '', description: 'x' },
+    } as never)
+    expect(Object.keys(columns)).toEqual(['cpf'])
+    expect(columns.cpf).toMatchObject({
+      description: 'The document number.',
+      // A classification nobody defined is no classification, not a new one.
+      classification: '',
+      tags: ['pii'],
+    })
+  })
+})
+
+describe('effectiveClassification', () => {
+  it('a table is as restricted as the most restricted column in it', () => {
+    const annotations = withColumnAnnotation(
+      { '/t': normalizeAnnotation('/t', { classification: 'internal' }) },
+      '/t',
+      'cpf',
+      { classification: 'restricted' },
+    )
+    expect(effectiveClassification(annotations['/t'])).toBe('restricted')
+    expect(annotations['/t'].classification).toBe('internal')
+  })
+
+  it('a column never lowers what the table itself says', () => {
+    const annotations = withColumnAnnotation(
+      { '/t': normalizeAnnotation('/t', { classification: 'confidential' }) },
+      '/t',
+      'id',
+      { classification: 'public' },
+    )
+    expect(effectiveClassification(annotations['/t'])).toBe('confidential')
+  })
+
+  it('says nothing about a table nobody classified and whose columns are silent', () => {
+    expect(effectiveClassification(emptyAnnotation('/t'))).toBe('')
+    expect(effectiveClassification(null)).toBe('')
+  })
+
+  it('points at the column that raises the badge, and only at that one', () => {
+    const annotation = normalizeAnnotation('/t', { classification: 'internal' })
+    expect(
+      columnRaisesClassification(annotation, {
+        column: 'cpf',
+        description: '',
+        classification: 'restricted',
+        tags: [],
+      }),
+    ).toBe(true)
+    expect(
+      columnRaisesClassification(annotation, {
+        column: 'id',
+        description: '',
+        classification: 'public',
+        tags: [],
+      }),
+    ).toBe(false)
+    // A classified column inside an unclassified table raises it too: the table
+    // said nothing, and nothing is not the same as "less than restricted".
+    expect(
+      columnRaisesClassification(emptyAnnotation('/t'), {
+        column: 'cpf',
+        description: '',
+        classification: 'internal',
+        tags: [],
+      }),
+    ).toBe(true)
+  })
+})
+
+describe('catalogStats with columns', () => {
+  it('counts the described columns across the whole catalog', () => {
+    const annotations = withColumnAnnotation(
+      withColumnAnnotation(described('/lake/silver/orders'), '/lake/silver/orders', 'cpf', {
+        classification: 'restricted',
+      }),
+      '/lake/silver/orders',
+      'total',
+      { description: 'Order total, in cents.' },
+    )
+    // Described is not classified: the number beside the coverage counts the
+    // columns somebody decided who may see, not the ones somebody explained.
+    expect(catalogStats(buildCatalog(index(), annotations)).columnsClassified).toBe(1)
   })
 })

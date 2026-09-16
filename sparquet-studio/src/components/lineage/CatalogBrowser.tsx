@@ -19,6 +19,7 @@ import { Badge, Button, type BadgeTone } from '@/components/ui'
 import {
   buildNamespaceTree,
   describeAsset,
+  effectiveClassification,
   type CatalogAsset,
   type CatalogEntry,
   type CatalogNode,
@@ -359,11 +360,21 @@ export function CatalogBrowser({
                         <span className="italic">no owner</span>
                       )}
                       {annotation?.domain ? <span>· {annotation.domain}</span> : null}
-                      {annotation?.classification ? (
+                      {/*
+                        The effective classification, not the one typed on the
+                        table: a dataset is as restricted as the most restricted
+                        column in it, and a badge that says `internal` over a
+                        `restricted` column is worse than no badge at all.
+                      */}
+                      {effectiveClassification(annotation) ? (
                         <Badge
-                          tone={annotation.classification === 'restricted' ? 'warning' : 'neutral'}
+                          tone={
+                            effectiveClassification(annotation) === 'restricted'
+                              ? 'warning'
+                              : 'neutral'
+                          }
                         >
-                          {annotation.classification}
+                          {effectiveClassification(annotation)}
                         </Badge>
                       ) : null}
                       {/*

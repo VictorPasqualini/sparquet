@@ -23,6 +23,7 @@ import {
   buildColumnGraph,
   catalogStats,
   deriveSchemas,
+  type ColumnAnnotation,
   type DatasetAnnotation,
   type ProbedField,
 } from '@/lib/datacatalog'
@@ -33,8 +34,9 @@ import {
   type DatasetGrant,
   type Decision,
 } from '@/lib/iam'
-import { fetchDatasetSchema } from '@/lib/runner/client'
+import { fetchDatasetSchema, runQuery, type RunnerQueryResult } from '@/lib/runner/client'
 import { sparkForDatasets } from '@/lib/runner/session'
+import { viewAlias } from '@/lib/sql/views'
 import { buildLineage, type DatasetPlace } from '@/lib/lineage'
 import {
   LINEAGE_EXAMPLE_WORKFLOW,
@@ -157,6 +159,7 @@ export function Catalog() {
   const annotations = useCatalogStore((state) => state.annotations)
   const loadCatalog = useCatalogStore((state) => state.load)
   const annotate = useCatalogStore((state) => state.annotate)
+  const annotateColumn = useCatalogStore((state) => state.annotateColumn)
   const forget = useCatalogStore((state) => state.forget)
   const grants = useIamStore((state) => state.grants)
   const loadGrants = useIamStore((state) => state.load)
@@ -412,6 +415,36 @@ export function Catalog() {
     [jobs, runnerUrl, runnerToken],
   )
 
+  /**
+   * Asks the runner for the dataset's first rows.
+   *
+   * The same `/query` the SQL editor uses, with one source and a statement this
+   * screen writes: the runner registers the dataset as a temporary view and
+   * selects from it, so every format the framework can read samples here, and
+   * the read-only rule and the row cap that bound a query bound this too.
+   *
+   * It names neither a tab nor a saved query on purpose. Those are what the
+   * runner files a run under, and a sample somebody asked a catalog sheet for is
+   * not a statement they wrote — it has no business in their query history.
+   */
+  const sample = useCallback(
+    async (key: string, format: string, limit: number): Promise<RunnerQueryResult> => {
+      const alias = viewAlias(key)
+      return runQuery(
+        runnerUrl,
+        {
+          sql: `SELECT * FROM ${alias}`,
+          sources: [{ alias, format, path: key }],
+          limit,
+          spark: sparkForDatasets(jobs, [key]),
+        },
+        undefined,
+        runnerToken,
+      )
+    },
+    [jobs, runnerUrl, runnerToken],
+  )
+
   const save = useCallback(
     async (key: string, patch: Partial<DatasetAnnotation>) => {
       try {
@@ -421,6 +454,17 @@ export function Catalog() {
       }
     },
     [annotate],
+  )
+
+  const saveColumn = useCallback(
+    async (key: string, column: string, patch: Partial<ColumnAnnotation>) => {
+      try {
+        await annotateColumn(key, column, patch)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Could not save the column')
+      }
+    },
+    [annotateColumn],
   )
 
   const drop = useCallback(
@@ -514,7 +558,7 @@ export function Catalog() {
   }
 
   return (
-    <PageShell>
+    <PageShell width="full">
       <PageHeader
         icon={<Database />}
         title="Data catalog"
@@ -692,8 +736,14 @@ export function Catalog() {
           onClearOwner={() => clearOwner('dataset', open.dataset.key)}
           mayManageAccess={mayAdministerResource('dataset', open.dataset.key)}
           probe={runnerUrl ? (format) => probe(open.dataset.key, format) : null}
+          sample={
+            runnerUrl
+              ? (format, limit) => sample(open.dataset.key, format, limit)
+              : null
+          }
           onClose={() => setOpenKey(null)}
           onSave={(patch) => save(open.dataset.key, patch)}
+          onSaveColumn={(column, patch) => saveColumn(open.dataset.key, column, patch)}
           onForget={() => drop(open.dataset.key)}
           onOpenJob={openJob}
         />
