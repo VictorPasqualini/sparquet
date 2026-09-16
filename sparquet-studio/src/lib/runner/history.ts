@@ -12,9 +12,13 @@ import type {
   JobRunRecord,
   LineageDataset,
   PipelineRunRecord,
+  RunDay,
+  RunGroup,
+  RunGroupBy,
   RunLineage,
   RunLogPage,
   RunLogRecord,
+  RunMetrics,
   StepRunRecord,
 } from '@/types/history'
 
@@ -375,5 +379,63 @@ export async function getRun(
   } catch (error) {
     if (isRunnerError(error) && error.status === 404) return null
     throw error
+  }
+}
+
+
+function toRunGroup(value: unknown): RunGroup {
+  const record = isRecord(value) ? value : {}
+  return {
+    key: asNullableString(record.key),
+    label: asString(record.label, 'Unknown'),
+    runs: asNullableNumber(record.runs) ?? 0,
+    failed: asNullableNumber(record.failed) ?? 0,
+    durationMsAvg: asNullableNumber(record.duration_ms_avg),
+    durationMsTotal: asNullableNumber(record.duration_ms_total) ?? 0,
+  }
+}
+
+function toRunDay(value: unknown): RunDay {
+  const record = isRecord(value) ? value : {}
+  return {
+    day: asString(record.day),
+    runs: asNullableNumber(record.runs) ?? 0,
+    failed: asNullableNumber(record.failed) ?? 0,
+  }
+}
+
+/**
+ * A month of executions: how many, how they ended, how long they took.
+ *
+ * Read from the execution history rather than from the credits ledger, so it
+ * counts the local runs and the runs that failed before writing anything: the
+ * ones a bill never mentions and an operator always asks about.
+ */
+export async function getRunMetrics(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  options: { period?: string; groupBy?: RunGroupBy; workflowId?: string } = {},
+  signal?: AbortSignal,
+  token?: string,
+): Promise<RunMetrics> {
+  const params = new URLSearchParams()
+  if (options.period) params.set('period', options.period)
+  params.set('group_by', options.groupBy ?? 'pipeline')
+  if (options.workflowId) params.set('workflow_id', options.workflowId)
+
+  const payload = await getJson(baseUrl, `/runs/metrics?${params.toString()}`, signal, token)
+  const record = isRecord(payload) ? payload : {}
+  return {
+    period: asString(record.period),
+    total: asNullableNumber(record.total) ?? 0,
+    succeeded: asNullableNumber(record.succeeded) ?? 0,
+    failed: asNullableNumber(record.failed) ?? 0,
+    other: asNullableNumber(record.other) ?? 0,
+    durationMsAvg: asNullableNumber(record.duration_ms_avg),
+    durationMsP50: asNullableNumber(record.duration_ms_p50),
+    durationMsP95: asNullableNumber(record.duration_ms_p95),
+    durationMsTotal: asNullableNumber(record.duration_ms_total) ?? 0,
+    days: Array.isArray(record.days) ? record.days.map(toRunDay) : [],
+    groups: Array.isArray(record.groups) ? record.groups.map(toRunGroup) : [],
+    groupBy: asString(record.group_by, 'pipeline') as RunGroupBy,
   }
 }

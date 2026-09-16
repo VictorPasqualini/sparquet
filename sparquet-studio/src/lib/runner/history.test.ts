@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_RUNNER_URL, isRunnerError, RUNNER_TOKEN_HEADER, RunnerError } from '@/lib/runner/client'
-import { getJobRunConfig, getJobRunLogs, getRun, listRuns, pinRun } from '@/lib/runner/history'
+import {
+  getJobRunConfig,
+  getJobRunLogs,
+  getRun,
+  getRunMetrics,
+  listRuns,
+  pinRun,
+} from '@/lib/runner/history'
 
 const fetchMock = vi.fn()
 
@@ -447,6 +454,108 @@ describe('pinRun', () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
 
     await expect(pinRun(DEFAULT_RUNNER_URL, 'run-1', true)).rejects.toSatisfy(
+      (error: unknown) => isRunnerError(error) && error.kind === 'unreachable',
+    )
+  })
+})
+
+describe('getRunMetrics', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    fetchMock.mockReset()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('maps a month of executions', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        period: '2026-03',
+        total: 3,
+        succeeded: 2,
+        failed: 1,
+        other: 0,
+        duration_ms_avg: 150,
+        duration_ms_p50: 100,
+        duration_ms_p95: 300,
+        duration_ms_total: 450,
+        days: [{ day: '2026-03-01', runs: 2, failed: 1 }],
+        groups: [
+          {
+            key: 'j1',
+            label: 'orders',
+            runs: 2,
+            failed: 1,
+            duration_ms_avg: 200,
+            duration_ms_total: 400,
+          },
+        ],
+        group_by: 'pipeline',
+      }),
+    )
+
+    const metrics = await getRunMetrics(DEFAULT_RUNNER_URL, { period: '2026-03' })
+
+    expect(metrics.total).toBe(3)
+    expect(metrics.durationMsP95).toBe(300)
+    expect(metrics.days).toEqual([{ day: '2026-03-01', runs: 2, failed: 1 }])
+    expect(metrics.groups[0]).toEqual({
+      key: 'j1',
+      label: 'orders',
+      runs: 2,
+      failed: 1,
+      durationMsAvg: 200,
+      durationMsTotal: 400,
+    })
+  })
+
+  it('keeps a month with no finished run readable instead of zeroing its durations', async () => {
+    // Null is not zero here: "no run finished" and "every run was instant" are
+    // different months, and only one of them is worth investigating.
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        period: '2026-07',
+        total: 0,
+        succeeded: 0,
+        failed: 0,
+        other: 0,
+        duration_ms_avg: null,
+        duration_ms_p50: null,
+        duration_ms_p95: null,
+        duration_ms_total: 0,
+        days: [],
+        groups: [],
+        group_by: 'job',
+      }),
+    )
+
+    const metrics = await getRunMetrics()
+
+    expect(metrics.durationMsAvg).toBeNull()
+    expect(metrics.groupBy).toBe('job')
+  })
+
+  it('asks for the requested month and dimension', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ period: '2026-03', group_by: 'user' }))
+
+    await getRunMetrics(
+      DEFAULT_RUNNER_URL,
+      { period: '2026-03', groupBy: 'user' },
+      undefined,
+      'tok',
+    )
+
+    const [url, init] = lastCall()
+    expect(url).toContain('/runs/metrics?period=2026-03&group_by=user')
+    expect(new Headers(init.headers).get(RUNNER_TOKEN_HEADER)).toBe('tok')
+  })
+
+  it('reports an unreachable runner as such', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    await expect(getRunMetrics()).rejects.toSatisfy(
       (error: unknown) => isRunnerError(error) && error.kind === 'unreachable',
     )
   })

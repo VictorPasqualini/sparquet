@@ -14,12 +14,18 @@
  * The screen owns the month, because the trend chart and the breakdown are the
  * same question asked at two zoom levels: the bars say which month is worth
  * looking at, and clicking one is what points the breakdown at it.
+ *
+ * The last card reads the same month from the execution history instead of the
+ * ledger. Cost and activity are different questions with different answers — a
+ * month of local development costs nothing and still ran hundreds of times — and
+ * putting them on one screen is what lets one be read against the other.
  */
 
 import { Coins } from 'lucide-react'
 import { useState } from 'react'
 
 import { CreditsPanel } from '@/components/credits/CreditsPanel'
+import { RunActivity } from '@/components/credits/RunActivity'
 import { SpendBreakdown } from '@/components/credits/SpendBreakdown'
 import { SpendTrend } from '@/components/credits/SpendTrend'
 import { PageHeader, PageShell } from '@/components/layout/PageShell'
@@ -29,12 +35,13 @@ export function Billing() {
   const [period, setPeriod] = useState(currentPeriod)
 
   return (
-    <PageShell width="default">
+    <PageShell width="wide">
       <PageHeader
         icon={<Coins />}
         title="Billing"
-        description="Execution credits. One per successful write that lands away from this machine
-          — local runs and runs that failed before writing are free."
+        description="Execution credits — one per successful write that lands away from this
+          machine, so local runs and runs that failed before writing are free — and, below them,
+          what actually ran this month whether or not it cost anything."
       />
 
       <div className="space-y-6">
@@ -46,6 +53,9 @@ export function Billing() {
         </div>
         <div className="card space-y-5 p-5">
           <SpendBreakdown period={period} />
+        </div>
+        <div className="card space-y-5 p-5">
+          <RunActivity period={period} />
         </div>
       </div>
     </PageShell>
