@@ -425,12 +425,29 @@ pip install omnigent      # Python 3.12+ only
 ```
 
 That floor is why it is optional rather than required: the framework itself
-supports 3.9, and a runner on 3.10 must keep working.
+supports 3.9, and a runner on 3.10 must keep working. It is not a fork in the
+road, though — the framework is tested on 3.12 and 3.13 as well, so a single
+interpreter carries both and `pip install sparquet omnigent` resolves without a
+conflict.
 
 Omnigent is pointed at the same Ollama by default, so choosing it changes the
-agent loop without starting to spend money — `auth: {type: api_key, base_url}`
-on an `OpenAIAgentsSDKExecutor`. A team that outgrows the built-in prompt writes
-its own agent YAML and points `SPARQUET_STUDIO_OMNIGENT_AGENT` at it.
+agent loop without starting to spend money. Four things about the wiring follow
+from what the package does rather than from what its agent YAML describes, and
+every one of them fails quietly when guessed wrong:
+
+| Wiring | Why |
+|---|---|
+| `OpenAIAgentsSDKExecutor(api_key=…, base_url_override=…)` | `auth: {type: api_key, base_url}` is the *spec* syntax. The constructor takes plain keywords and rejects an `auth` keyword outright. |
+| `use_responses=False` | It defaults to True, which is OpenAI's `/responses` endpoint. Ollama does not implement it, so the default breaks the backend this is pointed at by default. |
+| Flat tool specs rather than OpenAI-shaped ones | Omnigent reads `name`, `description` and `parameters` off the top of each spec. In the nested shape it finds no name, and a spec with no name is skipped rather than refused — the symptom is an assistant answering from memory, not an error anybody sees. |
+| `_tool_executor`, and a fresh `session_id` on every turn | Tool calls are dispatched through the attribute Omnigent's own runtime adapter assigns; without it every call comes back "no tool executor" and the model reasons on from a failure it cannot fix. The session key is what Omnigent replays history against, and our transcript already arrives whole from the browser — one shared key would show the model its own past twice, and on a runner with more than one user, somebody else's. |
+
+`server/test_omnigent_live.py` is what keeps that table honest. It skips when
+the package is absent and, when it is there, drives the installed executor
+through a real turn — tool call, tool result, streamed answer, usage — against a
+stub that speaks the OpenAI streaming shape in place of model weights. A team
+that outgrows the built-in prompt writes its own agent YAML and points
+`SPARQUET_STUDIO_OMNIGENT_AGENT` at it.
 
 ### What a turn costs
 

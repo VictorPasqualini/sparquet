@@ -1615,7 +1615,10 @@ O que falta, na ordem em que dói:
   apontado para o mesmo Ollama, de modo que trocar de backend troca o laço de agente
   sem passar a gastar. Verificado na 0.14.0: Apache-2.0, `Requires-Python >=3.12`,
   13 MB e ~40 dependências. O caminho local e gratuito é o `OpenAIAgentsSDKExecutor`
-  com `auth: {type: api_key, api_key, base_url}`; os eventos são despachados pelo
+  com `api_key`, `base_url_override` e `use_responses=False` — o `auth: {...}` do
+  quadro original é a sintaxe do *spec* do agente, não a do construtor, e o
+  `use_responses` default aponta para `/responses`, que o Ollama não implementa; os
+  eventos são despachados pelo
   **nome da classe** (`TextChunk`, `ToolCallRequest`, `ToolCallComplete`,
   `TurnComplete`, `ExecutorError`), e o adaptador do runner depende disso.
 
@@ -1636,13 +1639,32 @@ O que falta, na ordem em que dói:
   Documentado em `sparquet-studio/server/README.md` (**The assistant**) e em
   `sparquet-studio/README.md`.
 
-- [ ] **Falta o Omnigent rodar de verdade uma vez** — o adaptador tem teste com
-  eventos falsos que carregam os nomes de classe reais, e o caminho Ollama tem teste
-  de ponta a ponta com frames NDJSON; o que nunca rodou é `pip install omnigent` num
-  interpretador 3.12+ com um agente de verdade. Antes de anunciar o backend, uma
-  execução manual: instalar, `SPARQUET_STUDIO_ASSISTANT=omnigent`, fazer uma pergunta
-  que force `validate_config` e conferir que o `usage` do `TurnComplete` chega em
-  `assist_usage`.
+- [x] **O Omnigent rodou de verdade** — `pip install omnigent` (0.14.0) num venv
+  3.12.9, ao lado do `sparquet` instalado em modo editável (pyspark 4.2.0): resolveu
+  sem conflito, os 27 formatos de leitura continuam registrados e os dois pacotes
+  convivem no mesmo interpretador. A instalação expôs quatro divergências entre o
+  adaptador e o pacote que de fato instala, **todas silenciosas** — a razão de o teste
+  com fakes não tê-las pego é que um fake obedece à assinatura que o autor imagina:
+
+  | Divergência | O que acontecia |
+  |---|---|
+  | `auth={...}` no construtor | Não existe: é sintaxe do *spec* do agente. O construtor recebe `api_key` e `base_url_override` e recusa `auth`. |
+  | `use_responses` default `True` | Aponta para `/responses` da OpenAI, que o Ollama não implementa — o default quebrava exatamente o backend padrão. |
+  | Spec de ferramenta aninhado | O Omnigent lê `name` no topo do spec; sem nome ele **descarta em silêncio**. Sintoma: assistente respondendo de memória, sem ferramenta e sem erro. |
+  | Despacho e sessão | Ferramenta é chamada por `_tool_executor`, atribuído pelo próprio adaptador de runtime do Omnigent; e cada turno precisa de `session_id` novo, senão o Omnigent replica um histórico que o navegador já manda inteiro (num runner com mais de um usuário, o histórico alheio). |
+
+  Corrigido em `server/assistant.py` e coberto por `server/test_omnigent_live.py`, que
+  pula sozinho quando o pacote não está instalado e, quando está, roda um turno
+  inteiro pelo executor instalado: chamada de ferramenta, resultado devolvido ao
+  modelo, resposta em streaming e `usage`.
+
+- [ ] **Uma rodada do Omnigent com pesos de verdade** — o que o teste acima ainda
+  substitui é só o modelo: não há Ollama nesta máquina, então quem responde é um stub
+  no formato de streaming da OpenAI. Tudo entre o stub e o teste (executor, OpenAI
+  Agents SDK, ponte de ferramentas, classes de evento, adaptador, framework) é o
+  instalado. Falta a execução manual numa máquina com Ollama: `ollama pull`,
+  `SPARQUET_STUDIO_ASSISTANT=omnigent`, uma pergunta que force `validate_config`, e
+  conferir o `usage` do `TurnComplete` chegando em `assist_usage`.
 
 - [ ] **Agir, não só olhar** — criar o Job que acabou de descrever, rodar, corrigir o
   que o linter apontou. As ferramentas de escrita são a parte que falta, e cada uma

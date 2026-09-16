@@ -43,6 +43,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
@@ -241,6 +242,24 @@ def _function(name: str, description: str, parameters: Dict[str, Any]) -> Dict[s
     }
 
 
+def _flat(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """The same tool, with the `function` envelope unwrapped.
+
+    Omnigent reads `name`, `description` and `parameters` off the top of each
+    spec. Handed the OpenAI-shaped one it finds no name, and a spec with no name
+    is skipped rather than rejected — so the symptom is not an error, it is an
+    assistant that answers from memory because it was registered with no tools
+    at all. Converting here keeps `TOOLS` in the shape Ollama wants, which is
+    also the shape the docs and the tests describe.
+    """
+    inner = spec.get("function", spec)
+    return {
+        "name": inner.get("name", ""),
+        "description": inner.get("description", ""),
+        "parameters": inner.get("parameters", {"type": "object", "properties": {}}),
+    }
+
+
 TOOLS: List[Tool] = [
     Tool(
         name="list_formats",
@@ -279,6 +298,11 @@ TOOLS_BY_NAME: Dict[str, Tool] = {tool.name: tool for tool in TOOLS}
 #: What goes on the wire. Kept apart from `TOOLS` so a caller can hand the specs
 #: to a runtime that does its own dispatch without also handing it our callables.
 TOOL_SPECS: List[Dict[str, Any]] = [tool.spec for tool in TOOLS]
+
+#: The same tools in Omnigent's flat shape. Two lists rather than one converted
+#: at the call site, because which shape a runtime wants is a fact about that
+#: runtime and belongs next to the specs it describes.
+FLAT_TOOL_SPECS: List[Dict[str, Any]] = [_flat(tool.spec) for tool in TOOLS]
 
 
 def call_tool(name: str, args: Dict[str, Any]) -> Any:
@@ -600,6 +624,25 @@ def _omnigent() -> Any:
     return omnigent
 
 
+def _omnigent_version(module: Any) -> str:
+    """Which Omnigent this is, asked of the package rather than the module.
+
+    0.14.0 exports no `__version__`, so reading the attribute reports an empty
+    string on a perfectly healthy install — and "available, version unknown" is
+    the shape of a report nobody trusts. The distribution metadata is there
+    either way.
+    """
+    declared = getattr(module, "__version__", "")
+    if declared:
+        return str(declared)
+    try:
+        from importlib import metadata
+
+        return metadata.version("omnigent")
+    except Exception:  # pragma: no cover - a source checkout has no metadata
+        return ""
+
+
 class OmnigentBackend:
     """The same tools, driven by Omnigent's executor.
 
@@ -656,10 +699,26 @@ class OmnigentBackend:
             detail["error"] = str(error)
             return detail
         detail["available"] = True
-        detail["version"] = getattr(module, "__version__", "")
+        detail["version"] = _omnigent_version(module)
         return detail
 
     def _executor(self) -> Any:
+        """The executor, pointed at our model and wired to our tools.
+
+        Three things here are decided by what the package actually does rather
+        than by what its agent YAML describes:
+
+        * `auth: {type: api_key, …}` is the *spec* syntax. The constructor takes
+          `api_key` and `base_url_override` as plain keywords, and rejects an
+          `auth` keyword outright.
+        * `use_responses` defaults to True, which is OpenAI's `/responses`
+          endpoint. Ollama does not implement it — the default would make every
+          turn fail against the very backend this is pointed at by default.
+        * Tools are dispatched through `_tool_executor`, which Omnigent's own
+          runtime adapter assigns directly. Without it the executor answers
+          every call with "no tool executor", and the model reasons on from an
+          error it cannot fix.
+        """
         module = _omnigent()
         try:
             executor_cls = module.OpenAIAgentsSDKExecutor
@@ -670,13 +729,18 @@ class OmnigentBackend:
             ) from error
         # The key is a placeholder because Ollama does not check one and the SDK
         # refuses to build a client without something in the field.
-        return executor_cls(
-            auth={
-                "type": "api_key",
-                "api_key": os.getenv("SPARQUET_STUDIO_ASSISTANT_KEY", "") or "sparquet-local",
-                "base_url": self.base_url,
-            }
-        )
+        key = os.getenv("SPARQUET_STUDIO_ASSISTANT_KEY", "") or "sparquet-local"
+        try:
+            executor = executor_cls(
+                api_key=key, base_url_override=self.base_url, use_responses=False,
+            )
+        except TypeError as error:  # pragma: no cover - version drift
+            raise AssistantUnavailable(
+                "This Omnigent's executor does not take an OpenAI-compatible base URL.",
+                hint="Install omnigent>=0.14,<0.15.",
+            ) from error
+        executor._tool_executor = lambda name, args: call_tool(name, args)
+        return executor
 
     def stream(
         self, turns: Sequence[Dict[str, str]], *, system: str = SYSTEM_PROMPT,
@@ -696,15 +760,25 @@ class OmnigentBackend:
         streamed = False
         usage_report: Dict[str, Any] = {}
 
-        messages = [
-            module.Message(role=turn["role"], content=turn["content"]) for turn in turns
-        ]
+        # Dicts, not `omnigent.Message`, despite the `list[Message]` annotation
+        # on `run_turn`: the executor reads `message.get("role")` and
+        # `message["session_id"]` off them, and a dataclass instance dies on the
+        # first `.get`. The annotation describes the protocol, the code describes
+        # the contract, and the contract is what runs.
+        messages = [dict(turn) for turn in turns]
+        if messages:
+            # A turn of its own. Omnigent keys an SDK session off this and
+            # replays that session's history into the next turn; ours already
+            # carries the whole transcript from the browser, so a shared key
+            # would show the model its own past twice — and, on a runner with
+            # more than one user, somebody else's.
+            messages[-1]["session_id"] = f"sparquet-{uuid.uuid4().hex}"
         config = module.ExecutorConfig(model=chosen)
 
         loop = asyncio.new_event_loop()
         try:
             stream = self._executor().run_turn(
-                messages, list(TOOL_SPECS), system, config,
+                messages, list(FLAT_TOOL_SPECS), system, config,
             )
             while True:
                 try:

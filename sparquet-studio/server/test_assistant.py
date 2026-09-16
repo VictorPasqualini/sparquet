@@ -30,6 +30,7 @@ fact rather than an absence of rows.
 """
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import sys
@@ -328,9 +329,13 @@ def _event(class_name, **fields):
 
 
 def _fake_omnigent(events):
-    """A module with the three names the adapter touches, and nothing else."""
+    """A module with the three names the adapter touches, and nothing else.
+
+    No `__version__`: the real 0.14.0 does not export one either, and a fake
+    that did would hide the fact that `describe()` has to ask the distribution
+    metadata instead.
+    """
     module = types.ModuleType("omnigent")
-    module.__version__ = "0.14.0"
 
     class Message:
         def __init__(self, role, content):
@@ -343,9 +348,20 @@ def _fake_omnigent(events):
     class OpenAIAgentsSDKExecutor:
         seen = {}
         calls = []
+        instance = None
 
-        def __init__(self, auth=None):
-            OpenAIAgentsSDKExecutor.seen = dict(auth or {})
+        # Keyword-only, and exactly these names: the real constructor rejects an
+        # `auth` keyword, and defaults `use_responses` to True — the endpoint
+        # Ollama does not implement. A fake that accepted anything would have
+        # let both mistakes ship.
+        def __init__(self, *, api_key=None, base_url_override=None, use_responses=True):
+            OpenAIAgentsSDKExecutor.seen = {
+                "api_key": api_key,
+                "base_url_override": base_url_override,
+                "use_responses": use_responses,
+            }
+            self._tool_executor = None
+            OpenAIAgentsSDKExecutor.instance = self
 
         def run_turn(self, messages, tools, system_prompt, config=None):
             OpenAIAgentsSDKExecutor.calls.append(
@@ -396,8 +412,18 @@ class OmnigentTests(unittest.TestCase):
         sys.modules["omnigent"] = _fake_omnigent([])
         detail = assistant.OmnigentBackend().describe()
         self.assertTrue(detail["available"])
-        self.assertEqual(detail["version"], "0.14.0")
         self.assertIn("validate_config", detail["tools"])
+
+    def test_the_version_comes_from_the_metadata_when_the_module_has_none(self):
+        """0.14.0 exports no `__version__`, and "unknown" is not a report."""
+        module = _fake_omnigent([])
+        self.assertFalse(hasattr(module, "__version__"))
+        sys.modules["omnigent"] = module
+        try:
+            expected = importlib.metadata.version("omnigent")
+        except importlib.metadata.PackageNotFoundError:
+            self.skipTest("omnigent is not installed here")
+        self.assertEqual(assistant.OmnigentBackend().describe()["version"], expected)
 
     # ---- the events
 
@@ -510,22 +536,49 @@ class OmnigentTests(unittest.TestCase):
         self._stream([_event("TurnComplete", response="hi", continue_turn=False,
                              usage=None)])
         seen = self.module.OpenAIAgentsSDKExecutor.seen
-        self.assertEqual(seen["base_url"], "http://127.0.0.1:11434/v1")
-        self.assertEqual(seen["type"], "api_key")
+        self.assertEqual(seen["base_url_override"], "http://127.0.0.1:11434/v1")
+        # `/responses` is the constructor default and Ollama does not implement
+        # it, so leaving it alone breaks the backend it is pointed at by default.
+        self.assertFalse(seen["use_responses"])
         # Ollama checks no key and the SDK refuses to build a client without one.
         self.assertTrue(seen["api_key"])
+
+    def test_the_tools_are_dispatched_by_us_and_not_left_unanswered(self):
+        """Omnigent calls a private attribute its own adapter assigns."""
+        self._stream([_event("TurnComplete", response="hi", continue_turn=False,
+                             usage=None)])
+        run = self.module.OpenAIAgentsSDKExecutor.instance._tool_executor
+        self.assertIsNotNone(run)
+        self.assertIn("There is no tool called", run("nope", {})["error"])
+        self.assertFalse(run("validate_config", {"config": "not json"})["valid"])
 
     def test_the_runners_tools_and_prompt_are_handed_over(self):
         self._stream([_event("TurnComplete", response="hi", continue_turn=False,
                              usage=None)])
         call = self.module.OpenAIAgentsSDKExecutor.calls[0]
+        # Flat, not OpenAI-shaped: Omnigent reads the name off the top of the
+        # spec, and a spec whose name it cannot find is skipped silently — an
+        # assistant with no tools rather than an error anybody would notice.
         self.assertEqual(
-            [spec["function"]["name"] for spec in call["tools"]],
+            [spec["name"] for spec in call["tools"]],
             [tool.name for tool in assistant.TOOLS],
         )
+        self.assertTrue(all("parameters" in spec for spec in call["tools"]))
         self.assertIn("Workflow", call["system"])
         self.assertEqual(call["config"].model, "m")
-        self.assertEqual(call["messages"][0].content, "q")
+        # Dicts: the executor reads `.get("role")` off each message, whatever
+        # the `list[Message]` annotation on `run_turn` says.
+        self.assertEqual(call["messages"][0]["content"], "q")
+        self.assertEqual(call["messages"][0]["role"], "user")
+
+    def test_every_turn_gets_a_session_of_its_own(self):
+        """Omnigent replays a session's history; ours already carries it."""
+        keys = set()
+        for _ in range(2):
+            self._stream([_event("TurnComplete", response="hi", continue_turn=False,
+                                 usage=None)])
+            keys.add(self.module.OpenAIAgentsSDKExecutor.calls[-1]["messages"][-1]["session_id"])
+        self.assertEqual(len(keys), 2)
 
 
 
