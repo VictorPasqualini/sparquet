@@ -131,6 +131,8 @@ export interface InputSpec {
   format: string
   path: string
   options?: Record<string, unknown>
+  /** Keys the Studio does not know, carried through untouched. */
+  [key: string]: unknown
 }
 
 /** `{ "$include": "shared/filter.json" }` — expanded inline before parsing. */
@@ -162,6 +164,8 @@ export interface ValidationsSpec {
   report?: OutputSpec
   /** Optional row-routing (quarantine): keys `valid` / `invalid` → an output sink. */
   outputs?: Record<string, OutputSpec>
+  /** Keys the Studio does not know, carried through untouched. */
+  [key: string]: unknown
 }
 
 export interface OutputSpec {
@@ -184,6 +188,8 @@ export interface OutputSpec {
    * row-level rule, which is what a quarantine without scoping has always meant.
    */
   rules?: string[]
+  /** Keys the Studio does not know, carried through untouched. */
+  [key: string]: unknown
 }
 
 /**
@@ -196,11 +202,30 @@ export interface PipelineSpec {
   description?: string
   spark?: SparkSettings
   input: InputSpec
+  /**
+   * Registers (and caches) the input as a temp view before the transformations
+   * run, so a later `join` or `sql` reads it back instead of going to the source
+   * a second time. A bare string is the view name in `session` scope.
+   */
+  input_view?: InputViewSpec
   transformations?: TransformationSpec[]
   validations?: ValidationsSpec
   output?: OutputSpec
   outputs?: OutputSpec[]
+  /** Keys the Studio does not know, carried through untouched. */
+  [key: string]: unknown
 }
+
+/**
+ * `input_view`, in the two forms `PipelineConfig.from_dict` accepts.
+ *
+ * `global` puts the view on the SparkSession rather than on the run, and the
+ * Studio runner reuses one session across runs — so two Jobs naming the same
+ * global view overwrite each other. The linter says so; the key stays readable
+ * either way, because a JSON that already says `global` must survive being
+ * opened on the canvas.
+ */
+export type InputViewSpec = string | { name: string; type?: 'session' | 'global' }
 
 export function isIncludeDirective(value: TransformationSpec): value is IncludeDirective {
   return typeof value === 'object' && value !== null && '$include' in value

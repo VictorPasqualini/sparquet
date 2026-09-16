@@ -21,8 +21,24 @@ export type SourceNodeData = {
   format: string
   path: string
   options: Record<string, unknown>
+  /**
+   * `input_view` — register the input as a temp view before the transformations
+   * run, so a `join` or a `sql` can read it back without going to the source
+   * twice. The framework **caches** the input when this is set, which on a large
+   * table is memory nobody asked for, so it stays empty unless asked for.
+   */
+  inputView?: string
+  /**
+   * `input_view.type`. `session` is the temp view of this run; `global` lives on
+   * the SparkSession, which the runner reuses between runs — two Jobs naming the
+   * same global view overwrite each other. Kept so a JSON that says `global`
+   * survives the round trip; the linter is what warns about it.
+   */
+  inputViewScope?: 'session' | 'global'
   /** Free-form note shown in the inspector; never compiled into JSON. */
   comment?: string
+  /** Keys of `input` this build does not know. See `PipelineExtras`. */
+  extras?: Record<string, unknown>
 }
 
 /** One entry of a `transformations` array. */
@@ -96,6 +112,8 @@ export type SinkNodeData = {
    */
   dqRules?: string[]
   comment?: string
+  /** Keys of this output this build does not know. See `PipelineExtras`. */
+  extras?: Record<string, unknown>
 }
 
 /** Canvas-only sticky note. Never compiled. */
@@ -195,7 +213,24 @@ export interface ParamDefinition {
  */
 export interface ValidationPolicy {
   onFailure: OnFailureMode
+  /** Keys of `validations` this build does not know. See `PipelineExtras`. */
+  extras?: Record<string, unknown>
 }
+
+/**
+ * Keys of a pipeline JSON this build of the Studio does not understand, carried
+ * through the canvas untouched.
+ *
+ * A `.json` written by hand — or by a newer Studio, or by a framework extension
+ * registered only in Python — can hold keys no compiler here knows. Opening it
+ * on the canvas and saving it back used to delete them without a word, which is
+ * the worst possible outcome: the configuration is gone and nothing said so.
+ * So whatever is not recognised is parked here on the way in and written back
+ * out on the way out, and the importer reports what it parked.
+ *
+ * A key the compiler *does* know always wins: these are only the leftovers.
+ */
+export type PipelineExtras = Record<string, unknown>
 
 export interface JobSettings {
   /** `name` inside the compiled pipeline JSON. */
@@ -207,6 +242,8 @@ export interface JobSettings {
    * readable: every consumer falls back to `DEFAULT_VALIDATION_POLICY`.
    */
   validations?: ValidationPolicy
+  /** Top-level keys of the pipeline JSON this build does not know. */
+  extras?: PipelineExtras
 }
 
 /**
@@ -214,6 +251,27 @@ export interface JobSettings {
  * Frozen because it is handed straight to readers as a fallback value.
  */
 export const DEFAULT_VALIDATION_POLICY: ValidationPolicy = Object.freeze({ onFailure: 'fail' })
+
+/**
+ * When the runner should start this on its own.
+ *
+ * It lives in the record, next to the Job or the Pipeline it schedules, rather
+ * than in a table on the side: that way it is committed with the project, it
+ * travels through git, a review sees it in the diff, and a clone of the
+ * repository is already scheduled. There is no second store to keep in step.
+ *
+ * `cron` is the five-field dialect the runner parses — minute, hour, day of
+ * month, month, day of week. `timezone` is an IANA name, `UTC`, or `local` for
+ * the clock of the machine running the runner. `runAs` names the user whose
+ * permissions the run carries, so a schedule can never outlive the access of
+ * whoever wrote it.
+ */
+export interface ScheduleSpec {
+  cron: string
+  timezone?: string
+  enabled: boolean
+  runAs?: string
+}
 
 export interface Job {
   id: string
@@ -226,6 +284,9 @@ export interface Job {
   params: ParamDefinition[]
   createdAt: number
   updatedAt: number
+  /** When the runner starts this without anybody pressing Run. Optional: most
+   * Jobs have none, and older records predate scheduling entirely. */
+  schedule?: ScheduleSpec
   /** Bumped by every persisted mutation; used for optimistic-concurrency checks. */
   revision: number
 }
@@ -304,6 +365,8 @@ export interface Pipeline {
   tags?: string[]
   createdAt: number
   updatedAt: number
+  /** When the runner starts this without anybody pressing Run, as on `Job`. */
+  schedule?: ScheduleSpec
   /** Bumped by every persisted mutation, like `Job.revision`. */
   revision: number
 }

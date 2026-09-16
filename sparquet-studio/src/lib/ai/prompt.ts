@@ -84,6 +84,7 @@ const HARD_RULES = [
   'Emit exactly ONE JSON object per reply — the complete pipeline, never a diff, never a patch, never several alternatives.',
   '"name" and "input" are mandatory. "output" (single object) or "outputs" (array) is mandatory; prefer "outputs" when there is more than one destination.',
   'Only use the transformation types, formats and validator types listed above. Never invent a key or a type.',
+  '"input_view" is an optional TOP-LEVEL key that names the input as a SQL temp view, so a "sql" step or a self-join can read it without reading the source twice. Write the name as a bare string ("orders") — a simple identifier, never qualified by a dot — or as {"name": "orders", "type": "global"} for a view shared by the whole Spark session, which the runner reuses across runs and which therefore collides between jobs. Registering the view also caches the input, so only emit the key when something later in the pipeline reads the name.',
   'Transformations run top to bottom over one DataFrame; each one sees the columns produced by the previous ones.',
   '"select" entries are SQL expressions parsed with F.expr, so alias them ("to_json(payload) AS value") and backtick names with spaces or dots.',
   '"group_by" takes "by" (list of column names) and "agg" as a LIST OF SQL STRINGS ("sum(valor) as total"), never an object.',

@@ -1107,6 +1107,61 @@ describe('lintJob', () => {
     })
   })
 
+  describe('input_view', () => {
+    const graph = (patch: Partial<SourceNodeData>, params: Record<string, unknown> = {}) => ({
+      nodes: [
+        source('src', patch),
+        transform('q', 'sql', params),
+        sink('out'),
+      ],
+      edges: [link('src', 'q'), link('q', 'out')],
+    })
+
+    it('refuses a name qualified by a dot', () => {
+      const { nodes, edges } = graph({ inputView: 'vendas.orders' })
+      const issue = lint(nodes, edges).find((item) => item.id === 'input-view-name:src')
+      expect(issue?.severity).toBe('error')
+      expect(issue?.message).toContain('vendas.orders')
+    })
+
+    it('refuses a name starting with a digit', () => {
+      const { nodes, edges } = graph({ inputView: '1orders' })
+      expect(idsOf(lint(nodes, edges))).toContain('input-view-name:src')
+    })
+
+    it('accepts a simple identifier read by a later step', () => {
+      const { nodes, edges } = graph(
+        { inputView: 'orders' },
+        { query: 'select * from orders' },
+      )
+      expect(idsOf(lint(nodes, edges)).filter((id) => id.startsWith('input-view'))).toEqual([])
+    })
+
+    it('warns that a global view is shared by every job on the session', () => {
+      const { nodes, edges } = graph(
+        { inputView: 'orders', inputViewScope: 'global' },
+        { query: 'select * from orders' },
+      )
+      const issue = lint(nodes, edges).find((item) => item.id === 'input-view-global:src')
+      expect(issue?.severity).toBe('warning')
+      expect(issue?.hint).toContain('orders')
+    })
+
+    it('warns when nothing reads the view back', () => {
+      const { nodes, edges } = graph(
+        { inputView: 'orders' },
+        { query: 'select * from outra' },
+      )
+      const issue = lint(nodes, edges).find((item) => item.id === 'input-view-unused:src')
+      expect(issue?.severity).toBe('warning')
+    })
+
+    it('says nothing when the field is empty', () => {
+      const { nodes, edges } = graph({}, { query: 'select 1' })
+      expect(idsOf(lint(nodes, edges)).filter((id) => id.startsWith('input-view'))).toEqual([])
+    })
+  })
+
   describe('bundled templates', () => {
     for (const template of TEMPLATES) {
       it(`lints "${template.id}" without a single error`, () => {

@@ -11,6 +11,7 @@ import { ruleCodes } from './ruleCode'
 import { getTransformation } from '@/catalog'
 import type {
   InputSpec,
+  InputViewSpec,
   OutputSpec,
   PipelineSpec,
   SparkSettings,
@@ -67,6 +68,7 @@ const PIPELINE_KEY_ORDER = [
   'description',
   'spark',
   'input',
+  'input_view',
   'transformations',
   'validations',
   'output',
@@ -110,6 +112,17 @@ function jsonClone(value: unknown, depth = 0): unknown {
   if (typeof value === 'function' || typeof value === 'symbol' || value === undefined)
     return null
   return value
+}
+
+/**
+ * Puts back the keys this build did not understand when the JSON was imported.
+ *
+ * Spread FIRST, so anything the compiler knows how to write wins: the extras are
+ * leftovers, never an override. See `PipelineExtras`.
+ */
+function withExtras(spec: JsonRecord, extras: Record<string, unknown> | undefined): JsonRecord {
+  if (!extras || Object.keys(extras).length === 0) return spec
+  return { ...(jsonClone(extras) as JsonRecord), ...spec }
 }
 
 function isBlank(value: unknown): boolean {
@@ -198,7 +211,23 @@ function buildInput(node: SourceNode, issues: Issues): InputSpec {
   }
   const spec: InputSpec = { format, path }
   if (!isBlank(options)) spec.options = jsonClone(options) as JsonRecord
-  return spec
+  return withExtras(spec, node.data.extras) as InputSpec
+}
+
+/**
+ * `input_view` as the pipeline states it, or `undefined` when the source asks
+ * for no view.
+ *
+ * A bare string for the ordinary case and the object form only when the scope is
+ * `global`, so the common JSON stays the short one — and so a file that did not
+ * say `global` never grows a key saying `session`.
+ */
+function buildInputView(node: SourceNode): InputViewSpec | undefined {
+  const name = (node.data.inputView ?? '').trim()
+  if (!name) return undefined
+  return node.data.inputViewScope === 'global'
+    ? { name, type: 'global' }
+    : name
 }
 
 function buildOutput(
@@ -219,7 +248,7 @@ function buildOutput(
   if (columns !== null && !isBlank(columns)) spec.columns = [...columns]
   if (!isBlank(options)) spec.options = jsonClone(options) as JsonRecord
   if (transformations.length > 0) spec.transformations = transformations
-  return spec
+  return withExtras(spec, node.data.extras) as OutputSpec
 }
 
 /** One rule node → one entry of `validations.rules`. */
@@ -304,7 +333,7 @@ function buildValidations(
   if (Object.keys(quarantine).length > 0) spec.outputs = quarantine
 
   spec.rules = rules
-  return spec
+  return withExtras(spec as unknown as JsonRecord, policy?.extras) as unknown as ValidationsSpec
 }
 
 function buildSpark(spark: SparkSettings | undefined): SparkSettings | null {
@@ -657,11 +686,18 @@ export function compileGraph(
     issues.warning('The pipeline has no name.', { field: 'name' })
   }
 
+  const inputView = buildInputView(source)
+
   const pipeline: PipelineSpec = {
+    // The keys this build does not know go first, so every key it DOES know
+    // overwrites them. See `PipelineExtras`: they are what a hand-written or
+    // newer JSON carried in, put back so saving over it loses nothing.
+    ...(settings.extras ? (jsonClone(settings.extras) as JsonRecord) : {}),
     name: settings.pipelineName ?? '',
     ...(description ? { description } : {}),
     ...(spark ? { spark } : {}),
     input,
+    ...(inputView !== undefined ? { input_view: inputView } : {}),
     ...(transformations.length > 0 ? { transformations } : {}),
     ...(validations ? { validations } : {}),
     ...(outputs.length === 1 ? { output: outputs[0] } : { outputs }),

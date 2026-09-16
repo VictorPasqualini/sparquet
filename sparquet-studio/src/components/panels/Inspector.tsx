@@ -751,6 +751,7 @@ export function retainOptions(
 function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData }) {
   const updateNodeData = useEditorStore((state) => state.updateNodeData)
   const sink = data.kind === 'sink' ? data : null
+  const source = data.kind === 'source' ? data : null
   // The role is stored on the node, so nothing has to be looked up in the graph.
   const sideRole = sink?.dqRole ?? null
   const sideDef = sideRole ? getValidationSink(sideRole) : null
@@ -843,6 +844,56 @@ function IoBody({ id, data }: { id: string; data: SourceNodeData | SinkNodeData 
           updateNodeData(id, { path: typeof value === 'string' ? value : '' })
         }
       />
+
+      {source && (
+        <Section
+          title="Register as a temp view"
+          count={source.inputView ? 1 : 0}
+          defaultOpen={Boolean(source.inputView)}
+          opensFor={(request) => request.key === 'input_view'}
+        >
+          <div id={fieldAnchorId(id, 'inputView')} className="scroll-mt-4">
+            <Field
+              label="View name"
+              help="Names this input as a SQL table for the rest of the job, so a sql step or a self-join can read it without reading the source twice. Registering it also caches the input in memory — leave it empty unless something downstream names it."
+              htmlFor={`${id}-input-view`}
+            >
+              <Input
+                id={`${id}-input-view`}
+                value={source.inputView ?? ''}
+                placeholder="orders"
+                onChange={(event) => {
+                  const next = event.target.value
+                  updateNodeData(id, { inputView: next.trim() === '' ? undefined : next })
+                }}
+              />
+            </Field>
+          </div>
+
+          {source.inputView && (
+            <div id={fieldAnchorId(id, 'inputViewScope')} className="scroll-mt-4">
+              <Field
+                label="Scope"
+                help="Session keeps the view inside this run. Global publishes it to the whole Spark session — and the runner reuses one session across runs, so another job registering the same name replaces it."
+              >
+                <Segmented
+                  value={source.inputViewScope ?? 'session'}
+                  ariaLabel="Temp view scope"
+                  onChange={(next) =>
+                    updateNodeData(id, {
+                      inputViewScope: next === 'global' ? 'global' : 'session',
+                    })
+                  }
+                  options={[
+                    { value: 'session', label: 'Session' },
+                    { value: 'global', label: 'Global' },
+                  ]}
+                />
+              </Field>
+            </div>
+          )}
+        </Section>
+      )}
 
       {sink && (
         <>
