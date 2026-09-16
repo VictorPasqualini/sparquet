@@ -17,6 +17,7 @@ import glob
 import io
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -27,6 +28,18 @@ except Exception:  # pragma: no cover - ambiente sem pyspark
 
 from sparquet.core.config import InputConfig, OutputConfig
 from sparquet.io.csv import CsvReader, CsvWriter
+
+# O mesmo alinhamento que `sparquet.core.context` faz em master local, aqui
+# porque este arquivo monta a SparkSession na mao e nao passa pelo contexto do
+# framework. Sem ele o Spark sobe o worker com o `python` do PATH: numa maquina
+# cujo interpretador padrao seja de outra minor que a do venv, o probe do
+# `setUpClass` morre com `Python worker exited unexpectedly (crashed)` e os
+# quatro testes sao **pulados** — o arquivo fica verde sem testar nada. O
+# sintoma foi visto rodando a suite num venv 3.13/3.14 com 3.14 no PATH.
+# `setdefault`: quem escolheu o interpretador explicitamente continua mandando.
+for _var in ("PYSPARK_PYTHON", "PYSPARK_DRIVER_PYTHON"):
+    os.environ.setdefault(_var, sys.executable)
+
 
 #: Um valor com aspas E virgula — as duas coisas que o dialeto tem de sobreviver.
 VALUE = '{"pattern": "^[A-Z]{2}$", "code": "X"}'

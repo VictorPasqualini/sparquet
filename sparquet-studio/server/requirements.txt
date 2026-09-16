@@ -33,3 +33,8 @@ cryptography>=42.0
 # for an agent loop. Install it yourself when you want it:
 #
 #     pip install omnigent
+#
+# Wanting it costs nothing else. The framework is tested through 3.14, so a
+# runner on a 3.12+ interpreter is an ordinary runner, and `sparquet` and
+# `omnigent` resolve together without a conflict — verified on 3.12 with
+# omnigent 0.14.0 (pydantic and fastapi land inside the ranges above).

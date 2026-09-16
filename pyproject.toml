@@ -24,6 +24,13 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    # 3.14 exige pyspark >= 4.2.0. Não dá para expressar isso em `dependencies`
+    # (a marca seria `pyspark>=4.2; python_version>="3.14"`, e isso obrigaria
+    # todo mundo que já tem 4.1 a subir de linha do Spark ao instalar), então
+    # fica declarado aqui e explicado no README: em 4.1.1 o worker morre com
+    # `Python worker exited unexpectedly (crashed)`, sem dizer por quê.
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Software Development :: Libraries :: Python Modules",
