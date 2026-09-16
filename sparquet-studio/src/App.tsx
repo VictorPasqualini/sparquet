@@ -7,6 +7,7 @@ import logoMark from '@/assets/logo.png'
 import { LoginGate } from '@/components/auth/LoginGate'
 import { AppShell } from '@/components/layout/AppShell'
 import { Spinner, TooltipProvider } from '@/components/ui'
+import { detectLocalAi } from '@/lib/ai/local'
 import { seedIfEmpty } from '@/lib/storage/seed'
 import { Assistant } from '@/screens/Assistant'
 import { Dashboard } from '@/screens/Dashboard'
@@ -103,6 +104,8 @@ export default function App() {
   const theme = useSettingsStore((state) => state.theme)
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const aiPinned = useSettingsStore((state) => state.aiPinned)
+  const adoptAi = useSettingsStore((state) => state.adoptAi)
   const load = useLibraryStore((state) => state.load)
   const refreshAuth = useAuthStore((state) => state.refresh)
   const authReady = useAuthStore((state) => state.ready)
@@ -131,6 +134,24 @@ export default function App() {
   useEffect(() => {
     void refreshAuth()
   }, [refreshAuth, runnerUrl, runnerToken])
+
+  // A Studio nobody configured looks for a model already running on this
+  // machine, once per boot and only while the provider is still the untouched
+  // default. Two probes against localhost, both silent when nothing answers:
+  // the alternative is a first screen that asks for an API key before it has
+  // been useful once.
+  useEffect(() => {
+    if (aiPinned) return
+    const controller = new AbortController()
+    void detectLocalAi({ baseUrl: runnerUrl, token: runnerToken }, controller.signal)
+      .then((choice) => {
+        if (choice && !controller.signal.aborted) adoptAi(choice.settings)
+      })
+      .catch(() => {
+        /* nothing local here; the assistant screen says what to install */
+      })
+    return () => controller.abort()
+  }, [aiPinned, adoptAi, runnerUrl, runnerToken])
 
   useEffect(() => {
     if (!authReady || locked) return

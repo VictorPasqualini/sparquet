@@ -17,11 +17,11 @@
  * The provider, model and key are the same ones Settings already holds, so this
  * screen adds no second place to configure anything and no second bill.
  *
- * What it cannot do yet is *act* — create the job it just described, run it, read
- * the catalog back. That needs an agent loop with tools rather than a single
- * request, and the plan is to put Omnigent behind this screen rather than grow
- * one here (`BACKLOG.md`). The transcript shape below is the one an agent would
- * need anyway, which is why it exists before the engine does.
+ * With the local runner as the provider it can also *look*: read the formats
+ * this installation registered, validate a config against the framework. What
+ * it still cannot do is *write* — create the job it just described, run it. That
+ * is the next step in `BACKLOG.md`, and the transcript shape below is already
+ * the one it needs.
  */
 
 import {
@@ -131,6 +131,9 @@ export function Assistant() {
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [assistant, setAssistant] = useState<AssistantInfo | null>(null)
+  // Told apart from `assistant: null` on purpose: no runner at all is a
+  // different thing to fix than a runner with no model behind it.
+  const [runnerDown, setRunnerDown] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -149,12 +152,20 @@ export function Assistant() {
   useEffect(() => {
     if (!usingRunner) {
       setAssistant(null)
+      setRunnerDown(false)
       return
     }
     const controller = new AbortController()
     getAssistantInfo(runnerUrl, runnerToken, controller.signal)
-      .then(setAssistant)
-      .catch(() => setAssistant(null))
+      .then((info) => {
+        setAssistant(info)
+        setRunnerDown(false)
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return
+        setAssistant(null)
+        setRunnerDown(true)
+      })
     return () => controller.abort()
   }, [usingRunner, runnerUrl, runnerToken])
 
@@ -264,6 +275,32 @@ export function Assistant() {
             </IconButton>
           }
         />
+      )}
+
+      {usingRunner && runnerDown && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-line bg-surface-sunken p-3 text-xs text-content-muted">
+          <ServerCog className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          <p>
+            No local model is answering yet. Start the{' '}
+            <Link
+              to="/settings"
+              className="text-brand-600 hover:underline dark:text-brand-400"
+            >
+              local runner
+            </Link>{' '}
+            and it answers here for free, or install{' '}
+            <a
+              href="https://ollama.com"
+              target="_blank"
+              rel="noreferrer"
+              className="text-brand-600 hover:underline dark:text-brand-400"
+            >
+              Ollama
+            </a>{' '}
+            and run <code className="font-mono">ollama pull qwen2.5-coder:7b</code> — the
+            Studio picks either up on its own. A provider with a key works too.
+          </p>
+        </div>
       )}
 
       {usingRunner && assistant && !assistant.available && (

@@ -208,6 +208,20 @@ With the **Local runner** provider selected it can also *look*: read the formats
 
 The key is used to call the provider **directly from your browser** and is never sent anywhere else — there is no Sparquet server in the loop. By default it is kept in memory for the session only; "Remember key in this browser" stores it in `localStorage`, which is convenient on a personal machine and a bad idea on a shared one.
 
+#### Picked for you, if something is already running
+
+A Studio nobody has configured looks for a model on this machine at boot — the
+local runner first, because it is the only provider that can call tools and the
+only one whose turns show up in Billing, then Ollama on `localhost:11434`. Two
+probes against localhost, both silent when nothing answers, and **never** a
+switch to a provider that bills: the fallback is no provider at all, and the
+assistant screen then says what to install.
+
+Choosing anything in **Settings › AI** ends the looking and the choice stays,
+including on a machine where the runner is not up; the notice at the top of that
+section says which of the two you are in and offers to look again. Installs from
+before this existed are treated as chosen, so nothing moves under anyone.
+
 #### Answering from your own machine
 
 The first two providers ask for no key at all.

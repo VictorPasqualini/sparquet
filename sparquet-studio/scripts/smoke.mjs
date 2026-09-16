@@ -34,8 +34,16 @@ const HEADED = args.includes('--headed')
  * The editors ask the runner for run history as soon as they open, so failed
  * reads against this origin are expected — Studio handles them in the UI. Console
  * errors from any OTHER origin still fail the run.
+ *
+ * The local-model ports are excused for the same reason and a worse one: the
+ * boot looks for a model already running on this machine, and what answers on
+ * 11434 — or on the default runner port, which the first load probes before the
+ * seed above has pinned it to nowhere — is a fact about the developer's
+ * machine. The browser logs the result before any code can catch it.
  */
 const RUNNER_URL = 'http://127.0.0.1:9'
+/** Ports a local model may be listening on. Failures here are machine state. */
+const LOCAL_MODEL_PORTS = /^https?:\/\/(127\.0\.0\.1|localhost):(8787|11434)\//
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
@@ -530,14 +538,17 @@ async function main() {
     const realErrors = consoleErrors.filter(
       ({ text, url }) =>
         !/favicon|monaco|Download the React DevTools/i.test(text) &&
-        !url.startsWith(RUNNER_URL),
+        !url.startsWith(RUNNER_URL) &&
+        !LOCAL_MODEL_PORTS.test(url),
     )
     check(
       'no console errors',
       realErrors.length === 0,
       realErrors
         .slice(0, 3)
-        .map(({ text }) => text)
+        // With the URL: "Failed to load resource" alone names neither what
+        // failed nor who asked for it.
+        .map(({ text, url }) => (url ? `${text} [${url}]` : text))
         .join(' | '),
     )
   } finally {

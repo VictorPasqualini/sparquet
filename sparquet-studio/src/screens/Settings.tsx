@@ -62,6 +62,7 @@ import {
   RUNNER_INSTALL_COMMAND,
   RUNNER_START_COMMAND,
 } from '@/lib/runner/client'
+import { detectLocalAi } from '@/lib/ai/local'
 import { getAssistantInfo } from '@/lib/runner/assistant'
 import { getWorkspaceRoot, setWorkspaceRoot } from '@/lib/runner/workspaceRoot'
 import { clearAll, exportAll, importAll } from '@/lib/storage/db'
@@ -361,6 +362,8 @@ function AppearanceSection() {
 function AiSection() {
   const ai = useSettingsStore((state) => state.ai)
   const setAi = useSettingsStore((state) => state.setAi)
+  const adoptAi = useSettingsStore((state) => state.adoptAi)
+  const aiPinned = useSettingsStore((state) => state.aiPinned)
   const persistApiKey = useSettingsStore((state) => state.persistApiKey)
   const setPersistApiKey = useSettingsStore((state) => state.setPersistApiKey)
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
@@ -379,6 +382,7 @@ function AiSection() {
   const [customModel, setCustomModel] = useState(false)
   const [probe, setProbe] = useState<Probe<string>>(IDLE)
   const [assistant, setAssistant] = useState<AssistantInfo | null>(null)
+  const [look, setLook] = useState<Probe<string>>(IDLE)
   const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => () => abortRef.current?.abort(), [])
@@ -418,6 +422,32 @@ function AiSection() {
       model: target.defaultModel,
       baseUrl: target.defaultBaseUrl,
     })
+  }
+
+  /**
+   * Looks for a model on this machine again, without pinning the result: a
+   * provider found by looking should keep being found, so moving the laptop to
+   * a machine with a runner moves the setting too.
+   */
+  async function lookForLocal() {
+    setLook({ status: 'busy' })
+    try {
+      const choice = await detectLocalAi({ baseUrl: runnerUrl, token: runnerToken })
+      if (!choice) {
+        setLook({
+          status: 'error',
+          message:
+            'Nothing answered on this machine. Start the local runner, or install Ollama and pull a model.',
+        })
+        return
+      }
+      adoptAi(choice.settings)
+      setCustomModel(false)
+      setProbe(IDLE)
+      setLook({ status: 'ok', value: `Switched — ${choice.reason}.` })
+    } catch (error) {
+      setLook({ status: 'error', message: messageOf(error) })
+    }
   }
 
   function changeModel(next: string) {
@@ -482,6 +512,15 @@ function AiSection() {
 
   return (
     <Section meta={SECTION.ai}>
+      <LocalDefaultNotice
+        pinned={aiPinned}
+        label={info.label}
+        busy={look.status === 'busy'}
+        message={look.status === 'ok' ? look.value : ''}
+        error={look.status === 'error' ? look.message : ''}
+        onLook={() => void lookForLocal()}
+      />
+
       <div className="grid gap-5 sm:grid-cols-2">
         <Field label="Provider" htmlFor={ids.provider} help={info.docsNote}>
           <Select
@@ -668,6 +707,58 @@ function AiSection() {
 }
 
 /* --------------------------------------------------------------- runner */
+
+interface LocalDefaultNoticeProps {
+  pinned: boolean
+  label: string
+  busy: boolean
+  message: string
+  error: string
+  onLook: () => void
+}
+
+/**
+ * The line that admits nobody chose this provider.
+ *
+ * A setting that changed itself has to say so, or the next person to open this
+ * screen reads it as a choice somebody made and works around it. It also says
+ * what ends the arrangement — picking anything here — because an automatic
+ * default that cannot be turned off is not a default.
+ */
+function LocalDefaultNotice({
+  pinned,
+  label,
+  busy,
+  message,
+  error,
+  onLook,
+}: LocalDefaultNoticeProps) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface-sunken p-3">
+      <p className="min-w-0 flex-1 text-2xs leading-relaxed text-content-muted">
+        {error ? (
+          error
+        ) : message ? (
+          message
+        ) : pinned ? (
+          <>
+            <strong className="font-medium text-content">{label}</strong> is your choice and
+            stays. Looking again replaces it with whatever runs on this machine, for free.
+          </>
+        ) : (
+          <>
+            Using <strong className="font-medium text-content">{label}</strong>, chosen by
+            looking for a model already running here — no key, no bill. Picking a provider
+            below makes that choice yours and stops the looking.
+          </>
+        )}
+      </p>
+      <Button size="sm" variant="secondary" loading={busy} onClick={onLook}>
+        Look for a local model
+      </Button>
+    </div>
+  )
+}
 
 /**
  * What the runner says about its own assistant.
