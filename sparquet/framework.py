@@ -108,6 +108,8 @@ class Sparquet:
                          - um **dict** `{"name": "<nome>", "type": "session"|"global"}`
                            — use `"type": "global"` para uma global temp view visível a
                            toda a aplicação (lida como `global_temp.<nome>`).
+                         O JSON também pode trazer a chave `input_view` com a mesma
+                         forma; este argumento tem precedência sobre ela.
         """
         config = self._load_config(config_path, params)
         self._apply_spark_override(config)

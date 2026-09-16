@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from sparquet_cola import expand_targets
 
@@ -105,6 +106,54 @@ def _annotate_column(value: Any) -> Optional[str]:
             "códigos (string não vazia)."
         )
     return value.strip()
+
+
+#: Um nome de temp view: identificador simples, sem ponto e sem qualificação.
+_SIMPLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: Escopos aceitos por `input_view`. `global` vive na SparkSession inteira, então
+#: duas execuções que compartilham a sessão compartilham a view — e se atropelam.
+_INPUT_VIEW_SCOPES = ("session", "global")
+
+
+def _input_view(value: Any) -> Optional[Union[str, Dict[str, Any]]]:
+    """Normaliza a chave `input_view` do JSON.
+
+    Aceita a mesma coisa que o argumento Python homônimo: o nome, ou
+    `{"name": ..., "type": "session"|"global"}`. O nome precisa ser um identificador
+    simples — uma temp view chamada `vendas.orders` não é registrável, e um nome com
+    ponto parece qualificado sem ser, então recusar aqui é mais barato do que deixar
+    o Spark falhar no meio da execução.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return {"name": _input_view_name(value), "type": "session"}
+    if isinstance(value, dict):
+        scope = str(value.get("type") or "session").strip().lower()
+        if scope not in _INPUT_VIEW_SCOPES:
+            raise ValueError(
+                f"input_view.type precisa ser um de {', '.join(_INPUT_VIEW_SCOPES)}; "
+                f"veio {value.get('type')!r}."
+            )
+        return {"name": _input_view_name(value.get("name")), "type": scope}
+    raise ValueError(
+        "input_view precisa ser o nome da temp view (string) ou um objeto "
+        '{"name": ..., "type": "session"|"global"}.'
+    )
+
+
+def _input_view_name(value: Any) -> str:
+    name = value.strip() if isinstance(value, str) else ""
+    if not name:
+        raise ValueError("input_view precisa nomear a temp view.")
+    if not _SIMPLE_IDENTIFIER.match(name):
+        raise ValueError(
+            f"input_view {name!r} não é um nome de temp view válido: use letras, "
+            "dígitos e underscore, começando por letra ou underscore. Nome com ponto "
+            "parece qualificado por banco, e uma temp view não é."
+        )
+    return name
 
 
 def _reject_quarantine_keys(data: Dict[str, Any], where: str, reason: str) -> None:
@@ -262,6 +311,11 @@ class PipelineConfig:
     spark: SparkConfig = field(default_factory=SparkConfig)
     transformations: List[TransformationConfig] = field(default_factory=list)
     validations: ValidationConfig = field(default_factory=ValidationConfig)
+    # Registra (e cacheia) a entrada como temp view antes das transformações, para
+    # self-join e `sql` sobre a entrada sem reler a base. Aceita o nome ("orders")
+    # ou {"name": "orders", "type": "session"|"global"} — a mesma forma do argumento
+    # Python homônimo, que continua existindo e tem precedência sobre esta chave.
+    input_view: Optional[Union[str, Dict[str, Any]]] = None
 
     @classmethod
     def from_file(cls, path: str) -> PipelineConfig:
@@ -301,4 +355,5 @@ class PipelineConfig:
             ],
             validations=ValidationConfig.from_dict(data.get("validations", {})),
             outputs=outputs,
+            input_view=_input_view(data.get("input_view")),
         )
