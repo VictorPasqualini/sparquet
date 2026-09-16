@@ -36,6 +36,7 @@ seam — this runs on a laptop today and is meant to move to a shared host later
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -179,6 +180,29 @@ class WorkspaceError(Exception):
     """A request the workspace refuses: unknown kind, id that escapes the root."""
 
 
+class WorkspaceConflict(WorkspaceError):
+    """The record on disk is not the one the caller read.
+
+    A library is a *directory*, which means two Studios can be open over the same
+    one — a network share, a synced folder, two checkouts of the same repository,
+    or simply the same machine in two tabs. Nothing about a directory stops the
+    second save from landing on top of the first, and a save that silently throws
+    away somebody else's work is the worst failure a store can have: nobody finds
+    out, and there is nothing to find out *from*.
+
+    So a write may state the revision it read, and a write whose revision no
+    longer matches is refused with this — carrying the record as it now stands,
+    so the caller can show what arrived instead of only saying no.
+    """
+
+    def __init__(self, message: str, *, revision: str, record: Optional[Dict[str, Any]]) -> None:
+        super().__init__(message)
+        #: What the record is at right now. Save again with this to overwrite.
+        self.revision = revision
+        #: The record on disk, so the caller can diff or reload without a second call.
+        self.record = record
+
+
 def slugify(value: str, fallback: str = "untitled") -> str:
     """`Orders — daily (v2)` -> `orders-daily-v2`. Never empty, never a path.
 
@@ -205,6 +229,11 @@ class Document:
     config: Optional[Dict[str, Any]] = None
     #: Relative path of the readable file, filled in by the store on write.
     path: Optional[str] = None
+    #: What this record's bytes hashed to when it was read, filled in by the store.
+    #: Hand it back on the next write and the store refuses to overwrite somebody
+    #: else's save. Empty string means "there was nothing here"; `None` means the
+    #: caller is not tracking revisions and the check is skipped.
+    revision: Optional[str] = None
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -212,6 +241,7 @@ class Document:
             "id": self.id,
             "record": self.record,
             "path": self.path,
+            "revision": self.revision,
         }
 
 
@@ -260,6 +290,11 @@ class LibraryFile:
     #: Last modification, epoch seconds. Whoever edits the file outside the Studio
     #: is the reason this is worth showing.
     modified: float
+    #: The Studio record this file is the artefact of, when there is one — `"job"`,
+    #: `"pipeline"`, `"workflow"`. `None` is the interesting case: a file nobody
+    #: here wrote, which is the one that can be deleted and has no canvas to open.
+    owner_kind: Optional[str] = None
+    owner_id: Optional[str] = None
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -267,6 +302,8 @@ class LibraryFile:
             "name": self.name,
             "size": self.size,
             "modified": self.modified,
+            "owner_kind": self.owner_kind,
+            "owner_id": self.owner_id,
         }
 
 
@@ -277,11 +314,15 @@ class WorkspaceStore(Protocol):
 
     def read_file(self, relative: str) -> Dict[str, Any]: ...
 
+    def delete_file(self, relative: str) -> bool: ...
+
+    def owners(self) -> Dict[str, str]: ...
+
     def snapshot(self) -> WorkspaceSnapshot: ...
 
     def read(self, kind: str, doc_id: str) -> Optional[Document]: ...
 
-    def write(self, doc: Document) -> Document: ...
+    def write(self, doc: Document, expected_revision: Optional[str] = None) -> Document: ...
 
     def read_meta(self) -> Dict[str, Any]: ...
 
@@ -412,6 +453,31 @@ class FileWorkspaceStore:
     def _index_path(self) -> Path:
         return self._root / _STUDIO_DIR / _INDEX_FILE
 
+    def _revision(self, kind: str, doc_id: str, relative: Optional[str]) -> str:
+        """What this record's bytes hash to right now. `""` when it is not there.
+
+        Both files are hashed, not just the sidecar: the readable file is the one
+        a person edits by hand, pulls from git or receives from a sync client, and
+        a Studio that only watched its own sidecar would overwrite all three of
+        those without noticing. Content, never mtime — a synced folder rewrites
+        timestamps on files it did not change, and a revision that flips for no
+        reason trains people to click through the warning.
+        """
+        digest = hashlib.sha256()
+        present = False
+        for path in (self._sidecar(kind, doc_id), self._resolve(relative) if relative else None):
+            if path is None:
+                continue
+            try:
+                digest.update(path.read_bytes())
+                present = True
+            except (OSError, WorkspaceError):
+                # A missing readable file is normal for a record saved by an older
+                # build; it simply contributes nothing to the hash.
+                continue
+            digest.update(b"|")
+        return digest.hexdigest() if present else ""
+
     def _index(self) -> Dict[str, str]:
         """`"<kind>:<id>" -> relative readable path`. Rebuilt lazily; a missing or
         corrupt index costs a rewrite of the readable files, never a lost record —
@@ -513,6 +579,10 @@ class FileWorkspaceStore:
             for kind, docs in by_kind.items():
                 for doc in docs:
                     doc.path = index.get(f"{kind}:{doc.id}")
+                    # Filled here too, so the editor holds a revision for every
+                    # record from the first load and not only for the ones it
+                    # happened to open one at a time.
+                    doc.revision = self._revision(kind, doc.id, doc.path)
             return WorkspaceSnapshot(
                 root=str(self._root),
                 workflows=by_kind[WORKFLOW],
@@ -529,8 +599,10 @@ class FileWorkspaceStore:
             record = _read_json(self._sidecar(kind, doc_id))
             if not isinstance(record, dict):
                 return None
+            relative = self._index().get(f"{kind}:{doc_id}")
             return Document(
-                kind=kind, id=doc_id, record=record, path=self._index().get(f"{kind}:{doc_id}")
+                kind=kind, id=doc_id, record=record, path=relative,
+                revision=self._revision(kind, doc_id, relative),
             )
 
     # ---- runnable files --------------------------------------------------
@@ -544,6 +616,7 @@ class FileWorkspaceStore:
         state, not something to run — and so is anything hidden, which on this
         tree means a dot-directory or one of `_write_json`'s temporary files.
         """
+        owners = self.owners()
         files: List[LibraryFile] = []
         for path in sorted(self._root.rglob("*.json")):
             relative = path.relative_to(self._root)
@@ -554,15 +627,29 @@ class FileWorkspaceStore:
             except OSError:
                 # It was there when the directory was listed and is not now.
                 continue
+            posix = relative.as_posix()
+            kind, _, doc_id = owners.get(posix, "").partition(":")
             files.append(
                 LibraryFile(
-                    path=relative.as_posix(),
+                    path=posix,
                     name=path.stem,
                     size=stat.st_size,
                     modified=stat.st_mtime,
+                    owner_kind=kind or None,
+                    owner_id=doc_id or None,
                 )
             )
         return files
+
+    def owners(self) -> Dict[str, str]:
+        """`relative path -> "<kind>:<id>"`, for every file a Studio record wrote.
+
+        The index is the only honest answer to "whose file is this?". Deriving it
+        from the layout would mean re-slugifying names, and two records that slug
+        the same, or a record renamed since, would each give a wrong owner — which
+        here decides whether a file may be deleted.
+        """
+        return {relative: key for key, relative in self._index().items()}
 
     def read_file(self, relative: str) -> Dict[str, Any]:
         """The JSON at a relative path, for a stage that runs a file directly.
@@ -586,6 +673,34 @@ class FileWorkspaceStore:
                 f"{relative!r} holds {type(payload).__name__}, not a pipeline object."
             )
         return payload
+
+    def delete_file(self, relative: str) -> bool:
+        """Removes one runnable JSON from the library. There is no undo.
+
+        Only a file no Studio record owns. A Job's file is half of a record —
+        deleting it alone would leave the sidecar pointing at nothing and the next
+        save would write the file back — so that one is refused with the name of
+        the record to delete instead. `False` means the file was already gone,
+        which is the same end state and not worth an error.
+        """
+        value = _check_relative(relative)
+        with self._lock:
+            owner = self.owners().get(value)
+            if owner:
+                kind, _, doc_id = owner.partition(":")
+                raise WorkspaceError(
+                    f"{value!r} is the file of {kind} {doc_id}. Delete the {kind} "
+                    "itself — removing only the file would leave the record behind."
+                )
+            candidate = self._resolve(value)
+            if not candidate.is_file():
+                return False
+            try:
+                candidate.unlink()
+            except OSError as error:
+                raise WorkspaceError(f"{relative!r} cannot be deleted: {error}") from error
+            self._prune_empty_dirs()
+            return True
 
     # ---- meta ------------------------------------------------------------
 
@@ -611,10 +726,30 @@ class FileWorkspaceStore:
 
     # ---- writes ----------------------------------------------------------
 
-    def write(self, doc: Document) -> Document:
+    def write(self, doc: Document, expected_revision: Optional[str] = None) -> Document:
+        """Saves one record, optionally only if nobody else changed it first.
+
+        `expected_revision` is the revision the caller read. `None` means it is
+        not tracking them and the write proceeds as it always did; a string —
+        including `""` for "there was nothing here" — makes the write conditional
+        and raises `WorkspaceConflict` when the bytes on disk no longer hash to
+        it. The comparison happens under the same lock as the write, so nothing
+        can slip in between the check and the rename.
+        """
         kind = _check_kind(doc.kind)
         doc_id = _check_id(doc.id)
         with self._lock:
+            if expected_revision is not None:
+                current = self._revision(kind, doc_id, self._index().get(f"{kind}:{doc_id}"))
+                if current != expected_revision:
+                    existing = _read_json(self._sidecar(kind, doc_id))
+                    raise WorkspaceConflict(
+                        f"{kind}/{doc_id} changed on disk since it was read."
+                        if current
+                        else f"{kind}/{doc_id} was deleted on disk since it was read.",
+                        revision=current,
+                        record=existing if isinstance(existing, dict) else None,
+                    )
             names = self._workflow_names()
             if kind == WORKFLOW:
                 name = doc.record.get("name")
@@ -646,7 +781,8 @@ class FileWorkspaceStore:
                 self._relocate_children(doc_id, names, index)
 
             return Document(kind=kind, id=doc_id, record=doc.record, config=doc.config,
-                            path=relative)
+                            path=relative,
+                            revision=self._revision(kind, doc_id, relative))
 
     def _relocate_children(
         self, workflow_id: str, names: Dict[str, str], index: Dict[str, str]

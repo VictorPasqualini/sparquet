@@ -21,6 +21,7 @@ from typing import Any, Dict, List
 _TMP = tempfile.TemporaryDirectory()
 # Point every store at a throwaway directory *before* importing the module: they
 # are created at import time, and the developer's own runner is not a fixture.
+os.environ["SPARQUET_STUDIO_AUDIT_DB"] = os.path.join(_TMP.name, "audit.sqlite3")
 os.environ["SPARQUET_STUDIO_AUTH_DB"] = os.path.join(_TMP.name, "auth.sqlite3")
 os.environ["SPARQUET_STUDIO_CREDITS_DB"] = os.path.join(_TMP.name, "credits.sqlite3")
 os.environ["SPARQUET_STUDIO_HISTORY_DB"] = os.path.join(_TMP.name, "history.sqlite3")
@@ -673,6 +674,218 @@ class SimulateEndpointTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as caught:
             self.ask(username="carla", action="run:Everything")
         self.assertEqual(caught.exception.status_code, 400)
+
+
+class SavedQueryGrantTest(unittest.TestCase):
+    """A saved query is a securable of its own.
+
+    Two things have to be true at once, and they pull in opposite directions.
+    A rule on the file has to close the file — otherwise `query` in the picker
+    is decoration. And it must never stand in for the tables: a query somebody
+    is allowed to open still reads tables they may be denied, so the sources are
+    checked on their own every single time.
+    """
+
+    def setUp(self) -> None:
+        main._workspace.write_meta(
+            "grants",
+            [
+                rule(
+                    resource="query",
+                    resourceId="q-revenue",
+                    principalKind="team",
+                    principalId="t-analytics",
+                    level="read",
+                )
+            ],
+        )
+
+    def tearDown(self) -> None:
+        main._workspace.delete_meta("grants")
+
+    def test_a_governed_query_is_closed_to_everybody_the_rules_miss(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            main._authorize_resource(principal(), "query", "q-revenue", "read")
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIn("q-revenue", raised.exception.detail)
+
+    def test_the_granted_team_opens_it(self) -> None:
+        main._authorize_resource(
+            principal(username="ana", user_id="u1", team_id="t-analytics"),
+            "query", "q-revenue", "read",
+        )
+
+    def test_read_on_the_file_is_not_write_on_it(self) -> None:
+        # Cumulative levels run one way only: being allowed to open somebody's
+        # query does not make it yours to rewrite.
+        with self.assertRaises(HTTPException):
+            main._authorize_resource(
+                principal(username="ana", user_id="u1", team_id="t-analytics"),
+                "query", "q-revenue", "write",
+            )
+
+    def test_the_document_guard_only_speaks_for_queries(self) -> None:
+        # A Job is governed where it runs. Widening this guard to it would be a
+        # separate decision with separate consequences, so it does nothing here.
+        main._authorize_document(principal(), "job", "q-revenue", "write")
+        with self.assertRaises(HTTPException):
+            main._authorize_document(principal(), "query", "q-revenue", "read")
+
+    def test_an_unsaved_buffer_is_governed_only_by_its_tables(self) -> None:
+        # No id, nothing to check: a draft has no file for a rule to name.
+        main._authorize_document(principal(), "query", "", "read")
+
+    def test_a_query_nobody_wrote_a_rule_about_stays_open(self) -> None:
+        main._authorize_resource(principal(), "query", "q-scratch", "read")
+
+    def test_a_query_is_ownable_and_a_dataset_rule_does_not_reach_it(self) -> None:
+        self.assertIn("query", grants.OWNABLE_KINDS)
+        self.assertIn("query", grants.RESOURCE_KINDS)
+        # Same id, different kind: the namespaces do not bleed into each other.
+        main._authorize_resource(principal(), "dataset", "q-revenue", "read")
+
+
+class ColumnAddressTest(unittest.TestCase):
+    """How a column is spelled as a resource, and read back."""
+
+    def test_the_address_joins_the_table_and_the_column(self) -> None:
+        self.assertEqual(
+            grants.column_resource("main.silver.orders", "CPF"),
+            "main.silver.orders#cpf",
+        )
+
+    def test_a_half_missing_address_is_no_address(self) -> None:
+        self.assertEqual(grants.column_resource("", "cpf"), "")
+        self.assertEqual(grants.column_resource("main.orders", "  "), "")
+
+    def test_it_reads_back_into_its_two_halves(self) -> None:
+        self.assertEqual(
+            grants.parse_column_resource("s3://bucket/orders#cpf"),
+            ("s3://bucket/orders", "cpf"),
+        )
+
+    def test_an_id_that_is_not_a_column_is_refused(self) -> None:
+        # A plain table, a dangling separator, and a name with nothing before it
+        # are all "this is not a column", not "this is a column called empty".
+        self.assertIsNone(grants.parse_column_resource("main.orders"))
+        self.assertIsNone(grants.parse_column_resource("main.orders#"))
+        self.assertIsNone(grants.parse_column_resource("#cpf"))
+
+    def test_the_chain_reaches_the_table_but_not_a_folder_called_hash(self) -> None:
+        chain = grants.scope_chain("column", "/lake/silver/orders#cpf")
+        self.assertEqual(chain[0], ("column", "/lake/silver/orders#cpf"))
+        self.assertIn(("column", grants.ANY), chain)
+        self.assertIn(("dataset", "/lake/silver/orders"), chain)
+        self.assertIn(("dataset", "/lake/silver"), chain)
+        # The column id itself is never walked as a path: its "ancestors" are
+        # the table's, and inventing `column//lake/silver` would let a rule
+        # meant for a folder land on a column.
+        self.assertEqual(
+            [ident for kind, ident in chain if kind == "column"],
+            ["/lake/silver/orders#cpf", grants.ANY],
+        )
+
+    def test_a_column_is_not_ownable(self) -> None:
+        self.assertIn("column", grants.RESOURCE_KINDS)
+        self.assertNotIn("column", grants.OWNABLE_KINDS)
+
+
+class ColumnGrantTest(unittest.TestCase):
+    """One column of one table, governed on its own.
+
+    The point of the kind is the sentence "the whole table except the document
+    number". That needs two things the dataset kind alone cannot give: a rule
+    that names a column, and a deny on it that survives an allow on the table
+    above.
+    """
+
+    def setUp(self) -> None:
+        main._workspace.write_meta(
+            "catalog",
+            {
+                "/data/orders": {
+                    "tags": ["finance"],
+                    "classification": "internal",
+                    "columns": {
+                        "cpf": {
+                            "column": "cpf",
+                            "description": "",
+                            "classification": "restricted",
+                            "tags": ["pii"],
+                        }
+                    },
+                }
+            },
+        )
+        main._workspace.write_meta(
+            "grants",
+            [
+                rule(level="write"),
+                rule(
+                    resource="column",
+                    resourceId="/data/orders#cpf",
+                    level="read",
+                    effect="deny",
+                ),
+            ],
+        )
+
+    def tearDown(self) -> None:
+        main._workspace.delete_meta("grants")
+        main._workspace.delete_meta("catalog")
+
+    def _ana(self) -> Any:
+        return principal(username="ana", user_id="u1", team_id="t-analytics")
+
+    def test_the_table_stays_open_to_the_granted_team(self) -> None:
+        main._authorize_resource(self._ana(), "dataset", "/data/orders", "write")
+
+    def test_the_denied_column_is_closed_to_that_same_team(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            main._authorize_resource(
+                self._ana(), "column", "/data/orders#cpf", "read"
+            )
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIn("cpf", raised.exception.detail)
+
+    def test_a_column_nobody_named_inherits_the_table(self) -> None:
+        main._authorize_resource(self._ana(), "column", "/data/orders#total", "write")
+
+    def test_a_column_of_another_table_is_untouched(self) -> None:
+        # Same column name, different table: the address is the whole identity.
+        main._authorize_resource(self._ana(), "column", "/data/people#cpf", "read")
+
+    def test_the_column_carries_its_own_tags_into_the_chain(self) -> None:
+        parents = main._parents_of("column", "/data/orders#cpf")
+        self.assertIn(("tag", "pii"), parents)
+        self.assertIn(("tag", "classification:restricted"), parents)
+        # And the table's, because a rule on the table's vocabulary still
+        # reaches everything inside it.
+        self.assertIn(("tag", "finance"), parents)
+        self.assertIn(("tag", "classification:internal"), parents)
+
+    def test_a_rule_on_the_column_tag_closes_every_column_that_wears_it(self) -> None:
+        main._workspace.write_meta(
+            "grants",
+            [
+                rule(level="write"),
+                rule(
+                    resource="tag",
+                    resourceId="pii",
+                    level="read",
+                    effect="deny",
+                ),
+            ],
+        )
+        with self.assertRaises(HTTPException):
+            main._authorize_resource(
+                self._ana(), "column", "/data/orders#cpf", "read"
+            )
+        # The table it belongs to is not classified `pii`, so it stays open.
+        main._authorize_resource(self._ana(), "dataset", "/data/orders", "write")
+
+    def test_an_id_that_is_not_a_column_has_no_parents(self) -> None:
+        self.assertEqual(main._parents_of("column", "/data/orders"), [])
 
 
 if __name__ == "__main__":

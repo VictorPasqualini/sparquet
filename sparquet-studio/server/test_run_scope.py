@@ -21,6 +21,7 @@ _TMP = tempfile.TemporaryDirectory()
 # Point every store at a throwaway directory *before* importing the module: they
 # are created at import time, and the developer's own runner database is not a
 # test fixture.
+os.environ["SPARQUET_STUDIO_AUDIT_DB"] = os.path.join(_TMP.name, "audit.sqlite3")
 os.environ["SPARQUET_STUDIO_AUTH_DB"] = os.path.join(_TMP.name, "auth.sqlite3")
 os.environ["SPARQUET_STUDIO_CREDITS_DB"] = os.path.join(_TMP.name, "credits.sqlite3")
 os.environ["SPARQUET_STUDIO_HISTORY_DB"] = os.path.join(_TMP.name, "history.sqlite3")

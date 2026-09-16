@@ -183,7 +183,7 @@ TOKEN_PRINCIPAL = Principal(
 ACTIONS: Dict[str, str] = {
     "workspace:Read": "Read the Workflows, Jobs and Pipelines in the library.",
     "workspace:Write": "Create or change a record in the library.",
-    "workspace:Delete": "Remove a record from the library.",
+    "workspace:Delete": "Remove a record, or a loose file, from the library.",
     "run:Execute": "Run a Job or a Pipeline on this runner.",
     "run:Cancel": "Stop a run that is in progress.",
     "run:Validate": "Check a JSON without running it.",
@@ -193,6 +193,13 @@ ACTIONS: Dict[str, str] = {
     "history:Pin": "Mark a run as kept forever, so retention never expires it.",
     "history:Purge": "Apply the retention policy by hand, deleting old history.",
     "history:Ingest": "Report a run executed somewhere else, so it lands in this history.",
+    "monitoring:Read": "See the health of every Job and which alerts are firing.",
+    "monitoring:Manage": (
+        "Create and change the rules that raise an alert. Separate from "
+        "`monitoring:Read` for the same reason a grant is separate from a Job: "
+        "whoever is on call reads the alerts, and turning one off is a decision "
+        "with consequences for everybody else who relies on it."
+    ),
     "iam:ReadUsers": "See who has access, in which teams and with which roles.",
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
     "iam:ManageRoles": "Create and edit roles, and choose the actions each one allows.",
@@ -251,6 +258,7 @@ BUILTIN_ROLES: Dict[str, Role] = {
                     "workspace:*", "run:*", "catalog:Inspect", "catalog:Query",
                     "history:Read",
                     "history:Pin", "history:Ingest", "credits:Read",
+                    "monitoring:Read", "monitoring:Manage",
                     # Reading the list, so a Job can reference a secret by name.
                     # `secrets:Write` is deliberately not here: whoever builds the
                     # Jobs must not also be able to repoint a connection at a
@@ -277,6 +285,7 @@ BUILTIN_ROLES: Dict[str, Role] = {
                     "history:Read",
                     "history:Pin",
                     "history:Ingest",
+                    "monitoring:Read",
                 ],
                 "resources": ["*"],
             }
@@ -288,7 +297,7 @@ BUILTIN_ROLES: Dict[str, Role] = {
         statements=[
             {
                 "effect": "allow",
-                "actions": ["workspace:Read", "history:Read"],
+                "actions": ["workspace:Read", "history:Read", "monitoring:Read"],
                 "resources": ["*"],
             }
         ],

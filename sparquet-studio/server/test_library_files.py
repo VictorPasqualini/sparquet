@@ -17,12 +17,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
 _TMP = tempfile.TemporaryDirectory()
 # Every store is built at import time, so the environment has to be right before
 # `main` is imported — and the developer's own runner is not a test fixture.
+os.environ["SPARQUET_STUDIO_AUDIT_DB"] = os.path.join(_TMP.name, "audit.sqlite3")
 os.environ["SPARQUET_STUDIO_AUTH_DB"] = os.path.join(_TMP.name, "auth.sqlite3")
 os.environ["SPARQUET_STUDIO_CREDITS_DB"] = os.path.join(_TMP.name, "credits.sqlite3")
 os.environ["SPARQUET_STUDIO_HISTORY_DB"] = os.path.join(_TMP.name, "history.sqlite3")
@@ -269,6 +271,165 @@ class LibraryEndpointTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as caught:
             main.read_library_file("../outside.json")
         self.assertEqual(caught.exception.status_code, 400)
+
+
+class _Request:
+    """Enough of a Request for `audit_detail` — it only writes to `state`."""
+
+    def __init__(self) -> None:
+        self.state = types.SimpleNamespace()
+
+
+class FileOwnerTest(unittest.TestCase):
+    """Whose file is this? The answer decides what the interface may offer."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name) / "library"
+        self.store = workspace.FileWorkspaceStore(self.root)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def _job(self, name: str = "Ingestao") -> workspace.Document:
+        self.store.write(
+            workspace.Document(
+                kind=workspace.WORKFLOW, id="w1", record={"name": "Vendas"}
+            )
+        )
+        return self.store.write(
+            workspace.Document(
+                kind=workspace.JOB,
+                id="j1",
+                record={"name": name, "workflowId": "w1"},
+                config=PIPELINE,
+            )
+        )
+
+    def test_a_file_the_studio_wrote_names_the_record_behind_it(self) -> None:
+        doc = self._job()
+
+        listed = {item.path: item for item in self.store.list_files()}
+
+        self.assertIn(doc.path, listed)
+        self.assertEqual(listed[doc.path].owner_kind, "job")
+        self.assertEqual(listed[doc.path].owner_id, "j1")
+
+    def test_a_file_nobody_here_wrote_has_no_owner(self) -> None:
+        """The case the screen exists for: there is no canvas to open for it."""
+        _write(self.root, "terceiros/legado.json")
+
+        listed = {item.path: item for item in self.store.list_files()}
+
+        self.assertIsNone(listed["terceiros/legado.json"].owner_kind)
+        self.assertIsNone(listed["terceiros/legado.json"].owner_id)
+
+
+class DeleteLibraryFileTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name) / "library"
+        self.store = workspace.FileWorkspaceStore(self.root)
+
+    def tearDown(self) -> None:
+        self._dir.cleanup()
+
+    def test_it_removes_a_file_nobody_owns(self) -> None:
+        path = _write(self.root, "terceiros/legado.json")
+
+        self.assertTrue(self.store.delete_file("terceiros/legado.json"))
+        self.assertFalse(path.exists())
+        self.assertEqual(self.store.list_files(), [])
+
+    def test_the_folder_it_emptied_goes_with_it(self) -> None:
+        """An empty directory is something git cannot even record."""
+        _write(self.root, "terceiros/legado.json")
+
+        self.store.delete_file("terceiros/legado.json")
+
+        self.assertFalse((self.root / "terceiros").exists())
+
+    def test_deleting_what_is_already_gone_is_not_an_error(self) -> None:
+        """Two people pressing delete is the same end state, not a failure."""
+        self.assertFalse(self.store.delete_file("nao/existe.json"))
+
+    def test_a_jobs_own_file_is_refused_and_says_what_to_delete(self) -> None:
+        """Half a record is worse than none: the next save would write it back."""
+        self.store.write(
+            workspace.Document(kind=workspace.WORKFLOW, id="w1", record={"name": "Vendas"})
+        )
+        doc = self.store.write(
+            workspace.Document(
+                kind=workspace.JOB,
+                id="j1",
+                record={"name": "Ingestao", "workflowId": "w1"},
+                config=PIPELINE,
+            )
+        )
+
+        with self.assertRaises(workspace.WorkspaceError) as caught:
+            self.store.delete_file(doc.path or "")
+
+        self.assertIn("job j1", str(caught.exception))
+        self.assertTrue((self.root / (doc.path or "")).is_file())
+
+    def test_the_editors_own_state_cannot_be_deleted(self) -> None:
+        with self.assertRaises(workspace.WorkspaceError):
+            self.store.delete_file(".studio/index.json")
+
+    def test_a_path_out_of_the_root_is_refused(self) -> None:
+        with self.assertRaises(workspace.WorkspaceError):
+            self.store.delete_file("../../etc/passwd.json")
+
+
+class DeleteLibraryFileEndpointTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(main._WORKSPACE_ROOT)
+        for stale in self.root.rglob("*.json"):
+            if ".studio" not in stale.parts:
+                stale.unlink()
+
+    def test_it_deletes_and_says_so(self) -> None:
+        _write(self.root, "terceiros/legado.json")
+
+        out = main.delete_library_file("terceiros/legado.json", _Request())
+
+        self.assertTrue(out.deleted)
+        self.assertEqual(out.path, "terceiros/legado.json")
+        self.assertFalse((self.root / "terceiros/legado.json").exists())
+
+    def test_the_audit_log_is_told_what_was_removed(self) -> None:
+        """A file deleted from disk is exactly what somebody asks about later."""
+        _write(self.root, "terceiros/legado.json")
+        request = _Request()
+
+        main.delete_library_file("terceiros/legado.json", request)
+
+        self.assertEqual(
+            request.state.audit_detail,
+            {"path": "terceiros/legado.json", "deleted": True},
+        )
+
+    def test_a_refusal_is_a_400_with_the_reason(self) -> None:
+        with self.assertRaises(HTTPException) as caught:
+            main.delete_library_file("../outside.json", _Request())
+        self.assertEqual(caught.exception.status_code, 400)
+
+    def test_it_is_not_read_as_a_record_delete(self) -> None:
+        """`/workspace/files/x.json` has the shape of `/workspace/{kind}/{id}`;
+        only the order the routes are declared in keeps them apart."""
+        routes = [
+            route
+            for route in main.app.routes
+            if "DELETE" in getattr(route, "methods", set())
+            and getattr(route, "path", "").startswith("/workspace/")
+        ]
+        paths = [route.path for route in routes]
+
+        self.assertLess(
+            paths.index("/workspace/files/{path:path}"),
+            paths.index("/workspace/{kind}/{record_id}"),
+        )
 
 
 if __name__ == "__main__":

@@ -54,15 +54,31 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 #: than by a role because the question is the same one datasets ask — who may
 #: reach this particular thing — and because `read` on a secret means "may be
 #: used by a run this person starts", never "may be looked at".
-RESOURCE_KINDS = ("dataset", "job", "pipeline", "workflow", "tag", "secret")
+#: `column` is one column of one dataset, addressed as `<dataset key>#<column>`.
+#: It is a kind of its own rather than a flag on the dataset because the question
+#: asked about it is the same one — who may reach this — and because a column
+#: inherits its table and can only ever be narrower. A rule here closes the
+#: column and leaves the table open, which is how "the whole table except the
+#: document number" gets said at all.
+RESOURCE_KINDS = (
+    "dataset",
+    "column",
+    "job",
+    "pipeline",
+    "workflow",
+    "tag",
+    "secret",
+    "query",
+)
 
 #: The kinds that live inside a Workflow, and therefore inherit from one.
 CONTAINED_KINDS = ("job", "pipeline")
 
 #: The kinds a deed can be written on. A tag is not one: ownership is
-#: responsibility for a thing, and a tag is a word that is true of several. See
+#: responsibility for a thing, and a tag is a word that is true of several. A
+#: column is not one either — it is handed over with its table. See
 #: `OWNABLE_KINDS` in `src/lib/iam/grants.ts`.
-OWNABLE_KINDS = ("dataset", "job", "pipeline", "workflow", "secret")
+OWNABLE_KINDS = ("dataset", "job", "pipeline", "workflow", "secret", "query")
 
 LEVELS = ("read", "write", "admin")
 
@@ -70,6 +86,12 @@ LEVEL_RANK: Dict[str, int] = {"read": 1, "write": 2, "admin": 3}
 
 #: Both in the resource id and in the principal id.
 ANY = "*"
+
+#: What separates a column from the dataset it belongs to in a `column`
+#: resource id. `#` rather than one of the address separators below, so that a
+#: column of `main.silver.orders` is still read as a column of that table and
+#: not as a fourth level of the name.
+COLUMN_SEPARATOR = "#"
 
 #: The separators a dataset address nests with: a path (`/lake/silver/orders`)
 #: and a qualified name (`main.silver.orders`). One address uses one of them, so
@@ -288,6 +310,56 @@ def ancestors(resource_id: str) -> List[str]:
     return out
 
 
+def column_resource(dataset_key: str, column: str) -> str:
+    """The resource id of one column. Empty when either half is missing.
+
+    The column name is lower-cased because that is how the catalog keys its
+    column annotations, and a rule written on `Amount` has to govern the column
+    a warehouse spells `amount`.
+    """
+    key = (dataset_key or "").strip()
+    name = (column or "").strip().lower()
+    if not key or not name:
+        return ""
+    return f"{key}{COLUMN_SEPARATOR}{name}"
+
+
+def parse_column_resource(resource_id: str) -> Optional[Tuple[str, str]]:
+    """`(dataset key, column)` out of a column resource id, or `None`.
+
+    Cut at the last separator, not the first: an address may legitimately carry a
+    `#` of its own, and the column name never does.
+    """
+    raw = (resource_id or "").strip()
+    cut = raw.rfind(COLUMN_SEPARATOR)
+    if cut <= 0 or cut == len(raw) - 1:
+        return None
+    return raw[:cut], raw[cut + 1 :]
+
+
+def _column_chain(
+    resource_id: str, parents: Optional[Sequence[Tuple[str, str]]] = None
+) -> List[Tuple[str, str]]:
+    """Every place a rule could be written to reach one column, nearest first.
+
+    The column itself, then everything that reaches its dataset — the table, the
+    folders above it, the tags on both. The ancestors of the *column* id are not
+    walked: `lake/silver/orders#amount` has no container called
+    `lake/silver/orders#` and pretending it does would let a rule meant for a
+    folder land on a column.
+
+    A deny written on the column therefore beats an allow on the table, which is
+    the whole point of the kind.
+    """
+    clean = (resource_id or "").strip()
+    chain: List[Tuple[str, str]] = [("column", clean)] if clean else []
+    chain.append(("column", ANY))
+
+    parsed = parse_column_resource(resource_id)
+    key = parsed[0] if parsed else ""
+    return chain + scope_chain("dataset", key, parents)
+
+
 def scope_chain(
     resource: str, resource_id: str, parents: Optional[Sequence[Tuple[str, str]]] = None
 ) -> List[Tuple[str, str]]:
@@ -301,6 +373,9 @@ def scope_chain(
     that and this module does not — a Job is a record in the workspace, and
     keeping the lookup out here is what stops this file from needing one.
     """
+    if resource == "column":
+        return _column_chain(resource_id, parents)
+
     chain: List[Tuple[str, str]] = []
     seen = set()
 

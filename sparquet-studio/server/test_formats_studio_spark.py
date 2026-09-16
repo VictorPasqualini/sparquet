@@ -37,6 +37,7 @@ from pathlib import Path
 _TMP = tempfile.TemporaryDirectory()
 # Every store is built at import time, so the environment has to be right before
 # `main` is imported — and the developer's own runner is not a test fixture.
+os.environ["SPARQUET_STUDIO_AUDIT_DB"] = os.path.join(_TMP.name, "audit.sqlite3")
 os.environ["SPARQUET_STUDIO_AUTH_DB"] = os.path.join(_TMP.name, "auth.sqlite3")
 os.environ["SPARQUET_STUDIO_CREDITS_DB"] = os.path.join(_TMP.name, "credits.sqlite3")
 os.environ["SPARQUET_STUDIO_HISTORY_DB"] = os.path.join(_TMP.name, "history.sqlite3")

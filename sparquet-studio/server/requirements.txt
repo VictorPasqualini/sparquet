@@ -1,9 +1,18 @@
 # Sparquet Studio local execution bridge.
 #
-# pyspark and the sparquet framework itself are NOT listed here on purpose:
-# they come from the parent repository (run this service from the repo root, or
-# install the framework into the same environment). Install those with the
-# repository's own requirements.txt / `pip install -e .`.
+# The framework is a dependency like any other, pinned to the range this Studio
+# was built against. The same range is declared in `compat.py`, which is what
+# `/health` checks the installed version against, and `test_compat.py` fails if
+# the two ever disagree.
+#
+# Inside the Sparquet repository this line is already satisfied by the editable
+# install (`pip install -e ..` from here, or `pip install -e .` at the root), so
+# pip leaves it alone and the checkout stays the framework that runs.
+sparquet>=0.12,<0.13
+
+# `pyspark` is NOT listed: the framework declares it, and it declares a floor
+# (`pyspark>=3.4`) rather than a version, because which Spark line to install is
+# the cluster's decision and not this service's.
 
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0

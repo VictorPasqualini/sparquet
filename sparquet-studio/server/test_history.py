@@ -482,6 +482,130 @@ class HistoryRepositoryTest(unittest.TestCase):
             )
 
 
+class RunMetricsTest(unittest.TestCase):
+    """A month of executions, counted from the history rather than the ledger."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = history.SQLiteExecutionRepository(
+            Path(self._tmp.name) / "history.sqlite3"
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(
+        self, *, started: str, status: str = history.SUCCESS,
+        duration_ms: int = 100, job_id: str = "j1", name: str = "orders",
+        pipeline_id=None, workflow_id="w1", run_as=None,
+    ) -> str:
+        run_id = self.repo.create_pipeline_run(
+            kind="pipeline" if pipeline_id else "job",
+            workflow_id=workflow_id, pipeline_id=pipeline_id, job_id=job_id,
+            name=name, run_as=run_as, started_at=started,
+        )
+        job_run_id = self.repo.create_job_run(
+            run_id, job_id=job_id, name=name, stage_index=0
+        )
+        self.repo.finish_job_run(
+            job_run_id, status=status, duration_ms=duration_ms, error=None,
+            rows_read=1, rows_written=1,
+        )
+        self.repo.finish_pipeline_run(
+            run_id, status=status, duration_ms=duration_ms, error=None
+        )
+        return run_id
+
+    def test_counts_a_month_and_ignores_the_others(self) -> None:
+        self._run(started="2026-03-02T10:00:00+00:00", duration_ms=100)
+        self._run(started="2026-03-09T10:00:00+00:00", duration_ms=300)
+        self._run(
+            started="2026-03-20T10:00:00+00:00", status=history.FAILED, duration_ms=50
+        )
+        self._run(started="2026-02-28T10:00:00+00:00", duration_ms=9999)
+
+        metrics = self.repo.run_metrics(period="2026-03")
+        self.assertEqual(metrics.total, 3)
+        self.assertEqual(metrics.succeeded, 2)
+        self.assertEqual(metrics.failed, 1)
+        self.assertEqual(metrics.other, 0)
+        self.assertEqual(metrics.duration_ms_total, 450)
+        self.assertEqual(metrics.duration_ms_avg, 150)
+        self.assertEqual(metrics.duration_ms_p50, 100)
+        self.assertEqual(metrics.duration_ms_p95, 300)
+
+    def test_a_run_still_going_is_neither_success_nor_failure(self) -> None:
+        # It has no duration either, so it must not drag the average down.
+        self._run(started="2026-03-02T10:00:00+00:00", duration_ms=200)
+        self.repo.create_pipeline_run(
+            kind="job", workflow_id="w1", pipeline_id=None, job_id="j2",
+            name="running", started_at="2026-03-03T10:00:00+00:00",
+        )
+
+        metrics = self.repo.run_metrics(period="2026-03")
+        self.assertEqual(metrics.total, 2)
+        self.assertEqual(metrics.other, 1)
+        self.assertEqual(metrics.duration_ms_avg, 200)
+
+    def test_every_day_of_the_month_is_present(self) -> None:
+        self._run(started="2026-03-02T10:00:00+00:00")
+        days = self.repo.run_metrics(period="2026-03").days
+        self.assertEqual(len(days), 31)
+        self.assertEqual(days[0].day, "2026-03-01")
+        self.assertEqual(days[0].runs, 0)
+        self.assertEqual(days[1].runs, 1)
+
+    def test_groups_by_pipeline_keep_the_ad_hoc_job_runs(self) -> None:
+        self._run(started="2026-03-02T10:00:00+00:00", job_id="j1", name="orders")
+        self._run(started="2026-03-03T10:00:00+00:00", job_id="j1", name="orders")
+        self._run(
+            started="2026-03-04T10:00:00+00:00", pipeline_id="p1", job_id=None,
+            name="nightly",
+        )
+
+        groups = self.repo.run_metrics(period="2026-03", group_by="pipeline").groups
+        self.assertEqual([(g.key, g.runs) for g in groups], [("j1", 2), ("p1", 1)])
+
+    def test_grouping_by_job_counts_the_stages_of_a_pipeline(self) -> None:
+        run_id = self.repo.create_pipeline_run(
+            kind="pipeline", workflow_id="w1", pipeline_id="p1", job_id=None,
+            name="nightly", started_at="2026-03-05T10:00:00+00:00",
+        )
+        for index, job_id in enumerate(("j1", "j2")):
+            job_run_id = self.repo.create_job_run(
+                run_id, job_id=job_id, name=job_id, stage_index=index
+            )
+            self.repo.finish_job_run(
+                job_run_id, status=history.SUCCESS, duration_ms=40, error=None,
+                rows_read=1, rows_written=1,
+            )
+        self.repo.finish_pipeline_run(
+            run_id, status=history.SUCCESS, duration_ms=80, error=None
+        )
+
+        groups = self.repo.run_metrics(period="2026-03", group_by="job").groups
+        self.assertEqual(sorted(g.key for g in groups), ["j1", "j2"])
+        self.assertEqual([g.runs for g in groups], [1, 1])
+
+    def test_the_label_follows_a_rename(self) -> None:
+        # The run stores the name it had; a month should not show one Job twice
+        # because somebody renamed it on the 15th.
+        self._run(started="2026-03-02T10:00:00+00:00", job_id="j1", name="orders")
+        self.repo.upsert_job(
+            "j1", workflow_id="w1", name="orders daily", description=None, path=None
+        )
+
+        groups = self.repo.run_metrics(period="2026-03").groups
+        self.assertEqual(groups[0].label, "orders daily")
+
+    def test_an_empty_month_answers_with_zeroes_not_with_nothing(self) -> None:
+        metrics = self.repo.run_metrics(period="2026-07")
+        self.assertEqual(metrics.total, 0)
+        self.assertIsNone(metrics.duration_ms_avg)
+        self.assertEqual(metrics.groups, [])
+        self.assertEqual(len(metrics.days), 31)
+
+
 class RetentionTest(unittest.TestCase):
     """Two-stage expiry: a run first loses its detail, and only much later its row.
 
