@@ -22,3 +22,14 @@ pydantic>=2.6,<3.0
 # runner without it still boots and still serves secrets whose provider is `env`
 # — it refuses only to seal or open a `local` one.
 cryptography>=42.0
+
+# The assistant answers through Ollama over plain HTTP, so nothing is listed for
+# it here — the default backend needs no Python package at all, only a model
+# pulled on the machine.
+#
+# `omnigent` is the other backend (SPARQUET_STUDIO_ASSISTANT=omnigent) and is
+# deliberately NOT listed: it requires Python 3.12, while the framework supports
+# 3.9, so installing it narrows the interpreter of every runner that never asked
+# for an agent loop. Install it yourself when you want it:
+#
+#     pip install omnigent
