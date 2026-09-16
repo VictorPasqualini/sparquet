@@ -7,7 +7,10 @@
  * what it cost and whether it worked, and a way to put any of them back in the
  * buffer.
  *
- * Kept per browser, not in the library; see `lib/sql/history`.
+ * The runs are kept by the runner, not by this browser: a saved query is a file
+ * two people can open, so what it has been run as belongs next to the file and
+ * each run says who made it. A buffer nobody has saved has no file to share, and
+ * its runs stay the business of whoever ran them. See `lib/sql/history`.
  */
 
 import { Check, Copy, History, Trash2 } from 'lucide-react'
@@ -37,10 +40,17 @@ function oneLine(sql: string): string {
 
 export function QueryHistory({
   runs,
+  shared,
   onRestore,
   onClear,
 }: {
   runs: QueryRun[]
+  /**
+   * Whether these runs belong to a saved query rather than to a draft. It only
+   * changes what the panel says: a shared history is worth naming as one, and
+   * who ran a statement is information only when it can be somebody else.
+   */
+  shared: boolean
   /** Puts the statement back in the editor. */
   onRestore: (sql: string) => void
   onClear: () => void
@@ -52,8 +62,8 @@ export function QueryHistory({
     return (
       <p className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-line px-3 py-8 text-center text-xs text-content-subtle">
         <History className="h-3.5 w-3.5" aria-hidden />
-        Nothing run from this query yet. Every run is kept here — the statement,
-        not just the result.
+        Nothing run from this query yet. Every run is kept by the runner — the
+        statement, not just the result.
       </p>
     )
   }
@@ -62,7 +72,8 @@ export function QueryHistory({
     <div className="overflow-hidden rounded-xl border border-line bg-surface">
       <div className="flex items-center gap-2 border-b border-line bg-surface-sunken px-2.5 py-1.5">
         <span className="text-[11px] text-content-subtle">
-          {runs.length} {runs.length === 1 ? 'run' : 'runs'}, newest first — this browser only
+          {runs.length} {runs.length === 1 ? 'run' : 'runs'}, newest first —{' '}
+          {shared ? 'everyone who runs this query' : 'yours, until this query is saved'}
         </span>
         <Button
           size="xs"
@@ -148,6 +159,7 @@ export function QueryHistory({
                   </Button>
                   <span className="text-[11px] text-content-subtle">
                     run with a cap of {run.limit} rows
+                    {shared && run.runAs ? ` · by ${run.runAs}` : ''}
                   </span>
                 </div>
               ) : null}

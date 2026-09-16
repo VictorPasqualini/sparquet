@@ -31,9 +31,11 @@
  *     datasets already declare (`sparkForDatasets`).
  */
 
-import Editor, { type EditorProps, type OnMount } from '@monaco-editor/react'
+import Editor, { type EditorProps, type Monaco, type OnMount } from '@monaco-editor/react'
 import type { editor as MonacoEditor, IDisposable } from 'monaco-editor/esm/vs/editor/editor.api'
 import {
+  ChartColumn,
+  Check,
   Copy,
   Database,
   Download,
@@ -48,6 +50,8 @@ import {
   TableProperties,
   Timer,
   TriangleAlert,
+  WandSparkles,
+  Workflow,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
@@ -81,20 +85,23 @@ import { buildLineage } from '@/lib/lineage'
 import { configureMonaco } from '@/lib/monaco'
 import {
   cancelQuery,
+  clearQueryHistory,
+  fetchQueryHistory,
   isRunnerError,
+  moveQueryHistory,
   runQuery,
+  validateQuery,
   type QuerySource,
+  type QueryValidation,
   type RunnerQueryResult,
 } from '@/lib/runner/client'
+import { CreateJobFromQuery } from '@/components/sql/CreateJobFromQuery'
+import { chartable } from '@/lib/sql/chartScale'
+import { formatSql } from '@/lib/sql/format'
+import { ResultChart } from '@/components/sql/ResultChart'
+import { accessTo, useIamStore } from '@/store/iam'
 import { sparkForDatasets } from '@/lib/runner/session'
-import {
-  addRun,
-  clearHistory,
-  historyKey,
-  moveHistory,
-  readHistory,
-  type QueryRun,
-} from '@/lib/sql/history'
+import { historyScope, type QueryRun } from '@/lib/sql/history'
 import { isPlanResult } from '@/lib/sql/plan'
 import { mentionedAliases, viewAlias } from '@/lib/sql/views'
 import { timestampedName, toCsv } from '@/lib/utils/csv'
@@ -130,6 +137,17 @@ const HEIGHT_KEY = 'sparquet-studio:sql-height'
  * for — collected to the driver, serialized, sent over the wire — for rows
  * nobody scrolls to.
  */
+/**
+ * How long the typing has to pause before the parser is asked.
+ *
+ * Long enough that a statement being typed is not sent word by word, short
+ * enough that the marker lands while the mistake is still on screen.
+ */
+const SYNTAX_DELAY_MS = 600
+
+/** Who owns the squiggles, so nothing else on this model is cleared with them. */
+const SYNTAX_MARKER = 'sparquet-sql-syntax'
+
 const LIMITS = [20, 50, 100, 500, 1000] as const
 
 const DEFAULT_LIMIT = 20
@@ -232,11 +250,11 @@ interface SqlTab {
 /**
  * What the space under the editor is showing.
  *
- * Three answers to one run — the rows, the plan behind them, and every earlier
- * version of the statement — and they each want the whole width, so they take
- * turns rather than stack.
+ * Four answers to one run — the rows, the shape of them, the plan behind them,
+ * and every earlier version of the statement — and they each want the whole
+ * width, so they take turns rather than stack.
  */
-type Surface = 'result' | 'plan' | 'history'
+type Surface = 'result' | 'chart' | 'plan' | 'history'
 
 let tabSeq = 0
 
@@ -318,6 +336,9 @@ export function SqlEditor() {
   const [result, setResult] = useState<RunnerQueryResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selection, setSelection] = useState('')
+  /** Open while the query is being turned into a Job. */
+  const [creatingJob, setCreatingJob] = useState(false)
+  const [syntax, setSyntax] = useState<QueryValidation | null>(null)
   const [height, setHeight] = useState(readHeight)
   const [surface, setSurface] = useState<Surface>('result')
   const [history, setHistory] = useState<QueryRun[]>([])
@@ -327,16 +348,41 @@ export function SqlEditor() {
   // Monaco binds the shortcut once, so the command has to reach the CURRENT run.
   const runRef = useRef<() => void>(() => {})
   const saveRef = useRef<() => void>(() => {})
+  const formatRef = useRef<() => void>(() => {})
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
+  const monacoRef = useRef<Monaco | null>(null)
   const completionRef = useRef<IDisposable | null>(null)
   const dragRef = useRef<{ from: number; height: number } | null>(null)
 
   const active = tabs.find((tab) => tab.tabId === activeTabId) ?? tabs[0]
+  const activeQueryId = active?.queryId ?? null
+
+  // A saved query is a securable: the file can be closed to somebody who may
+  // still read every table it names. The rules are loaded here rather than
+  // assumed, because this screen is reachable without ever opening Access.
+  const iamGrants = useIamStore((state) => state.grants)
+  const iamOwners = useIamStore((state) => state.owners)
+  const loadIam = useIamStore((state) => state.load)
+  useEffect(() => {
+    void loadIam()
+  }, [loadIam])
+
+  /** What this person holds on the open file. `null` while the tab is a draft. */
+  const queryAccess = useMemo(
+    () => (activeQueryId ? accessTo('query', activeQueryId) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeQueryId, iamGrants, iamOwners],
+  )
+  /**
+   * Optimistic on purpose, like every other client-side check here: an
+   * ungoverned file is editable, and the runner refuses what this gets wrong.
+   * A wrong `false` would hide work somebody is entitled to do.
+   */
+  const mayEditQuery =
+    !queryAccess?.governed || queryAccess.level === 'write' || queryAccess.level === 'admin'
+  const mayDeleteQuery = !queryAccess?.governed || queryAccess.level === 'admin'
   const sql = active?.sql ?? ''
   const limit = active?.limit ?? DEFAULT_LIMIT
-  /** Which history this buffer writes to: its file when it has one, itself when not. */
-  const runsKey = historyKey(active?.queryId ?? null, active?.tabId ?? '')
-
   /** Edits the tab being typed in. Everything that changes a buffer goes here. */
   const patchActive = useCallback(
     (patch: Partial<SqlTab>) => {
@@ -447,11 +493,31 @@ export function SqlEditor() {
     }
   }, [height])
 
+  /**
+   * Reads this buffer's runs back from the runner.
+   *
+   * The runner records them as it executes, so this is a read and never a write:
+   * what a run cost and how it failed is what happened, not what a client
+   * reported. Called again after each run rather than appended to locally, which
+   * is also what makes a teammate's run on a saved query show up here.
+   */
+  const loadHistory = useCallback(
+    (signal?: AbortSignal) => {
+      const scope = historyScope(activeQueryId, activeTabId)
+      void fetchQueryHistory(runnerUrl, scope, signal, runnerToken).then((runs) => {
+        if (!signal?.aborted) setHistory(runs)
+      })
+    },
+    [activeQueryId, activeTabId, runnerToken, runnerUrl],
+  )
+
   // Switching tab switches history with it — a run belongs to the query it was
   // run from, not to the screen.
   useEffect(() => {
-    setHistory(readHistory(runsKey))
-  }, [runsKey])
+    const controller = new AbortController()
+    loadHistory(controller.signal)
+    return () => controller.abort()
+  }, [loadHistory])
 
   useEffect(() => () => completionRef.current?.dispose(), [])
 
@@ -472,7 +538,6 @@ export function SqlEditor() {
     queryIdRef.current = queryId
     setRunning(true)
     setError(null)
-    const startedAt = Date.now()
 
     try {
       const answer = await runQuery(
@@ -487,6 +552,13 @@ export function SqlEditor() {
           // Without this a Delta table fails with DATA_SOURCE_NOT_FOUND on a
           // session that was built for something else.
           spark: sparkForDatasets(jobs, sources.map((source) => source.path)),
+          // The runner checks the grants on the file as well as on the tables.
+          // A draft sends nothing: there is no file to have a rule about.
+          savedQueryId: activeQueryId ?? undefined,
+          // What the run is filed under while the buffer has no file yet. The
+          // runner keys a draft's history by the tab *and* the person, so a
+          // scratch statement stays the business of whoever ran it.
+          tab: activeTabId,
         },
         controller.signal,
         runnerToken,
@@ -495,16 +567,9 @@ export function SqlEditor() {
       // An EXPLAIN comes back as one cell of text; showing it as a one-row
       // table is showing the plan in a window the width of a column.
       setSurface(isPlanResult(answer.columns, answer.rows) ? 'plan' : 'result')
-      setHistory(
-        addRun(runsKey, {
-          sql: statement,
-          limit,
-          elapsedMs: answer.elapsedMs,
-          rows: answer.rows.length,
-          truncated: answer.truncated,
-          error: null,
-        }),
-      )
+      // The runner already wrote this run down as it executed it; read it back
+      // rather than keeping a second, client-side account of the same thing.
+      loadHistory()
     } catch (caught) {
       const message =
         caught instanceof DOMException && caught.name === 'AbortError'
@@ -517,32 +582,27 @@ export function SqlEditor() {
       setError(message)
       setResult(null)
       setSurface('result')
-      // A failed run is kept too: "what did I run that broke" is asked at least
-      // as often as "what did I run that worked".
-      setHistory(
-        addRun(runsKey, {
-          sql: statement,
-          limit,
-          elapsedMs: Date.now() - startedAt,
-          rows: 0,
-          truncated: false,
-          error: message.split('\n')[0],
-        }),
-      )
+      // A failed run is kept too — "what did I run that broke" is asked at least
+      // as often as the other question — and the runner records a refusal the
+      // same way it records a result. A failure that never reached the runner,
+      // a cancellation included, has nothing on the other side to read back.
+      loadHistory()
     } finally {
       abortRef.current = null
       queryIdRef.current = null
       setRunning(false)
     }
   }, [
+    activeQueryId,
     aliases,
     attachables,
+    activeTabId,
     jobs,
     limit,
+    loadHistory,
     running,
     runnerToken,
     runnerUrl,
-    runsKey,
     selection,
     sql,
     timeoutSeconds,
@@ -566,7 +626,13 @@ export function SqlEditor() {
 
   const handleMount = useCallback<OnMount>((editor, monaco) => {
     editorRef.current = editor
+    monacoRef.current = monaco
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runRef.current())
+    // The shortcut every editor uses for this, so nobody has to learn ours.
+    editor.addCommand(
+      monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF,
+      () => formatRef.current(),
+    )
     // Ctrl/Cmd+S inside the editor saves the query rather than offering to save
     // the page, which is what the browser would otherwise do with it.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())
@@ -657,6 +723,81 @@ export function SqlEditor() {
 
     editor.focus()
   }, [])
+
+  /**
+   * Lays the statement out, over the selection when there is one.
+   *
+   * Applied as an edit rather than through `setSql` so it lands in the editor's
+   * own undo stack: formatting somebody's query is only safe if one Ctrl+Z puts
+   * it back exactly as it was.
+   */
+  const format = useCallback(() => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    if (!editor || !model) {
+      setSql((current) => formatSql(current))
+      return
+    }
+    const selected = editor.getSelection()
+    const range = selected && !selected.isEmpty() ? selected : model.getFullModelRange()
+    const source = model.getValueInRange(range)
+    const formatted = formatSql(source)
+    if (formatted !== source) {
+      editor.executeEdits('format', [{ range, text: formatted, forceMoveMarkers: true }])
+    }
+    editor.focus()
+  }, [setSql])
+
+  formatRef.current = format
+
+  /**
+   * The parser's opinion of the buffer, asked for while it is being typed.
+   *
+   * Debounced because it crosses the network, and asked about the whole buffer
+   * rather than the selection because the markers are drawn on the buffer. It
+   * never reports a failure of its own: a runner that is off or busy means the
+   * editor marks nothing, which is the same answer as "not checked".
+   */
+  useEffect(() => {
+    if (!sql.trim()) {
+      setSyntax(null)
+      return
+    }
+    const controller = new AbortController()
+    const handle = window.setTimeout(() => {
+      void validateQuery(runnerUrl, sql, controller.signal, runnerToken).then((result) => {
+        if (!controller.signal.aborted) setSyntax(result)
+      })
+    }, SYNTAX_DELAY_MS)
+    return () => {
+      window.clearTimeout(handle)
+      controller.abort()
+    }
+  }, [runnerToken, runnerUrl, sql])
+
+  // Monaco owns the squiggle; this only says where it goes. The owner string
+  // keeps it apart from any other marker source on the same model.
+  useEffect(() => {
+    const monaco = monacoRef.current
+    const model = editorRef.current?.getModel()
+    if (!monaco || !model) return
+    if (!syntax || !syntax.checked || syntax.ok) {
+      monaco.editor.setModelMarkers(model, SYNTAX_MARKER, [])
+      return
+    }
+    const line = Math.min(Math.max(syntax.line ?? 1, 1), model.getLineCount())
+    const column = (syntax.column ?? 0) + 1
+    monaco.editor.setModelMarkers(model, SYNTAX_MARKER, [
+      {
+        severity: monaco.MarkerSeverity.Error,
+        message: syntax.message || 'The parser refused this statement.',
+        startLineNumber: line,
+        endLineNumber: line,
+        startColumn: Math.min(column, model.getLineMaxColumn(line)),
+        endColumn: model.getLineMaxColumn(line),
+      },
+    ])
+  }, [syntax])
 
   /** Puts text where the cursor is, which is where a person clicking a column wants it. */
   const insert = useCallback((text: string) => {
@@ -753,6 +894,10 @@ export function SqlEditor() {
     async (name?: string) => {
       const tab = tabs.find((item) => item.tabId === activeTabId)
       if (!tab || saving) return
+      if (tab.queryId !== null && !mayEditQuery) {
+        setError('You do not hold write on this saved query. Save it under a new name instead.')
+        return
+      }
       if (tab.queryId === null && name === undefined) {
         setNaming(tab.name === UNTITLED ? '' : tab.name)
         return
@@ -768,7 +913,10 @@ export function SqlEditor() {
           (await createQuery(fields))
         // The buffer just acquired a file, and the history follows the file from
         // now on: without this, saving would drop everything run to get here.
-        moveHistory(historyKey(tab.queryId, tab.tabId), historyKey(stored.id, tab.tabId))
+        // It also stops being private — having a file is what makes it shared.
+        if (tab.queryId === null) {
+          await moveQueryHistory(runnerUrl, tab.tabId, stored.id, runnerToken)
+        }
         setTabs((current) =>
           current.map((item) =>
             item.tabId === tab.tabId
@@ -783,12 +931,16 @@ export function SqlEditor() {
         setSaving(false)
       }
     },
-    [activeTabId, createQuery, saving, tabs, updateQuery],
+    [activeTabId, createQuery, mayEditQuery, runnerToken, runnerUrl, saving, tabs, updateQuery],
   )
 
   const deleteActive = useCallback(async () => {
     const tab = tabs.find((item) => item.tabId === activeTabId)
     if (!tab?.queryId) return
+    if (!mayDeleteQuery) {
+      setError('Deleting a saved query needs admin on it.')
+      return
+    }
     const ok = await confirm({
       title: `Delete ${tab.name}?`,
       message: 'The file goes from the library. The tab stays open as a draft.',
@@ -802,7 +954,7 @@ export function SqlEditor() {
         item.tabId === tab.tabId ? { ...item, queryId: null, savedSql: '' } : item,
       ),
     )
-  }, [activeTabId, confirm, removeQuery, tabs])
+  }, [activeTabId, confirm, mayDeleteQuery, removeQuery, tabs])
 
   const tabViews = useMemo<QueryTabView[]>(
     () =>
@@ -854,8 +1006,13 @@ export function SqlEditor() {
     [active, result],
   )
 
+  // Offered only when the result has a number in it: a chart tab over a result
+  // of strings is an invitation to an empty panel.
+  const plottable = useMemo(() => (result ? chartable(result.fields) : false), [result])
+
   const surfaceTabs = useMemo<WorkspaceTab<Surface>[]>(() => {
     const list: WorkspaceTab<Surface>[] = [{ id: 'result', label: 'Result', icon: Table2 }]
+    if (plottable) list.push({ id: 'chart', label: 'Chart', icon: ChartColumn })
     if (planText) list.push({ id: 'plan', label: 'Plan', icon: Network })
     list.push({
       id: 'history',
@@ -867,7 +1024,7 @@ export function SqlEditor() {
         ) : undefined,
     })
     return list
-  }, [history.length, planText])
+  }, [history.length, planText, plottable])
 
   const startDrag = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -965,9 +1122,11 @@ export function SqlEditor() {
   const statement = (selection.trim() || sql).trim()
   const named = new Set(mentionedAliases(statement, aliases))
   const attached = attachables.filter((entry) => named.has(entry.alias))
-  // The plan tab exists only while there is a plan, so a run that returns rows
-  // after an EXPLAIN must not leave the screen pointing at a tab that is gone.
-  const shownSurface: Surface = surface === 'plan' && !planText ? 'result' : surface
+  // The plan and chart tabs exist only while the last run earns them, so a run
+  // that returns rows after an EXPLAIN — or strings after numbers — must not
+  // leave the screen pointing at a tab that is gone.
+  const shownSurface: Surface =
+    (surface === 'plan' && !planText) || (surface === 'chart' && !plottable) ? 'result' : surface
 
   return (
     <PageShell width="full">
@@ -1055,6 +1214,55 @@ export function SqlEditor() {
                   <Database className="h-3 w-3" />
                   {attached.length} {attached.length === 1 ? 'view' : 'views'}
                 </span>
+              ) : null}
+              {/* The way out of the console. A query that proved itself here is
+                  the same statement a Job would run, and retyping it into a
+                  canvas is how a good query stays an exploration forever. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setCreatingJob(true)}
+                disabled={!statement}
+                title="Create a Job that runs this statement"
+              >
+                <Workflow />
+                Create Job
+              </Button>
+
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={format}
+                disabled={!sql.trim()}
+                title="Lay this out — the selection when there is one, the whole buffer otherwise
+                  (Shift+Alt+F)"
+              >
+                <WandSparkles />
+                Format
+              </Button>
+
+              {/* Says nothing at all unless the parser was actually asked: an
+                  editor with no runner behind it marks nothing rather than
+                  guessing in a dialect it does not implement. */}
+              {syntax?.checked ? (
+                syntax.ok ? (
+                  <span
+                    className="hidden items-center gap-1 text-[11px] text-state-success sm:flex"
+                    title="Spark's own parser accepted this statement. It says nothing about
+                      whether the tables exist."
+                  >
+                    <Check className="h-3 w-3" />
+                    Parses
+                  </span>
+                ) : (
+                  <span
+                    className="flex items-center gap-1 text-[11px] text-state-danger"
+                    title={syntax.message}
+                  >
+                    <TriangleAlert className="h-3 w-3" />
+                    {syntax.line ? `Syntax error on line ${syntax.line}` : 'Syntax error'}
+                  </span>
+                )
               ) : null}
 
               <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -1281,18 +1489,31 @@ export function SqlEditor() {
                   )
                 ) : null}
 
+                {shownSurface === 'chart' && result ? (
+                  <ResultChart
+                    columns={result.columns}
+                    rows={result.rows}
+                    fields={result.fields}
+                  />
+                ) : null}
+
                 {shownSurface === 'plan' && planText ? <PlanTree text={planText} /> : null}
 
                 {shownSurface === 'history' ? (
                   <QueryHistory
                     runs={history}
+                    shared={activeQueryId !== null}
                     onRestore={(text) => {
                       setSql(text)
                       setSurface('result')
                     }}
                     onClear={() => {
-                      clearHistory(runsKey)
-                      setHistory([])
+                      void clearQueryHistory(
+                        runnerUrl,
+                        historyScope(activeQueryId, activeTabId),
+                        undefined,
+                        runnerToken,
+                      ).then(() => setHistory([]))
                     }}
                   />
                 ) : null}
@@ -1344,6 +1565,19 @@ export function SqlEditor() {
           }}
         />
       </Modal>
+
+      {creatingJob && (
+        <CreateJobFromQuery
+          sql={statement}
+          datasets={attached.map(({ key, alias, format }) => ({ key, alias, format }))}
+          spark={sparkForDatasets(
+            jobs,
+            attached.map((entry) => entry.key),
+          )}
+          suggestedName={active && active.name !== UNTITLED ? active.name : 'Query job'}
+          onClose={() => setCreatingJob(false)}
+        />
+      )}
 
       {confirmDialog}
     </PageShell>
