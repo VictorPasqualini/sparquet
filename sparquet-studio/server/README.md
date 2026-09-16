@@ -383,12 +383,15 @@ from the browser with the user's own key and never learn any of that.
 no egress. Pull a model once and the assistant works:
 
 ```bash
-ollama pull qwen2.5-coder:7b
+ollama pull llama3.1:8b
 ```
 
 Any pulled model is offered — `GET /assistant` lists what `/api/tags` reports.
-`qwen2.5-coder:7b` is the default because it fits in 8 GB of RAM and is good at
-JSON; a machine with more room does better with `qwen2.5-coder:32b`.
+`llama3.1:8b` is the default because it fits in 8 GB of RAM *and* was measured
+calling this runner's tools; a coder-tuned model reads JSON better but several
+of them, `qwen2.5-coder:7b` included, print the tool call instead of making it
+(see [Omnigent](#omnigent)). A machine with more room does better with
+`llama3.1:70b`.
 
 `/api/chat` is used rather than Ollama's OpenAI-compatible `/v1` route, because
 only the native one reports `prompt_eval_count` and `eval_count` while
@@ -441,6 +444,7 @@ every one of them fails quietly when guessed wrong:
 | `use_responses=False` | It defaults to True, which is OpenAI's `/responses` endpoint. Ollama does not implement it, so the default breaks the backend this is pointed at by default. |
 | Flat tool specs rather than OpenAI-shaped ones | Omnigent reads `name`, `description` and `parameters` off the top of each spec. In the nested shape it finds no name, and a spec with no name is skipped rather than refused — the symptom is an assistant answering from memory, not an error anybody sees. |
 | `_tool_executor`, and a fresh `session_id` on every turn | Tool calls are dispatched through the attribute Omnigent's own runtime adapter assigns; without it every call comes back "no tool executor" and the model reasons on from a failure it cannot fix. The session key is what Omnigent replays history against, and our transcript already arrives whole from the browser — one shared key would show the model its own past twice, and on a runner with more than one user, somebody else's. |
+| `stream_options: {"include_usage": true}`, asked for by the runner | The Agents SDK sends it only when the base URL is OpenAI's own (`ChatCmplHelpers.is_openai` is a prefix test), and Omnigent never sets `include_usage`. Point it at Ollama and no chunk carries a usage block, so every local turn is metered at zero in and zero out — the one number that makes "we moved the assistant in-house" a fact rather than an absence of rows. |
 
 `server/test_omnigent_live.py` is what keeps that table honest. It skips when
 the package is absent and, when it is there, drives the installed executor
@@ -448,6 +452,16 @@ through a real turn — tool call, tool result, streamed answer, usage — again
 stub that speaks the OpenAI streaming shape in place of model weights. A team
 that outgrows the built-in prompt writes its own agent YAML and points
 `SPARQUET_STUDIO_OMNIGENT_AGENT` at it.
+
+**Pick a model that calls tools.** The loop is only as good as the weights
+behind it, and "supports tools" is not a yes/no the tag list can be trusted on.
+`qwen2.5-coder:7b` reports `tools` in `ollama show` and still answers a tool
+question by *printing* `{"name": "validate_config", "arguments": {…}}` as prose:
+nothing is dispatched, the user reads a JSON blob, and the runner meters a turn
+with zero tool calls. `llama3.1:8b` was measured doing the same turn properly —
+tool call, tool result, answer. Anything smaller than 7B is not worth trying;
+if the assistant answers with JSON instead of running anything, the model is the
+thing to change, not the wiring.
 
 ### What a turn costs
 
@@ -538,7 +552,7 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_PER_ASSIST` | `1` | Credits one assistant turn costs when it was **not** answered on this machine. A local turn is recorded at zero whatever this says. |
 | `SPARQUET_STUDIO_ASSISTANT` | `ollama` | Which runtime answers questions. `omnigent` uses Omnigent instead; `off`/`none`/`disabled` turns the assistant off and makes the routes say so rather than never replying. |
 | `SPARQUET_STUDIO_OLLAMA_URL` | `http://127.0.0.1:11434` | Where Ollama is. Both backends talk to it. |
-| `SPARQUET_STUDIO_ASSISTANT_MODEL` | `qwen2.5-coder:7b` | Model used when the caller names none. Free text — any pulled model works. |
+| `SPARQUET_STUDIO_ASSISTANT_MODEL` | `llama3.1:8b` | Model used when the caller names none. Free text — any pulled model works, but pick one that calls tools. |
 | `SPARQUET_STUDIO_ASSISTANT_KEY` | unset | API key for the assistant endpoint, for the deployment that points `SPARQUET_STUDIO_OLLAMA_URL` at something that wants one. Ollama itself ignores it. |
 | `SPARQUET_STUDIO_OMNIGENT_AGENT` | unset | Path to an Omnigent agent YAML. Unset, the runner builds one from its own prompt and tools. |
 | `SPARQUET_STUDIO_SECRET_KEY` | unset | Master key the `local` connection secrets are encrypted with. Without it the runner still boots and still serves `env` secrets — it refuses only to seal or open a `local` one. Changing it makes every existing `local` secret unreadable. |

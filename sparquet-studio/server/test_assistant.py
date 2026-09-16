@@ -581,6 +581,146 @@ class OmnigentTests(unittest.TestCase):
         self.assertEqual(len(keys), 2)
 
 
+class OmnigentModelTests(unittest.TestCase):
+    """What the Studio's model picker is offered when the backend is Omnigent."""
+
+    def setUp(self):
+        self._get_json = assistant._get_json
+
+    def tearDown(self):
+        assistant._get_json = self._get_json
+
+    def _answer(self, body):
+        seen = {}
+
+        def fake(url, timeout=None):
+            seen["url"] = url
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        assistant._get_json = fake
+        return seen
+
+    def test_a_local_endpoint_lists_what_it_will_serve(self):
+        """`/v1/models`, because the promise here is OpenAI-compatible."""
+        seen = self._answer({"data": [{"id": "qwen2.5-coder:7b"}, {"id": "llama3.1:8b"}]})
+        backend = assistant.OmnigentBackend(base_url="http://127.0.0.1:11434", model="m")
+        self.assertEqual(backend.models(), ["llama3.1:8b", "qwen2.5-coder:7b"])
+        self.assertEqual(seen["url"], "http://127.0.0.1:11434/v1/models")
+
+    def test_a_hosted_endpoint_is_not_asked(self):
+        """Its catalogue is thousands long and some plans bill for the call."""
+        seen = self._answer({"data": [{"id": "gpt-4o"}]})
+        backend = assistant.OmnigentBackend(base_url="https://api.openai.com", model="m")
+        self.assertEqual(backend.models(), [])
+        self.assertNotIn("url", seen)
+
+    def test_a_server_that_is_down_leaves_the_picker_to_typing(self):
+        self._answer(OSError("refused"))
+        backend = assistant.OmnigentBackend(base_url="http://127.0.0.1:9", model="m")
+        self.assertEqual(backend.models(), [])
+
+
+class UsageRequestTests(unittest.TestCase):
+    """A local server reports tokens only when asked, and the SDK does not ask.
+
+    Without this the Billing screen shows every local turn as zero in and zero
+    out — the one number that made "we moved the assistant in-house" a fact you
+    can point at, missing precisely on the backend that was supposed to prove it.
+    """
+
+    NAMES = ("agents", "agents.models", "agents.models.chatcmpl_helpers")
+
+    def setUp(self):
+        assistant._USAGE_ASKED = False
+        self._saved = {name: sys.modules.get(name) for name in self.NAMES}
+
+    def tearDown(self):
+        assistant._USAGE_ASKED = False
+        for name, module in self._saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def _install_sdk(self):
+        """The Agents SDK's helper, reduced to the decision being changed."""
+
+        class ChatCmplHelpers:
+            @classmethod
+            def is_openai(cls, client):
+                return str(client).startswith("https://api.openai.com")
+
+            @classmethod
+            def get_stream_options_param(cls, client, model_settings, stream):
+                if not stream:
+                    return None
+                default = True if cls.is_openai(client) else None
+                chosen = (
+                    model_settings.include_usage
+                    if model_settings.include_usage is not None
+                    else default
+                )
+                return {"include_usage": chosen} if chosen is not None else None
+
+        helpers = types.ModuleType("agents.models.chatcmpl_helpers")
+        helpers.ChatCmplHelpers = ChatCmplHelpers
+        models = types.ModuleType("agents.models")
+        models.chatcmpl_helpers = helpers
+        package = types.ModuleType("agents")
+        package.models = models
+        sys.modules.update({
+            "agents": package,
+            "agents.models": models,
+            "agents.models.chatcmpl_helpers": helpers,
+        })
+        return ChatCmplHelpers
+
+    def test_a_local_endpoint_is_asked_for_the_tokens_it_would_not_volunteer(self):
+        helpers = self._install_sdk()
+        settings = types.SimpleNamespace(include_usage=None)
+        local = "http://127.0.0.1:11434/v1"
+        self.assertIsNone(helpers.get_stream_options_param(local, settings, True))
+        assistant._ask_for_usage()
+        self.assertEqual(
+            helpers.get_stream_options_param(local, settings, True),
+            {"include_usage": True},
+        )
+
+    def test_openais_own_endpoint_decides_for_itself_as_before(self):
+        helpers = self._install_sdk()
+        assistant._ask_for_usage()
+        settings = types.SimpleNamespace(include_usage=None)
+        self.assertEqual(
+            helpers.get_stream_options_param("https://api.openai.com/v1", settings, True),
+            {"include_usage": True},
+        )
+
+    def test_an_operator_who_said_no_is_not_overruled(self):
+        helpers = self._install_sdk()
+        assistant._ask_for_usage()
+        settings = types.SimpleNamespace(include_usage=False)
+        self.assertEqual(
+            helpers.get_stream_options_param("http://127.0.0.1:11434/v1", settings, True),
+            {"include_usage": False},
+        )
+
+    def test_a_turn_that_is_not_streaming_is_left_alone(self):
+        helpers = self._install_sdk()
+        assistant._ask_for_usage()
+        settings = types.SimpleNamespace(include_usage=None)
+        self.assertIsNone(
+            helpers.get_stream_options_param("http://127.0.0.1:11434/v1", settings, False)
+        )
+
+    def test_a_runner_without_the_sdk_is_not_a_failure(self):
+        """Omnigent absent, or a version that moved the helper: still a no-op."""
+        sys.modules["agents.models.chatcmpl_helpers"] = None  # import raises
+        assistant._ask_for_usage()
+        self.assertTrue(assistant._USAGE_ASKED)
+
+
 
 # ------------------------------------------------------------------ billing
 

@@ -1658,13 +1658,21 @@ O que falta, na ordem em que dói:
   inteiro pelo executor instalado: chamada de ferramenta, resultado devolvido ao
   modelo, resposta em streaming e `usage`.
 
-- [ ] **Uma rodada do Omnigent com pesos de verdade** — o que o teste acima ainda
-  substitui é só o modelo: não há Ollama nesta máquina, então quem responde é um stub
-  no formato de streaming da OpenAI. Tudo entre o stub e o teste (executor, OpenAI
-  Agents SDK, ponte de ferramentas, classes de evento, adaptador, framework) é o
-  instalado. Falta a execução manual numa máquina com Ollama: `ollama pull`,
-  `SPARQUET_STUDIO_ASSISTANT=omnigent`, uma pergunta que force `validate_config`, e
-  conferir o `usage` do `TurnComplete` chegando em `assist_usage`.
+- [x] **Uma rodada do Omnigent com pesos de verdade** — feita em 2026-09-16 com
+  Ollama 0.34.1 nesta máquina (RTX 2060, 6 GB de VRAM): pergunta que força
+  `validate_config`, ferramenta despachada, resultado de volta ao modelo, resposta em
+  streaming e `usage` de 1050 tokens de entrada e 113 de saída registrado como local.
+  Duas coisas que nenhum stub tinha como pegar apareceram só aí:
+
+  | O que quebrou | Por quê |
+  |---|---|
+  | `qwen2.5-coder:7b` **imprime** a tool call como texto | `ollama show` anuncia `tools` e o template existe, mas os pesos respondem `{"name": "validate_config", "arguments": {…}}` em prosa. Nada é despachado, o usuário lê um blob de JSON e o turno é medido com zero ferramentas. Medido também pela rota crua (`/v1/chat/completions`, com e sem streaming): o campo `tool_calls` volta vazio nas três formas, então não é o adaptador. `llama3.1:8b` faz o mesmo turno direito — e virou o padrão do runner. |
+  | Todo turno local era medido em zero token | O Agents SDK só manda `stream_options: {"include_usage": true}` quando reconhece o endpoint como o da própria OpenAI (`ChatCmplHelpers.is_openai` é um teste de prefixo em `https://api.openai.com`), e o Omnigent nunca define `include_usage`. Apontado para o Ollama, nenhum chunk traz bloco de usage e `TurnComplete.usage` chega vazio — justamente o número que faz "trouxemos o assistant para dentro" ser um fato verificável. O runner passou a pedir (`_ask_for_usage`), e só isso: `is_openai` também decide `store`, que um servidor local recusaria. |
+
+  `GET /assistant` no backend Omnigent também passou a listar os modelos do endpoint
+  local, via `/v1/models` (vocabulário da OpenAI, não `/api/tags` do Ollama, porque a
+  promessa aqui é só compatibilidade com OpenAI — llama.cpp e vLLM respondem igual).
+  Sem isso o seletor de modelo da tela ficava vazio nesse backend.
 
 - [ ] **Agir, não só olhar** — criar o Job que acabou de descrever, rodar, corrigir o
   que o linter apontou. As ferramentas de escrita são a parte que falta, e cada uma

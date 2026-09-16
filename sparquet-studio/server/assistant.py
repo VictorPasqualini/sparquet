@@ -52,12 +52,16 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 #: listening on — a well-known way for a local model to look like a hung one.
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 
-#: The model asked for when the operator has not chosen. A code-shaped model in
-#: the small size class, because the work here is reading and writing JSON, and
-#: because a 7B has to fit on the laptop of the person who just wanted to try it.
+#: The model asked for when the operator has not chosen. Small enough for the
+#: laptop of somebody who just wanted to try it, and — the part that is not
+#: obvious — one that actually emits tool calls. A code-shaped model reads and
+#: writes JSON better, but `qwen2.5-coder:7b` answers a tool question by printing
+#: the call as prose while reporting `tools` in `ollama show`: nothing runs, the
+#: user reads a JSON blob, and the turn is metered with zero tool calls. Tools
+#: are what this backend is for, so the default is the model measured using them.
 #: Free text, like every model id in this product: a model released tomorrow
 #: works by typing its name.
-DEFAULT_MODEL = "qwen2.5-coder:7b"
+DEFAULT_MODEL = "llama3.1:8b"
 
 #: Long enough for a cold model to load off disk, short enough that a runner does
 #: not hold a connection open all afternoon for a model nobody is serving.
@@ -604,6 +608,44 @@ class OllamaBackend:
 # ----------------------------------------------------------------- omnigent
 
 
+_USAGE_ASKED = False
+
+
+def _ask_for_usage() -> None:
+    """Make the Agents SDK request token counts from a non-OpenAI endpoint.
+
+    The SDK only sends `stream_options: {"include_usage": true}` when it
+    recognises the endpoint as OpenAI's own — `ChatCmplHelpers.is_openai` is a
+    prefix test against `https://api.openai.com` — and Omnigent never sets
+    `include_usage` itself. Point the same client at Ollama and no streamed
+    chunk carries a usage block, so `TurnComplete.usage` is empty and Billing
+    records a turn that read and wrote nothing. Ollama does report usage; it
+    only has to be asked, which is what this does.
+
+    Narrow on purpose. `is_openai` also decides `store`, and asking a local
+    server to store the conversation is an OpenAI-side feature it would reject,
+    so only the stream options are touched — and only when nothing else already
+    decided them.
+    """
+    global _USAGE_ASKED
+    if _USAGE_ASKED:
+        return
+    _USAGE_ASKED = True
+    try:
+        from agents.models.chatcmpl_helpers import ChatCmplHelpers
+    except ImportError:  # pragma: no cover - the SDK moved or is absent
+        return
+    original = ChatCmplHelpers.get_stream_options_param.__func__
+
+    def with_usage(cls: Any, client: Any, model_settings: Any, stream: bool) -> Any:
+        chosen = original(cls, client, model_settings, stream)
+        if stream and chosen is None:
+            return {"include_usage": True}
+        return chosen
+
+    ChatCmplHelpers.get_stream_options_param = classmethod(with_usage)
+
+
 def _omnigent() -> Any:
     """The package, or a refusal that says how to get it.
 
@@ -682,12 +724,38 @@ class OmnigentBackend:
         host = self.base_url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
         return host in {"127.0.0.1", "localhost", "::1", "[::1]"}
 
+    def models(self) -> List[str]:
+        """What this endpoint will serve, asked in OpenAI's own vocabulary.
+
+        `GET /v1/models` rather than Ollama's `/api/tags`, because the base URL
+        here is only promised to be OpenAI-compatible — llama.cpp and vLLM
+        answer it too, and the point of this backend is that the server behind
+        it is interchangeable.
+
+        Local only. A hosted endpoint charges for the call in some plans, its
+        catalogue is thousands of entries long, and neither belongs in a health
+        report; the picker there is the operator's own list. Empty on any
+        failure: the model still runs, the picker just falls back to typing.
+        """
+        if not self.local:
+            return []
+        try:
+            body = _get_json(f"{self.base_url}/models", timeout=CONNECT_TIMEOUT)
+        except Exception:
+            return []
+        entries = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(entries, list):
+            return []
+        names = [str(entry.get("id")) for entry in entries if isinstance(entry, dict)]
+        return sorted(name for name in names if name and name != "None")
+
     def describe(self) -> Dict[str, Any]:
         detail: Dict[str, Any] = {
             "backend": self.id,
             "local": self.local,
             "baseUrl": self.base_url,
             "model": self.model,
+            "models": self.models(),
             "agent": self.agent_path or "(built in)",
             "tools": [tool.name for tool in TOOLS],
         }
@@ -740,6 +808,7 @@ class OmnigentBackend:
                 hint="Install omnigent>=0.14,<0.15.",
             ) from error
         executor._tool_executor = lambda name, args: call_tool(name, args)
+        _ask_for_usage()
         return executor
 
     def stream(

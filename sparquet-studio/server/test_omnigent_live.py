@@ -168,6 +168,17 @@ class OmnigentLiveTests(unittest.TestCase):
         text = "".join(event.text for event in self.events if event.kind == "delta")
         self.assertEqual(text, "That config is not valid.")
 
+    def test_the_local_server_was_asked_for_its_token_counts(self):
+        """An OpenAI-compatible server reports usage only when asked to.
+
+        The SDK asks on its own only when the base URL is OpenAI's own, and
+        Omnigent never sets `include_usage`, so without `_ask_for_usage` no
+        chunk carries a usage block and every local turn is metered at zero.
+        This is the only test that runs the real SDK, so it is the only place
+        the request body can be checked rather than a fake's stand-in for it.
+        """
+        self.assertEqual(self.sent[0].get("stream_options"), {"include_usage": True})
+
     def test_usage_survives_the_trip_and_is_free(self):
         usage = self.events[-1].usage
         self.assertEqual(usage.provider, "omnigent")
