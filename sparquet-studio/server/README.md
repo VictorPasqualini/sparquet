@@ -370,6 +370,85 @@ curl -X POST http://127.0.0.1:8787/credits/<team-id>/grant \
   -d '{"amount": 100, "note": "quarter budget"}'
 ```
 
+## The assistant
+
+The runner answers questions about Sparquet itself, at `POST /assistant/stream`.
+It exists because the useful answers are the ones a browser cannot give: which
+formats *this* installation registered, and whether *this* config actually
+validates. Studio's other providers (Anthropic, OpenAI, Gemini) talk to a vendor
+from the browser with the user's own key and never learn any of that.
+
+**Nothing leaves the machine by default.** The default backend is
+[Ollama](https://ollama.com) on `http://127.0.0.1:11434`, which needs no key and
+no egress. Pull a model once and the assistant works:
+
+```bash
+ollama pull qwen2.5-coder:7b
+```
+
+Any pulled model is offered — `GET /assistant` lists what `/api/tags` reports.
+`qwen2.5-coder:7b` is the default because it fits in 8 GB of RAM and is good at
+JSON; a machine with more room does better with `qwen2.5-coder:32b`.
+
+`/api/chat` is used rather than Ollama's OpenAI-compatible `/v1` route, because
+only the native one reports `prompt_eval_count` and `eval_count` while
+streaming. Billing that cannot see tokens is billing that cannot answer "what
+did this cost", which is the whole point of recording local turns at all.
+
+### Tools
+
+The assistant can call the runner, and the answers say which tools ran, because
+"checked the installed formats" and "recalled them" are different claims about
+how much to trust the reply:
+
+| Tool | Answers with |
+|---|---|
+| `list_formats` | the read and write formats this installation registered, from the framework's own factory |
+| `validate_config` | whether a pipeline JSON parses into a `PipelineConfig`, and the first error if not |
+
+Tool calls and their results are rebuilt on the runner every turn and are never
+accepted from the caller. A transcript the browser could write is a transcript
+that can tell the model a configuration validated when it did not; `POST
+/assistant/stream` therefore takes `user` and `assistant` text and nothing else.
+A model that calls tools six times without answering is stopped and says so.
+
+### Omnigent
+
+`SPARQUET_STUDIO_ASSISTANT=omnigent` swaps the loop for
+[Omnigent](https://pypi.org/project/omnigent/) (Apache-2.0), keeping the same
+tools, the same streaming contract and the same metering. It is an optional
+dependency of the runner and is imported lazily — absent, `GET /assistant`
+answers `available: false` with the hint that installs it:
+
+```bash
+pip install omnigent      # Python 3.12+ only
+```
+
+That floor is why it is optional rather than required: the framework itself
+supports 3.9, and a runner on 3.10 must keep working.
+
+Omnigent is pointed at the same Ollama by default, so choosing it changes the
+agent loop without starting to spend money — `auth: {type: api_key, base_url}`
+on an `OpenAIAgentsSDKExecutor`. A team that outgrows the built-in prompt writes
+its own agent YAML and points `SPARQUET_STUDIO_OMNIGENT_AGENT` at it.
+
+### What a turn costs
+
+**Every turn is recorded; a local turn is recorded at zero.** The credit ledger
+writes no row when nothing was charged — it records movements of money — so
+assistant turns are kept in their own `assist_usage` table instead, and a team
+that moved its assistant onto its own hardware watches the turns climb while the
+charge stays flat. That is the evidence the move worked, and a single
+usage-and-cost figure would hide it.
+
+A turn that went to a paid provider costs `SPARQUET_STUDIO_CREDITS_PER_ASSIST`
+(default 1) and also writes a ledger row, under the same account, the same
+enforcement switch and the same free monthly allowance as a run.
+
+`assistant:Ask` is granted to the builtin `editor` and `operator` roles and not
+to `viewer`: asking spends the runner's CPU, and a read-only account should not
+be able to.
+
 ## Install
 
 ```bash
@@ -439,6 +518,12 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_FREE_MONTHLY` | `40` | Writes a team gets for free each calendar month (UTC). Does not accumulate. |
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
+| `SPARQUET_STUDIO_CREDITS_PER_ASSIST` | `1` | Credits one assistant turn costs when it was **not** answered on this machine. A local turn is recorded at zero whatever this says. |
+| `SPARQUET_STUDIO_ASSISTANT` | `ollama` | Which runtime answers questions. `omnigent` uses Omnigent instead; `off`/`none`/`disabled` turns the assistant off and makes the routes say so rather than never replying. |
+| `SPARQUET_STUDIO_OLLAMA_URL` | `http://127.0.0.1:11434` | Where Ollama is. Both backends talk to it. |
+| `SPARQUET_STUDIO_ASSISTANT_MODEL` | `qwen2.5-coder:7b` | Model used when the caller names none. Free text — any pulled model works. |
+| `SPARQUET_STUDIO_ASSISTANT_KEY` | unset | API key for the assistant endpoint, for the deployment that points `SPARQUET_STUDIO_OLLAMA_URL` at something that wants one. Ollama itself ignores it. |
+| `SPARQUET_STUDIO_OMNIGENT_AGENT` | unset | Path to an Omnigent agent YAML. Unset, the runner builds one from its own prompt and tools. |
 | `SPARQUET_STUDIO_SECRET_KEY` | unset | Master key the `local` connection secrets are encrypted with. Without it the runner still boots and still serves `env` secrets — it refuses only to seal or open a `local` one. Changing it makes every existing `local` secret unreadable. |
 | `SPARQUET_STUDIO_NEW_RESOURCE_DEFAULT` | `creator+team` | What a newly created Job, Pipeline, Workflow, saved query, dataset or secret is governed by. `creator+team` makes its author the owner and gives their team `write` (`read` on a secret). `creator` writes the ownership only. `off` leaves new records ungoverned. See **Default access**. |
 | `SPARQUET_STUDIO_WORKSPACE` | unset | Pins the library directory. Set it and the interface may not change it — a deployment that decides centrally decides centrally. Unset, the runner uses what was chosen in Settings, falling back to the per-user default. |
@@ -1421,6 +1506,74 @@ change the shape of the chart. Same scope rule as `/credits/usage`.
   "periods": [{ "period": "2026-07", "writes": 0, "charged": 0, "waived": 0, "runs": 0 },
               { "period": "2026-08", "writes": 12, "charged": 3, "waived": 9, "runs": 5 }] }
 ```
+
+### `GET /assistant`
+
+Needs a token and no permission: Studio asks this to decide whether to offer the
+runner's assistant at all, and a **403** here would read as a broken runner
+rather than as an unconfigured one.
+
+```json
+{ "backend": "ollama", "available": true, "local": true,
+  "model": "qwen2.5-coder:7b", "base_url": "http://127.0.0.1:11434",
+  "models": ["qwen2.5-coder:7b", "llama3.1:8b"],
+  "tools": ["list_formats", "validate_config"],
+  "agent": "", "version": "", "hint": "", "error": "" }
+```
+
+`available: false` always carries `error` — what is wrong — and `hint` — what to
+do about it, such as `ollama pull qwen2.5-coder:7b` or `pip install omnigent`.
+`local` says whether a turn is going to cost anything, which is what Studio puts
+next to the model name.
+
+### `POST /assistant/stream`
+
+Requires `assistant:Ask`. Server-sent events, same framing as `/run/stream`.
+
+```json
+{ "messages": [{ "role": "user", "content": "which formats can I write?" }],
+  "model": "qwen2.5-coder:7b",
+  "workflow_id": "w1" }
+```
+
+Only `user` and `assistant` messages are accepted. `model` overrides the
+runner's default for this turn; `workflow_id` is what the question is about, so
+the cost lands on the right line of the bill — optional, because a question
+asked from the assistant screen belongs to no Workflow and saying so is more
+honest than guessing.
+
+| Event | Payload |
+|---|---|
+| `delta` | `{"text": "…"}` — the answer as it arrives |
+| `tool` | `{"name": "list_formats", "args": {}, "result": …}` — a tool ran |
+| `done` | `{"usage": {"model": …, "provider": …, "local": true, "inputTokens": 120, "outputTokens": 40, "toolCalls": 1, "durationMs": 2500}}` |
+| `error` | `{"message": "…", "hint": "…"}` — the turn stopped, and why |
+
+The turn is metered whether it finished or failed, so a run of failures is
+visible in billing instead of free.
+
+### `GET /credits/assist`
+
+`?period=YYYY-MM&account_id=…&limit=20` — a month of assistant work and the most
+recent turns behind it. Same scope rule as `/credits/usage`: your own team
+always, somebody else's or the whole runner with `credits:Read`.
+
+```json
+{ "period": "2026-09", "scope": "t1",
+  "turns": 3, "local_turns": 2, "remote_turns": 1,
+  "input_tokens": 300, "output_tokens": 120, "tool_calls": 4,
+  "charged": 1, "seconds": 7,
+  "recent": [{ "id": "a1", "period": "2026-09", "backend": "ollama",
+               "provider": "ollama", "model": "qwen2.5-coder:7b", "local": true,
+               "input_tokens": 100, "output_tokens": 40, "tool_calls": 2,
+               "duration_ms": 2500, "amount": 0,
+               "created_at": "2026-09-16T10:00:00Z",
+               "actor": "ana", "workflow_id": null }] }
+```
+
+`turns` counts everything and `charged` counts only what money moved for, which
+is the pair that answers "is this thing costing us anything". This reads
+`assist_usage`, not the ledger — the ledger has no row for a free turn.
 
 ### `GET /audit`
 

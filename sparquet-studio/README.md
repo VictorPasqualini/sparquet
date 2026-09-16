@@ -29,7 +29,7 @@ If you know n8n, you already know the idea. This is that, for data engineering.
 | **Visual job editor** | Drag sources, transformations, validations and destinations onto a canvas. Joins and unions take a second input, so a branching Job reads like a diagram instead of nested JSON. |
 | **Data quality on the canvas** | Every validation rule is a box, and so are the three datasets the `validations` block writes: the quality report and the two quarantine outputs come from the Quality section of the palette and sit beside a main chain that keeps every row. |
 | **Every Sparquet feature, typed** | All 20 transformations, 7 IO formats and 6 validators, with per-field help, defaults and the gotchas that only live in the framework source (positional `union`, hand-written `MERGE` clauses, `{{runtime}}` pushdown, dot-path `struct`, …). |
-| **AI that writes jobs** | Describe what you need and get a complete, valid Job back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI, Google or any OpenAI-compatible endpoint. |
+| **AI that writes jobs** | Describe what you need and get a complete, valid Job back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI or Google, or answer from your own machine with Ollama or the local runner, for free. |
 | **Live linting** | 20+ rules run as you type: unreachable nodes, a `merge` write without an ON or WHEN clauses, a `{{var}}` no `collect` publishes, a `{param}` you never declared, `collect` before `checkpoint`, two sinks fighting over one path, a quarantine output with no row-level rule to fill it. |
 | **Round-trip JSON** | Import an existing config, edit it visually, export it byte-for-byte usable. The compiler is covered by tests that round-trip the framework's own example configs. |
 | **Run it locally** | An optional Python service executes the compiled JSON with the real `Sparquet` and streams back counters, validation results, a data preview and the framework's structured logs. |
@@ -189,7 +189,9 @@ The Studio opens on **Assistant** (`/`) rather than on a list of what you alread
 
 Before anything is typed the screen is an invitation rather than a blank page: the mark, one sentence saying what kind of answer it is good at, and four openings of different shapes — show me one, which of these, why is mine wrong, how do I. The first message replaces all of it with the transcript.
 
-It is deliberately not the canvas assistant: there is no job open, so no pipeline, no selection and no lint output leave the browser — only what you type. It answers about Sparquet itself, and what it cannot do yet is *act*: create the job it just described, run it, read the catalog back. That needs an agent loop with tools, and the plan recorded in `BACKLOG.md` is to put the open-source **Omnigent** agent runtime behind this screen rather than grow a second engine here.
+It is deliberately not the canvas assistant: there is no job open, so no pipeline, no selection and no lint output leave the browser — only what you type. It answers about Sparquet itself.
+
+With the **Local runner** provider selected it can also *look*: read the formats this installation actually registered, and validate a config against the framework instead of recalling what it thinks the schema is. The tools it ran are named above each answer, because "checked" and "remembered" are different claims about how much to trust a reply. Acting — creating the job it just described, running it — is still the next step in `BACKLOG.md`.
 
 ### Setting it up
 
@@ -197,12 +199,24 @@ It is deliberately not the canvas assistant: there is no job open, so no pipelin
 
 | Provider | Get a key | Default model |
 |---|---|---|
+| **Local runner** | none — the runner holds it | whatever the runner was configured with |
+| **Ollama** | none — nothing leaves the machine | `qwen2.5-coder:7b` |
 | Anthropic | <https://console.anthropic.com/settings/keys> | `claude-sonnet-4-5` |
 | OpenAI | <https://platform.openai.com/api-keys> | `gpt-4.1` |
 | Google | <https://aistudio.google.com/apikey> | `gemini-2.5-pro` |
-| OpenAI-compatible | your own gateway, Ollama, vLLM… | free text |
+| OpenAI-compatible | your own gateway, vLLM… | free text |
 
 The key is used to call the provider **directly from your browser** and is never sent anywhere else — there is no Sparquet server in the loop. By default it is kept in memory for the session only; "Remember key in this browser" stores it in `localStorage`, which is convenient on a personal machine and a bad idea on a shared one.
+
+#### Answering from your own machine
+
+The first two providers ask for no key at all.
+
+**Ollama** is the browser talking to [Ollama](https://ollama.com) on `http://localhost:11434`. Nothing leaves the machine and nothing is billed. `ollama pull qwen2.5-coder:7b` once and it works.
+
+**Local runner** sends the question to the runner you already started, which answers with its own model — Ollama by default — and can call its own tools on the way. Settings hides the base URL and key fields for it, because neither is the browser's to set, and shows what the runner answered instead: backend, model, endpoint, tools, and whether a turn is going to cost anything. Setup, models and the `SPARQUET_STUDIO_ASSISTANT` knobs are in [server/README.md](server/README.md#the-assistant).
+
+Every turn appears under **Billing**, including the free ones — a team that moved its assistant in-house watches the turns climb while the charge stays flat, which is the evidence the move worked.
 
 ## Local runner
 

@@ -1596,42 +1596,58 @@ O que falta, na ordem em que dói:
   digitado. Provider, modelo e chave são os mesmos de Settings — nem segundo lugar para
   configurar, nem segunda conta para pagar.
 
-- [ ] **Omnigent como motor do assistente** — hoje a tela faz uma requisição e devolve
-  texto. O que falta é **agir**: criar o Job que acabou de descrever, rodar, ler o
-  catálogo de volta, corrigir o que o linter apontou. Isso é laço de agente com
-  ferramentas, e a decisão é usar o Omnigent (open source) em vez de crescer um segundo
-  motor dentro do Studio — o que existe em `src/lib/ai/` é cliente de provider, não
-  orquestrador, e não deve virar um.
+- ✅ **O assistente responde da própria máquina, e mesmo assim aparece no billing** —
+  o runner ganhou `server/assistant.py`, `GET /assistant`, `POST /assistant/stream`
+  (SSE, sob `assistant:Ask`) e `GET /credits/assist`; o Studio ganhou dois providers,
+  **Local runner** e **Ollama**, ao lado de Anthropic/OpenAI/Google.
 
-  O formato do transcript da tela já é o que um agente precisaria (turnos, streaming por
-  token, cancelamento via `AbortController`), então a troca é de motor, não de interface.
+  **Ollama é o backend padrão**, e a análise que levou a isso: é o único caminho que
+  não pede chave, não gera egress e não gera custo, e o modelo que cabe em 8 GB
+  (`qwen2.5-coder:7b`) já é bom o bastante para JSON de pipeline. O runner fala com
+  `/api/chat` e **não** com a rota compatível com OpenAI (`/v1`), porque só a nativa
+  reporta `prompt_eval_count`/`eval_count` durante o streaming — billing que não
+  enxerga token não responde "quanto isto custou", que é a razão de registrar turno
+  local. `/api/tags` lista o que já foi baixado, e é isso que `GET /assistant`
+  oferece como lista de modelos.
 
-  **O que o projeto é**, verificado em <https://github.com/omnigent-ai/omnigent>: framework
-  de agentes em Python sob **Apache 2.0**, instalável como `pip install omnigent`. Sobe um
-  servidor HTTP com SSE (`localhost:6767` por padrão) e também expõe SDK Python, então dá
-  para embuti-lo no runner em vez de rodar um serviço à parte. Um agente é declarado em
-  YAML e as ferramentas são funções Python referenciadas por caminho de import
-  (`type: function` / `callable: pacote.modulo.funcao`), além de servidores MCP e
-  sub-agentes. É esse ponto que torna a integração barata: as ferramentas do Studio já
-  existem como funções Python no runner (`workspace.py`, o linter, o disparo de execução),
-  e declarar uma delas é uma entrada de YAML, não um adaptador.
+  **O Omnigent entrou como segundo backend** (`SPARQUET_STUDIO_ASSISTANT=omnigent`),
+  com as mesmas ferramentas, o mesmo contrato de streaming e a mesma medição —
+  apontado para o mesmo Ollama, de modo que trocar de backend troca o laço de agente
+  sem passar a gastar. Verificado na 0.14.0: Apache-2.0, `Requires-Python >=3.12`,
+  13 MB e ~40 dependências. O caminho local e gratuito é o `OpenAIAgentsSDKExecutor`
+  com `auth: {type: api_key, api_key, base_url}`; os eventos são despachados pelo
+  **nome da classe** (`TextChunk`, `ToolCallRequest`, `ToolCallComplete`,
+  `TurnComplete`, `ExecutorError`), e o adaptador do runner depende disso.
 
-  **Duas das questões abaixo já têm resposta.** Licença: Apache 2.0, compatível com a
-  distribuição do Studio. Empacotamento: entra como extra opcional, porque
-  `requirements.txt` do runner não deve arrastar a árvore do agente para quem não usa o
-  assistente — mas o piso de Python do Omnigent é **3.12+**, contra
-  `requires-python = ">=3.9"` do framework, então instalar o extra estreita a versão de
-  Python do ambiente e isso precisa estar dito no README do runner.
+  Por causa do piso 3.12 ele é **dependência opcional e importada preguiçosamente**:
+  o framework sustenta 3.9 e um runner em 3.10 tem que continuar funcionando. Sem o
+  pacote, `GET /assistant` responde `available: false` com o `hint` que instala.
 
-  As demais, a definir antes de começar:
+  **As perguntas em aberto ficaram assim:**
 
-  | Questão | Por que decide o desenho |
+  | Questão | Resposta |
   |---|---|
-  | Onde o agente roda | Ferramenta que cria Job, lê o disco ou dispara execução **não** pode viver no navegador: ela precisa do runner. Provavelmente um endpoint novo em `server/`, com `requires(...)` como todo o resto — agente sem IAM é escalada de privilégio com interface de chat. |
-  | Embutido ou ao lado | O Omnigent roda como servidor próprio (`:6767`) ou como SDK dentro de outro processo. Servidor à parte é uma segunda porta a proteger e um segundo lugar aonde a identidade precisa chegar; SDK dentro do runner herda o IAM que já existe. A segunda opção parece certa, e o que decide é quanto do laço o Omnigent quer tomar do processo hospedeiro. |
-  | Chave de quem | O navegador hoje chama o provider com a chave do usuário, e nada fica no servidor. Um agente no runner inverte isso; ou o runner passa a receber a chave por requisição, ou passa a ter uma própria — e aí é ele que aparece na fatura. |
-  | Superfície de ferramentas | Começar com leitura (listar workflows, ler Job, ler catálogo, rodar o linter) e só depois escrita. Toda ferramenta que escreve precisa de confirmação na tela, pelo mesmo motivo que apagar arquivo da biblioteca tem: o usuário aprova o efeito, não a intenção. |
-  | Custo por execução | Billing já cobra execução de pipeline (§9.3). Turno de agente é um custo novo, e sem medida ele entra como surpresa na fatura. |
+  | Onde o agente roda | No runner, como o quadro previa. As ferramentas são funções Python do próprio processo e a rota exige `assistant:Ask` — concedida a `editor` e `operator`, negada a `viewer`, porque perguntar gasta CPU do runner. |
+  | Embutido ou ao lado | Embutido. Nada de segunda porta em `:6767`: o backend é construído dentro do processo, herda o IAM que já existe e morre com ele. |
+  | Chave de quem | De ninguém — é esse o ponto. O navegador não manda chave para o provider `runner`, e o runner não tem uma: o modelo é local. `SPARQUET_STUDIO_ASSISTANT_KEY` existe só para quem apontar `SPARQUET_STUDIO_OLLAMA_URL` para um gateway que peça chave. |
+  | Superfície de ferramentas | Começou por leitura, como planejado: `list_formats` (o que *esta* instalação registrou) e `validate_config` (se *este* JSON vira `PipelineConfig`). São as duas respostas que o navegador não consegue dar. Escrita continua pendente, com confirmação na tela. |
+  | Custo por execução | Resolvido, e é a parte que exigiu tabela nova. `CreditStore.charge()` não escreve linha no ledger quando o custo é ≤ 0 — ledger registra movimento de dinheiro —, então turno de assistente vive em `assist_usage`: **todo** turno é gravado, o local com `amount` 0. Billing mostra os dois números separados, e quem migrou o assistente para a própria máquina vê os turnos subirem com a cobrança parada. Turno remoto custa `SPARQUET_STUDIO_CREDITS_PER_ASSIST` e aí sim também escreve no ledger. |
+
+  Documentado em `sparquet-studio/server/README.md` (**The assistant**) e em
+  `sparquet-studio/README.md`.
+
+- [ ] **Falta o Omnigent rodar de verdade uma vez** — o adaptador tem teste com
+  eventos falsos que carregam os nomes de classe reais, e o caminho Ollama tem teste
+  de ponta a ponta com frames NDJSON; o que nunca rodou é `pip install omnigent` num
+  interpretador 3.12+ com um agente de verdade. Antes de anunciar o backend, uma
+  execução manual: instalar, `SPARQUET_STUDIO_ASSISTANT=omnigent`, fazer uma pergunta
+  que force `validate_config` e conferir que o `usage` do `TurnComplete` chega em
+  `assist_usage`.
+
+- [ ] **Agir, não só olhar** — criar o Job que acabou de descrever, rodar, corrigir o
+  que o linter apontou. As ferramentas de escrita são a parte que falta, e cada uma
+  delas precisa de confirmação na tela pelo mesmo motivo que apagar arquivo da
+  biblioteca tem: o usuário aprova o efeito, não a intenção.
 
 ---
 
