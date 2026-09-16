@@ -7,7 +7,6 @@ clock, no Spark. The rest exercise the store and the HTTP surface, which is wher
 transitions, wildcards and the exposition format live.
 """
 
-import json
 import os
 import tempfile
 import unittest
