@@ -109,6 +109,10 @@ TOKEN_ACCOUNT = "token"
 REASON_RUN = "run"
 REASON_GRANT = "grant"
 REASON_ADJUST = "adjust"
+#: An assistant turn that went to a paid provider. A turn answered by a
+#: model on this machine never reaches the ledger — it is recorded in
+#: `assist_usage` instead, which is metered whether or not it costs.
+REASON_ASSIST = "assist"
 
 #: What the free allowance is worth when nobody overrides it. Forty writes a
 #: month is enough for a person to build and test pipelines without ever meeting
@@ -131,6 +135,23 @@ def credits_per_write() -> int:
     """One credit per destination written, unless the operator says otherwise."""
     try:
         return max(0, int(os.getenv("SPARQUET_STUDIO_CREDITS_PER_WRITE", "1")))
+    except ValueError:
+        return 1
+
+
+def assist_credits_per_turn() -> int:
+    """What one assistant turn costs when the model is not on this machine.
+
+    A turn and not a token: the runner sees whatever usage numbers the provider
+    chose to report, and several report none at all, so pricing per token would
+    be a number that silently becomes wrong. A turn is something the runner
+    always knows it did.
+
+    Zero turns it off, which is what an operator who pays the model provider
+    directly wants — the usage is still recorded, it just does not move credits.
+    """
+    try:
+        return max(0, int(os.getenv("SPARQUET_STUDIO_CREDITS_PER_ASSIST", "1")))
     except ValueError:
         return 1
 
@@ -329,6 +350,38 @@ CREATE TABLE IF NOT EXISTS ledger_tag (
   PRIMARY KEY (entry_id, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_tag_tag ON ledger_tag(tag);
+
+/* One row per assistant turn, including the ones that cost nothing.
+
+   Separate from `ledger` on purpose. The ledger records movements of money
+   and deliberately stays empty when nothing moved; this table records work,
+   and a turn answered by a model running on this machine is work that
+   happened — it burned somebody's GPU for eight seconds and it belongs on
+   the billing screen, with a cost of zero, next to the turns that did cost.
+   Writing free rows into the ledger to get that would bury the rows that
+   matter, which is the reason the ledger refuses them. */
+CREATE TABLE IF NOT EXISTS assist_usage (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  period TEXT NOT NULL,
+  backend TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  /* 1 when the model answered from this machine, which is what makes it free. */
+  local INTEGER NOT NULL DEFAULT 1,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  tool_calls INTEGER NOT NULL DEFAULT 0,
+  amount INTEGER NOT NULL DEFAULT 0,
+  actor TEXT,
+  workflow_id TEXT,
+  entry_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_assist_period ON assist_usage(period, account_id);
+CREATE INDEX IF NOT EXISTS idx_assist_account
+  ON assist_usage(account_id, created_at DESC);
 """
 
 #: A tag is typed by a human, so it is bounded before it reaches the ledger.
@@ -445,6 +498,58 @@ class Entry:
 
 
 @dataclass
+class AssistTurn:
+    """One answered assistant turn, as the billing screen reads it back."""
+
+    id: str
+    account_id: str
+    period: str
+    #: `ollama` or `omnigent` — which runtime answered, not which model.
+    backend: str
+    #: Where the tokens were actually spent. `ollama` for a local model; the
+    #: provider id for anything Omnigent routed outward.
+    provider: str
+    model: str
+    local: bool
+    input_tokens: int
+    output_tokens: int
+    duration_ms: int
+    tool_calls: int
+    #: Credits taken. Zero for every local turn, which is the whole point.
+    amount: int
+    created_at: str
+    actor: Optional[str] = None
+    workflow_id: Optional[str] = None
+    #: The ledger row this turn produced, when it produced one.
+    entry_id: Optional[str] = None
+
+
+@dataclass
+class AssistSummary:
+    """A month of assistant work, split by what it cost.
+
+    `local_turns` and `remote_turns` are reported apart rather than summed,
+    because the answer to "what is the assistant costing us" is a different
+    number from "how much is it being used", and a team running everything on
+    its own hardware wants to see the second one go up while the first stays
+    at zero.
+    """
+
+    period: str
+    account_id: str
+    turns: int = 0
+    local_turns: int = 0
+    remote_turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tool_calls: int = 0
+    charged: int = 0
+    #: Seconds of model time, rounded, so a slow local model is visible as
+    #: something other than a free lunch.
+    seconds: int = 0
+
+
+@dataclass
 class Reservation:
     """Credits held for a run that has not finished yet.
 
@@ -553,6 +658,22 @@ class CreditLedger(Protocol):
     def entries_for_job_runs(self, job_run_ids: Iterable[str]) -> Dict[str, Entry]: ...
 
     def usage(self, account_id: str, period: Optional[str] = None) -> Dict[str, int]: ...
+
+    def record_assist(
+        self, account_id: str, *, backend: str, provider: str, model: str,
+        local: bool, input_tokens: int = 0, output_tokens: int = 0,
+        duration_ms: int = 0, tool_calls: int = 0, username: Optional[str] = None,
+        actor: Optional[str] = None, workflow_id: Optional[str] = None,
+    ) -> AssistTurn: ...
+
+    def assist_summary(
+        self, account_id: Optional[str] = None, period: Optional[str] = None,
+    ) -> AssistSummary: ...
+
+    def assist_turns(
+        self, account_id: Optional[str] = None, limit: int = 50,
+        *, period: Optional[str] = None,
+    ) -> List[AssistTurn]: ...
 
     def breakdown(
         self, *, group_by: str = "workflow", period: Optional[str] = None,
@@ -944,6 +1065,159 @@ class CreditStore:
             "period": wanted, "writes": int(row["writes"]),
             "charged": int(row["charged"]), "waived": int(row["waived"]),
         }
+
+
+    # ---- the assistant ---------------------------------------------------
+
+    def record_assist(
+        self, account_id: str, *, backend: str, provider: str, model: str,
+        local: bool, input_tokens: int = 0, output_tokens: int = 0,
+        duration_ms: int = 0, tool_calls: int = 0, username: Optional[str] = None,
+        actor: Optional[str] = None, workflow_id: Optional[str] = None,
+    ) -> AssistTurn:
+        """Record one answered turn, and charge it only if it left the machine.
+
+        Every turn is written, including the free ones — that is what separates
+        this from `charge`, and it is deliberate: a team that moved its assistant
+        onto its own hardware should be able to watch the usage keep climbing
+        while the cost stays flat at zero. A number that only appears when
+        somebody is being billed cannot show that.
+
+        A remote turn also writes a ledger row, so it reaches the invoice through
+        the same path every other cost does.
+        """
+        cost = 0 if local else assist_credits_per_turn()
+        gate = enforced()
+        turn_id = uuid.uuid4().hex
+        entry_id: Optional[str] = None
+        now = _now_iso()
+
+        with self._lock, closing(self._connect()) as conn:
+            row = self._ensure(conn, account_id, username)
+            period = str(row["period"] or current_period())
+            balance_after = int(row["balance"])
+
+            if cost > 0:
+                free_remaining = max(0, free_monthly() - int(row["free_used"]))
+                from_free = min(free_remaining, cost)
+                from_balance = cost - from_free
+                shortfall = 0
+                if gate and from_balance > balance_after:
+                    # The answer is already streamed; refusing it now would only
+                    # mean charging nothing for work that happened.
+                    shortfall = from_balance - balance_after
+                    from_balance = balance_after
+                if gate:
+                    free_used = int(row["free_used"]) + from_free
+                    balance_after = balance_after - from_balance
+                else:
+                    free_used = int(row["free_used"])
+                conn.execute(
+                    "UPDATE account SET balance = ?, free_used = ?, spent = spent + ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (balance_after, free_used, cost, now, account_id),
+                )
+                entry_id = self._write_entry(
+                    conn, account_id=account_id, amount=-cost, reason=REASON_ASSIST,
+                    applied=gate, balance_after=balance_after,
+                    target=f"{provider}/{model}", job_name=None,
+                    note=None if gate else "metering only; enforcement is off",
+                    writes=0, free_amount=from_free if gate else 0, shortfall=shortfall,
+                    period=period, workflow_id=workflow_id, actor=actor,
+                )
+
+            conn.execute(
+                "INSERT INTO assist_usage (id, account_id, period, backend, provider, "
+                "model, local, input_tokens, output_tokens, duration_ms, tool_calls, "
+                "amount, actor, workflow_id, entry_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    turn_id, account_id, period, backend, provider, model,
+                    1 if local else 0, max(0, int(input_tokens)),
+                    max(0, int(output_tokens)), max(0, int(duration_ms)),
+                    max(0, int(tool_calls)), cost, actor, workflow_id, entry_id, now,
+                ),
+            )
+            conn.commit()
+
+        return AssistTurn(
+            id=turn_id, account_id=account_id, period=period, backend=backend,
+            provider=provider, model=model, local=local,
+            input_tokens=max(0, int(input_tokens)),
+            output_tokens=max(0, int(output_tokens)),
+            duration_ms=max(0, int(duration_ms)), tool_calls=max(0, int(tool_calls)),
+            amount=cost, created_at=now, actor=actor, workflow_id=workflow_id,
+            entry_id=entry_id,
+        )
+
+    def assist_summary(
+        self, account_id: Optional[str] = None, period: Optional[str] = None,
+    ) -> AssistSummary:
+        """A month of assistant work. `account_id` None reads the whole runner."""
+        wanted = period or current_period()
+        where = ["period = ?"]
+        args: List[Any] = [wanted]
+        if account_id:
+            where.append("account_id = ?")
+            args.append(account_id)
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS turns, "
+                "       COALESCE(SUM(local), 0) AS local_turns, "
+                "       COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+                "       COALESCE(SUM(output_tokens), 0) AS output_tokens, "
+                "       COALESCE(SUM(tool_calls), 0) AS tool_calls, "
+                "       COALESCE(SUM(amount), 0) AS charged, "
+                "       COALESCE(SUM(duration_ms), 0) AS duration_ms "
+                "FROM assist_usage WHERE " + " AND ".join(where),
+                tuple(args),
+            ).fetchone()
+        turns = int(row["turns"])
+        local_turns = int(row["local_turns"])
+        return AssistSummary(
+            period=wanted, account_id=account_id or "all", turns=turns,
+            local_turns=local_turns, remote_turns=turns - local_turns,
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            tool_calls=int(row["tool_calls"]), charged=int(row["charged"]),
+            seconds=round(int(row["duration_ms"]) / 1000),
+        )
+
+    def assist_turns(
+        self, account_id: Optional[str] = None, limit: int = 50,
+        *, period: Optional[str] = None,
+    ) -> List[AssistTurn]:
+        """The most recent turns, newest first."""
+        where: List[str] = []
+        args: List[Any] = []
+        if account_id:
+            where.append("account_id = ?")
+            args.append(account_id)
+        if period:
+            where.append("period = ?")
+            args.append(period)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        args.append(max(1, min(500, int(limit))))
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM assist_usage" + clause
+                + " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                tuple(args),
+            ).fetchall()
+        return [
+            AssistTurn(
+                id=str(row["id"]), account_id=str(row["account_id"]),
+                period=str(row["period"]), backend=str(row["backend"]),
+                provider=str(row["provider"]), model=str(row["model"]),
+                local=bool(row["local"]), input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                duration_ms=int(row["duration_ms"]), tool_calls=int(row["tool_calls"]),
+                amount=int(row["amount"]), created_at=str(row["created_at"]),
+                actor=row["actor"], workflow_id=row["workflow_id"],
+                entry_id=row["entry_id"],
+            )
+            for row in rows
+        ]
 
     #: What a bill can be sliced by, and the ledger column each slice reads.
     #: The account is always the payer — these only decide how one account's month

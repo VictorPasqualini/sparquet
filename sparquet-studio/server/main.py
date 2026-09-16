@@ -150,6 +150,7 @@ vault = _load_sibling_module("vault")
 compat = _load_sibling_module("compat")
 monitoring = _load_sibling_module("monitoring")
 scheduling = _load_sibling_module("scheduling")
+assistant = _load_sibling_module("assistant")
 
 
 # ------------------------------------------------------------------ models
@@ -7382,6 +7383,226 @@ def _elapsed_ms(started: float) -> int:
 
 # Started last, once `_log` and the whole module exist: the first purge runs
 # immediately, on a daemon thread, so it never delays a request or survives a
+
+# ------------------------------------------------------- the assistant
+
+
+class AssistantTurnIn(BaseModel):
+    """One message of the transcript the browser is holding.
+
+    Only `user` and `assistant` are accepted; tool calls and results are the
+    runner's business and are rebuilt on every turn rather than trusted from the
+    client — a transcript that can name a tool result is a transcript that can
+    forge one.
+    """
+
+    role: str
+    content: str
+
+
+class AssistRequest(BaseModel):
+    messages: List[AssistantTurnIn] = Field(default_factory=list)
+    #: Overrides the runner's default for this turn only. Free text, like every
+    #: model id in this product.
+    model: Optional[str] = None
+    #: What the question is about, so the cost lands on the right line of the
+    #: bill. Optional, because a question asked from the assistant screen belongs
+    #: to no Workflow and saying so is more honest than guessing.
+    workflow_id: Optional[str] = None
+
+
+class AssistantInfo(BaseModel):
+    """What `GET /assistant` answers: whether it can answer, and with what."""
+
+    backend: str
+    available: bool
+    local: bool
+    model: str = ""
+    base_url: str = ""
+    models: List[str] = Field(default_factory=list)
+    tools: List[str] = Field(default_factory=list)
+    agent: str = ""
+    version: str = ""
+    hint: str = ""
+    error: str = ""
+
+
+class AssistTurnOut(BaseModel):
+    id: str
+    period: str
+    backend: str
+    provider: str
+    model: str
+    local: bool
+    input_tokens: int
+    output_tokens: int
+    tool_calls: int
+    duration_ms: int
+    amount: int
+    created_at: str
+    actor: Optional[str] = None
+    workflow_id: Optional[str] = None
+
+
+class AssistSummaryOut(BaseModel):
+    period: str
+    scope: str
+    turns: int
+    local_turns: int
+    remote_turns: int
+    input_tokens: int
+    output_tokens: int
+    tool_calls: int
+    charged: int
+    seconds: int
+    recent: List[AssistTurnOut] = Field(default_factory=list)
+
+
+def _assistant_info(detail: Dict[str, Any]) -> AssistantInfo:
+    return AssistantInfo(
+        backend=str(detail.get("backend") or ""),
+        available=bool(detail.get("available")),
+        local=bool(detail.get("local", True)),
+        model=str(detail.get("model") or ""),
+        base_url=str(detail.get("baseUrl") or ""),
+        models=[str(name) for name in detail.get("models") or []],
+        tools=[str(name) for name in detail.get("tools") or []],
+        agent=str(detail.get("agent") or ""),
+        version=str(detail.get("version") or ""),
+        hint=str(detail.get("hint") or ""),
+        error=str(detail.get("error") or ""),
+    )
+
+
+@app.get("/assistant", response_model=AssistantInfo)
+def assistant_info() -> AssistantInfo:
+    """Which runtime answers here, and whether it can right now.
+
+    No permission needed, and deliberately: the Studio asks this on every load to
+    decide whether to offer the runner's assistant at all, and a 403 would be
+    indistinguishable from a runner that has none.
+    """
+    try:
+        return _assistant_info(assistant.describe())
+    except assistant.AssistantUnavailable as error:
+        return AssistantInfo(
+            backend=assistant.backend_name(), available=False, local=True,
+            error=str(error), hint=getattr(error, "hint", ""),
+        )
+
+
+@app.post(
+    "/assistant/stream",
+    dependencies=[Depends(requires("assistant:Ask"))],
+)
+def assistant_stream(
+    body: AssistRequest, principal: Any = Depends(current_principal)
+) -> StreamingResponse:
+    """One turn, as Server-Sent Events.
+
+    Events: `delta` with the text as it arrives, `tool` when the assistant called
+    one of this runner's tools and what it answered, then a final `done` carrying
+    what the turn consumed — or `error`.
+
+    The turn is metered when it ends, not when it starts, because what it cost is
+    not known until the model stops. A client that hangs up mid-answer still pays
+    for the work, which is why the recording happens in `finally` and not after
+    the last yield.
+    """
+    try:
+        backend = assistant.build()
+    except assistant.AssistantUnavailable as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{error} {getattr(error, 'hint', '')}".strip(),
+        ) from error
+
+    turns = assistant.turns_of(body.messages)
+    if not turns:
+        raise HTTPException(status_code=400, detail="There is nothing to answer.")
+
+    account_id, username = credits.account_for(principal)
+    actor = credits.actor_for(principal)
+
+    def _stream() -> Iterator[str]:
+        usage: Optional[Any] = None
+        try:
+            for event in backend.stream(turns, model=body.model):
+                if event.kind == "done":
+                    usage = event.usage
+                yield _sse(event.kind, event.payload())
+        except assistant.AssistantUnavailable as error:
+            yield _sse("error", {"message": str(error), "hint": getattr(error, "hint", "")})
+        except Exception as error:  # pragma: no cover - defensive
+            yield _sse("error", {"message": f"{type(error).__name__}: {error}"})
+        finally:
+            if usage is not None:
+                try:
+                    _credits.record_assist(
+                        account_id, backend=backend.id, provider=usage.provider,
+                        model=usage.model, local=usage.local,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        duration_ms=usage.duration_ms, tool_calls=usage.tool_calls,
+                        username=username, actor=actor, workflow_id=body.workflow_id,
+                    )
+                except Exception:  # pragma: no cover - metering must not break a turn
+                    _log.exception("Could not record the assistant turn")
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/credits/assist", response_model=AssistSummaryOut)
+def assist_usage(
+    period: Optional[str] = None,
+    account_id: Optional[str] = None,
+    limit: int = 20,
+    principal: Any = Depends(current_principal),
+) -> AssistSummaryOut:
+    """A month of assistant work, and the most recent turns behind it.
+
+    Reported next to the rest of billing and not inside the assistant screen,
+    because the question it answers — is this thing costing us anything — is a
+    billing question. Scope follows the same rule as every other bill: your own
+    team always, the whole runner with `credits:Read`.
+    """
+    own, _ = credits.account_for(principal)
+    everyone = principal is not None and principal.allows("credits:Read")
+    if account_id and account_id != own and not everyone:
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's spending needs credits:Read.",
+        )
+    scoped = account_id or (None if everyone else own)
+    summary = _credits.assist_summary(account_id=scoped, period=period)
+    recent = _credits.assist_turns(
+        account_id=scoped, limit=limit, period=period or credits.current_period()
+    )
+    return AssistSummaryOut(
+        period=summary.period, scope=summary.account_id, turns=summary.turns,
+        local_turns=summary.local_turns, remote_turns=summary.remote_turns,
+        input_tokens=summary.input_tokens, output_tokens=summary.output_tokens,
+        tool_calls=summary.tool_calls, charged=summary.charged,
+        seconds=summary.seconds,
+        recent=[
+            AssistTurnOut(
+                id=turn.id, period=turn.period, backend=turn.backend,
+                provider=turn.provider, model=turn.model, local=turn.local,
+                input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                tool_calls=turn.tool_calls, duration_ms=turn.duration_ms,
+                amount=turn.amount, created_at=turn.created_at, actor=turn.actor,
+                workflow_id=turn.workflow_id,
+            )
+            for turn in recent
+        ],
+    )
+
+
+
 # shutdown. `SPARQUET_STUDIO_HISTORY_PURGE=off` leaves the database untouched.
 if history.RetentionPolicy.enabled():
     threading.Thread(
