@@ -5,6 +5,7 @@ import {
   Boxes,
   Copy,
   FolderKanban,
+  FolderOpen,
   GraduationCap,
   LayoutDashboard,
   LayoutTemplate,
@@ -16,9 +17,10 @@ import {
   Workflow as JobIcon,
 } from 'lucide-react'
 import { useId, useMemo, useState, type ReactNode } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useMatch, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
+import { LibraryBrowser } from '@/components/library/LibraryBrowser'
 import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import {
   Button,
@@ -37,6 +39,7 @@ import {
   useConfirm,
 } from '@/components/ui'
 import { TEMPLATES } from '@/data/templates'
+import { normalizeFolder } from '@/lib/library/tree'
 import { SEED_WORKFLOW_NAME } from '@/lib/storage/seed'
 import { cn } from '@/lib/utils/cn'
 import { plural, relativeTime } from '@/lib/utils/format'
@@ -49,6 +52,15 @@ import {
 } from '@/types/studio'
 
 const RECENT_LIMIT = 8
+
+/**
+ * The two readings of the same library: the records the Studio wrote, and the
+ * directory on disk they share with everything else that is runnable.
+ */
+const TABS = [
+  { id: 'workflow', label: 'Workflow', icon: LayoutDashboard },
+  { id: 'files', label: 'Library files', icon: FolderOpen },
+] as const
 
 /** Workflow accents mapped onto the semantic palette — no raw colors anywhere. */
 const ACCENT: Record<WorkflowAccent, { dot: string; tile: string; surface: string }> = {
@@ -86,6 +98,12 @@ const ACCENT: Record<WorkflowAccent, { dot: string; tile: string; surface: strin
 
 export function Dashboard() {
   const navigate = useNavigate()
+
+  // The splat matches an empty tail, so `/workflow/files` and
+  // `/workflow/files/vendas/gold` are the same route: which tab is open and which
+  // folder is being browsed come from the same match.
+  const browsing = useMatch('/workflow/files/*')
+  const folder = normalizeFolder(browsing?.params['*'] ?? '')
   const workflows = useLibraryStore((state) => state.workflows)
   const jobs = useLibraryStore((state) => state.jobs)
   const duplicateJob = useLibraryStore((state) => state.duplicateJob)
@@ -140,7 +158,7 @@ export function Dashboard() {
     <PageShell className="space-y-8">
       <PageHeader
         icon={<LayoutDashboard />}
-        title="Overview"
+        title="Workflow"
         description="Sparquet Studio turns a pipeline into a canvas you can read — drop in sources,
           transformations and destinations, and Studio writes the JSON that Sparquet runs."
         className="mb-0"
@@ -167,109 +185,148 @@ export function Dashboard() {
         }
       />
 
-      {firstRun && <GettingStarted onCreateWorkflow={() => setCreatingWorkflow(true)} />}
-
-      <section className="grid gap-3 sm:grid-cols-3">
-        <StatTile icon={<FolderKanban />} label="Workflows" value={workflows.length} />
-        <StatTile icon={<JobIcon />} label="Jobs" value={jobs.length} />
-        <StatTile
-          icon={<Boxes />}
-          label="Nodes"
-          value={totalNodes}
-          hint="across all jobs"
-        />
-      </section>
-
-      <section className="space-y-3">
-        <SectionTitle
-          action={
-            jobs.length > RECENT_LIMIT ? (
-              <span className="text-2xs text-content-subtle">
-                Showing {RECENT_LIMIT} of {jobs.length}
-              </span>
-            ) : undefined
-          }
-        >
-          Recent jobs
-        </SectionTitle>
-
-        {recent.length === 0 ? (
-          <div className="card">
-            <EmptyState
-              icon={<JobIcon />}
-              title="No jobs yet"
-              description="A job is one pipeline: a source, the transformations it needs and where the result lands."
-              action={
-                <Button
-                  size="sm"
-                  variant="primary"
-                  icon={<Plus className="h-4 w-4" />}
-                  disabled={!mayWrite}
-                  onClick={() => setCreatingJob(true)}
-                >
-                  New job
-                </Button>
-              }
-            />
-          </div>
-        ) : (
-          <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {recent.map((job) => (
-              <JobCard
-                key={job.id}
-                job={job}
-                workflow={workflowsById.get(job.workflowId)}
-                onOpen={() => navigate(`/jobs/${job.id}`)}
-                onDuplicate={() => void handleDuplicate(job)}
-                onRename={() => setRenaming(job)}
-                onDelete={() => void handleDelete(job)}
-                editable={mayWrite}
-                deletable={mayDelete}
-              />
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="space-y-3">
-        <SectionTitle
-          action={
-            <Button
-              size="xs"
-              variant="ghost"
-              icon={<Plus className="h-3.5 w-3.5" />}
-              disabled={!mayWrite}
-              onClick={() => setCreatingWorkflow(true)}
+      <nav
+        role="tablist"
+        aria-label="Library"
+        className="flex items-center gap-0.5 border-b border-line"
+      >
+        {TABS.map((item) => {
+          const active = item.id === (browsing ? 'files' : 'workflow')
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              className={cn(
+                'flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors',
+                active
+                  ? 'border-brand-500 text-content'
+                  : 'border-transparent text-content-subtle hover:text-content',
+              )}
+              onClick={() => navigate(item.id === 'files' ? '/workflow/files' : '/workflow')}
             >
-              New workflow
-            </Button>
-          }
-        >
-          Workflows
-        </SectionTitle>
+              <item.icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              {item.label}
+            </button>
+          )
+        })}
+      </nav>
 
-        {workflows.length === 0 ? (
-          <div className="card">
-            <EmptyState
-              icon={<FolderKanban />}
-              title="No workflows yet"
-              description="Workflows group the pipelines of one domain — ingestion, ledger, reporting."
-            />
-          </div>
-        ) : (
-          <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {workflows.map((workflow) => (
-              <WorkflowCard
-                key={workflow.id}
-                workflow={workflow}
-                jobCount={
-                  jobs.filter((job) => job.workflowId === workflow.id).length
+      {browsing ? (
+        <LibraryBrowser
+          folder={folder}
+          onNavigate={(target) =>
+            navigate(target ? `/workflow/files/${target}` : '/workflow/files')
+          }
+        />
+      ) : (
+        <>
+        {firstRun && <GettingStarted onCreateWorkflow={() => setCreatingWorkflow(true)} />}
+
+        <section className="grid gap-3 sm:grid-cols-3">
+          <StatTile icon={<FolderKanban />} label="Workflows" value={workflows.length} />
+          <StatTile icon={<JobIcon />} label="Jobs" value={jobs.length} />
+          <StatTile
+            icon={<Boxes />}
+            label="Nodes"
+            value={totalNodes}
+            hint="across all jobs"
+          />
+        </section>
+
+        <section className="space-y-3">
+          <SectionTitle
+            action={
+              jobs.length > RECENT_LIMIT ? (
+                <span className="text-2xs text-content-subtle">
+                  Showing {RECENT_LIMIT} of {jobs.length}
+                </span>
+              ) : undefined
+            }
+          >
+            Recent jobs
+          </SectionTitle>
+
+          {recent.length === 0 ? (
+            <div className="card">
+              <EmptyState
+                icon={<JobIcon />}
+                title="No jobs yet"
+                description="A job is one pipeline: a source, the transformations it needs and where the result lands."
+                action={
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={<Plus className="h-4 w-4" />}
+                    disabled={!mayWrite}
+                    onClick={() => setCreatingJob(true)}
+                  >
+                    New job
+                  </Button>
                 }
               />
-            ))}
-          </ul>
-        )}
-      </section>
+            </div>
+          ) : (
+            <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {recent.map((job) => (
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  workflow={workflowsById.get(job.workflowId)}
+                  onOpen={() => navigate(`/jobs/${job.id}`)}
+                  onDuplicate={() => void handleDuplicate(job)}
+                  onRename={() => setRenaming(job)}
+                  onDelete={() => void handleDelete(job)}
+                  editable={mayWrite}
+                  deletable={mayDelete}
+                />
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="space-y-3">
+          <SectionTitle
+            action={
+              <Button
+                size="xs"
+                variant="ghost"
+                icon={<Plus className="h-3.5 w-3.5" />}
+                disabled={!mayWrite}
+                onClick={() => setCreatingWorkflow(true)}
+              >
+                New workflow
+              </Button>
+            }
+          >
+            Workflows
+          </SectionTitle>
+
+          {workflows.length === 0 ? (
+            <div className="card">
+              <EmptyState
+                icon={<FolderKanban />}
+                title="No workflows yet"
+                description="Workflows group the pipelines of one domain — ingestion, ledger, reporting."
+              />
+            </div>
+          ) : (
+            <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {workflows.map((workflow) => (
+                <WorkflowCard
+                  key={workflow.id}
+                  workflow={workflow}
+                  jobCount={
+                    jobs.filter((job) => job.workflowId === workflow.id).length
+                  }
+                />
+              ))}
+            </ul>
+          )}
+        </section>
+        </>
+      )}
 
       {creatingJob && <NewJobModal onClose={() => setCreatingJob(false)} />}
       {creatingWorkflow && <NewWorkflowModal onClose={() => setCreatingWorkflow(false)} />}

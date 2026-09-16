@@ -23,11 +23,11 @@ export function NotFound() {
         }
         action={
           <Link
-            to="/"
+            to="/workflow"
             className="inline-flex h-8 items-center gap-2 rounded-lg border border-line bg-surface-raised px-3 text-xs font-medium text-content transition-colors hover:border-line-strong hover:bg-surface-sunken"
           >
             <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
-            Back to overview
+            Back to Workflow
           </Link>
         }
       />

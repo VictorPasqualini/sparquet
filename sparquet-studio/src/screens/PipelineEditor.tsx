@@ -28,6 +28,7 @@ import { toast } from 'sonner'
 
 import { CreditsBadge } from '@/components/credits/CreditsBadge'
 import { PipelineRunViewBanner, showPipelineRun } from '@/components/history/PipelineRunViewBanner'
+import { RunRail } from '@/components/history/RunRail'
 import { RunsBrowser } from '@/components/history/RunsBrowser'
 import {
   WorkspaceTabs,
@@ -36,7 +37,9 @@ import {
   type WorkspaceTab,
 } from '@/components/layout/WorkspaceTabs'
 import { PipelineCanvas } from '@/components/pipeline/PipelineCanvas'
+import { ConflictBanner } from '@/components/library/ConflictBanner'
 import { TagsPopover } from '@/components/library/TagsPopover'
+import { SchedulePopover } from '@/components/scheduling/SchedulePopover'
 import { PipelineRunPanel } from '@/components/pipeline/PipelineRunPanel'
 import { StagePicker } from '@/components/pipeline/StagePicker'
 import { Badge, IconButton, Input, Spinner, Tooltip } from '@/components/ui'
@@ -51,7 +54,7 @@ import {
 } from '@/store/pipelineEditor'
 import { useKnownTags, useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
-import type { Pipeline, ValidationIssue } from '@/types/studio'
+import type { Pipeline, ScheduleSpec, ValidationIssue } from '@/types/studio'
 
 export function PipelineEditor() {
   const { pipelineId } = useParams<{ pipelineId: string }>()
@@ -99,8 +102,11 @@ export function PipelineEditor() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-canvas text-center">
         <p className="text-sm text-content">This pipeline no longer exists.</p>
-        <Link to="/" className="text-xs text-brand-600 hover:underline dark:text-brand-400">
-          Back to overview
+        <Link
+          to="/workflow"
+          className="text-xs text-brand-600 hover:underline dark:text-brand-400"
+        >
+          Back to Workflow
         </Link>
       </div>
     )
@@ -241,12 +247,32 @@ const PIPELINE_TABS: WorkspaceTab<PipelineWorkspaceView>[] = [
   { id: 'runs', label: 'Runs', icon: HistoryIcon },
 ]
 
+function PipelineConflictBanner() {
+  const conflict = usePipelineEditorStore((state) => state.conflict)
+  const refused = usePipelineEditorStore((state) => state.conflictRefused)
+  const adopt = usePipelineEditorStore((state) => state.adoptConflict)
+  const overwrite = usePipelineEditorStore((state) => state.overwriteConflict)
+  const dismiss = usePipelineEditorStore((state) => state.dismissConflict)
+
+  return (
+    <ConflictBanner
+      conflict={conflict}
+      refused={refused}
+      noun="pipeline"
+      onAdopt={adopt}
+      onOverwrite={overwrite}
+      onDismiss={dismiss}
+    />
+  )
+}
+
 /**
  * The middle of the pipeline editor: the flow, and the executions it has had.
  *
  * Opening a pipeline lands on the flow, never on an old run painted over it. A run
- * is something you go and get — `Pipeline → run id` in the Runs tab — and from
- * there either onto these stage boxes or into the job that ran as one of them.
+ * is something you go and get — from the strip of recent executions above the
+ * canvas, or `Pipeline → run id` in the Runs tab — and from there either onto
+ * these stage boxes or into the job that ran as one of them.
  *
  * The canvas stays mounted across tabs so React Flow keeps the viewport.
  */
@@ -261,15 +287,42 @@ function PipelineWorkspace({ resolved }: { resolved: ResolvedPipeline }) {
   const runView = usePipelineEditorStore((state) => state.runView)
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const canvas = useSettingsStore((state) => state.canvas)
+  const setCanvas = useSettingsStore((state) => state.setCanvas)
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
+      {/* Above the tabs: it is about the file, so it belongs on the run history
+          view as much as on the canvas. */}
+      <PipelineConflictBanner />
+
       <WorkspaceTabs
         value={view}
         onChange={setView}
         tabs={PIPELINE_TABS}
         ariaLabel="Pipeline workspace"
       />
+
+      {/* Above the tab panels rather than inside the flow one: the strip is about
+          the pipeline, not about the canvas, and moving it with the tab would
+          make it flicker on every switch. */}
+      {pipeline && (
+        <RunRail
+          runnerUrl={runnerUrl}
+          runnerToken={runnerToken}
+          workflowId={pipeline.workflowId}
+          pipelineId={pipeline.id}
+          refreshToken={run?.runId}
+          viewingRunId={runView?.runId ?? null}
+          onSelect={(runId) => {
+            void showPipelineRun(runId, runnerUrl, runnerToken)
+            setView('flow')
+          }}
+          onOpenHistory={() => setView('runs')}
+          collapsed={!canvas.showRunRail}
+          onCollapsedChange={(collapsed) => setCanvas({ showRunRail: !collapsed })}
+        />
+      )}
 
       <div className="relative min-h-0 flex-1">
         <div
@@ -386,6 +439,12 @@ function PipelineTopBar({
     usePipelineEditorStore.setState({ pipeline: { ...pipeline, tags } })
   }
 
+  const commitSchedule = (schedule: ScheduleSpec | undefined) => {
+    if (!pipeline) return
+    void updatePipelineMeta(pipeline.id, { schedule })
+    usePipelineEditorStore.setState({ pipeline: { ...pipeline, schedule } })
+  }
+
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
       <IconButton label="Back to the workflow" onClick={onBack}>
@@ -414,6 +473,13 @@ function PipelineTopBar({
         onChange={commitTags}
         suggestions={knownTags}
         subject={pipeline?.name ?? 'this pipeline'}
+      />
+
+      <SchedulePopover
+        schedule={pipeline?.schedule}
+        onChange={commitSchedule}
+        subject={pipeline?.name ?? 'this pipeline'}
+        resource={pipeline?.id ? `pipeline/${pipeline.id}` : '*'}
       />
 
       <div className="flex items-center gap-1">

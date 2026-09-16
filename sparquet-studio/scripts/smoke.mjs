@@ -21,12 +21,21 @@ const BASE_URL = urlArg >= 0 ? args[urlArg + 1] : 'http://localhost:5273'
 const HEADED = args.includes('--headed')
 
 /**
- * `DEFAULT_RUNNER_URL` in `src/lib/runner/client.ts`. The runner is optional, and
- * the editors ask it for run history as soon as they open, so a refused or
- * unauthorized read there is expected here — Studio handles it in the UI. Console
+ * The runner this run pins the Studio to, written into settings before the app
+ * boots. Deliberately a port nothing listens on.
+ *
+ * The runner is optional — the Studio works out of IndexedDB without one — but it
+ * is NOT neutral: a runner with users in its identity store answers
+ * `login_required`, and the login gate then replaces the whole app, so every
+ * assertion below would fail on a developer machine that happens to have one
+ * running. What this smoke test covers is the browser, so it pins the runner to
+ * somewhere unreachable and the result stops depending on the machine.
+ *
+ * The editors ask the runner for run history as soon as they open, so failed
+ * reads against this origin are expected — Studio handles them in the UI. Console
  * errors from any OTHER origin still fail the run.
  */
-const RUNNER_URL = 'http://127.0.0.1:8787'
+const RUNNER_URL = 'http://127.0.0.1:9'
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
@@ -103,13 +112,37 @@ async function main() {
 
     /* ------------------------------------------------ library boots clean */
 
-    await page.goto(BASE_URL, { waitUntil: 'networkidle2' })
-    await page.evaluate(async () => {
+    // `/` is the assistant now; the seeded library is what /workflow lists.
+    await page.goto(`${BASE_URL}/#/workflow`, { waitUntil: 'networkidle2' })
+    await page.evaluate(async (runnerUrl) => {
       const databases = await indexedDB.databases()
       for (const database of databases) if (database.name) indexedDB.deleteDatabase(database.name)
       localStorage.clear()
-    })
-    await page.goto(BASE_URL, { waitUntil: 'networkidle2' })
+      // Written in the shape `persist` reads back, so the app boots already
+      // pointed away from whatever runner this machine has.
+      localStorage.setItem(
+        'sparquet-studio:settings',
+        JSON.stringify({ state: { runnerUrl, runnerToken: '' }, version: 1 }),
+      )
+    }, RUNNER_URL)
+    // Same hash as before the wipe, so a plain goto may not reload the document;
+    // the seed only runs on boot, and it has to boot against the empty stores.
+    await page.goto(`${BASE_URL}/#/workflow`, { waitUntil: 'networkidle2' })
+    await page.reload({ waitUntil: 'networkidle2' })
+
+    // A runner with users in its identity store answers `login_required`, and the
+    // login gate then replaces the whole app — every assertion below would time
+    // out on a selector that is not missing, only behind a password. That is a
+    // machine state, not a regression, so say which one and stop.
+    if (/Sign in to Sparquet Studio/i.test(await page.evaluate(() => document.body.innerText))) {
+      console.error('The runner is asking for a login, so the Studio never renders.')
+      console.error('Either stop the runner, or start it against an empty identity store:')
+      console.error('  SPARQUET_STUDIO_AUTH_DB=$(mktemp -d)/auth.sqlite3 python server/main.py')
+      await browser.close()
+      server?.kill()
+      process.exit(2)
+    }
+
     await page.waitForSelector('a[href*="jobs"]', { timeout: 15_000 })
 
     const seeded = await page.$$eval('a[href*="jobs"]', (links) =>
@@ -199,7 +232,7 @@ async function main() {
     // browser storage only if nothing answers — so the seeded workflow appears a
     // tick after the page is idle rather than with the first paint.
     const workflowHref = await page
-      .goto(BASE_URL, { waitUntil: 'networkidle2' })
+      .goto(`${BASE_URL}/#/workflow`, { waitUntil: 'networkidle2' })
       .then(() => page.waitForSelector('a[href*="workflows/"]', { timeout: 15_000 }))
       .then(() => page.$$eval('a[href*="workflows/"]', (links) => links[0]?.getAttribute('href')))
       .catch(() => null)
@@ -474,10 +507,14 @@ async function main() {
     /* ------------------------------------------------------- routes */
 
     for (const [route, needle] of [
+      ['#/', /What should the data do/i],
+      ['#/workflow', /Library files/i],
       ['#/templates', /template/i],
       ['#/learn', /lesson|learn/i],
       ['#/billing', /Execution credits/i],
-      ['#/access', /Access &amp; IAM|Users, teams and roles/i],
+      // `innerText` carries the ampersand, not the entity: the old needle could only
+      // ever match the copy that used to sit under the title.
+      ['#/access', /Access & IAM/i],
       ['#/settings', /AI assistant|Appearance/i],
     ]) {
       await page.goto(`${BASE_URL}/${route}`, { waitUntil: 'networkidle2' })

@@ -34,8 +34,10 @@ import { CreditsBadge } from '@/components/credits/CreditsBadge'
 import { JobCanvas } from '@/components/canvas/JobCanvas'
 import { RunsBrowser } from '@/components/history/RunsBrowser'
 import { RunViewBanner } from '@/components/history/RunViewBanner'
+import { ConflictBanner } from '@/components/library/ConflictBanner'
 import { CommandPalette } from '@/components/layout/CommandPalette'
 import { TagsPopover } from '@/components/library/TagsPopover'
+import { SchedulePopover } from '@/components/scheduling/SchedulePopover'
 import {
   WorkspaceTabs,
   workspacePanelId,
@@ -55,7 +57,7 @@ import { getJob } from '@/lib/storage/db'
 import { useEditorStore, type PanelId, type WorkspaceView } from '@/store/editor'
 import { useKnownTags, useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
-import type { Job } from '@/types/studio'
+import type { Job, ScheduleSpec } from '@/types/studio'
 
 /** Monaco is heavy and only the JSON tab needs it. */
 const JsonPanel = lazy(() =>
@@ -131,8 +133,11 @@ export function JobEditor() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-canvas text-center">
         <p className="text-sm text-content">This job no longer exists.</p>
-        <Link to="/" className="text-xs text-brand-600 hover:underline dark:text-brand-400">
-          Back to overview
+        <Link
+          to="/workflow"
+          className="text-xs text-brand-600 hover:underline dark:text-brand-400"
+        >
+          Back to Workflow
         </Link>
       </div>
     )
@@ -163,6 +168,25 @@ const WORKSPACE_TABS: WorkspaceTab<WorkspaceView>[] = [
   { id: 'runs', label: 'Runs', icon: HistoryIcon },
 ]
 
+function JobConflictBanner() {
+  const conflict = useEditorStore((state) => state.conflict)
+  const refused = useEditorStore((state) => state.conflictRefused)
+  const adopt = useEditorStore((state) => state.adoptConflict)
+  const overwrite = useEditorStore((state) => state.overwriteConflict)
+  const dismiss = useEditorStore((state) => state.dismissConflict)
+
+  return (
+    <ConflictBanner
+      conflict={conflict}
+      refused={refused}
+      noun="job"
+      onAdopt={adopt}
+      onOverwrite={overwrite}
+      onDismiss={dismiss}
+    />
+  )
+}
+
 /**
  * The middle of the editor: the flow, the JSON behind it, and the executions it
  * has had. This is the only place the JSON is shown — a second Monaco on the same
@@ -188,6 +212,10 @@ function JobWorkspace() {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col">
+      {/* Above the tabs, not over the canvas: it is about the file, and it has to
+          be visible from the JSON view and the run history too. */}
+      <JobConflictBanner />
+
       <WorkspaceTabs
         value={view}
         onChange={setView}
@@ -309,6 +337,12 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
     useEditorStore.setState({ job: { ...job, tags } })
   }
 
+  const commitSchedule = (schedule: ScheduleSpec | undefined) => {
+    if (!job) return
+    void updateJobMeta(job.id, { schedule })
+    useEditorStore.setState({ job: { ...job, schedule } })
+  }
+
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
       <IconButton label="Back" onClick={onBack}>
@@ -337,6 +371,13 @@ function EditorTopBar({ onBack }: { onBack: () => void }) {
         onChange={commitTags}
         suggestions={knownTags}
         subject={job?.name ?? 'this job'}
+      />
+
+      <SchedulePopover
+        schedule={job?.schedule}
+        onChange={commitSchedule}
+        subject={job?.name ?? 'this job'}
+        resource={job?.id ? `job/${job.id}` : '*'}
       />
 
       <div className="flex items-center gap-1">
