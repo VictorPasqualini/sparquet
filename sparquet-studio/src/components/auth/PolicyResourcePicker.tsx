@@ -18,6 +18,7 @@ import { useMemo, useState } from 'react'
 import { Badge, Button, Input, Select } from '@/components/ui'
 import { useCatalogStore } from '@/store/catalog'
 import { useLibraryStore } from '@/store/library'
+import { useQueriesStore } from '@/store/queries'
 import { useSecretsStore } from '@/store/secrets'
 
 /** The kinds a statement may scope to, plus the "everything" row that has no id. */
@@ -28,6 +29,7 @@ const KINDS = [
   'job',
   'dataset',
   'secret',
+  'query',
   'team',
   'user',
 ] as const
@@ -52,6 +54,7 @@ export function useResourceChoices(): Record<string, ResourceChoice[]> {
   const pipelines = useLibraryStore((state) => state.pipelines)
   const annotations = useCatalogStore((state) => state.annotations)
   const secrets = useSecretsStore((state) => state.items)
+  const queries = useQueriesStore((state) => state.items)
 
   return useMemo(() => {
     const named = (records: { id: string; name?: string }[]) =>
@@ -64,10 +67,11 @@ export function useResourceChoices(): Record<string, ResourceChoice[]> {
       // A secret is named by its name, which is also its id — there is no record
       // behind it to look a label up in.
       secret: secrets.map((secret) => ({ id: secret.name, label: secret.name })),
+      query: queries.map((query) => ({ id: query.id, label: query.name })),
       team: [],
       user: [],
     }
-  }, [annotations, jobs, pipelines, secrets, workflows])
+  }, [annotations, jobs, pipelines, queries, secrets, workflows])
 }
 
 /** `job/j1` split into its two halves; `*` has no id and no kind to check. */

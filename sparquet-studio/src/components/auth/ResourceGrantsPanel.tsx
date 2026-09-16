@@ -15,37 +15,45 @@
  * anything. What this screen adds is the resource picker.
  */
 
-import { Boxes, FolderTree, KeyRound, Tag, Workflow } from 'lucide-react'
+import { Boxes, Columns3, FileCode2, FolderTree, KeyRound, Tag, Workflow } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { GrantsPanel, type NewGrant } from '@/components/catalog/GrantsPanel'
 import { OwnerPicker, type NewOwner } from '@/components/catalog/OwnerPicker'
 import { Badge, Field, Segmented, Select, Spinner, type SelectOption } from '@/components/ui'
-import { grantsFor, tagScopes, type ResourceKind } from '@/lib/iam'
+import { columnResource, grantsFor, tagScopes, type ResourceKind } from '@/lib/iam'
 import { useAuthStore } from '@/store/auth'
 import { useCatalogStore } from '@/store/catalog'
 import { accessTo, effectiveOwnerOf, mayAdministerResource, useIamStore } from '@/store/iam'
 import { useLibraryStore } from '@/store/library'
+import { useQueriesStore } from '@/store/queries'
 import { useSecretsStore } from '@/store/secrets'
 import type { AuthTeam, AuthUser } from '@/types/auth'
 
-type Kind = Extract<ResourceKind, 'job' | 'pipeline' | 'workflow' | 'tag' | 'secret'>
+type Kind = Extract<
+  ResourceKind,
+  'column' | 'job' | 'pipeline' | 'workflow' | 'tag' | 'secret' | 'query'
+>
 
 const NOUN: Record<Kind, string> = {
+  column: 'Column',
   job: 'Job',
   pipeline: 'Pipeline',
   workflow: 'Workflow',
   tag: 'Tag',
   secret: 'Secret',
+  query: 'Query',
 }
 
 const ICON: Record<Kind, typeof Boxes> = {
+  column: Columns3,
   job: Boxes,
   pipeline: Workflow,
   workflow: FolderTree,
   tag: Tag,
   secret: KeyRound,
+  query: FileCode2,
 }
 
 function messageOf(error: unknown): string {
@@ -66,6 +74,8 @@ export function ResourceGrantsPanel() {
   const loadCatalog = useCatalogStore((state) => state.load)
 
   const secrets = useSecretsStore((state) => state.items)
+  const queries = useQueriesStore((state) => state.items)
+  const loadQueries = useQueriesStore((state) => state.load)
   const loadSecrets = useSecretsStore((state) => state.load)
 
   const grants = useIamStore((state) => state.grants)
@@ -90,7 +100,10 @@ export function ResourceGrantsPanel() {
     // Secrets live only on the runner, so the list has to be fetched before a
     // rule can name one. A caller without `secrets:Read` simply sees none.
     void loadSecrets()
-  }, [load, loadCatalog, loadSecrets])
+    // Saved queries are library files like the rest, and a rule can name one
+    // before anybody opens the SQL editor in this session.
+    void loadQueries()
+  }, [load, loadCatalog, loadQueries, loadSecrets])
 
   useEffect(() => {
     if (!can('iam:ReadUsers')) return
@@ -131,9 +144,35 @@ export function ResourceGrantsPanel() {
     return [...found].sort((left, right) => left.localeCompare(right))
   }, [annotations, grants])
 
+  /**
+   * Every column the catalog has something to say about, as `table#column`.
+   *
+   * Only the described ones: a rule on a column nobody classified would be a
+   * rule on a name that may not survive the next schema change, and the catalog
+   * entry is where somebody committed to the column existing.
+   */
+  const columns = useMemo(() => {
+    const out: { id: string; name: string }[] = []
+    for (const [key, annotation] of Object.entries(annotations)) {
+      for (const column of Object.values(annotation.columns ?? {})) {
+        const id = columnResource(key, column.column)
+        if (id) out.push({ id, name: id })
+      }
+    }
+    for (const grant of grants) {
+      if (grant.resource !== 'column' || grant.resourceId === '*') continue
+      if (!out.some((item) => item.id === grant.resourceId)) {
+        out.push({ id: grant.resourceId, name: grant.resourceId })
+      }
+    }
+    return out
+  }, [annotations, grants])
+
   const options = useMemo<SelectOption[]>(() => {
     const source =
-      kind === 'job'
+      kind === 'column'
+        ? columns
+        : kind === 'job'
         ? jobs.map((job) => ({ id: job.id, name: job.name }))
         : kind === 'pipeline'
           ? pipelines.map((pipeline) => ({ id: pipeline.id, name: pipeline.name }))
@@ -141,7 +180,9 @@ export function ResourceGrantsPanel() {
             ? tags.map((tag) => ({ id: tag, name: tag }))
             : kind === 'secret'
               ? secrets.map((secret) => ({ id: secret.name, name: secret.name }))
-              : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
+              : kind === 'query'
+                ? queries.map((query) => ({ id: query.id, name: query.name }))
+                : workflows.map((workflow) => ({ id: workflow.id, name: workflow.name }))
     const counted = source.map((item) => {
       const rules = grantsFor(grants, kind, item.id)
       const denies = rules.filter((rule) => rule.effect === 'deny').length
@@ -158,7 +199,7 @@ export function ResourceGrantsPanel() {
       }
     })
     return counted.sort((left, right) => left.label.localeCompare(right.label))
-  }, [grants, jobs, kind, owners, pipelines, secrets, tags, workflows])
+  }, [columns, grants, jobs, kind, owners, pipelines, queries, secrets, tags, workflows])
 
   // Keep the picker on something that exists: switching kind, or deleting the
   // record, must not leave the panel editing rules for nothing.
@@ -324,6 +365,17 @@ export function ResourceGrantsPanel() {
                 label: 'Secrets',
                 title: 'A connection credential — read here means "a run may use it"',
               },
+              {
+                value: 'query',
+                label: 'Queries',
+                title: 'A saved SQL file — the tables it reads are still checked on their own',
+              },
+              {
+                value: 'column',
+                label: 'Columns',
+                title:
+                  'One column of one dataset — a deny here closes the column and leaves the table open',
+              },
             ]}
           />
         </Field>
@@ -331,11 +383,15 @@ export function ResourceGrantsPanel() {
           {options.length === 0 ? (
             <p className="flex items-center gap-1.5 py-1.5 text-xs italic text-content-subtle">
               <Icon className="h-3.5 w-3.5" />
-              {kind === 'tag'
+              {kind === 'column'
+                ? 'No column has been described in the catalog yet. Open a dataset and classify one on its Shape tab.'
+                : kind === 'tag'
                 ? 'No dataset in the catalog carries a tag yet.'
                 : kind === 'secret'
                   ? 'This runner holds no connection secrets yet.'
-                  : `The library has no ${NOUN[kind]} to restrict yet.`}
+                  : kind === 'query'
+                    ? 'Nothing has been saved from the SQL editor yet.'
+                    : `The library has no ${NOUN[kind]} to restrict yet.`}
             </p>
           ) : (
             <Select
@@ -353,7 +409,7 @@ export function ResourceGrantsPanel() {
           {/* A tag has no owner on purpose: ownership is admin that no deny can
               reach, and handing that out over a label anybody may type onto a
               table would be handing out admin over tables never seen. */}
-          {kind === 'tag' ? null : (
+          {kind === 'tag' || kind === 'column' ? null : (
           <OwnerPicker
             resource={kind}
             owner={ownRecord}

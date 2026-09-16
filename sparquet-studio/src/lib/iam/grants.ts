@@ -48,8 +48,31 @@
  * reach this particular thing. `read` on a secret means "may be used by a run
  * this person starts" — never "may be looked at". No level, and no endpoint,
  * returns a value to anybody.
+ *
+ * `query` is a saved SQL file. It is a securable for the reason a Job is: it is
+ * a record somebody wrote, it is stored in the library, and it names tables. It
+ * does NOT stand in for the tables it reads — the datasets are checked on their
+ * own, every run, so `read` on a query never widens what its author could see.
+ * What a grant on a query decides is who may open, edit and delete the file.
+ *
+ * `column` is one column of one dataset, addressed as `<dataset key>#<column>`.
+ * It exists because the column is the unit sensitivity actually has: a table is
+ * closed to everybody because one field in it holds a document number, and then
+ * the people who only ever needed the order date lose the table. A rule here
+ * closes the column and leaves the table open. A column inherits from its
+ * dataset, never the other way round — `read` on the dataset does not carry into
+ * a column somebody has explicitly denied, because a deny anywhere in the chain
+ * wins, which is the whole point of stating it at this level.
  */
-export type ResourceKind = 'dataset' | 'job' | 'pipeline' | 'workflow' | 'tag' | 'secret'
+export type ResourceKind =
+  | 'dataset'
+  | 'column'
+  | 'job'
+  | 'pipeline'
+  | 'workflow'
+  | 'tag'
+  | 'secret'
+  | 'query'
 
 /** What the holder may do. Cumulative: admin implies write implies read. */
 export type AccessLevel = 'read' | 'write' | 'admin'
@@ -107,11 +130,13 @@ export interface Owner {
 
 export const RESOURCE_KINDS: ResourceKind[] = [
   'dataset',
+  'column',
   'job',
   'pipeline',
   'workflow',
   'tag',
   'secret',
+  'query',
 ]
 
 /** The kinds that live inside a Workflow, and therefore inherit from one. */
@@ -119,6 +144,10 @@ export const CONTAINED_KINDS: ResourceKind[] = ['job', 'pipeline']
 
 /**
  * The kinds a deed can be written on.
+ *
+ * A column is not one of them either: ownership is responsibility for a thing
+ * somebody can hand over, and a column is handed over with its table. The
+ * dataset's owner owns its columns.
  *
  * A tag is not one of them. Ownership is responsibility for a thing, and a tag
  * is a word that happens to be true of several things — "owner of everything
@@ -131,6 +160,7 @@ export const OWNABLE_KINDS: ResourceKind[] = [
   'pipeline',
   'workflow',
   'secret',
+  'query',
 ]
 
 export const LEVELS: AccessLevel[] = ['read', 'write', 'admin']
@@ -143,6 +173,11 @@ export const LEVEL_HINT: Record<ResourceKind, Record<AccessLevel, string>> = {
     read: 'Query it in the SQL editor and read its schema from storage.',
     write: 'Everything read allows, plus running a Job that writes to it.',
     admin: 'Everything write allows, plus editing its catalog entry and its grants.',
+  },
+  column: {
+    read: 'See this one column of that dataset — its values, and its entry in the catalog.',
+    write: 'Everything read allows, plus running a Job that writes this column.',
+    admin: 'Everything write allows, plus classifying it and changing who may read it.',
   },
   job: {
     read: 'Open the Job and see its canvas, JSON and run history.',
@@ -168,6 +203,11 @@ export const LEVEL_HINT: Record<ResourceKind, Record<AccessLevel, string>> = {
     read: 'Reference it from a Job, a query or a schema read — the run gets the value, the person never does.',
     write: 'Everything read allows, plus rotating its fields, retagging it and deleting it.',
     admin: 'Everything write allows, plus deciding who else may use it.',
+  },
+  query: {
+    read: 'Open the saved query and run it — the tables it names are still checked one by one.',
+    write: 'Everything read allows, plus editing the statement and renaming the file.',
+    admin: 'Everything write allows, plus deleting it and changing its grants.',
   },
 }
 
@@ -357,6 +397,117 @@ export function tagScopes(
 }
 
 /**
+ * How a column is addressed: the dataset it belongs to, then its name.
+ *
+ * One string, because a grant names one resource and the column has no address
+ * that survives its table. `#` because it appears in no dataset address the
+ * catalog produces — paths, URLs and `catalog.schema.table` names never carry
+ * one — so parsing back is unambiguous.
+ *
+ * The name is lower-cased for the same reason a tag is: a schema that spells it
+ * `CustomerId` and a rule written against `customerid` mean the same column, and
+ * an access decision that misses on a capital letter fails open.
+ */
+export const COLUMN_SEPARATOR = '#'
+
+export function columnResource(datasetKey: string, column: string): string {
+  const key = (datasetKey ?? '').trim()
+  const name = (column ?? '').trim().toLowerCase()
+  if (!key || !name) return ''
+  return `${key}${COLUMN_SEPARATOR}${name}`
+}
+
+export function parseColumnResource(
+  resourceId: string,
+): { key: string; column: string } | null {
+  const raw = (resourceId ?? '').trim()
+  const cut = raw.lastIndexOf(COLUMN_SEPARATOR)
+  if (cut <= 0 || cut === raw.length - 1) return null
+  return { key: raw.slice(0, cut), column: raw.slice(cut + 1) }
+}
+
+/**
+ * Every place a rule could be written to reach one column, nearest first.
+ *
+ * The column first, then everything that reaches its dataset — the table, the
+ * folders above it, the tags on both. A column inherits its table's access and
+ * can only ever be narrower: a deny written here wins over an allow on the
+ * table, which is what makes "the whole table except the document number"
+ * expressible at all.
+ *
+ * The column's own tags and classification enter as `tag:` scopes exactly like a
+ * dataset's, so one rule on `tag/classification:restricted` governs restricted
+ * columns and restricted tables alike, including the ones classified next month.
+ */
+export function columnScopeChain(
+  datasetKey: string,
+  column: string,
+  options: {
+    columnTags?: readonly string[]
+    columnClassification?: string | null
+    datasetTags?: readonly string[]
+    datasetClassification?: string | null
+    datasetDomain?: string | null
+  } = {},
+): Scope[] {
+  return scopeChain(
+    'column',
+    columnResource(datasetKey, column),
+    columnParents(options),
+  )
+}
+
+/**
+ * The tag scopes one column inherits: its own first, then its table's.
+ *
+ * Both sets enter, because a column classified `restricted` inside an
+ * `internal` table has to be reachable by a rule on
+ * `tag/classification:restricted` while the table's own vocabulary still
+ * applies to everything in it. Mirrors `_parents_of` for `column` on the runner.
+ */
+export function columnParents(
+  options: {
+    columnTags?: readonly string[]
+    columnClassification?: string | null
+    datasetTags?: readonly string[]
+    datasetClassification?: string | null
+    datasetDomain?: string | null
+  } = {},
+): Scope[] {
+  const tags = [
+    ...tagScopes(options.columnTags ?? [], {
+      classification: options.columnClassification,
+    }),
+    ...tagScopes(options.datasetTags ?? [], {
+      classification: options.datasetClassification,
+      domain: options.datasetDomain,
+    }),
+  ]
+  const seen = new Set<string>()
+  return tags.filter(([, value]) => {
+    if (seen.has(value)) return false
+    seen.add(value)
+    return true
+  })
+}
+
+/**
+ * The chain of one column: itself, every column, then its whole table.
+ *
+ * The ancestors of the column id are deliberately not walked. A path address
+ * carries separators, so `lake/silver/orders#cpf` would otherwise invent a
+ * container called `column/lake/silver` and let a rule meant for a folder of
+ * tables land on a column.
+ */
+function columnChain(resourceId: string, parents: readonly Scope[]): Scope[] {
+  const clean = (resourceId ?? '').trim()
+  const chain: Scope[] = clean ? [['column', clean]] : []
+  chain.push(['column', ANY])
+  const parsed = parseColumnResource(clean)
+  return [...chain, ...scopeChain('dataset', parsed?.key ?? '', parents)]
+}
+
+/**
  * Every place a rule could be written to reach this securable, nearest first.
  *
  * `parents` is how a Job says which Workflow it belongs to — the record knows,
@@ -367,6 +518,8 @@ export function scopeChain(
   resourceId: string,
   parents: readonly Scope[] = [],
 ): Scope[] {
+  if (resource === 'column') return columnChain(resourceId, parents)
+
   const chain: Scope[] = []
   const seen = new Set<string>()
   const add = (kind: ResourceKind, id: string) => {

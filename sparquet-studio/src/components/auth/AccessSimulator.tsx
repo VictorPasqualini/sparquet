@@ -26,7 +26,7 @@ function messageOf(error: unknown): string {
 }
 
 /** The securable kinds layer two knows. `tag` is answered through the datasets that carry it. */
-const KINDS = ['', 'dataset', 'job', 'pipeline', 'workflow', 'secret'] as const
+const KINDS = ['', 'dataset', 'job', 'pipeline', 'workflow', 'secret', 'query'] as const
 
 const LEVELS = ['', 'read', 'write', 'admin'] as const
 

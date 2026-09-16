@@ -17,12 +17,14 @@ import { create } from 'zustand'
 
 import {
   CONTAINED_KINDS,
+  columnParents,
   decide,
   effectiveOwner,
   grantId,
   grantsByResource,
   mayAdminister,
   ownerOf,
+  parseColumnResource,
   tagScopes,
   withGrant,
   withOwner,
@@ -146,6 +148,22 @@ export function parentsOf(resource: ResourceKind, resourceId: string): Scope[] {
           domain: annotation.domain,
         })
       : []
+  }
+  if (resource === 'column') {
+    // A column's own vocabulary plus its table's. The table itself is not
+    // listed: `scopeChain` derives it from the address. Mirrors `_parents_of`
+    // for `column` on the runner.
+    const parsed = parseColumnResource(resourceId)
+    if (!parsed) return []
+    const annotation = useCatalogStore.getState().annotations[parsed.key]
+    const column = annotation?.columns?.[parsed.column]
+    return columnParents({
+      columnTags: column?.tags ?? [],
+      columnClassification: column?.classification,
+      datasetTags: annotation?.tags ?? [],
+      datasetClassification: annotation?.classification,
+      datasetDomain: annotation?.domain,
+    })
   }
   if (resource === 'secret') {
     // A credential joins the same tag chain a table does, so a deny on

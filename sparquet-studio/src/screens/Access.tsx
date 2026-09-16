@@ -22,7 +22,7 @@ import { AccessPanel } from '@/components/auth/AccessPanel'
 import { AccessSimulator } from '@/components/auth/AccessSimulator'
 import { AuditLogPanel } from '@/components/auth/AuditLogPanel'
 import { ResourceGrantsPanel } from '@/components/auth/ResourceGrantsPanel'
-import { PageHeader, PageShell, type PageWidth } from '@/components/layout/PageShell'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { PageTabs, type PageTab } from '@/components/layout/PageTabs'
 import { RolesPanel } from '@/components/auth/RolesPanel'
 import { TeamsPanel } from '@/components/auth/TeamsPanel'
@@ -54,15 +54,6 @@ const DESCRIPTIONS: Record<Section, string> = {
     'Every change this runner accepted and every request it refused, newest first. Written by the server and never edited.',
 }
 
-/** The log is a table and wants the width; the forms read better in a column. */
-const WIDTHS: Record<Section, PageWidth> = {
-  people: 'default',
-  roles: 'default',
-  rules: 'default',
-  simulator: 'default',
-  audit: 'wide',
-}
-
 function sectionOf(param: string | undefined): Section {
   const found = SECTIONS.find((name) => name === param)
   return found ?? 'people'
@@ -73,7 +64,13 @@ export function Access() {
   const section = sectionOf(param)
 
   return (
-    <PageShell width={WIDTHS[section]}>
+    // One width for all five. The log used to ask for `full` because it is a
+    // table, and the price was the header, the description and the tab strip
+    // jumping sideways on the way in and back on the way out — a section of a
+    // screen that moves the screen reads as a different screen. The table fits
+    // the column: three of its five cells are fixed-width and the detail row
+    // scrolls inside itself.
+    <PageShell width="default">
       <PageHeader icon={<Users />} title="Access & IAM" description={DESCRIPTIONS[section]} />
 
       <PageTabs tabs={TABS} ariaLabel="Access sections" />
@@ -103,7 +100,11 @@ export function Access() {
         </div>
       ) : null}
 
-      {section === 'audit' ? <AuditLogPanel /> : null}
+      {section === 'audit' ? (
+        <div className="card space-y-5 p-5">
+          <AuditLogPanel />
+        </div>
+      ) : null}
     </PageShell>
   )
 }

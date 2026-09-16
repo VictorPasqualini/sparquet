@@ -12,7 +12,11 @@ import { describe, expect, it } from 'vitest'
 import {
   allows,
   ancestors,
+  columnParents,
+  columnResource,
+  columnScopeChain,
   decide,
+  parseColumnResource,
   effectiveOwner,
   mayAdminister,
   owns,
@@ -312,5 +316,111 @@ describe('grants written on a tag', () => {
     // Ownership is undeniable admin. Handing it out over a label anybody may
     // type onto a table would be handing out admin over tables never seen.
     expect(sanitizeOwners([owner('tag', 'pii', 't1')])).toEqual([])
+  })
+})
+
+describe('columns as securables', () => {
+  const CPF = columnResource('/data/orders', 'cpf')
+
+  it('addresses a column under its table, lower-cased', () => {
+    expect(columnResource('main.silver.orders', 'CPF')).toBe('main.silver.orders#cpf')
+    expect(columnResource('', 'cpf')).toBe('')
+    expect(columnResource('/data/orders', '  ')).toBe('')
+  })
+
+  it('reads an address back into its two halves', () => {
+    expect(parseColumnResource('s3://bucket/orders#cpf')).toEqual({
+      key: 's3://bucket/orders',
+      column: 'cpf',
+    })
+    // A table, a dangling separator and a name with nothing before it are all
+    // "not a column", never "a column called nothing".
+    expect(parseColumnResource('/data/orders')).toBeNull()
+    expect(parseColumnResource('/data/orders#')).toBeNull()
+    expect(parseColumnResource('#cpf')).toBeNull()
+  })
+
+  it('reaches the table above it without inventing a folder of columns', () => {
+    const chain = scopeChain('column', '/lake/silver/orders#cpf')
+    expect(chain[0]).toEqual(['column', '/lake/silver/orders#cpf'])
+    expect(chain).toContainEqual(['column', '*'])
+    expect(chain).toContainEqual(['dataset', '/lake/silver/orders'])
+    expect(chain).toContainEqual(['dataset', '/lake/silver'])
+    expect(chain.filter(([kind]) => kind === 'column').map(([, id]) => id)).toEqual([
+      '/lake/silver/orders#cpf',
+      '*',
+    ])
+  })
+
+  it('carries the column tags first and the table tags after', () => {
+    expect(
+      columnParents({
+        columnTags: ['pii'],
+        columnClassification: 'restricted',
+        datasetTags: ['pii', 'finance'],
+        datasetClassification: 'internal',
+        datasetDomain: 'sales',
+      }),
+    ).toEqual([
+      ['tag', 'pii'],
+      ['tag', 'classification:restricted'],
+      ['tag', 'finance'],
+      ['tag', 'classification:internal'],
+      ['tag', 'domain:sales'],
+    ])
+  })
+
+  it('closes one column of a table the reader may otherwise write', () => {
+    const rules = [
+      grant('dataset', '/data/orders', 't1', 'write'),
+      grant('column', CPF, 't1', 'read', 'deny'),
+    ]
+
+    expect(allows(rules, 'dataset', '/data/orders', ANA, 'write')).toBe(true)
+    expect(allows(rules, 'column', CPF, ANA, 'read')).toBe(false)
+    // Every other column of the same table is untouched.
+    expect(allows(rules, 'column', columnResource('/data/orders', 'total'), ANA, 'write')).toBe(
+      true,
+    )
+  })
+
+  it('lets a rule on the column tag close every column that wears it', () => {
+    const rules = [
+      grant('dataset', '/data/orders', 't1', 'write'),
+      grant('tag', 'pii', 't1', 'read', 'deny'),
+    ]
+    const parents = columnParents({ columnTags: ['pii'] })
+
+    expect(allows(rules, 'column', CPF, ANA, 'read', true, [], parents)).toBe(false)
+    // And the chain that builds itself from the same tags says the same thing.
+    expect(columnScopeChain('/data/orders', 'cpf', { columnTags: ['pii'] })).toContainEqual([
+      'tag',
+      'pii',
+    ])
+    // The table carries no such tag, so it stays open.
+    expect(allows(rules, 'dataset', '/data/orders', ANA, 'write')).toBe(true)
+  })
+
+  it('does not let a column rule widen what the table refuses', () => {
+    // Cumulative levels run one way, and a deny wins anywhere in the chain:
+    // granting a column cannot open a table that is closed above it.
+    const rules = [
+      grant('dataset', '/data', 't1', 'read', 'deny'),
+      grant('column', CPF, 't1', 'admin'),
+    ]
+    expect(allows(rules, 'column', CPF, ANA, 'read')).toBe(false)
+  })
+
+  it('refuses to let a column be owned', () => {
+    // A column is handed over with its table; ownership is admin no deny can
+    // reach, and nobody owns half a row.
+    expect(sanitizeOwners([owner('column', CPF, 't1')])).toEqual([])
+  })
+
+  it('keeps another team out of a column granted to this one', () => {
+    const rules = [grant('column', CPF, 't1', 'read')]
+    expect(decide(rules, 'column', CPF, ANA).level).toBe('read')
+    expect(decide(rules, 'column', CPF, BRUNO).level).toBeNull()
+    expect(mayAdminister(rules, [], 'column', CPF, ANA)).toBe(false)
   })
 })
