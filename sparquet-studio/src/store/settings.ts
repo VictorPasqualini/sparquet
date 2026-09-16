@@ -34,6 +34,12 @@ export interface CanvasPreferences {
   animateEdges: boolean
   /** Auto-run the linter as the graph changes. */
   liveLint: boolean
+  /**
+   * The strip of recent executions above the pipeline canvas. On by default:
+   * the question it answers — has this been failing — is the one somebody
+   * opening a pipeline has before they have any other.
+   */
+  showRunRail: boolean
 }
 
 interface SettingsState {
@@ -81,6 +87,7 @@ const DEFAULT_CANVAS: CanvasPreferences = {
   showMinimap: true,
   animateEdges: true,
   liveLint: true,
+  showRunRail: true,
 }
 
 export const useSettingsStore = create<SettingsState>()(

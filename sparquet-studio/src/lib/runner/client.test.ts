@@ -92,6 +92,11 @@ describe('checkRunnerHealth', () => {
       version: '0.1.0',
       sparkAvailable: true,
       frameworkVersion: '0.2.3',
+      // A runner that predates the version check has not said the framework is
+      // unsupported — it has said nothing, which reads as supported.
+      frameworkSupported: true,
+      frameworkMessage: undefined,
+      frameworkRequirement: undefined,
     })
     expect(lastCall()[0]).toBe(`${DEFAULT_RUNNER_URL}/health`)
   })

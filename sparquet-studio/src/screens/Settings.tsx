@@ -168,6 +168,13 @@ const CANVAS_PREFERENCES: {
     label: 'Live linting',
     description: 'Re-checks the job while you edit, not only when you run it.',
   },
+  {
+    key: 'showRunRail',
+    label: 'Recent runs strip',
+    description:
+      'Shows the last executions above the pipeline canvas, one square each. Click one to '
+      + 'paint it onto the stages.',
+  },
 ]
 
 const THEME_OPTIONS = [
@@ -757,13 +764,18 @@ function RunnerSection() {
                 {health.authRequired ? 'Token enforced' : 'Token not enforced'}
               </Badge>
               {health.frameworkVersion && (
-                <Badge tone="neutral">framework {health.frameworkVersion}</Badge>
+                <Badge tone={health.frameworkSupported === false ? 'warning' : 'neutral'}>
+                  framework {health.frameworkVersion}
+                </Badge>
               )}
               <span>
                 {health.authRequired
                   ? 'It requires the token on runs and validations.'
                   : 'This build accepts unauthenticated runs — update the runner.'}
               </span>
+              {health.frameworkMessage && (
+                <span className="w-full text-state-warning">{health.frameworkMessage}</span>
+              )}
             </span>
           )}
         />

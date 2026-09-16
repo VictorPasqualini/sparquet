@@ -55,6 +55,16 @@ export interface RunnerHealth {
   frameworkVersion?: string
   /** The runner requires a token on /run and /validate. */
   authRequired?: boolean
+  /**
+   * Whether the installed framework is inside the range this Studio was built
+   * against. Absent on an older runner, and true there by default: a runner
+   * that does not answer the question has not answered "no".
+   */
+  frameworkSupported?: boolean
+  /** What to do about a mismatch, written by the runner that found it. */
+  frameworkMessage?: string
+  /** The range itself, e.g. `sparquet>=0.12,<0.13`. */
+  frameworkRequirement?: string
 }
 
 /**
@@ -163,6 +173,24 @@ export interface RunQueryRequest {
    * says so through `sessionRestarted`.
    */
   spark?: SparkSettings
+  /**
+   * The library file this statement came from, when it came from one.
+   *
+   * A saved query is a securable of its own, so the runner checks the grants on
+   * the file as well as on every table the statement names. An unsaved buffer
+   * sends nothing here — there is no file to have a rule about, and the tables
+   * are checked either way.
+   */
+  savedQueryId?: string
+  /**
+   * The editor tab this ran from, which is what the run is filed under while the
+   * buffer has no file yet.
+   *
+   * A run that names neither a saved query nor a tab is executed and not
+   * recorded — the catalog's row sample goes through here too, and a storage
+   * read is not part of anybody's query history.
+   */
+  tab?: string
 }
 
 export interface RunnerQueryResult {
@@ -368,6 +396,9 @@ export async function checkRunnerHealth(
     frameworkVersion: optionalString(payload.framework_version),
     // Absent on runners predating the token: those accept requests unauthenticated.
     authRequired: asBoolean(payload.auth_required, false),
+    frameworkSupported: asBoolean(payload.framework_supported, true),
+    frameworkMessage: optionalString(payload.framework_message),
+    frameworkRequirement: optionalString(payload.framework_requirement),
   }
 }
 
@@ -475,6 +506,8 @@ export async function runQuery(
     query_id: body.queryId,
     timeout_seconds: body.timeoutSeconds,
     spark: body.spark,
+    saved_query_id: body.savedQueryId,
+    tab: body.tab,
   }
 
   let payload: Record<string, unknown>
@@ -509,6 +542,187 @@ export async function runQuery(
     truncated: asBoolean(payload.truncated),
     elapsedMs: asNumber(payload.elapsed_ms),
     sessionRestarted: asBoolean(payload.session_restarted),
+  }
+}
+
+/** What the runner's parser made of a statement it was asked to check. */
+export interface QueryValidation {
+  /** False when no SparkSession was up to ask; the editor then marks nothing. */
+  checked: boolean
+  ok: boolean
+  message: string
+  /** 1-based line, as the parser and the editor both count them. */
+  line: number | null
+  /** 0-based column, which is how Spark reports `pos`. */
+  column: number | null
+  /** Why nothing was checked, when nothing was. */
+  reason: string
+}
+
+/**
+ * Asks the runner to parse a statement without running it.
+ *
+ * The syntax of Spark SQL is only known for certain by the parser that will run
+ * the query, so the marker in the editor comes from there rather than from a
+ * second implementation in the browser that would disagree with it.
+ *
+ * Never throws. A runner that is off, older than this route, or busy is a
+ * reason to mark nothing — not a reason to interrupt the typing with an error.
+ */
+export async function validateQuery(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  sql: string,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<QueryValidation> {
+  try {
+    const payload = expectRecord(
+      await requestJson(baseUrl, '/query/validate', jsonPost({ sql }, token), signal),
+    )
+    return {
+      checked: asBoolean(payload.checked),
+      ok: asBoolean(payload.ok, true),
+      message: asString(payload.message),
+      line: typeof payload.line === 'number' ? payload.line : null,
+      column: typeof payload.column === 'number' ? payload.column : null,
+      reason: asString(payload.reason),
+    }
+  } catch (error) {
+    return {
+      checked: false,
+      ok: true,
+      message: '',
+      line: null,
+      column: null,
+      reason: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+/** One past execution of a query, as the runner recorded it. */
+export interface QueryRun {
+  id: string
+  /** ISO-8601, from the runner's clock — one clock for everybody reading it. */
+  at: string
+  /** Exactly what was sent, which is the selection when a selection was run. */
+  sql: string
+  /** The row cap it ran under, since that changes what came back. */
+  limit: number
+  elapsedMs: number
+  rows: number
+  /** The runner cut the result short at the cap. */
+  truncated: boolean
+  /** The first line of the failure, or null when the run succeeded. */
+  error: string | null
+  /** Who ran it. Empty on a runner with no login. */
+  runAs: string
+}
+
+/** Which history is being read: a saved query's, or a scratch tab's. */
+export interface HistoryScope {
+  savedQueryId?: string
+  tab?: string
+}
+
+function historyQuery(scope: HistoryScope): string {
+  const params = new URLSearchParams()
+  if (scope.savedQueryId) params.set('saved_query_id', scope.savedQueryId)
+  else if (scope.tab) params.set('tab', scope.tab)
+  return params.toString()
+}
+
+function toQueryRun(value: unknown): QueryRun | null {
+  if (!isRecord(value)) return null
+  const id = asString(value.id)
+  if (!id) return null
+  return {
+    id,
+    at: asString(value.at),
+    sql: asString(value.sql),
+    limit: asNumber(value.limit),
+    elapsedMs: asNumber(value.elapsed_ms),
+    rows: asNumber(value.rows),
+    truncated: asBoolean(value.truncated),
+    error: typeof value.error === 'string' && value.error.length > 0 ? value.error : null,
+    runAs: asString(value.run_as),
+  }
+}
+
+/**
+ * What a query has been run as, newest first.
+ *
+ * Kept by the runner rather than by the browser: a saved query is a file two
+ * people can open, and what it has been run as is part of it. A buffer nobody
+ * has saved has no file to share, so the runner keys its runs by the tab and
+ * the person, and only that person reads them back.
+ *
+ * Never throws. A runner that is off or older than this route means an empty
+ * history, which is what an editor with no runs shows anyway.
+ */
+export async function fetchQueryHistory(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  scope: HistoryScope,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<QueryRun[]> {
+  const search = historyQuery(scope)
+  if (!search) return []
+  try {
+    const payload = expectRecord(
+      await requestJson(
+        baseUrl,
+        `/query/history?${search}`,
+        { method: 'GET', headers: authHeaders(token) },
+        signal,
+      ),
+    )
+    return asArray(payload.runs)
+      .map(toQueryRun)
+      .filter((run): run is QueryRun => run !== null)
+  } catch {
+    return []
+  }
+}
+
+/** Forgets one query's runs — everybody's, since the history is shared. */
+export async function clearQueryHistory(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  scope: HistoryScope,
+  signal?: AbortSignal,
+  token?: string,
+): Promise<void> {
+  const search = historyQuery(scope)
+  if (!search) return
+  await requestJson(
+    baseUrl,
+    `/query/history?${search}`,
+    { method: 'DELETE', headers: authHeaders(token) },
+    signal,
+  )
+}
+
+/**
+ * Carries a scratch buffer's runs onto the file it was just saved as.
+ *
+ * Without this, saving the query somebody worked their way to would throw away
+ * the work that got them there. Never throws: a history that did not follow is
+ * not a reason to fail a save that already happened.
+ */
+export async function moveQueryHistory(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  tab: string,
+  savedQueryId: string,
+  token?: string,
+): Promise<void> {
+  if (!tab || !savedQueryId) return
+  try {
+    await requestJson(
+      baseUrl,
+      '/query/history/move',
+      jsonPost({ tab, saved_query_id: savedQueryId }, token),
+    )
+  } catch {
+    // The runs stay under the tab, where they still read back for this person.
   }
 }
 
