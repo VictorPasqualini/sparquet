@@ -1,23 +1,38 @@
 export {
   buildCatalog,
   catalogStats,
+  CLASSIFICATION_RANK,
   CLASSIFICATIONS,
+  columnAnnotationOf,
+  columnAnnotationsOf,
+  columnKey,
+  columnRaisesClassification,
+  effectiveClassification,
   emptyAnnotation,
+  emptyColumnAnnotation,
   isBlank,
+  isColumnBlank,
   knownDomains,
+  MAX_COLUMN_DESCRIPTION,
+  MAX_COLUMN_NAME,
   MAX_DESCRIPTION,
   MAX_DOMAIN,
   MAX_OWNER,
   normalizeAnnotation,
+  normalizeColumnAnnotation,
+  normalizeColumns,
   orphanAnnotations,
   sanitizeAnnotations,
   withAnnotation,
+  withColumnAnnotation,
   withoutAnnotation,
 } from './catalog'
 export type {
   CatalogAnnotations,
   CatalogEntry,
   CatalogStats,
+  ColumnAnnotation,
+  ColumnAnnotations,
   DataClassification,
   DatasetAnnotation,
 } from './catalog'
@@ -28,7 +43,7 @@ export {
   kindOfFormat,
   kindOfFormats,
 } from './namespace'
-export type { AssetKind, CatalogAsset, CatalogNode, RootKind } from './namespace'
+export type { AssetKind, CatalogAsset, CatalogNode, NodeTier, RootKind } from './namespace'
 export { compareSchema, normalizeType } from './drift'
 export type { DriftRow, DriftStatus, ProbedField, SchemaDrift } from './drift'
 export {

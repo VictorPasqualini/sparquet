@@ -1,10 +1,40 @@
 # Sparquet Studio local execution bridge.
 #
-# pyspark and the sparquet framework itself are NOT listed here on purpose:
-# they come from the parent repository (run this service from the repo root, or
-# install the framework into the same environment). Install those with the
-# repository's own requirements.txt / `pip install -e .`.
+# The framework is a dependency like any other, pinned to the range this Studio
+# was built against. The same range is declared in `compat.py`, which is what
+# `/health` checks the installed version against, and `test_compat.py` fails if
+# the two ever disagree.
+#
+# Inside the Sparquet repository this line is already satisfied by the editable
+# install (`pip install -e ..` from here, or `pip install -e .` at the root), so
+# pip leaves it alone and the checkout stays the framework that runs.
+sparquet>=0.12,<0.13
+
+# `pyspark` is NOT listed: the framework declares it, and it declares a floor
+# (`pyspark>=3.4`) rather than a version, because which Spark line to install is
+# the cluster's decision and not this service's.
 
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 pydantic>=2.6,<3.0
+
+# Encrypts the local secret store. Optional at runtime rather than required: a
+# runner without it still boots and still serves secrets whose provider is `env`
+# — it refuses only to seal or open a `local` one.
+cryptography>=42.0
+
+# The assistant answers through Ollama over plain HTTP, so nothing is listed for
+# it here — the default backend needs no Python package at all, only a model
+# pulled on the machine.
+#
+# `omnigent` is the other backend (SPARQUET_STUDIO_ASSISTANT=omnigent) and is
+# deliberately NOT listed: it requires Python 3.12, while the framework supports
+# 3.9, so installing it narrows the interpreter of every runner that never asked
+# for an agent loop. Install it yourself when you want it:
+#
+#     pip install omnigent
+#
+# Wanting it costs nothing else. The framework is tested through 3.14, so a
+# runner on a 3.12+ interpreter is an ordinary runner, and `sparquet` and
+# `omnigent` resolve together without a conflict — verified on 3.12 with
+# omnigent 0.14.0 (pydantic and fastapi land inside the ranges above).

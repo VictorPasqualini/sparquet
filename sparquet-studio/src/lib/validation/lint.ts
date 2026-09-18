@@ -757,6 +757,71 @@ const checkSources = (ctx: LintContext): void => {
   }
 }
 
+/** A temp view name: a simple identifier, never qualified by a dot. */
+const VIEW_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * `input_view` — the three things that go wrong with it, none of which the
+ * framework can tell you before the run.
+ *
+ * The name has to be a plain identifier, because a temp view cannot be qualified
+ * by a database and `vendas.orders` only looks like it can. `global` scope lives
+ * on the SparkSession, and the Studio runner keeps one session across runs, so
+ * two Jobs naming the same global view overwrite each other's input. And the
+ * registration **caches** the input, which is memory nobody asked for if nothing
+ * downstream reads the view back.
+ */
+const checkInputView = (ctx: LintContext): void => {
+  for (const node of ctx.sources) {
+    const name = (node.data.inputView ?? '').trim()
+    if (!name) continue
+
+    if (!VIEW_NAME.test(name)) {
+      ctx.issues.push({
+        id: `input-view-name:${node.id}`,
+        severity: 'error',
+        message: `"${name}" is not a temp view name.`,
+        nodeId: node.id,
+        field: 'inputView',
+        hint: 'Letters, digits and underscore, starting with a letter or underscore. A name with a dot reads as qualified by a database, and a temp view never is.',
+      })
+      continue
+    }
+
+    if (node.data.inputViewScope === 'global') {
+      ctx.issues.push({
+        id: `input-view-global:${node.id}`,
+        severity: 'warning',
+        message: 'A global temp view is shared by every job on the same Spark session.',
+        nodeId: node.id,
+        field: 'inputViewScope',
+        hint: `The runner reuses one session across runs, so a second job registering "${name}" replaces this input with its own. Use the session scope unless something outside this job has to read it.`,
+      })
+    }
+
+    // Read back anywhere? The whole point of the view is a later `sql` or `join`
+    // naming it. Nothing naming it means a cached input paying for nothing.
+    const mention = new RegExp(String.raw`\b${name}\b`)
+    const referenced =
+      [...ctx.transforms, ...ctx.validations].some((step) =>
+        mention.test(JSON.stringify(step.data.params ?? {})),
+      ) ||
+      // A join whose right side is a `view` source reads the name from a path,
+      // not from a param.
+      ctx.sources.some((other) => other.id !== node.id && mention.test(other.data.path ?? ''))
+    if (!referenced) {
+      ctx.issues.push({
+        id: `input-view-unused:${node.id}`,
+        severity: 'warning',
+        message: `Nothing in this job reads "${name}".`,
+        nodeId: node.id,
+        field: 'inputView',
+        hint: 'Registering the view caches the input, so an unread view is memory spent for nothing. Read it from a `sql` or a `join`, or clear the field.',
+      })
+    }
+  }
+}
+
 /**
  * `on` and `actions` are skipped here and reported by the dedicated merge rule, which
  * knows the write mode and produces one precise message instead of two overlapping ones.
@@ -1383,6 +1448,7 @@ export function lintJob(
 
   checkStructure(ctx)
   checkSources(ctx)
+  checkInputView(ctx)
   checkSinks(ctx)
   checkTransforms(ctx)
   checkValidationRules(ctx)

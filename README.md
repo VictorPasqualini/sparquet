@@ -32,6 +32,13 @@ The JSON is the contract between them. Studio never invents syntax the framework
 pip install sparquet
 ```
 
+> **Which Python?** 3.9 is the floor and the suite runs on 3.9, 3.11, 3.12, 3.13
+> and 3.14. On **3.14 the Spark workers need `pyspark>=4.2.0`** — on 4.1.1 the
+> worker starts and dies with `Python worker exited unexpectedly (crashed)`,
+> which says nothing about the interpreter. Worth knowing before picking one: the
+> Studio's optional agent backend needs 3.12+, so a runner that wants one puts
+> the framework on 3.12 or newer, and none of the above is in the way.
+
 ```python
 from sparquet import Sparquet
 

@@ -14,35 +14,40 @@
  * The screen owns the month, because the trend chart and the breakdown are the
  * same question asked at two zoom levels: the bars say which month is worth
  * looking at, and clicking one is what points the breakdown at it.
+ *
+ * The last two cards read the same month from somewhere other than the ledger.
+ * Cost and activity are different questions with different answers — a month of
+ * local development costs nothing and still ran hundreds of times — and putting
+ * them on one screen is what lets one be read against the other. The assistant is
+ * the same story told about turns instead of runs: a model answering on this
+ * machine is work that happened and money that did not move.
  */
 
 import { Coins } from 'lucide-react'
 import { useState } from 'react'
 
+import { AssistActivity } from '@/components/credits/AssistActivity'
 import { CreditsPanel } from '@/components/credits/CreditsPanel'
+import { RunActivity } from '@/components/credits/RunActivity'
 import { SpendBreakdown } from '@/components/credits/SpendBreakdown'
 import { SpendTrend } from '@/components/credits/SpendTrend'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { currentPeriod } from '@/lib/billing'
 
 export function Billing() {
   const [period, setPeriod] = useState(currentPeriod)
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-6 py-8 animate-fade-in">
-      <header className="flex items-start gap-3">
-        <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-surface-sunken text-content-muted">
-          <Coins className="h-4 w-4" aria-hidden />
-        </span>
-        <div className="space-y-0.5">
-          <h1 className="text-lg font-semibold text-content">Billing</h1>
-          <p className="text-xs leading-relaxed text-content-muted">
-            Execution credits. One per successful write that lands away from this
-            machine — local runs and runs that failed before writing are free.
-          </p>
-        </div>
-      </header>
+    <PageShell width="wide">
+      <PageHeader
+        icon={<Coins />}
+        title="Billing"
+        description="Execution credits — one per successful write that lands away from this
+          machine, so local runs and runs that failed before writing are free — and, below them,
+          what actually ran this month whether or not it cost anything."
+      />
 
-      <div className="mt-8 space-y-6">
+      <div className="space-y-6">
         <div className="card space-y-5 p-5">
           <CreditsPanel />
         </div>
@@ -52,7 +57,13 @@ export function Billing() {
         <div className="card space-y-5 p-5">
           <SpendBreakdown period={period} />
         </div>
+        <div className="card space-y-5 p-5">
+          <RunActivity period={period} />
+        </div>
+        <div className="card space-y-5 p-5">
+          <AssistActivity period={period} />
+        </div>
       </div>
-    </div>
+    </PageShell>
   )
 }

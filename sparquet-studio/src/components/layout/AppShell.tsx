@@ -1,4 +1,5 @@
 import {
+  Activity,
   Coins,
   Database,
   Github,
@@ -8,10 +9,10 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
   Search,
   Settings as SettingsIcon,
   ShieldCheck,
+  Sparkles,
   SquareTerminal,
   Sun,
   type LucideIcon,
@@ -19,7 +20,6 @@ import {
 import {
   useEffect,
   useId,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -35,7 +35,6 @@ import {
   Input,
   Kbd,
   Modal,
-  SectionTitle,
   Textarea,
   Tooltip,
 } from '@/components/ui'
@@ -45,7 +44,7 @@ import lockup from '@/assets/lockup.png'
 import { cn } from '@/lib/utils/cn'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
-import { WORKFLOW_ACCENTS, type Workflow, type WorkflowAccent } from '@/types/studio'
+import { WORKFLOW_ACCENTS, type WorkflowAccent } from '@/types/studio'
 
 const SIDEBAR_KEY = 'sparquet-studio:sidebar'
 const GITHUB_URL = 'https://github.com/sparquet/sparquet-studio'
@@ -60,7 +59,7 @@ interface NavEntry {
   to: string
   label: string
   icon: LucideIcon
-  /** Only the overview must match exactly, or every route would light it up. */
+  /** Only the assistant must match exactly, or every route would light it up. */
   end?: boolean
 }
 
@@ -68,10 +67,12 @@ interface NavEntry {
 // Billing decides whether a run starts, Access decides who may start it. Both
 // used to be sections of Settings, where nobody looking for them found them.
 const NAV: NavEntry[] = [
-  { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
+  { to: '/', label: 'Assistant', icon: Sparkles, end: true },
+  { to: '/workflow', label: 'Workflow', icon: LayoutDashboard },
   { to: '/templates', label: 'Templates', icon: LayoutTemplate },
   { to: '/catalog', label: 'Catalog', icon: Database },
   { to: '/sql', label: 'SQL editor', icon: SquareTerminal },
+  { to: '/monitoring', label: 'Monitoring', icon: Activity },
   { to: '/billing', label: 'Billing', icon: Coins },
   { to: '/access', label: 'Access & IAM', icon: ShieldCheck },
   { to: '/learn', label: 'Learn', icon: GraduationCap },
@@ -86,16 +87,6 @@ const ACCENT_DOT: Record<WorkflowAccent, string> = {
   emerald: 'bg-node-output',
   rose: 'bg-state-danger',
   slate: 'bg-node-inspect',
-}
-
-/** Same accents, tinted — carries workflow identity into the collapsed rail. */
-const ACCENT_SOFT: Record<WorkflowAccent, string> = {
-  amber: 'bg-gold/15',
-  sky: 'bg-node-input/15',
-  violet: 'bg-node-combine/15',
-  emerald: 'bg-node-output/15',
-  rose: 'bg-state-danger/15',
-  slate: 'bg-node-inspect/15',
 }
 
 export function AppShell() {
@@ -138,7 +129,6 @@ export function AppShell() {
         collapsed={collapsed}
         onToggleCollapsed={() => setCollapsed((value) => !value)}
         onOpenPalette={() => setPaletteOpen(true)}
-        onNewWorkflow={() => setNewWorkflowOpen(true)}
       />
 
       {/* relative so an absolutely positioned descendant anchors to the scroller
@@ -159,21 +149,9 @@ interface SidebarProps {
   collapsed: boolean
   onToggleCollapsed: () => void
   onOpenPalette: () => void
-  onNewWorkflow: () => void
 }
 
-function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }: SidebarProps) {
-  const workflows = useLibraryStore((state) => state.workflows)
-  const jobs = useLibraryStore((state) => state.jobs)
-
-  const counts = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const job of jobs) {
-      map.set(job.workflowId, (map.get(job.workflowId) ?? 0) + 1)
-    }
-    return map
-  }, [jobs])
-
+function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette }: SidebarProps) {
   return (
     <aside
       aria-label="Sidebar"
@@ -250,53 +228,10 @@ function Sidebar({ collapsed, onToggleCollapsed, onOpenPalette, onNewWorkflow }:
         ))}
       </nav>
 
-      <div className={cn('scroll-area min-h-0 flex-1 px-2 pb-2', collapsed && 'px-0')}>
-        {collapsed ? (
-          <div className="flex flex-col items-center gap-0.5 border-t border-line pt-2">
-            {workflows.map((workflow) => (
-              <WorkflowLink
-                key={workflow.id}
-                workflow={workflow}
-                count={counts.get(workflow.id) ?? 0}
-                collapsed
-              />
-            ))}
-            <Tooltip content="New workflow" side="right">
-              <IconButton label="New workflow" size="sm" onClick={onNewWorkflow}>
-                <Plus />
-              </IconButton>
-            </Tooltip>
-          </div>
-        ) : (
-          <>
-            <SectionTitle
-              className="px-1 pb-1.5 pt-2"
-              action={
-                <IconButton label="New workflow" size="xs" onClick={onNewWorkflow}>
-                  <Plus />
-                </IconButton>
-              }
-            >
-              Workflows
-            </SectionTitle>
-            <div className="space-y-0.5">
-              {workflows.map((workflow) => (
-                <WorkflowLink
-                  key={workflow.id}
-                  workflow={workflow}
-                  count={counts.get(workflow.id) ?? 0}
-                  collapsed={false}
-                />
-              ))}
-            </div>
-            {workflows.length === 0 && (
-              <p className="px-1 py-1.5 text-2xs leading-relaxed text-content-subtle">
-                No workflows yet. Create one to hold your jobs.
-              </p>
-            )}
-          </>
-        )}
-      </div>
+      {/* The list of workflows used to end the menu. It duplicated the Workflow
+          tab one click away and grew without bound, so the nav stays fixed and
+          the workflows are found where they are listed. */}
+      <div className="min-h-0 flex-1" />
 
       <SidebarFooter collapsed={collapsed} onToggleCollapsed={onToggleCollapsed} />
     </aside>
@@ -330,54 +265,6 @@ function SidebarLink({ to, label, icon: Icon, collapsed, end }: SidebarLinkProps
       >
         <Icon className="h-4 w-4 shrink-0" aria-hidden />
         {!collapsed && <span className="truncate">{label}</span>}
-      </NavLink>
-    </Tooltip>
-  )
-}
-
-interface WorkflowLinkProps {
-  workflow: Workflow
-  count: number
-  collapsed: boolean
-}
-
-function WorkflowLink({ workflow, count, collapsed }: WorkflowLinkProps) {
-  const label = `${workflow.name} — ${countLabel(count)}`
-
-  return (
-    <Tooltip content={label} side="right" disabled={!collapsed}>
-      <NavLink
-        to={`/workflows/${workflow.id}`}
-        aria-label={collapsed ? label : undefined}
-        className={({ isActive }) =>
-          cn(
-            'flex items-center rounded-lg text-xs transition-colors',
-            collapsed ? 'h-8 w-8 justify-center' : 'gap-2.5 px-2.5 py-1.5',
-            isActive
-              ? 'bg-brand-500/12 text-content'
-              : 'text-content-muted hover:bg-rail-sunken hover:text-content',
-          )
-        }
-      >
-        {collapsed ? (
-          <span
-            className={cn(
-              'flex h-6 w-6 items-center justify-center rounded-md text-2xs font-semibold uppercase text-content',
-              ACCENT_SOFT[workflow.accent],
-            )}
-          >
-            {workflow.name.slice(0, 2)}
-          </span>
-        ) : (
-          <>
-            <span
-              className={cn('h-2 w-2 shrink-0 rounded-full', ACCENT_DOT[workflow.accent])}
-              aria-hidden
-            />
-            <span className="min-w-0 flex-1 truncate">{workflow.name}</span>
-            <span className="shrink-0 text-2xs tabular-nums text-content-subtle">{count}</span>
-          </>
-        )}
       </NavLink>
     </Tooltip>
   )
@@ -594,9 +481,4 @@ function readCollapsed(): boolean {
   } catch {
     return false
   }
-}
-
-function countLabel(count: number): string {
-  if (count === 0) return 'no jobs'
-  return `${count} ${count === 1 ? 'job' : 'jobs'}`
 }

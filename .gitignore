@@ -71,3 +71,4 @@ htmlcov/
 
 # Deck promocional: capturas de tela regeráveis (ver docs/promo/README.md)
 docs/promo/*.png
+docs/promo/comet/*.png

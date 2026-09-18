@@ -5,10 +5,51 @@
  * not a whitelist, so a model released tomorrow works by typing its id.
  */
 
+import { DEFAULT_RUNNER_URL } from '@/lib/runner/client'
 import { AI_PROVIDERS } from '@/types/ai'
 import type { AiProviderId, AiProviderInfo, AiSettings } from '@/types/ai'
 
 export const AI_PROVIDER_INFO: Record<AiProviderId, AiProviderInfo> = {
+  runner: {
+    id: 'runner',
+    label: 'Local runner',
+    keyUrl: '',
+    defaultModel: '',
+    models: [],
+    defaultBaseUrl: DEFAULT_RUNNER_URL,
+    requiresKey: false,
+    docsNote:
+      "The runner answers with whichever model it was started with, and the assistant can call the runner's own tools — it reads the installed formats and validates a config against the framework itself, instead of guessing from a prompt. Every turn appears in Billing, at a cost of zero while the model runs on the runner's machine.",
+  },
+
+  ollama: {
+    id: 'ollama',
+    label: 'Ollama',
+    keyUrl: '',
+    defaultModel: 'qwen2.5-coder:7b',
+    models: [
+      {
+        id: 'qwen2.5-coder:7b',
+        label: 'Qwen2.5 Coder 7B',
+        hint: 'Best default here — writes JSON reliably and fits in 8 GB of VRAM.',
+      },
+      {
+        id: 'llama3.1:8b',
+        label: 'Llama 3.1 8B',
+        hint: 'Good general answers; weaker at producing a clean pipeline JSON.',
+      },
+      {
+        id: 'qwen2.5-coder:32b',
+        label: 'Qwen2.5 Coder 32B',
+        hint: 'Closest to a hosted model, and wants a serious GPU.',
+      },
+    ],
+    defaultBaseUrl: 'http://localhost:11434/v1',
+    requiresKey: false,
+    docsNote:
+      'Models that run on your own machine: nothing leaves it, nothing is billed, and no key is needed. Install Ollama, then `ollama pull qwen2.5-coder:7b`. This is the same endpoint as OpenAI-compatible, pre-filled.',
+  },
+
   anthropic: {
     id: 'anthropic',
     label: 'Anthropic',
@@ -115,4 +156,16 @@ export function resolveBaseUrl(settings: EndpointSettings): string {
 
 export function resolveModel(settings: EndpointSettings): string {
   return settings.model.trim() || AI_PROVIDER_INFO[settings.provider].defaultModel
+}
+
+/**
+ * Whether the provider runs the model on hardware the user already owns.
+ *
+ * Used to say so in the UI rather than to decide anything: a provider that costs
+ * nothing is worth pointing at, and `runner` is only free when the runner itself
+ * says it is — an operator can point it at a paid model, and then the turn is
+ * billed like any other.
+ */
+export function isLocalProvider(provider: AiProviderId): boolean {
+  return provider === 'ollama' || provider === 'runner'
 }

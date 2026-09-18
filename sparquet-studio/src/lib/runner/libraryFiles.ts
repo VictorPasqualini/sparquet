@@ -35,6 +35,15 @@ export interface LibraryFile {
   size: number
   /** Last modification, epoch **seconds** (the runner reports `st_mtime`). */
   modified: number
+  /**
+   * The Studio record this file is the artefact of, when there is one.
+   *
+   * Absent is the interesting case — a conf the Studio never wrote. It is the
+   * only kind the runner will delete, and the only one with no canvas already
+   * behind it.
+   */
+  ownerKind?: string
+  ownerId?: string
 }
 
 export interface LibraryListing {
@@ -113,12 +122,24 @@ function toFile(value: unknown): LibraryFile | null {
   if (!isRecord(value)) return null
   const path = asString(value.path)
   if (!path) return null
+  const ownerKind = asString(value.owner_kind)
+  const ownerId = asString(value.owner_id)
   return {
     path,
     name: asString(value.name, path),
     size: asNumber(value.size),
     modified: asNumber(value.modified),
+    // Both or neither: half an owner would put a dead link in the interface.
+    ...(ownerKind && ownerId ? { ownerKind, ownerId } : {}),
   }
+}
+
+function encodePath(path: string): string {
+  return path
+    .split('/')
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/')
 }
 
 /** Every runnable JSON in the library. Needs `workspace:Read`. */
@@ -151,12 +172,7 @@ export async function readLibraryFile(
   token?: string,
   signal?: AbortSignal,
 ): Promise<PipelineSpec> {
-  const encoded = path
-    .split('/')
-    .filter(Boolean)
-    .map((part) => encodeURIComponent(part))
-    .join('/')
-  const payload = await get(baseUrl, `/workspace/files/${encoded}`, token, signal)
+  const payload = await get(baseUrl, `/workspace/files/${encodePath(path)}`, token, signal)
   const record = isRecord(payload) ? payload : {}
   if (!isRecord(record.pipeline)) {
     throw new RunnerError(
@@ -166,4 +182,41 @@ export async function readLibraryFile(
     )
   }
   return record.pipeline as unknown as PipelineSpec
+}
+
+/**
+ * Removes a library file from disk. Needs `workspace:Delete`. There is no undo.
+ *
+ * The runner refuses a file a Studio record owns — that one is deleted as a
+ * record, which removes the canvas with it. `false` means the file was already
+ * gone, which is the same end state and not worth an error.
+ */
+export async function deleteLibraryFile(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  path: string,
+  token?: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  let response: Response
+  try {
+    response = await fetch(`${normalizeBaseUrl(baseUrl)}/workspace/files/${encodePath(path)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+      signal,
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new RunnerError(RUNNER_UNREACHABLE_MESSAGE, 'unreachable', undefined, error)
+  }
+  if (!response.ok) {
+    throw new RunnerError(await readErrorMessage(response), 'http', response.status)
+  }
+  try {
+    const payload: unknown = await response.json()
+    return isRecord(payload) ? payload.deleted === true : false
+  } catch {
+    // The file is gone either way; a body this build cannot read is not a reason
+    // to tell somebody the delete failed.
+    return true
+  }
 }

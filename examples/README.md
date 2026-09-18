@@ -24,4 +24,19 @@ fw.stop()
 | [07_quarentena_codigos.json](07_quarentena_codigos.json) | **Códigos de falha por linha**: `code` na regra (e o código derivado da expressão quando ele é omitido), `validations.outputs.invalid.rules` para escopar a quarentena a alguns códigos e `annotate` para gravar em cada linha rejeitada o `array<string>` com os códigos que a rejeitaram. **Rodável localmente** (CSV → CSV + JSON) |
 | [08_validacao_multi_alvo.json](08_validacao_multi_alvo.json) | **Uma entrada de regra, vários alvos** (`targets`): tudo fora de `targets` é default compartilhado (o `min` do `range`), cada alvo sobrescreve o que quiser (o `max`), e o resultado são N regras **independentes** — 3 entradas viram 7 linhas no relatório, cada uma com seu alvo e seu código. O escopo da quarentena cita **um** alvo do `range`, então as violações de `id` ficam fora dela. **Rodável localmente** (CSV → CSV + JSON) |
 
+## Dados de exemplo
+
+`seed_iceberg_demo.py` cria um warehouse Iceberg local (catálogo Hadoop, ou seja,
+diretórios comuns) com `sales.orders` e `sales.order_items`, para abrir no SQL
+editor do Studio. Precisa de Java e `pip install pyspark`; o jar do Iceberg é
+baixado do Maven na primeira execução.
+
+```bash
+python examples/seed_iceberg_demo.py                  # /data/iceberg
+python examples/seed_iceberg_demo.py E:/data/iceberg  # outro diretório
+```
+
+Os `customer_id` batem com a tabela Delta de clientes, então dá para testar join
+entre Iceberg e Delta na mesma query.
+
 Referência completa do schema das confs: [CLAUDE.md](../CLAUDE.md).

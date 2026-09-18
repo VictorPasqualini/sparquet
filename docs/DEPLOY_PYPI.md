@@ -143,7 +143,7 @@ válidos como fallback ou para publicar de uma máquina local.
 
 | Arquivo | Dispara em | O que faz |
 |---|---|---|
-| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push / PR na `main` | roda os testes puros numa matriz Python (3.9 / 3.11 / 3.12) |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | push / PR na `main` | roda os testes puros numa matriz Python (3.9 / 3.11 / 3.12 / 3.13 / 3.14) |
 | [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) | **Release publicado** | testes → build (`+ twine check`) → **publish no PyPI** |
 | idem | **execução manual** (Actions → *Run workflow*) | mesma esteira, mas **publish no TestPyPI** (ensaio) |
 

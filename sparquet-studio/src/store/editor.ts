@@ -38,6 +38,7 @@ import {
 } from '@/lib/compiler'
 import { mergeParams } from '@/lib/params'
 import { runViewStatuses, type StepNodeLanes } from '@/lib/runner/stepNodes'
+import { isWorkspaceConflict } from '@/lib/storage/remote'
 import * as db from '@/lib/storage/db'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { lintJob } from '@/lib/validation/lint'
@@ -140,8 +141,20 @@ interface EditorState {
   dirty: boolean
   saving: boolean
   lastSavedAt: number | null
-  /** The stored record when another tab saved this job first. */
+  /** The stored record when somebody else saved this job first. */
   conflict: Job | null
+  /**
+   * Why the save was refused, when it was refused by the runner rather than
+   * merely noticed here.
+   *
+   * The two cases read the same on screen and are not the same underneath. A
+   * second tab shares this browser's storage, so the conflict is spotted before
+   * the write and the write still happens. A second *machine* over a shared or
+   * synced directory shares nothing: the runner refuses the write outright, the
+   * edits are still only in this tab, and saying so is the difference between
+   * "your change is in, look at theirs" and "your change is not saved yet".
+   */
+  conflictRefused: boolean
 
   past: Snapshot[]
   future: Snapshot[]
@@ -187,6 +200,10 @@ interface EditorState {
   close: () => void
   save: () => Promise<void>
   dismissConflict: () => void
+  /** Drops this tab's unsaved edits and reopens the record as it is on disk. */
+  adoptConflict: () => Promise<void>
+  /** Keeps this tab's edits and writes them over the record on disk. */
+  overwriteConflict: () => Promise<void>
 
   /* graph */
   onNodesChange: (changes: NodeChange<StudioNode>[]) => void
@@ -386,7 +403,23 @@ export const useEditorStore = create<EditorState>((set, get) => {
       updatedAt: Date.now(),
       revision: Math.max(job.revision, stored?.revision ?? 0) + 1,
     }
-    await db.saveJob(next)
+    try {
+      await db.saveJob(next)
+    } catch (error) {
+      // The runner refused it: the file on disk is not the one this edit started
+      // from. `dirty` stays true on purpose — nothing was written, and the next
+      // save attempt has to carry these edits, not drop them.
+      if (isWorkspaceConflict(error)) {
+        set({
+          saving: false,
+          conflict: (error.record as Job | null) ?? get().conflict,
+          conflictRefused: true,
+        })
+        return
+      }
+      set({ saving: false })
+      throw error
+    }
     lastWrite = { id: next.id, revision: next.revision }
     useLibraryStore.getState().upsertJob(next)
     set((state) => {
@@ -423,6 +456,50 @@ export const useEditorStore = create<EditorState>((set, get) => {
     return writeChain
   }
 
+  /**
+   * Replaces the job that is already open with another version of itself — what
+   * adopting the copy on disk needs, and the one thing `open` refuses to do.
+   *
+   * `open` bails on the same id because React Flow measures a node once. Swapping
+   * in fresh node objects for a canvas whose DOM is already the right size fires
+   * no ResizeObserver, so the nodes stay hidden and no edge is ever drawn. Here
+   * every node therefore arrives carrying dimensions: the ones this canvas has
+   * already measured where the node survived the other machine's edit, whatever
+   * the record was saved with next, and the seeded defaults last.
+   */
+  const reload = (job: Job) => {
+    if (autosaveTimer) {
+      clearTimeout(autosaveTimer)
+      autosaveTimer = null
+    }
+    forgetCoalescing()
+    const migrated = upgradeJob(job)
+    const onScreen = new Map(get().nodes.map((node) => [node.id, node.measured]))
+    const nodes = migrated.graph.nodes.map((node) => ({
+      ...node,
+      measured:
+        onScreen.get(node.id) ??
+        node.measured ?? { ...(node.data.kind === 'note' ? NOTE_RENDER_SIZE : NODE_RENDER_SIZE) },
+    })) as StudioNode[]
+    set({
+      job: migrated,
+      nodes,
+      edges: migrated.graph.edges,
+      params: migrated.params,
+      settings: migrated.settings,
+      selectedNodeId: null,
+      issues: [],
+      dirty: false,
+      saving: false,
+      conflict: null,
+      conflictRefused: false,
+      past: [],
+      future: [],
+      lastSavedAt: migrated.updatedAt,
+    })
+    get().lint()
+  }
+
   const insert = (data: StudioNodeData, position: XYPosition): string => {
     const id = `${data.kind}-${nanoid(6)}`
     // Seeded dimensions let React Flow draw the node and its edges on the first
@@ -446,6 +523,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     saving: false,
     lastSavedAt: null,
     conflict: null,
+    conflictRefused: false,
 
     past: [],
     future: [],
@@ -491,6 +569,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         dirty: false,
         saving: false,
         conflict: null,
+        conflictRefused: false,
         past: [],
         future: [],
         run: null,
@@ -530,6 +609,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         dirty: false,
         saving: false,
         conflict: null,
+        conflictRefused: false,
         past: [],
         future: [],
         run: null,
@@ -542,7 +622,39 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     save: () => flush(),
 
-    dismissConflict: () => set({ conflict: null }),
+    dismissConflict: () => set({ conflict: null, conflictRefused: false }),
+
+    adoptConflict: async () => {
+      const id = get().job?.id
+      if (!id) return
+      // Ask the disk rather than trusting the record the refusal carried: between
+      // the refusal and this click the other machine may have saved again.
+      const stored = (await db.refreshJob(id).catch(() => null)) ?? get().conflict
+      if (!stored) {
+        set({ conflict: null, conflictRefused: false })
+        return
+      }
+      lastWrite = null
+      useLibraryStore.getState().upsertJob(stored)
+      reload(stored)
+    },
+
+    overwriteConflict: async () => {
+      const { job, conflict } = get()
+      if (!job) return
+      await db.overwriteNext('job', job.id)
+      set({
+        // Past the other machine's number, so the in-browser check does not
+        // raise the same conflict again over a record the user just resolved.
+        job: { ...job, revision: Math.max(job.revision, conflict?.revision ?? 0) },
+        conflict: null,
+        conflictRefused: false,
+        // A conflict noticed (rather than refused) left nothing pending; the
+        // write still has to happen, because overwriting is what was asked for.
+        dirty: true,
+      })
+      await flush()
+    },
 
     onNodesChange: (changes) => {
       // Drags fire continuously; only the final position is worth an undo entry.

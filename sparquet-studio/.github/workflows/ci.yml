@@ -1,0 +1,103 @@
+# Sparquet Studio, on its own.
+#
+# GitHub only reads workflows from `.github/workflows` at the root of a
+# repository, so this file does nothing while the Studio lives inside the
+# framework repository — there the `studio` job of the root CI is what runs. It
+# is checked in anyway, and kept working, so the day this directory becomes a
+# repository the first push is already covered instead of green by absence.
+#
+# Two layers:
+#   web      typecheck, lint, unit tests, build and a smoke run in real Chrome
+#   runner   the local execution bridge's own tests, which need no Spark
+#
+# The unit tests round-trip the framework's example pipelines as fixtures. In a
+# standalone repository there is no `examples/` next to the checkout, so they
+# come from the installed `sparquet` — the version pinned in
+# `server/requirements.txt` — through `sparquet.examples_path()`. That is the
+# point of the pin: bumping it changes the fixtures, and a round-trip that stops
+# holding says the compiler has fallen behind the framework it compiles for.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Only the framework, and only for its examples: the compiler fixtures are
+      # read from the installed package. No pyspark here — nothing in this job
+      # runs a pipeline.
+      - name: Install the pinned framework
+        run: pip install "$(grep -E '^sparquet[><=]' server/requirements.txt)"
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # Without the flag, a machine that cannot find the example configs skips
+      # those cases, and a skip in CI is a green job proving nothing about them.
+      - name: Unit tests
+        env:
+          SPARQUET_EXAMPLES_REQUIRED: "1"
+        run: npm run test
+
+      # Typecheck and tests both run on source. This is the only step that proves
+      # the bundle still builds.
+      - name: Build
+        run: npm run build
+
+      - name: Smoke
+        run: npm run smoke
+
+  runner:
+    name: Runner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -r server/requirements.txt
+
+      # Each suite is a `unittest` main, run as a script — the same way they are
+      # run on a laptop. None of them needs Spark or a network.
+      - name: Runner tests
+        run: |
+          set -o pipefail
+          status=0
+          for suite in server/test_*.py; do
+            echo "::group::$suite"
+            python "$suite" || status=1
+            echo "::endgroup::"
+          done
+          exit $status

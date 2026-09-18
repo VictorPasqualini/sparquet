@@ -6,7 +6,7 @@
  * anybody has to type, because it is the only part no pipeline can tell us.
  */
 
-import { ChevronRight, RefreshCw, Trash2, X } from 'lucide-react'
+import { ChevronRight, HardDriveDownload, RefreshCw, Table2, Trash2, X } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 
 import {
@@ -16,20 +16,34 @@ import {
   IconButton,
   Input,
   Modal,
+  Segmented,
   Select,
   Textarea,
   type BadgeTone,
+  type SegmentedOption,
   type SelectOption,
 } from '@/components/ui'
+import { GrantsPanel, type NewGrant } from '@/components/catalog/GrantsPanel'
+import { RunResultTable } from '@/components/panels/RunResultTable'
+import type { RunnerQueryResult } from '@/lib/runner/client'
+import { OwnerPicker, type NewOwner } from '@/components/catalog/OwnerPicker'
 import { addTag, hasTag, MAX_TAG_LENGTH, MAX_TAGS, removeTag } from '@/lib/tags'
+import type { DatasetGrant, Owner } from '@/lib/iam'
+import type { AuthTeam, AuthUser } from '@/types/auth'
+import { useSecretsStore } from '@/store/secrets'
 import {
   CLASSIFICATIONS,
+  columnAnnotationOf,
+  columnRaisesClassification,
   compareSchema,
   dedupeSteps,
   dedupeUses,
+  effectiveClassification,
   impactOf,
+  MAX_COLUMN_DESCRIPTION,
   MAX_DESCRIPTION,
   originsOf,
+  type ColumnAnnotation,
   type ColumnGraph,
   type ColumnStep,
   type DataClassification,
@@ -183,6 +197,85 @@ function TrailList({
 }
 
 /**
+ * What one column is, and how restricted it is.
+ *
+ * A column is a catalog object of its own here, not a line in the table's
+ * description: it carries its own classification and its own tags, and the IAM
+ * rules can name it as `<dataset key>#<column>`. That is what makes "the whole
+ * table except the document number" expressible — a column can only ever be
+ * narrower than its table, never wider.
+ *
+ * It writes as you edit rather than through the sheet's Save button, because
+ * this form belongs to a row that can be collapsed: a description lost by
+ * closing a disclosure triangle is a description nobody writes twice.
+ */
+function ColumnAnnotationForm({
+  annotation,
+  column,
+  suggestions,
+  onSave,
+}: {
+  annotation: DatasetAnnotation | null
+  column: string
+  suggestions: string[]
+  onSave: (column: string, patch: Partial<ColumnAnnotation>) => Promise<void> | void
+}) {
+  const stored = columnAnnotationOf(annotation, column)
+  const [description, setDescription] = useState(stored?.description ?? '')
+
+  // A different column in the same table is a different form.
+  useEffect(() => {
+    setDescription(stored?.description ?? '')
+  }, [stored?.description, column])
+
+  const raised = stored ? columnRaisesClassification(annotation, stored) : false
+
+  return (
+    <div className="space-y-2 rounded-md border border-line/60 bg-surface-sunken p-2">
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-[12rem] flex-1">
+          <Input
+            value={description}
+            onChange={(event) =>
+              setDescription(event.target.value.slice(0, MAX_COLUMN_DESCRIPTION))
+            }
+            onBlur={() => {
+              if (description !== (stored?.description ?? '')) void onSave(column, { description })
+            }}
+            aria-label={`What ${column} holds`}
+            placeholder="What this column holds"
+            className="h-8"
+          />
+        </div>
+        <div className="w-44">
+          <Select
+            value={stored?.classification ?? ''}
+            ariaLabel={`How restricted ${column} is`}
+            options={CLASSIFICATION_OPTIONS}
+            onValueChange={(value) =>
+              void onSave(column, { classification: value as DataClassification | '' })
+            }
+          />
+        </div>
+      </div>
+      <TagBox
+        tags={stored?.tags ?? []}
+        suggestions={suggestions}
+        ariaLabel={`Add a tag to ${column}`}
+        onChange={(tags) => void onSave(column, { tags })}
+      />
+      {raised ? (
+        <p className="text-2xs leading-relaxed text-content-subtle">
+          This column is more restricted than the table around it, so the table reads as{' '}
+          <span className="font-medium text-content-muted">{stored?.classification}</span> wherever
+          its classification is shown.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * Where one column comes from, what it feeds, and who merely names it.
  *
  * The three answers are kept apart on purpose: a value path and a mention break
@@ -193,11 +286,19 @@ function ColumnDetail({
   graph,
   datasetKey,
   column,
+  annotation,
+  suggestions,
+  onSaveColumn,
   onOpenJob,
 }: {
   graph: ColumnGraph
   datasetKey: string
   column: string
+  annotation: DatasetAnnotation | null
+  suggestions: string[]
+  onSaveColumn:
+    | ((column: string, patch: Partial<ColumnAnnotation>) => Promise<void> | void)
+    | null
   onOpenJob: (jobId: string) => void
 }) {
   const ref = { key: datasetKey, column }
@@ -210,6 +311,14 @@ function ColumnDetail({
 
   return (
     <div className="space-y-2 rounded-md border border-line/60 bg-surface p-2">
+      {onSaveColumn ? (
+        <ColumnAnnotationForm
+          annotation={annotation}
+          column={column}
+          suggestions={suggestions}
+          onSave={onSaveColumn}
+        />
+      ) : null}
       <div className="flex flex-col gap-3 sm:flex-row">
         <TrailList
           title="Comes from"
@@ -270,6 +379,9 @@ function SchemaTable({
   datasetKey,
   formats,
   columns,
+  annotation,
+  suggestions,
+  onSaveColumn,
   probe,
   onOpenJob,
 }: {
@@ -277,6 +389,14 @@ function SchemaTable({
   datasetKey: string
   formats: readonly string[]
   columns: ColumnGraph
+  /** The catalog entry of this dataset, for the per-column classification. */
+  annotation: DatasetAnnotation | null
+  /** Tags already used elsewhere, offered on a column as well as on a table. */
+  suggestions: string[]
+  /** Writes one column's annotation. Null when this reader may not edit. */
+  onSaveColumn:
+    | ((column: string, patch: Partial<ColumnAnnotation>) => Promise<void> | void)
+    | null
   /** Opens the dataset on the runner. Absent when no runner is configured. */
   probe: ((format: string) => Promise<ProbedField[]>) | null
   onOpenJob: (jobId: string) => void
@@ -362,14 +482,28 @@ function SchemaTable({
             </button>
           ) : null}
           {probe && format ? (
+            /*
+              The one button on this screen that leaves the browser: it opens the
+              dataset on the runner. It says which format it will use and that no
+              rows are read, because "read from storage" on a 2 TB table is a
+              sentence people are right to hesitate over.
+            */
             <Button
               size="sm"
-              variant="secondary"
+              variant={probed ? 'secondary' : 'outline'}
               loading={probing}
               onClick={() => void run()}
-              title={`Open this dataset as ${format} on the runner and read its schema. No rows are read.`}
+              title={`Opens this dataset as ${format} on the runner and reads its schema. No rows are read.`}
+              trailing={
+                <span
+                  className="rounded bg-brand-500/10 px-1 py-px font-mono text-[10px] text-brand-500
+                    dark:text-brand-400"
+                >
+                  {format}
+                </span>
+              }
             >
-              <RefreshCw />
+              {probed ? <RefreshCw /> : <HardDriveDownload />}
               {probed ? 'Read again' : 'Read from storage'}
             </Button>
           ) : null}
@@ -385,10 +519,11 @@ function SchemaTable({
       <table className="w-full table-fixed text-xs">
         <thead>
           <tr className="text-left text-[11px] uppercase tracking-wide text-content-subtle">
-            <th className="w-[36%] py-1 pr-2 font-medium">Column</th>
-            <th className="w-[24%] py-1 pr-2 font-medium">Type</th>
-            {drift ? <th className="w-[22%] py-1 pr-2 font-medium">Storage</th> : null}
-            <th className={`${drift ? 'w-[18%]' : 'w-[40%]'} py-1 font-medium`}>
+            <th className="w-[30%] py-1 pr-2 font-medium">Column</th>
+            <th className="w-[20%] py-1 pr-2 font-medium">Type</th>
+            {drift ? <th className="w-[20%] py-1 pr-2 font-medium">Storage</th> : null}
+            <th className="w-[16%] py-1 pr-2 font-medium">Access</th>
+            <th className={`${drift ? 'w-[14%]' : 'w-[34%]'} py-1 font-medium`}>
               {drift ? 'Drift' : 'Origin'}
             </th>
           </tr>
@@ -397,6 +532,7 @@ function SchemaTable({
           {rows.map((row) => {
             const note = noteOf(row.name)
             const expanded = open === row.name
+            const described = columnAnnotationOf(annotation, row.name)
             return (
               <Fragment key={row.name}>
                 <tr className="border-t border-line/60 align-top">
@@ -439,6 +575,28 @@ function SchemaTable({
                       )}
                     </td>
                   ) : null}
+                  <td className="py-1 pr-2">
+                    {described?.classification ? (
+                      <span
+                        title={
+                          columnRaisesClassification(annotation, described)
+                            ? `Stricter than the table itself. ${
+                                CLASSIFICATION_HINT[described.classification]
+                              }`
+                            : CLASSIFICATION_HINT[described.classification]
+                        }
+                      >
+                        <Badge
+                          tone={described.classification === 'restricted' ? 'warning' : 'neutral'}
+                        >
+                          {described.classification}
+                          {columnRaisesClassification(annotation, described) ? ' ↑' : ''}
+                        </Badge>
+                      </span>
+                    ) : (
+                      <span className="text-content-subtle">—</span>
+                    )}
+                  </td>
                   <td className="py-1 text-content-subtle">
                     {drift ? (
                       <Badge tone={DRIFT_TONE[row.status]}>{DRIFT_LABEL[row.status]}</Badge>
@@ -454,11 +612,14 @@ function SchemaTable({
                 </tr>
                 {expanded ? (
                   <tr className="border-t border-line/40">
-                    <td colSpan={drift ? 4 : 3} className="px-1 py-2">
+                    <td colSpan={drift ? 5 : 4} className="px-1 py-2">
                       <ColumnDetail
                         graph={columns}
                         datasetKey={datasetKey}
                         column={row.name}
+                        annotation={annotation}
+                        suggestions={suggestions}
+                        onSaveColumn={onSaveColumn}
                         onOpenJob={onOpenJob}
                       />
                     </td>
@@ -492,6 +653,7 @@ interface Draft {
   domain: string
   classification: DataClassification | ''
   tags: string[]
+  connection: string
 }
 
 function draftOf(annotation: DatasetAnnotation | null): Draft {
@@ -501,6 +663,7 @@ function draftOf(annotation: DatasetAnnotation | null): Draft {
     domain: annotation?.domain ?? '',
     classification: annotation?.classification ?? '',
     tags: annotation?.tags ?? [],
+    connection: annotation?.connection ?? '',
   }
 }
 
@@ -510,6 +673,7 @@ function sameDraft(a: Draft, b: Draft): boolean {
     a.owner === b.owner &&
     a.domain === b.domain &&
     a.classification === b.classification &&
+    a.connection === b.connection &&
     a.tags.length === b.tags.length &&
     a.tags.every((tag, index) => tag === b.tags[index])
   )
@@ -564,10 +728,13 @@ function MentionList({
 function TagBox({
   tags,
   suggestions,
+  ariaLabel = 'Add a tag to this dataset',
   onChange,
 }: {
   tags: string[]
   suggestions: string[]
+  /** What is being labelled — a table by default, a column on the schema tab. */
+  ariaLabel?: string
   onChange: (tags: string[]) => void
 }) {
   const [draft, setDraft] = useState('')
@@ -604,7 +771,7 @@ function TagBox({
         }}
         onBlur={() => commit(draft)}
         disabled={tags.length >= MAX_TAGS}
-        aria-label="Add a tag to this dataset"
+        aria-label={ariaLabel}
         placeholder={tags.length >= MAX_TAGS ? `${MAX_TAGS} tags is the limit` : 'pii, daily, core'}
         className="h-8"
       />
@@ -627,6 +794,145 @@ function TagBox({
   )
 }
 
+/**
+ * The three questions people bring to a table, kept apart because they are asked
+ * by different people: what IS it (columns, types, who writes it), what does it
+ * MEAN (the description a person owes the next reader), and who may TOUCH it.
+ * Mixing the three made one long scroll where the access rules read as one more
+ * metadata field.
+ */
+type Tab = 'shape' | 'about' | 'access'
+
+const TABS: SegmentedOption<Tab>[] = [
+  { value: 'shape', label: 'Schema', title: 'Columns, types and who writes them' },
+  { value: 'about', label: 'Documentation', title: 'What the rows mean' },
+  { value: 'access', label: 'Access', title: 'Who may read, write or administer it' },
+]
+
+/**
+ * How many rows the sheet asks for.
+ *
+ * A sample is read by a person, and a person reads the first screen: it is
+ * enough to see what the values look like, whether a column is empty and whether
+ * the dates are what the name promised. Anything past that is a query, and there
+ * is an editor for those.
+ */
+const SAMPLE_ROWS = 20
+
+/**
+ * The first rows, read from the storage itself.
+ *
+ * It goes through the SAME path the SQL editor takes — the runner registers the
+ * dataset as a temporary view and runs `SELECT *` against it with a cap — so a
+ * Delta or Iceberg table samples here without this sheet knowing anything about
+ * either, and the row cap, the timeout and the access rules that bound a query
+ * bound this one too. It is not filed in anybody's query history: the statement
+ * was written by a button, not by a person, and a catalog sheet is not a console.
+ *
+ * Never read on open. The schema above costs a directory listing; rows cost a
+ * scan, and a sheet that scans a table because somebody clicked its name is a
+ * sheet people learn not to click.
+ */
+function SampleRows({
+  datasetKey,
+  formats,
+  sample,
+}: {
+  datasetKey: string
+  formats: readonly string[]
+  /** Reads the first rows on the runner. Absent when no runner is configured. */
+  sample: ((format: string, limit: number) => Promise<RunnerQueryResult>) | null
+}) {
+  const [rows, setRows] = useState<RunnerQueryResult | null>(null)
+  const [reading, setReading] = useState(false)
+  const [failure, setFailure] = useState<string | null>(null)
+  const format = probableFormat(formats)
+
+  // A different dataset in the same modal was never sampled.
+  useEffect(() => {
+    setRows(null)
+    setFailure(null)
+  }, [datasetKey])
+
+  const run = async () => {
+    if (!sample || !format) return
+    setReading(true)
+    setFailure(null)
+    try {
+      setRows(await sample(format, SAMPLE_ROWS))
+    } catch (error) {
+      setRows(null)
+      setFailure(error instanceof Error ? error.message : String(error))
+    } finally {
+      setReading(false)
+    }
+  }
+
+  if (!sample || !format) return null
+
+  return (
+    <section className="space-y-2 overflow-hidden rounded-lg border border-line bg-surface-sunken p-3">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-content-subtle">
+          Sample
+        </p>
+        {rows ? (
+          <span className="text-xs text-content-subtle">
+            <span className="tabular-nums">{rows.rows.length}</span>{' '}
+            {rows.rows.length === 1 ? 'row' : 'rows'} ·{' '}
+            <span className="tabular-nums">{rows.elapsedMs}</span> ms
+          </span>
+        ) : (
+          <span className="text-xs text-content-subtle">
+            The first {SAMPLE_ROWS} rows, when you ask for them.
+          </span>
+        )}
+        {rows?.truncated ? <Badge tone="warning">there are more rows</Badge> : null}
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            size="sm"
+            variant={rows ? 'secondary' : 'outline'}
+            loading={reading}
+            onClick={() => void run()}
+            title={`Opens this dataset as ${format} on the runner and returns the first ${SAMPLE_ROWS} rows. Reads only, and capped — the same path the SQL editor uses.`}
+            trailing={
+              <span
+                className="rounded bg-brand-500/10 px-1 py-px font-mono text-[10px] text-brand-500
+                  dark:text-brand-400"
+              >
+                {format}
+              </span>
+            }
+          >
+            {rows ? <RefreshCw /> : <Table2 />}
+            {rows ? 'Read again' : `Read ${SAMPLE_ROWS} rows`}
+          </Button>
+        </div>
+      </div>
+
+      {failure ? (
+        <p className="break-words rounded border border-danger/40 bg-danger/10 px-2 py-1 text-2xs text-danger">
+          {failure}
+        </p>
+      ) : null}
+
+      {rows ? (
+        <RunResultTable
+          columns={rows.columns}
+          rows={rows.rows}
+          fields={rows.fields}
+          truncated={rows.truncated}
+          maxRows={SAMPLE_ROWS}
+          sortable
+          inspectable
+          emptyMessage="The dataset is there and has no rows."
+          heightClass="max-h-[20rem]"
+        />
+      ) : null}
+    </section>
+  )
+}
+
 export interface DatasetSheetProps {
   dataset: LineageDataset | null
   annotation: DatasetAnnotation | null
@@ -643,8 +949,39 @@ export interface DatasetSheetProps {
    * when no runner is configured, and the sheet then shows only what it derived.
    */
   probe: ((format: string) => Promise<ProbedField[]>) | null
+  /**
+   * Reads the dataset's first rows on the runner, through the same `/query` path
+   * the SQL editor uses. Null when no runner is configured.
+   */
+  sample: ((format: string, limit: number) => Promise<RunnerQueryResult>) | null
+  /** Access rules on this dataset, and the principals a new one can name. */
+  grants: readonly DatasetGrant[]
+  teams: AuthTeam[]
+  users: AuthUser[]
+  onGrant: (grant: NewGrant) => Promise<void> | void
+  onRevoke: (id: string) => Promise<void> | void
+  /** The ownership record on this dataset itself, or null when it has none. */
+  owner: Owner | null
+  /**
+   * The owner that actually applies and where it sits — a table under an owned
+   * folder has one without a record of its own.
+   */
+  ownerEffective: { owner: Owner; source: string } | null
+  onAssignOwner: (owner: NewOwner) => Promise<void> | void
+  onClearOwner: () => Promise<void> | void
+  /**
+   * Whether this reader may write the rules here: an administrator of the
+   * runner, or the owner of the dataset. False still shows them — hiding who
+   * can reach a table is how people assume nobody can.
+   */
+  mayManageAccess?: boolean
   onClose: () => void
   onSave: (patch: Partial<DatasetAnnotation>) => Promise<void>
+  /**
+   * Writes one column's own entry — description, classification, tags. Saved on
+   * the spot rather than with the sheet, since the row it belongs to collapses.
+   */
+  onSaveColumn: (column: string, patch: Partial<ColumnAnnotation>) => Promise<void>
   onForget: () => Promise<void>
   onOpenJob: (jobId: string) => void
 }
@@ -657,18 +994,44 @@ export function DatasetSheet({
   schema,
   columns,
   probe,
+  sample,
+  grants,
+  teams,
+  users,
+  onGrant,
+  onRevoke,
+  owner,
+  ownerEffective,
+  onAssignOwner,
+  onClearOwner,
+  mayManageAccess = true,
   onClose,
   onSave,
+  onSaveColumn,
   onForget,
   onOpenJob,
 }: DatasetSheetProps) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(annotation))
   const [saving, setSaving] = useState(false)
+  const [tab, setTab] = useState<Tab>('shape')
+  const secrets = useSecretsStore((state) => state.items)
+  const loadSecrets = useSecretsStore((state) => state.load)
 
   // A different dataset in the same modal is a different form.
   useEffect(() => {
     setDraft(draftOf(annotation))
+    setTab('shape')
   }, [dataset?.key, annotation])
+
+  // Only the names, and only to fill a picker. Nothing here reads a value.
+  useEffect(() => {
+    void loadSecrets()
+  }, [loadSecrets])
+
+  const connectionOptions = useMemo<SelectOption[]>(
+    () => secrets.map((secret) => ({ value: secret.name, label: secret.name })),
+    [secrets],
+  )
 
   const dirty = useMemo(() => !sameDraft(draft, draftOf(annotation)), [draft, annotation])
 
@@ -718,6 +1081,16 @@ export function DatasetSheet({
       }
     >
       <div className="space-y-5">
+        <Segmented
+          size="sm"
+          ariaLabel="What to look at"
+          value={tab}
+          onChange={setTab}
+          options={TABS}
+        />
+
+        {tab === 'shape' ? (
+          <>
         <section className="space-y-3 rounded-lg border border-line bg-surface-sunken p-3">
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone={PLACE_TONE[dataset.place]}>{PLACE_LABEL[dataset.place]}</Badge>
@@ -726,6 +1099,23 @@ export function DatasetSheet({
                 {format}
               </Badge>
             ))}
+            {effectiveClassification(annotation) ? (
+              <span
+                title={
+                  effectiveClassification(annotation) === annotation?.classification
+                    ? CLASSIFICATION_HINT[effectiveClassification(annotation) as DataClassification]
+                    : 'Raised by one of its columns: a table is as restricted as the most restricted thing in it.'
+                }
+              >
+                <Badge
+                  tone={
+                    effectiveClassification(annotation) === 'restricted' ? 'warning' : 'neutral'
+                  }
+                >
+                  {effectiveClassification(annotation)}
+                </Badge>
+              </span>
+            ) : null}
             {dataset.sessionScoped ? <Badge tone="warning">session only</Badge> : null}
             {workflowNames.length > 1 ? (
               <span title={`Touched by: ${workflowNames.join(', ')}`}>
@@ -755,11 +1145,20 @@ export function DatasetSheet({
             datasetKey={dataset.key}
             formats={dataset.formats}
             columns={columns}
+            annotation={annotation}
+            suggestions={suggestions}
+            onSaveColumn={onSaveColumn}
             probe={probe}
             onOpenJob={onOpenJob}
           />
         ) : null}
 
+        <SampleRows datasetKey={dataset.key} formats={dataset.formats} sample={sample} />
+          </>
+        ) : null}
+
+        {tab === 'about' ? (
+          <>
         <Field
           label="What is it"
           help={`Plain language: what the rows are, and what they are not. ${
@@ -792,28 +1191,88 @@ export function DatasetSheet({
           </Field>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="Classification"
-            help="How far the data may travel. Blank is not the same as public."
-          >
+        <Field label="Tags" help="Free labels. Enter adds one, Backspace removes the last.">
+          <TagBox
+            tags={draft.tags}
+            suggestions={suggestions}
+            onChange={(tags) => setDraft({ ...draft, tags })}
+          />
+        </Field>
+
+        {/*
+          The name of the credential, and nothing more. It answers "what does
+          this table need to be opened", which today is only findable by reading
+          every Job that touches it. A free text box rather than only a picker,
+          because the runner may hold a secret this person is not allowed to
+          list, and the name is still the right thing to write down.
+        */}
+        <Field
+          label="Connection"
+          help="The secret that opens this dataset, by name. Its fields stay on the runner —
+            a Job references them as {secret:name/field}."
+        >
+          {connectionOptions.length > 0 ? (
             <Select
-              value={draft.classification}
-              options={CLASSIFICATION_OPTIONS}
-              placeholder="Not classified"
-              onValueChange={(value) =>
-                setDraft({ ...draft, classification: value as DataClassification | '' })
-              }
+              value={draft.connection}
+              options={connectionOptions}
+              placeholder="No connection named"
+              onValueChange={(value) => setDraft({ ...draft, connection: value })}
             />
-          </Field>
-          <Field label="Tags" help="Free labels. Enter adds one, Backspace removes the last.">
-            <TagBox
-              tags={draft.tags}
-              suggestions={suggestions}
-              onChange={(tags) => setDraft({ ...draft, tags })}
+          ) : (
+            <Input
+              value={draft.connection}
+              placeholder="pg-prod"
+              onChange={(event) => setDraft({ ...draft, connection: event.target.value })}
             />
-          </Field>
-        </div>
+          )}
+        </Field>
+          </>
+        ) : null}
+
+        {tab === 'access' ? (
+          <>
+            {/*
+              Classification sits here and not with the description: it is what
+              the rules below are usually justified by, and reading "restricted"
+              next to a deny is how somebody checks the two agree.
+            */}
+            <Field
+              label="Classification"
+              help="How far the data may travel. Blank is not the same as public — it only
+                means nobody has said."
+            >
+              <Select
+                value={draft.classification}
+                options={CLASSIFICATION_OPTIONS}
+                placeholder="Not classified"
+                onValueChange={(value) =>
+                  setDraft({ ...draft, classification: value as DataClassification | '' })
+                }
+              />
+            </Field>
+
+            <OwnerPicker
+              resource="dataset"
+              owner={owner}
+              effective={ownerEffective}
+              teams={teams}
+              users={users}
+              onAssign={onAssignOwner}
+              onClear={onClearOwner}
+              editable={mayManageAccess}
+            />
+
+            <GrantsPanel
+              resource="dataset"
+              grants={grants}
+              teams={teams}
+              users={users}
+              onGrant={onGrant}
+              onRevoke={onRevoke}
+              editable={mayManageAccess}
+            />
+          </>
+        ) : null}
       </div>
     </Modal>
   )

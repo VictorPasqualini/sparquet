@@ -12,8 +12,8 @@
 
 import { create } from 'zustand'
 
-import { withAnnotation, withoutAnnotation } from '@/lib/datacatalog'
-import type { CatalogAnnotations, DatasetAnnotation } from '@/lib/datacatalog'
+import { withAnnotation, withColumnAnnotation, withoutAnnotation } from '@/lib/datacatalog'
+import type { CatalogAnnotations, ColumnAnnotation, DatasetAnnotation } from '@/lib/datacatalog'
 import * as db from '@/lib/storage/db'
 
 interface CatalogState {
@@ -26,6 +26,18 @@ interface CatalogState {
   load: (force?: boolean) => Promise<void>
   /** Writes one dataset's annotation. A patch that empties it deletes the entry. */
   annotate: (key: string, patch: Partial<DatasetAnnotation>) => Promise<void>
+  /**
+   * Describe or classify one column of one dataset.
+   *
+   * Separate from `annotate` because the patch is shaped differently and
+   * merging it by hand at every call site is how two callers end up dropping
+   * each other's columns.
+   */
+  annotateColumn: (
+    key: string,
+    column: string,
+    patch: Partial<ColumnAnnotation>,
+  ) => Promise<void>
   forget: (key: string) => Promise<void>
 }
 
@@ -54,6 +66,13 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
     const next = withAnnotation(get().annotations, key, patch)
     // Persist first: showing an edit the storage refused would be a lie, and the
     // one thing a catalog cannot afford is a description nobody else can see.
+    await db.writeCatalog(next)
+    set({ annotations: next, error: null })
+  },
+
+  annotateColumn: async (key, column, patch) => {
+    const next = withColumnAnnotation(get().annotations, key, column, patch)
+    if (next === get().annotations) return
     await db.writeCatalog(next)
     set({ annotations: next, error: null })
   },

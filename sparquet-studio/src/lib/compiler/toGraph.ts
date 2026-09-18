@@ -67,6 +67,73 @@ function asText(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+/**
+ * The keys of `value` that are not in `known` — what this build of the Studio
+ * does not understand and must therefore not throw away. See `PipelineExtras`.
+ */
+function extrasOf(value: unknown, known: readonly string[]): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined
+  const out: JsonRecord = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (known.includes(key) || item === undefined) continue
+    out[key] = jsonClone(item)
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** Top-level keys this compiler reads. Anything else is parked in the extras. */
+const KNOWN_PIPELINE_KEYS = [
+  'name',
+  'description',
+  'spark',
+  'input',
+  'input_view',
+  'transformations',
+  'validations',
+  'output',
+  'outputs',
+] as const
+
+const KNOWN_INPUT_KEYS = ['format', 'path', 'options'] as const
+
+const KNOWN_OUTPUT_KEYS = [
+  'format',
+  'path',
+  'mode',
+  'partition_by',
+  'columns',
+  'options',
+  'transformations',
+  'annotate',
+  'rules',
+] as const
+
+const KNOWN_VALIDATIONS_KEYS = ['on_failure', 'rules', 'report', 'outputs'] as const
+
+/**
+ * `input_view`, in either form the framework accepts, as the source node stores it.
+ *
+ * An unreadable value is reported rather than dropped: `input_view: 42` means the
+ * author meant something, and the file will not run until they see what.
+ */
+function readInputView(
+  value: unknown,
+  issues: Issues,
+): { name: string; scope: 'session' | 'global' } | null {
+  if (value === undefined || value === null) return null
+  const raw = isRecord(value) ? value.name : value
+  const name = asText(raw).trim()
+  if (!name) {
+    issues.warning('"input_view" names no view and was ignored.')
+    return null
+  }
+  const rawScope = isRecord(value) ? asText(value.type).trim() : ''
+  if (rawScope && rawScope !== 'session' && rawScope !== 'global') {
+    issues.warning(`Unknown "input_view.type" "${rawScope}"; read as "session".`)
+  }
+  return { name, scope: rawScope === 'global' ? 'global' : 'session' }
+}
+
 interface IssueOptions {
   nodeId?: string
   field?: string
@@ -162,7 +229,8 @@ function readSourceData(value: unknown, issues: Issues, label: string): SourceNo
   if (!format) issues.warning(`${label} has no format.`)
   if (!path) issues.warning(`${label} has no path.`)
   const options = isRecord(value.options) ? (jsonClone(value.options) as JsonRecord) : {}
-  return { kind: 'source', format, path, options }
+  const extras = extrasOf(value, KNOWN_INPUT_KEYS)
+  return { kind: 'source', format, path, options, ...(extras ? { extras } : {}) }
 }
 
 function readSinkData(value: unknown, issues: Issues, label: string): SinkNodeData {
@@ -191,6 +259,7 @@ function readSinkData(value: unknown, issues: Issues, label: string): SinkNodeDa
     : null
   const options = isRecord(value.options) ? (jsonClone(value.options) as JsonRecord) : {}
 
+  const extras = extrasOf(value, KNOWN_OUTPUT_KEYS)
   return {
     kind: 'sink',
     format,
@@ -199,6 +268,7 @@ function readSinkData(value: unknown, issues: Issues, label: string): SinkNodeDa
     partitionBy,
     columns,
     options,
+    ...(extras ? { extras } : {}),
   }
 }
 
@@ -339,7 +409,8 @@ function importValidations(
     issues.warning(`Unknown "on_failure" mode "${rawMode}"; using "fail".`)
   }
 
-  const policy: ValidationPolicy = { onFailure }
+  const extras = extrasOf(value, KNOWN_VALIDATIONS_KEYS)
+  const policy: ValidationPolicy = { onFailure, ...(extras ? { extras } : {}) }
 
   if (isRecord(value.report)) sideSinks.set('report', value.report)
   if (isRecord(value.outputs)) {
@@ -373,16 +444,34 @@ export function pipelineToGraph(pipeline: unknown): DecompileResult {
     return { graph: { nodes: [], edges: [] }, settings: emptySettings(), issues: issues.items }
   }
 
+  const extras = extrasOf(pipeline, KNOWN_PIPELINE_KEYS)
   const settings: JobSettings = {
     pipelineName: asText(pipeline.name),
     description: asText(pipeline.description),
     spark: readSpark(pipeline.spark),
+    ...(extras ? { extras } : {}),
   }
   if (!settings.pipelineName) issues.warning('The pipeline has no "name".', { field: 'name' })
+  if (extras) {
+    // Said out loud rather than swallowed: the canvas cannot draw these, and the
+    // author has to know the editor is carrying something it does not understand.
+    issues.info(
+      `This build does not know ${Object.keys(extras)
+        .map((key) => `"${key}"`)
+        .join(', ')} — kept as written and saved back unchanged.`,
+      { hint: 'Nothing on the canvas edits them. Edit them in the JSON, or in the file.' },
+    )
+  }
 
   const ctx: BuildContext = { nodes: [], edges: [], issues }
 
-  const source = makeSourceNode(readSourceData(pipeline.input, issues, 'The pipeline "input"'))
+  const inputView = readInputView(pipeline.input_view, issues)
+  const source = makeSourceNode({
+    ...readSourceData(pipeline.input, issues, 'The pipeline "input"'),
+    ...(inputView
+      ? { inputView: inputView.name, inputViewScope: inputView.scope }
+      : {}),
+  })
   ctx.nodes.push(source)
 
   let tail: StudioNode = source

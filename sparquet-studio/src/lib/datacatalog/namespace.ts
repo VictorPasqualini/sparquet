@@ -252,13 +252,30 @@ export function describeAsset(key: string, formats: readonly string[]): CatalogA
   return { key, kind, ...fromPath(address) }
 }
 
-/** One level of the browser tree: a root, a database, a folder. */
+/**
+ * Which of the three tiers a node sits in.
+ *
+ * Databricks says catalog / schema / table and Athena says catalog / database /
+ * table; they are the same three levels with two names for the middle one. A
+ * lake has the same shape under different words — a bucket holds top-level
+ * prefixes that hold datasets — so the tiers are assigned by DEPTH and the words
+ * change with the root: a bucket is the catalog tier, its first prefix is the
+ * schema tier, and anything deeper is a plain folder that no metastore would
+ * have a name for.
+ */
+export type NodeTier = 'catalog' | 'schema' | 'folder'
+
+/** One level of the browser tree: a catalog, a schema/database, a folder. */
 export interface CatalogNode {
   /** Full path from the root, joined — stable across renders, unique in the tree. */
   id: string
   label: string
   /** Set on the top level only; the levels below a root are plain namespaces. */
   rootKind?: RootKind
+  /** Which of the three metastore tiers this level is. */
+  tier: NodeTier
+  /** 0 for a root, 1 for a schema, and up from there. */
+  depth: number
   children: CatalogNode[]
   /** Assets sitting at this level, sorted by name. */
   assets: CatalogAsset[]
@@ -266,15 +283,30 @@ export interface CatalogNode {
   count: number
 }
 
-function emptyNode(id: string, label: string, rootKind?: RootKind): CatalogNode {
-  return { id, label, rootKind, children: [], assets: [], count: 0 }
+function tierOf(depth: number): NodeTier {
+  if (depth === 0) return 'catalog'
+  if (depth === 1) return 'schema'
+  return 'folder'
+}
+
+function emptyNode(id: string, label: string, depth: number, rootKind?: RootKind): CatalogNode {
+  return {
+    id,
+    label,
+    rootKind,
+    tier: tierOf(depth),
+    depth,
+    children: [],
+    assets: [],
+    count: 0,
+  }
 }
 
 function childOf(parent: CatalogNode, label: string): CatalogNode {
   const id = `${parent.id}/${label}`
   const existing = parent.children.find((child) => child.id === id)
   if (existing) return existing
-  const created = emptyNode(id, label)
+  const created = emptyNode(id, label, parent.depth + 1)
   parent.children.push(created)
   return created
 }
@@ -301,7 +333,7 @@ export function buildNamespaceTree(assets: readonly CatalogAsset[]): CatalogNode
   for (const asset of assets) {
     let node = roots.get(asset.root)
     if (!node) {
-      node = emptyNode(asset.root, asset.rootLabel, asset.rootKind)
+      node = emptyNode(asset.root, asset.rootLabel, 0, asset.rootKind)
       roots.set(asset.root, node)
     }
     for (const segment of asset.namespace) node = childOf(node, segment)

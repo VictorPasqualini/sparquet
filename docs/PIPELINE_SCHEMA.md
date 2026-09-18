@@ -168,6 +168,13 @@ durante as transformações).
 As duas sintaxes **não colidem**: `{{nome}}` fica intacto mesmo quando `params` tem uma chave
 `nome`. São as chaves duplas que distinguem as duas — o template só substitui `{nome}` sozinha.
 
+Uma terceira forma pode aparecer num JSON escrito pelo Sparquet Studio:
+`{secret:nome/campo}`, uma credencial de conexão. **O framework não a resolve** — o
+runner do Studio a substitui antes de entregar o documento. Ela não colide com
+nenhuma das duas acima porque `apply_template` casa `(?<!\{)\{(\w+)\}(?!\})`, e `\w`
+não cobre `:` nem `/`. Do ponto de vista do framework é texto literal, e nada em
+`sparquet/` precisou mudar para isso funcionar.
+
 ---
 
 ## Reutilização de transformações com `$include`
@@ -220,6 +227,15 @@ permite mover uma pasta de includes inteira sem reescrever os caminhos de dentro
       "timestampAsOf": "2025-05-10T10:00:00Z"
     }
   },
+
+  // input_view: registra (e CACHEIA) a entrada como temp view antes das transformações,
+  // para self-join ou `sql` sobre a entrada sem reler a base. String = escopo "session";
+  // dict com "type": "global" = global temp view (lida como global_temp.<nome>). O nome
+  // precisa ser identificador simples — sem ponto, porque temp view não é qualificada por
+  // database. O argumento Python homônimo (`fw.run(..., input_view=...)`) tem precedência
+  // sobre esta chave.
+  "input_view": "entrada",              // opcional
+  // "input_view": { "name": "entrada", "type": "global" },
 
   "transformations": [                  // opcional — aplicadas em ordem
     { "type": "filter", "condition": "SQL expr" },
@@ -1210,7 +1226,7 @@ fw.register_validator("no_future_date", NoFutureDateValidator)
   juntos (senão o framework escreveria um CSV que ele mesmo não relê). Para ler arquivos
   gravados no dialeto antigo, declare `options: {"escape": "\\"}`.
 - **`filter`/`select` primeiro**: comece a cadeia de `transformations` reduzindo linhas (`filter`) e colunas (`select`) antes de joins/structs/group_by pesados — menos dados por todo o resto do pipeline (o Spark empurra parte, mas colocar explícito ajuda o planner e a legibilidade).
-- **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`).
+- **Self-join sem reler a base**: `fw.run(..., input_view="entrada")` registra (e cacheia) o df de entrada como temp view; um `join`/`sql` seguinte referencia `entrada` sem reler a fonte. Para uma global temp view, passe um dict: `input_view={"name": "entrada", "type": "global"}` (default `"type": "session"`). O mesmo pode ser declarado no JSON, na chave de topo `input_view`, com a mesma forma — o argumento Python vence quando os dois existem. Escopo `global` vive na SparkSession inteira: dois pipelines que compartilham a sessão e registram o mesmo nome se atropelam.
 - **temp view (`view`) global vs sessão**: `options.scope` = `session` (default) ou `global` (`global_temp.<nome>`, visível a toda a aplicação Spark).
 - **sparquet_cola** é um pacote/repo separado (`../sparquet-cola`), publicado no PyPI e declarado em `dependencies` do sparquet como `sparquet-cola>=0.4.0` (piso, sem cap: a 0.3.0 trouxe as métricas como tipos de regra e o `expand_targets` de que o parse da config depende; a 0.4.0, a medição das regras agregáveis numa passada única). Nome PyPI com hífen (`sparquet-cola`); o import é sempre `sparquet_cola` (underscore — convenção Python). Alterações no motor de DQ são feitas no repo `sparquet-cola` (publique uma nova versão lá antes de o sparquet a consumir).
 

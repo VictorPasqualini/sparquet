@@ -51,6 +51,19 @@ def _pipeline(doc_id: str = "p1", name: str = "Diário") -> workspace.Document:
     )
 
 
+def _query(doc_id: str = "q1", name: str = "Pedidos por dia") -> workspace.Document:
+    return workspace.Document(
+        kind="query",
+        id=doc_id,
+        record={
+            "id": doc_id,
+            "name": name,
+            "description": "",
+            "sql": "SELECT 1",
+        },
+    )
+
+
 class FileWorkspaceStoreTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -169,6 +182,75 @@ class FileWorkspaceStoreTest(unittest.TestCase):
         for bad in ("../escape", "a/b", "", "  "):
             with self.assertRaises(workspace.WorkspaceError, msg=bad):
                 self.store.write(workspace.Document(kind="workflow", id=bad, record={}))
+
+
+class SavedQueryTest(unittest.TestCase):
+    """A saved query is a `.sql` file, not a JSON document with SQL inside it.
+
+    That is the whole point of saving one here rather than in the browser: the
+    artefact is the text somebody wrote, so it has to be readable, diffable and
+    editable outside the Studio. A reviewer should be able to read the query in a
+    pull request without a JSON viewer, and an edit made in an editor should
+    survive — which is why nothing on the way out reformats it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "sparquet-workspace"
+        self.store = workspace.FileWorkspaceStore(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_the_readable_file_is_the_sql_itself(self) -> None:
+        doc = self.store.write(_query())
+
+        self.assertEqual(doc.path, "queries/pedidos-por-dia.sql")
+        self.assertEqual(
+            (self.root / "queries" / "pedidos-por-dia.sql").read_text(encoding="utf-8"),
+            "SELECT 1\n",
+        )
+
+    def test_it_belongs_to_no_workflow(self) -> None:
+        # A query is written against the catalog, which spans every Workflow, so
+        # there is no folder for it to inherit and `_orphans/` would be a lie.
+        self.store.write(_workflow())
+        doc = self.store.write(_query())
+
+        self.assertFalse(doc.path.startswith("_orphans/"))
+        self.assertFalse(doc.path.startswith("vendas/"))
+
+    def test_the_record_survives_a_reload(self) -> None:
+        self.store.write(_query())
+
+        again = workspace.FileWorkspaceStore(self.root).read("query", "q1")
+
+        self.assertIsNotNone(again)
+        assert again is not None
+        self.assertEqual(again.record["sql"], "SELECT 1")
+
+    def test_the_snapshot_carries_it(self) -> None:
+        self.store.write(_query())
+
+        snapshot = self.store.snapshot()
+
+        self.assertEqual([doc.id for doc in snapshot.queries], ["q1"])
+        self.assertIn("queries", snapshot.to_json())
+
+    def test_renaming_moves_the_file(self) -> None:
+        self.store.write(_query())
+
+        self.store.write(_query(name="Pedidos por hora"))
+
+        self.assertTrue((self.root / "queries" / "pedidos-por-hora.sql").exists())
+        self.assertFalse((self.root / "queries" / "pedidos-por-dia.sql").exists())
+
+    def test_a_query_is_not_offered_as_something_to_run(self) -> None:
+        # `list_files` is what a Pipeline stage picks from, and a SELECT is not a
+        # pipeline. Being `.sql` rather than `.json` is what keeps it out.
+        self.store.write(_query())
+
+        self.assertEqual(self.store.list_files(), [])
 
 
 class WorkspaceLocationTest(unittest.TestCase):

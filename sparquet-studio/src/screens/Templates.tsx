@@ -1,4 +1,4 @@
-import { ArrowRight, Check, Copy, Eye, Search, Sparkles, X } from 'lucide-react'
+import { ArrowRight, Check, Copy, Eye, LayoutTemplate, Search, Sparkles, X } from 'lucide-react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -17,6 +17,7 @@ import {
   type BadgeTone,
   type SegmentedOption,
 } from '@/components/ui'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { TEMPLATES } from '@/data/templates'
 import { usePermission } from '@/lib/auth/usePermission'
 import { serializePipeline } from '@/lib/compiler'
@@ -117,14 +118,13 @@ export function Templates() {
   }, [])
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
-      <header className="mb-6 space-y-1">
-        <h1 className="text-sm font-semibold text-content">Templates</h1>
-        <p className="max-w-2xl text-xs leading-relaxed text-content-muted">
-          Working pipelines you can open, read and edit. Every one compiles to real Sparquet
-          JSON, so a template is also the fastest way to learn a feature.
-        </p>
-      </header>
+    <PageShell>
+      <PageHeader
+        icon={<LayoutTemplate />}
+        title="Templates"
+        description="Working pipelines you can open, read and edit. Every one compiles to real
+          Sparquet JSON, so a template is also the fastest way to learn a feature."
+      />
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <Segmented value={level} onChange={setLevel} options={options} size="sm" />
@@ -204,7 +204,7 @@ export function Templates() {
           onClose={() => setTarget(null)}
         />
       )}
-    </div>
+    </PageShell>
   )
 }
 

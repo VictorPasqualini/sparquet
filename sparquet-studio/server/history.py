@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -42,7 +43,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
 # --------------------------------------------------------------------- status
 
@@ -187,6 +188,37 @@ class PipelineRun:
 
 
 @dataclass
+class QueryRun:
+    """One execution of a statement from the SQL editor.
+
+    Kept by the runner rather than by the browser because the query it belongs
+    to is a file in the workspace: two people opening the same saved query are
+    looking at the same thing, and what it has been run as is part of that
+    thing. A scratch buffer nobody has saved has no file, so its runs are keyed
+    by the tab and read back only by whoever made them.
+    """
+
+    id: str
+    #: `q:<saved query id>` for a saved query, `t:<tab id>` for a scratch buffer.
+    key: str
+    #: ISO-8601, from the runner's clock — one clock for everybody reading it.
+    at: str
+    #: Exactly the statement that was sent, which is the selection when a
+    #: selection was run.
+    sql: str
+    #: The row cap it ran under, since that changes what came back.
+    limit: int
+    elapsed_ms: int
+    rows: int
+    #: The runner cut the result short at the cap.
+    truncated: bool
+    #: The first line of the failure, or None when the run succeeded.
+    error: Optional[str] = None
+    #: Who ran it. Null on a runner with login turned off.
+    run_as: Optional[str] = None
+
+
+@dataclass
 class CatalogRecord:
     """One row of the catalog: a Workflow, a Pipeline or a Job.
 
@@ -220,6 +252,136 @@ class CatalogRecord:
 #: How many ids go into one `IN (...)` clause. SQLite's parameter limit is far
 #: higher, but a purge of a year's runs should not build a query megabytes long.
 _CHUNK = 400
+
+
+@dataclass
+class RunGroup:
+    """One line of the run breakdown: a Pipeline, a Job, a Workflow or a person."""
+
+    #: The id, or None for runs that belong to nothing of this dimension.
+    key: Optional[str]
+    #: What to show. The catalog name when there is one, the id otherwise.
+    label: str
+    runs: int
+    failed: int
+    #: Of the runs that finished. A month of averages that silently included the
+    #: runs still going would report every long run as a fast one.
+    duration_ms_avg: Optional[int]
+    duration_ms_total: int
+
+
+@dataclass
+class RunDay:
+    """One day of the month, including the days nothing ran."""
+
+    day: str  # YYYY-MM-DD
+    runs: int
+    failed: int
+
+
+@dataclass
+class JobHealth:
+    """The state of one Job, read from its own runs rather than from one of them.
+
+    The unit the monitoring screen and `monitoring.py` both work in. A Job with no
+    runs at all is still here, with everything `None`: "never ran" is an answer
+    somebody is looking for, and a Job that drops off a health list the moment it
+    stops running is a Job nobody notices has stopped.
+
+    Field names match `monitoring.JobFacts` one for one — the mapping between the
+    two lives in `main.py`, and this module deliberately does not import that one:
+    the history has to be readable by a runner that never evaluates a rule.
+    """
+
+    job_id: str
+    name: Optional[str] = None
+    workflow_id: Optional[str] = None
+    last_run_id: Optional[str] = None
+    last_status: Optional[str] = None
+    last_started_at: Optional[str] = None
+    last_finished_at: Optional[str] = None
+    last_duration_ms: Optional[int] = None
+    last_rows_read: Optional[int] = None
+    last_rows_written: Optional[int] = None
+    last_error: Optional[str] = None
+    last_success_at: Optional[str] = None
+    #: Failures since the last success. A cancelled or skipped run counts as
+    #: neither: it is not a failure, and it is not evidence that the Job recovered.
+    consecutive_failures: int = 0
+    runs: int = 0
+    failures: int = 0
+    #: Successful runs *before* the last one, newest first. The run being judged
+    #: is never part of the baseline it is judged against.
+    durations: List[int] = field(default_factory=list)
+    volumes: List[int] = field(default_factory=list)
+
+
+@dataclass
+class RunMetrics:
+    """How much this runner ran in one month, and how it went.
+
+    The companion to the credits breakdown, and deliberately a different source:
+    credits count what was charged, which excludes local runs and runs that
+    failed before writing. This counts executions — a month where everything ran
+    locally costs nothing and still happened, and "how much did we run" is the
+    question somebody asks before "what did it cost".
+    """
+
+    period: str  # YYYY-MM
+    total: int
+    succeeded: int
+    failed: int
+    #: Neither succeeded nor failed: cancelled, skipped, or still going.
+    other: int
+    #: Over the runs that finished, in the order somebody reads them: the
+    #: average is the expectation, the median the typical run, and p95 the one
+    #: that ruins an evening. All three are None in a month with no finished run.
+    duration_ms_avg: Optional[int]
+    duration_ms_p50: Optional[int]
+    duration_ms_p95: Optional[int]
+    #: Machine time the month spent running, which is what a quota is spent on.
+    duration_ms_total: int
+    days: List[RunDay] = field(default_factory=list)
+    groups: List[RunGroup] = field(default_factory=list)
+    #: Which dimension `groups` is sliced by.
+    group_by: str = "pipeline"
+
+
+#: The dimensions a month of runs can be read back by. `pipeline` covers both a
+#: Studio Pipeline and a Job run on its own, because "what ran" is one list to
+#: the person asking.
+RUN_GROUPS = ("pipeline", "job", "workflow", "user")
+
+
+def _percentile(sorted_values: List[int], percent: int) -> Optional[int]:
+    """The nearest-rank percentile of an already sorted list.
+
+    Nearest rank rather than interpolation: the answer is then a duration some
+    run actually took, which is what somebody reading "p95" wants to go and find
+    in the history.
+    """
+    if not sorted_values:
+        return None
+    rank = max(1, math.ceil(len(sorted_values) * percent / 100))
+    return sorted_values[rank - 1]
+
+
+def _days_of(period: str) -> List[str]:
+    """Every day of a `YYYY-MM`, so a chart keeps the days nothing ran.
+
+    A series that skips empty days draws a busy month and a quiet one the same
+    shape, which is the opposite of what the chart is for.
+    """
+    try:
+        first = datetime.strptime(period, "%Y-%m")
+    except ValueError:
+        return []
+    days: List[str] = []
+    day = first
+    while day.month == first.month:
+        days.append(day.strftime("%Y-%m-%d"))
+        day += timedelta(days=1)
+    return days
 
 
 def _chunks(items: List[str], size: int = _CHUNK):
@@ -372,7 +534,7 @@ class ExecutionRepository(Protocol):
 
     def ensure_run_targets(
         self, *, workflow_id: Optional[str], pipeline_id: Optional[str],
-        job_id: Optional[str], name: Optional[str] = None,
+        job_id: Optional[str], name: Optional[str] = None, path: Optional[str] = None,
     ) -> None: ...
 
     # ---- history: what happened
@@ -434,12 +596,51 @@ class ExecutionRepository(Protocol):
 
     def get_pipeline_run(self, run_id: str) -> Optional[PipelineRun]: ...
 
+    def run_metrics(
+        self, *, period: Optional[str] = None, group_by: str = "pipeline",
+        workflow_id: Optional[str] = None, limit: int = 20,
+    ) -> "RunMetrics": ...
+
+    def job_health(self, *, samples: int = 20, limit: int = 500) -> List["JobHealth"]: ...
+
     def set_pinned(self, run_id: str, pinned: bool) -> bool: ...
+
+    def record_query_run(
+        self, key: str, *, sql: str, limit: int, elapsed_ms: int, rows: int,
+        truncated: bool, error: Optional[str] = None, run_as: Optional[str] = None,
+    ) -> QueryRun: ...
+
+    def list_query_runs(self, key: str, *, limit: int = 0) -> List[QueryRun]: ...
+
+    def clear_query_runs(self, key: str) -> int: ...
+
+    def move_query_runs(self, from_key: str, to_key: str) -> int: ...
 
     def purge(
         self, policy: "RetentionPolicy", *, dry_run: bool = False,
         now: Optional[datetime] = None,
     ) -> "PurgeReport": ...
+
+
+#: How many runs one query keeps. The oldest goes when the next one arrives:
+#: the question a history answers is "what did I run recently", and an unbounded
+#: one would make a query somebody keeps open grow without anybody deciding to.
+QUERY_RUNS_KEPT = 100
+
+
+def _query_run_of(row: sqlite3.Row) -> QueryRun:
+    return QueryRun(
+        id=row["id"],
+        key=row["query_key"],
+        at=row["started_at"],
+        sql=row["statement"],
+        limit=int(row["row_limit"] or 0),
+        elapsed_ms=int(row["duration_ms"] or 0),
+        rows=int(row["row_count"] or 0),
+        truncated=bool(row["truncated"]),
+        error=row["error"],
+        run_as=row["run_as"],
+    )
 
 
 #: A tag is a label a human types, so it is bounded here rather than trusted.
@@ -596,6 +797,25 @@ CREATE TABLE IF NOT EXISTS step_run (
 );
 CREATE INDEX IF NOT EXISTS idx_step_run_job_run
   ON step_run(job_run_id, scope, step_index);
+
+/* What the SQL editor has been run as. It hangs off no execution: a query is
+   not a Job, it writes nothing, and it is recorded whether it worked or not —
+   "what did I run that broke" is asked as often as the other question. The key
+   is the saved query's id, or the tab's for a buffer nobody has saved yet. */
+CREATE TABLE IF NOT EXISTS query_run (
+  id TEXT PRIMARY KEY,
+  query_key TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  statement TEXT NOT NULL,
+  row_limit INTEGER,
+  duration_ms INTEGER,
+  row_count INTEGER,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  run_as TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_query_run_key
+  ON query_run(query_key, started_at DESC);
 
 CREATE TABLE IF NOT EXISTS run_log (
   job_run_id TEXT NOT NULL REFERENCES job_run(id),
@@ -760,6 +980,57 @@ def _link_runs_to_catalog(conn: sqlite3.Connection) -> None:
           ON job_run(pipeline_run_id, stage_index);
         """
     )
+
+
+def _job_health(
+    job_id: str,
+    name: Optional[str],
+    workflow_id: Optional[str],
+    runs: Sequence[Any],
+) -> JobHealth:
+    """Folds one Job's recent runs, newest first, into what is asked about it.
+
+    Separate from the query so it can be handed a list of plain rows in a test.
+
+    The streak of failures stops at the last success and counts nothing else on
+    the way: a cancelled run is somebody pressing stop, and a skipped one is
+    `stop_if_empty` ending gracefully. Neither is a failure, and neither is
+    evidence the Job recovered, so both are stepped over rather than counted or
+    treated as a reset.
+    """
+    health = JobHealth(job_id=job_id, name=name, workflow_id=workflow_id)
+    if not runs:
+        return health
+
+    first = runs[0]
+    health.last_run_id = first["id"]
+    health.last_status = first["status"]
+    health.last_started_at = first["started_at"]
+    health.last_finished_at = first["finished_at"]
+    health.last_duration_ms = first["duration_ms"]
+    health.last_rows_read = first["rows_read"]
+    health.last_rows_written = first["rows_written"]
+    health.last_error = first["error"]
+    health.runs = len(runs)
+
+    streak_open = True
+    for index, run in enumerate(runs):
+        status = run["status"]
+        if status == FAILED:
+            health.failures += 1
+            if streak_open:
+                health.consecutive_failures += 1
+        elif status == SUCCESS:
+            if health.last_success_at is None:
+                health.last_success_at = run["finished_at"] or run["started_at"]
+            streak_open = False
+            # The run being judged is the baseline's subject, never part of it.
+            if index > 0:
+                if run["duration_ms"] is not None:
+                    health.durations.append(int(run["duration_ms"]))
+                if run["rows_written"] is not None:
+                    health.volumes.append(int(run["rows_written"]))
+    return health
 
 
 class SQLiteExecutionRepository:
@@ -931,20 +1202,25 @@ class SQLiteExecutionRepository:
 
     def ensure_run_targets(
         self, *, workflow_id: Optional[str], pipeline_id: Optional[str],
-        job_id: Optional[str], name: Optional[str] = None,
+        job_id: Optional[str], name: Optional[str] = None, path: Optional[str] = None,
     ) -> None:
         """Makes the ids a run is about exist in the catalog, ahead of the run.
 
         `create_pipeline_run` does this for itself, so this is for callers that want
         the catalog to name the Job before the first execution of it lands — the run
         panel, which knows the Studio name while the runner only knows the id.
+
+        `path` is for the caller whose record *is* a file: the run knows where it
+        read the config from, and a placeholder row that cannot say so is a row
+        nobody can act on. Like the name, it is written only when the row is
+        created — a record somebody has since curated is theirs, not the run's.
         """
         with self._lock, closing(self._connect()) as conn:
             self._ensure_workflow(conn, workflow_id)
             if job_id:
-                self._ensure(conn, "job", job_id, workflow_id, name)
+                self._ensure(conn, "job", job_id, workflow_id, name, path)
             if pipeline_id:
-                self._ensure(conn, "pipeline", pipeline_id, workflow_id, name)
+                self._ensure(conn, "pipeline", pipeline_id, workflow_id, name, path)
             conn.commit()
 
     # ---- catalog internals -----------------------------------------------
@@ -979,6 +1255,7 @@ class SQLiteExecutionRepository:
     def _ensure(
         conn: sqlite3.Connection, table: str, record_id: str,
         workflow_id: Optional[str] = None, name: Optional[str] = None,
+        path: Optional[str] = None,
     ) -> None:
         """Creates a placeholder row if the id is unknown. Never overwrites a real
         one: a run knows an id, the workspace knows what it is called."""
@@ -991,9 +1268,10 @@ class SQLiteExecutionRepository:
             )
             return
         conn.execute(
-            f"INSERT OR IGNORE INTO {table} (id, workflow_id, name, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (record_id, workflow_id, name, stamp, stamp),
+            f"INSERT OR IGNORE INTO {table} "
+            "(id, workflow_id, name, path, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (record_id, workflow_id, name, path, stamp, stamp),
         )
 
     def _ensure_workflow(self, conn: sqlite3.Connection, workflow_id: Optional[str]) -> None:
@@ -1351,6 +1629,194 @@ class SQLiteExecutionRepository:
             run.jobs = jobs
             return run
 
+    # ---- metrics -------------------------------------------------------------
+
+    def run_metrics(
+        self, *, period: Optional[str] = None, group_by: str = "pipeline",
+        workflow_id: Optional[str] = None, limit: int = 20,
+    ) -> RunMetrics:
+        """One month of executions: how many, how they ended, how long they took.
+
+        The month is matched on the stored `started_at` prefix rather than by
+        converting to a timestamp, which keeps the query over the same ISO
+        strings everything else here stores.
+
+        Percentiles are computed in Python over the durations of the finished
+        runs. SQLite has no percentile function, the alternative is a window
+        query that still sorts everything, and a month of runs on a local runner
+        is a few thousand integers at worst.
+        """
+        month = period or datetime.now(timezone.utc).strftime("%Y-%m")
+        if group_by not in RUN_GROUPS:
+            group_by = "pipeline"
+        scope = "AND workflow_id = ?" if workflow_id else ""
+        args: Tuple[Any, ...] = (month, workflow_id) if workflow_id else (month,)
+
+        with self._lock, closing(self._connect()) as conn:
+            totals = conn.execute(
+                f"""
+                SELECT
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN status = '{SUCCESS}' THEN 1 ELSE 0 END) AS succeeded,
+                  SUM(CASE WHEN status = '{FAILED}' THEN 1 ELSE 0 END) AS failed,
+                  COALESCE(SUM(duration_ms), 0) AS spent
+                FROM pipeline_run
+                WHERE substr(started_at, 1, 7) = ? {scope}
+                """,
+                args,
+            ).fetchone()
+
+            durations = [
+                int(row["duration_ms"])
+                for row in conn.execute(
+                    f"""
+                    SELECT duration_ms FROM pipeline_run
+                    WHERE substr(started_at, 1, 7) = ? {scope}
+                      AND duration_ms IS NOT NULL
+                    ORDER BY duration_ms
+                    """,
+                    args,
+                ).fetchall()
+            ]
+
+            day_rows = conn.execute(
+                f"""
+                SELECT substr(started_at, 1, 10) AS day,
+                       COUNT(*) AS runs,
+                       SUM(CASE WHEN status = '{FAILED}' THEN 1 ELSE 0 END) AS failed
+                FROM pipeline_run
+                WHERE substr(started_at, 1, 7) = ? {scope}
+                GROUP BY day ORDER BY day
+                """,
+                args,
+            ).fetchall()
+
+            group_rows = conn.execute(
+                self._run_group_sql(group_by, scope), args
+            ).fetchall()
+            names = self._catalog_names(conn)
+
+        total = int(totals["total"] or 0)
+        succeeded = int(totals["succeeded"] or 0)
+        failed = int(totals["failed"] or 0)
+        counted = {row["day"]: row for row in day_rows}
+        groups = [
+            RunGroup(
+                key=row["key"],
+                label=self._run_group_label(group_by, row, names),
+                runs=int(row["runs"] or 0),
+                failed=int(row["failed"] or 0),
+                duration_ms_avg=(
+                    int(row["spent"] / row["finished"]) if row["finished"] else None
+                ),
+                duration_ms_total=int(row["spent"] or 0),
+            )
+            for row in group_rows
+        ][:limit]
+
+        return RunMetrics(
+            period=month,
+            total=total,
+            succeeded=succeeded,
+            failed=failed,
+            other=total - succeeded - failed,
+            duration_ms_avg=(
+                int(sum(durations) / len(durations)) if durations else None
+            ),
+            duration_ms_p50=_percentile(durations, 50),
+            duration_ms_p95=_percentile(durations, 95),
+            duration_ms_total=int(totals["spent"] or 0),
+            days=[
+                RunDay(
+                    day=day,
+                    runs=int(counted[day]["runs"]) if day in counted else 0,
+                    failed=int(counted[day]["failed"] or 0) if day in counted else 0,
+                )
+                for day in _days_of(month)
+            ],
+            groups=groups,
+            group_by=group_by,
+        )
+
+    @staticmethod
+    def _run_group_sql(group_by: str, scope: str) -> str:
+        """The breakdown query for one dimension.
+
+        `job` reads `job_run` and the other three read `pipeline_run`, because a
+        Job that runs as one stage of a Pipeline is an execution of that Job and
+        the row naming it is the nested one. Counting the outer row instead would
+        report a five-stage Pipeline as a single run of nothing.
+        """
+        job_scope = scope.replace("workflow_id", "pipeline_run.workflow_id")
+        if group_by == "job":
+            return f"""
+                SELECT job_run.job_id AS key,
+                       MAX(job_run.name) AS name,
+                       COUNT(*) AS runs,
+                       SUM(CASE WHEN job_run.status = '{FAILED}' THEN 1 ELSE 0 END)
+                         AS failed,
+                       SUM(CASE WHEN job_run.duration_ms IS NOT NULL THEN 1 ELSE 0 END)
+                         AS finished,
+                       COALESCE(SUM(job_run.duration_ms), 0) AS spent
+                FROM job_run
+                JOIN pipeline_run ON pipeline_run.id = job_run.pipeline_run_id
+                WHERE substr(pipeline_run.started_at, 1, 7) = ? {job_scope}
+                GROUP BY key ORDER BY runs DESC, spent DESC
+            """
+        column = {
+            # A Job run on its own has no pipeline_id and is still something that
+            # ran; grouping it under "nothing" would hide most of a local month.
+            "pipeline": "COALESCE(pipeline_id, job_id)",
+            "workflow": "workflow_id",
+            "user": "run_as",
+        }[group_by]
+        return f"""
+            SELECT {column} AS key,
+                   MAX(name) AS name,
+                   COUNT(*) AS runs,
+                   SUM(CASE WHEN status = '{FAILED}' THEN 1 ELSE 0 END) AS failed,
+                   SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) AS finished,
+                   COALESCE(SUM(duration_ms), 0) AS spent
+            FROM pipeline_run
+            WHERE substr(started_at, 1, 7) = ? {scope}
+            GROUP BY key ORDER BY runs DESC, spent DESC
+        """
+
+    @staticmethod
+    def _catalog_names(conn: sqlite3.Connection) -> Dict[str, str]:
+        """Id to name, across all three catalog tables.
+
+        A run stores the name it had when it ran, which is right for the run and
+        wrong for a monthly total: a Job renamed mid-month would appear as two
+        lines. The catalog is asked instead, and the stored name is the fallback
+        for a record the catalog no longer has.
+        """
+        names: Dict[str, str] = {}
+        for kind in ("workflow", "pipeline", "job"):
+            for row in conn.execute(f"SELECT id, name FROM {kind}").fetchall():
+                if row["name"]:
+                    names[str(row["id"])] = str(row["name"])
+        return names
+
+    @staticmethod
+    def _run_group_label(
+        group_by: str, row: sqlite3.Row, names: Dict[str, str]
+    ) -> str:
+        key = row["key"]
+        if key is None:
+            # Each dimension is absent for its own reason, and one label for all
+            # four would send the reader looking for the wrong thing.
+            return {
+                "pipeline": "Ad-hoc run",
+                "job": "Unnamed job",
+                "workflow": "Outside any workflow",
+                "user": "Shared runner token",
+            }[group_by]
+        if group_by == "user":
+            return str(key)
+        stored = row["name"]
+        return names.get(str(key)) or (str(stored) if stored else str(key))
+
     # ---- retention -----------------------------------------------------------
 
     def set_pinned(self, run_id: str, pinned: bool) -> bool:
@@ -1362,6 +1828,140 @@ class SQLiteExecutionRepository:
             )
             conn.commit()
         return cursor.rowcount > 0
+
+    # ---- health --------------------------------------------------------------
+
+    def job_health(self, *, samples: int = 20, limit: int = 500) -> List[JobHealth]:
+        """Every Job in the library, with what its own recent runs say about it.
+
+        One query for the catalog and one for the runs, rather than one query per
+        Job: a library of two hundred Jobs is a normal library, and a health
+        screen that costs two hundred round trips is a health screen that gets
+        opened once.
+
+        `samples` is how far back each Job is summarised. It bounds both the work
+        and the baseline a monitor compares against — twenty runs is enough for a
+        median to mean something and short enough that a Job which changed shape
+        last month is not judged against how it behaved before.
+        """
+        per_job = max(2, min(int(samples), 200))
+        with closing(self._connect()) as conn:
+            jobs = conn.execute(
+                "SELECT id, name, workflow_id FROM job WHERE deleted_at IS NULL"
+                " ORDER BY name COLLATE NOCASE LIMIT ?",
+                (max(1, min(int(limit), 2000)),),
+            ).fetchall()
+            known = {row["id"]: row for row in jobs}
+            # The window function does the per-Job slicing in SQLite rather than
+            # reading the whole history and throwing most of it away here.
+            rows = conn.execute(
+                """
+                SELECT job_id, id, status, started_at, finished_at, duration_ms,
+                       rows_read, rows_written, error
+                FROM (
+                  SELECT jr.*, ROW_NUMBER() OVER (
+                           PARTITION BY jr.job_id
+                           ORDER BY jr.started_at DESC, jr.rowid DESC
+                         ) AS rank_in_job
+                  FROM job_run jr
+                  WHERE jr.job_id IS NOT NULL AND jr.started_at IS NOT NULL
+                )
+                WHERE rank_in_job <= ?
+                ORDER BY job_id, rank_in_job
+                """,
+                (per_job,),
+            ).fetchall()
+
+        by_job: Dict[str, List[sqlite3.Row]] = {}
+        for row in rows:
+            by_job.setdefault(row["job_id"], []).append(row)
+
+        health: List[JobHealth] = []
+        for job_id, record in known.items():
+            health.append(
+                _job_health(job_id, record["name"], record["workflow_id"], by_job.get(job_id, []))
+            )
+        return health
+
+    # ---- query_run -----------------------------------------------------------
+
+    def record_query_run(
+        self, key: str, *, sql: str, limit: int, elapsed_ms: int, rows: int,
+        truncated: bool, error: Optional[str] = None, run_as: Optional[str] = None,
+    ) -> QueryRun:
+        """Records one execution from the SQL editor and returns it.
+
+        The runner writes this, not the browser: it is the side that knows how
+        long the statement took, how many rows it produced and how it failed,
+        and a history somebody else reads has to be a record of what happened
+        rather than of what a client said happened.
+        """
+        run = QueryRun(
+            id=_new_id(), key=key, at=_now_iso(), sql=sql, limit=int(limit),
+            elapsed_ms=int(elapsed_ms), rows=int(rows), truncated=bool(truncated),
+            error=error, run_as=run_as,
+        )
+        with self._lock, closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT INTO query_run (id, query_key, started_at, statement, "
+                "row_limit, duration_ms, row_count, truncated, error, run_as) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (run.id, run.key, run.at, run.sql, run.limit, run.elapsed_ms,
+                 run.rows, 1 if run.truncated else 0, run.error, run.run_as),
+            )
+            # Bounded here rather than by the retention policy: this is a working
+            # record of one query, not the execution history the runner reports
+            # on, and it would otherwise grow for as long as somebody keeps a
+            # query open.
+            conn.execute(
+                "DELETE FROM query_run WHERE query_key = ? AND id NOT IN ("
+                "  SELECT id FROM query_run WHERE query_key = ? "
+                "  ORDER BY started_at DESC, rowid DESC LIMIT ?)",
+                (key, key, QUERY_RUNS_KEPT),
+            )
+            conn.commit()
+        return run
+
+    def list_query_runs(self, key: str, *, limit: int = 0) -> List[QueryRun]:
+        """The runs of one query, newest first."""
+        size = QUERY_RUNS_KEPT if limit <= 0 else min(int(limit), QUERY_RUNS_KEPT)
+        with self._lock, closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM query_run WHERE query_key = ? "
+                "ORDER BY started_at DESC, rowid DESC LIMIT ?",
+                (key, size),
+            ).fetchall()
+        return [_query_run_of(row) for row in rows]
+
+    def clear_query_runs(self, key: str) -> int:
+        """Forgets one query's runs; returns how many were removed."""
+        with self._lock, closing(self._connect()) as conn:
+            cursor = conn.execute("DELETE FROM query_run WHERE query_key = ?", (key,))
+            conn.commit()
+        return cursor.rowcount
+
+    def move_query_runs(self, from_key: str, to_key: str) -> int:
+        """Carries a history from one key to another; returns how many moved.
+
+        Saving a scratch buffer for the first time gives it a file, and the file
+        is what its history is keyed by from then on. Without this, saving the
+        query somebody worked their way to would throw away the work.
+        """
+        if from_key == to_key:
+            return 0
+        with self._lock, closing(self._connect()) as conn:
+            cursor = conn.execute(
+                "UPDATE query_run SET query_key = ? WHERE query_key = ?",
+                (to_key, from_key),
+            )
+            conn.execute(
+                "DELETE FROM query_run WHERE query_key = ? AND id NOT IN ("
+                "  SELECT id FROM query_run WHERE query_key = ? "
+                "  ORDER BY started_at DESC, rowid DESC LIMIT ?)",
+                (to_key, to_key, QUERY_RUNS_KEPT),
+            )
+            conn.commit()
+        return cursor.rowcount
 
     def purge(
         self, policy: "RetentionPolicy", *, dry_run: bool = False,

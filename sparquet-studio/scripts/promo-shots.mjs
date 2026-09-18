@@ -4,7 +4,7 @@
  * in IndexedDB, which a fresh profile would not have.
  */
 
-import { existsSync, mkdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import process from 'node:process'
 
 import puppeteer from 'puppeteer-core'
@@ -105,6 +105,12 @@ async function main() {
   const executablePath = CHROME_CANDIDATES.find((path) => existsSync(path))
   if (!executablePath) throw new Error('Chrome not found; set CHROME_PATH')
   if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true })
+
+  // The cover uses the app's own lockup. It is not a screenshot, so nothing
+  // else would put it next to the shots, and the deck would open with a broken
+  // image where the logo goes.
+  copyFileSync('src/assets/lockup-light.png', `${OUT}/lockup-light.png`)
+  console.log('copied lockup-light')
 
   const browser = await puppeteer.launch({
     executablePath,

@@ -46,6 +46,8 @@ export interface FieldProps {
   className?: string
   /** Right-aligned adornment on the label row (e.g. a mode switch). */
   action?: ReactNode
+  /** Kept in the tree but out of the page, for a field the current mode has no use for. */
+  hidden?: boolean
 }
 
 export function Field({
@@ -58,6 +60,7 @@ export function Field({
   children,
   className,
   action,
+  hidden,
 }: FieldProps) {
   const generatedId = useId()
   const base = htmlFor ?? generatedId
@@ -66,7 +69,7 @@ export function Field({
   const describedBy = error ? errorId : help ? helpId : undefined
 
   return (
-    <div className={cn('space-y-1.5', className)}>
+    <div className={cn('space-y-1.5', className)} hidden={hidden}>
       {(label || action) && (
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1">

@@ -1,7 +1,15 @@
-import { ArrowRight, Check, Clock, LayoutTemplate, RotateCcw } from 'lucide-react'
+import {
+  ArrowRight,
+  Check,
+  Clock,
+  GraduationCap,
+  LayoutTemplate,
+  RotateCcw,
+} from 'lucide-react'
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
 import { Badge, Button, SectionTitle, useConfirm, type BadgeTone } from '@/components/ui'
 import { LESSONS, type Lesson } from '@/data/lessons'
 import { cn } from '@/lib/utils/cn'
@@ -166,14 +174,13 @@ export function Learn() {
   }, [confirm, resetAll])
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
-      <header className="mb-6 space-y-1">
-        <h1 className="text-sm font-semibold text-content">Learn Sparquet</h1>
-        <p className="max-w-2xl text-xs leading-relaxed text-content-muted">
-          Six short lessons, in order, from a first pipeline to a parameterized job in
-          production. Each one ends with a checklist you can run against your own data.
-        </p>
-      </header>
+    <PageShell>
+      <PageHeader
+        icon={<GraduationCap />}
+        title="Learn Sparquet"
+        description="Six short lessons, in order, from a first pipeline to a parameterized job in
+          production. Each one ends with a checklist you can run against your own data."
+      />
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_17rem] lg:items-start">
         <ol className="space-y-3">
@@ -250,7 +257,7 @@ export function Learn() {
       </div>
 
       {confirmDialog}
-    </div>
+    </PageShell>
   )
 }
 

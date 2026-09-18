@@ -3,6 +3,7 @@ import {
   ArrowRight,
   Copy,
   FileJson,
+  FolderOpen,
   FolderSymlink,
   ListOrdered,
   MoreHorizontal,
@@ -14,7 +15,7 @@ import {
   Workflow as JobIcon,
 } from 'lucide-react'
 import { useEffect, useId, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useMatch, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import {
@@ -39,10 +40,13 @@ import {
   Textarea,
   useConfirm,
 } from '@/components/ui'
+import { PageShell } from '@/components/layout/PageShell'
+import { LibraryBrowser } from '@/components/library/LibraryBrowser'
 import { TagsPopover } from '@/components/library/TagsPopover'
 import { TEMPLATES } from '@/data/templates'
 import { usePermission } from '@/lib/auth/usePermission'
 import { compileGraph, serializePipeline } from '@/lib/compiler'
+import { normalizeFolder } from '@/lib/library/tree'
 import { cn } from '@/lib/utils/cn'
 import { downloadText } from '@/lib/utils/download'
 import { plural, relativeTime } from '@/lib/utils/format'
@@ -57,6 +61,12 @@ import {
 
 type SortKey = 'updated' | 'name'
 
+/** The two readings of a workflow: what the Studio wrote, and what is on disk. */
+const TABS = [
+  { id: 'workflow', label: 'Workflow', icon: JobIcon },
+  { id: 'files', label: 'Library files', icon: FolderOpen },
+] as const
+
 /** Workflow accents mapped onto the semantic palette — no raw colors anywhere. */
 const ACCENT_DOT: Record<WorkflowAccent, string> = {
   amber: 'bg-gold',
@@ -67,9 +77,28 @@ const ACCENT_DOT: Record<WorkflowAccent, string> = {
   slate: 'bg-node-inspect',
 }
 
+/**
+ * A workflow, and the directory it lives in.
+ *
+ * The two tabs answer the same question from opposite ends. **Workflow** is what
+ * the Studio wrote — Jobs and the Pipelines that order them. **Library files** is
+ * the directory itself, every runnable JSON in it, including the ones that
+ * predate the Studio or came from somewhere else. Keeping them on one screen is
+ * what makes a file actionable: the tab already says which workflow a copy would
+ * land in, so an unowned conf can be opened on a canvas without first asking.
+ *
+ * Which tab is open, and the folder being browsed, are both in the URL. A path
+ * several levels into somebody else's directory is exactly the thing one person
+ * sends another.
+ */
 export function WorkflowDetail() {
   const { workflowId } = useParams<{ workflowId: string }>()
   const navigate = useNavigate()
+
+  // The splat matches an empty tail, so `/files` and `/files/vendas/gold` are one
+  // route: the tab and the folder are read from the same match.
+  const browsing = useMatch('/workflows/:workflowId/files/*')
+  const folder = normalizeFolder(browsing?.params['*'] ?? '')
 
   const workflow = useLibraryStore((state) =>
     state.workflows.find((candidate) => candidate.id === workflowId),
@@ -130,7 +159,7 @@ export function WorkflowDetail() {
 
   if (!workflow) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-6 py-6">
+      <PageShell width="default">
         <div className="card">
           <EmptyState
             icon={<JobIcon />}
@@ -138,15 +167,15 @@ export function WorkflowDetail() {
             description="It may have been deleted from another tab."
             action={
               <Link
-                to="/"
+                to="/workflow"
                 className="text-xs text-brand-600 hover:underline dark:text-brand-400"
               >
-                Back to overview
+                Back to Workflow
               </Link>
             }
           />
         </div>
-      </div>
+      </PageShell>
     )
   }
 
@@ -179,7 +208,7 @@ export function WorkflowDetail() {
     if (!confirmed) return
     await deleteWorkflow(workflow.id)
     toast.success('Workflow deleted')
-    navigate('/')
+    navigate('/workflow')
   }
 
   const handleDuplicate = async (job: Job) => {
@@ -230,14 +259,14 @@ export function WorkflowDetail() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6 px-6 py-6 animate-fade-in">
+    <PageShell className="space-y-6">
       <nav className="flex items-center gap-1 text-2xs text-content-subtle">
         <Link
-          to="/"
+          to="/workflow"
           className="inline-flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:text-content"
         >
           <ArrowLeft className="h-3 w-3" />
-          Overview
+          Workflow
         </Link>
       </nav>
 
@@ -312,147 +341,198 @@ export function WorkflowDetail() {
         </div>
       </header>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search jobs"
-          aria-label="Search jobs"
-          leading={<Search />}
-          className="h-8 w-64 py-1 text-xs"
-        />
-        <Segmented
-          size="sm"
-          value={sort}
-          onChange={setSort}
-          options={[
-            { value: 'updated', label: 'Updated', title: 'Most recently updated first' },
-            { value: 'name', label: 'Name', title: 'Alphabetical' },
-          ]}
-        />
-
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            size="sm"
-            icon={<ListOrdered className="h-4 w-4" />}
-            disabled={owned.length === 0 || !mayWrite}
-            title={
-              !mayWrite
-                ? 'Your role does not allow workspace:Write'
-                : owned.length === 0
-                  ? 'Create a job first — a pipeline orders jobs that already exist'
-                  : 'Chain several jobs into one sequential run'
-            }
-            onClick={() => setCreatingPipeline(true)}
-          >
-            New pipeline
-          </Button>
-          <Button
-            size="sm"
-            variant="primary"
-            icon={<Plus className="h-4 w-4" />}
-            disabled={!mayWrite}
-            onClick={() => setCreating(true)}
-          >
-            New job
-          </Button>
-        </div>
-      </div>
-
-      <div className="space-y-6">
-        {ownedPipelines.length > 0 && (
-          <section className="space-y-2">
-            <SectionTitle>Pipelines</SectionTitle>
-            <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface shadow-card">
-              {ownedPipelines.map((pipeline) => (
-                <PipelineRow
-                  key={pipeline.id}
-                  pipeline={pipeline}
-                  jobs={owned}
-                  onOpen={() => navigate(`/pipelines/${pipeline.id}`)}
-                  onRename={() => setRenamingPipeline(pipeline)}
-                  onDelete={() => void handleDeletePipeline(pipeline)}
-                  editable={mayWrite}
-                  deletable={mayDelete}
-                />
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {owned.length === 0 ? (
-          <div className="card">
-            <EmptyState
-              icon={<JobIcon />}
-              title="No jobs in this workflow"
-              description="Start from a blank canvas or pick a template that already wires a source, transformations and a destination."
-              action={
-                <Button
-                  size="sm"
-                  variant="primary"
-                  icon={<Plus className="h-4 w-4" />}
-                  disabled={!mayWrite}
-                  onClick={() => setCreating(true)}
-                >
-                  New job
-                </Button>
+      <nav
+        role="tablist"
+        aria-label="Workflow"
+        className="flex items-center gap-0.5 border-b border-line"
+      >
+        {TABS.map((item) => {
+          const active = item.id === (browsing ? 'files' : 'workflow')
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              className={cn(
+                'flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors',
+                active
+                  ? 'border-brand-500 text-content'
+                  : 'border-transparent text-content-subtle hover:text-content',
+              )}
+              onClick={() =>
+                navigate(
+                  item.id === 'files'
+                    ? `/workflows/${workflow.id}/files`
+                    : `/workflows/${workflow.id}`,
+                )
               }
-            />
-          </div>
-        ) : rows.length === 0 ? (
-          <div className="card">
-            <EmptyState
-              icon={<Search />}
-              title="No matches"
-              description={`Nothing in this workflow matches "${query.trim()}".`}
-              action={
-                <Button size="sm" onClick={() => setQuery('')}>
-                  Clear search
-                </Button>
-              }
-            />
-          </div>
-        ) : (
-          <section className="space-y-2">
-            {ownedPipelines.length > 0 && <SectionTitle>Jobs</SectionTitle>}
-            <ul
-              aria-label="Jobs"
-              className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface shadow-card"
             >
-              {rows.map((job) => (
-                <JobRow
-                  key={job.id}
-                  job={job}
-                  onOpen={() => navigate(`/jobs/${job.id}`)}
-                  onDuplicate={() => void handleDuplicate(job)}
-                  onRename={() => setRenaming(job)}
-                  onMove={() => setMoving(job)}
-                  onExport={() => exportJob(job)}
-                  onDelete={() => void handleDelete(job)}
-                  editable={mayWrite}
-                  deletable={mayDelete}
-                />
-              ))}
-            </ul>
-          </section>
-        )}
+              <item.icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              {item.label}
+            </button>
+          )
+        })}
+      </nav>
 
-        {/* Nothing here orders the jobs: a Pipeline is the only place the author
-            draws the sequence and runs it, so the way in stays on screen even
-            when this workflow has none yet. */}
-        {owned.length > 0 && ownedPipelines.length === 0 && (
-          <div className="card flex flex-wrap items-center gap-3 px-4 py-3">
-            <ListOrdered className="h-4 w-4 shrink-0 text-brand-500" aria-hidden />
-            <p className="min-w-0 flex-1 text-2xs leading-relaxed text-content-muted">
-              Need these jobs to run one after another? A pipeline lets you draw the order
-              yourself and run the whole sequence.
-            </p>
-            <Button size="sm" onClick={() => setCreatingPipeline(true)}>
+      {browsing ? (
+        <LibraryBrowser
+          folder={folder}
+          workflowId={workflow.id}
+          onNavigate={(target) =>
+            navigate(
+              target
+                ? `/workflows/${workflow.id}/files/${target}`
+                : `/workflows/${workflow.id}/files`,
+            )
+          }
+        />
+      ) : (
+        <>
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search jobs"
+            aria-label="Search jobs"
+            leading={<Search />}
+            className="h-8 w-64 py-1 text-xs"
+          />
+          <Segmented
+            size="sm"
+            value={sort}
+            onChange={setSort}
+            options={[
+              { value: 'updated', label: 'Updated', title: 'Most recently updated first' },
+              { value: 'name', label: 'Name', title: 'Alphabetical' },
+            ]}
+          />
+
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              size="sm"
+              icon={<ListOrdered className="h-4 w-4" />}
+              disabled={owned.length === 0 || !mayWrite}
+              title={
+                !mayWrite
+                  ? 'Your role does not allow workspace:Write'
+                  : owned.length === 0
+                    ? 'Create a job first — a pipeline orders jobs that already exist'
+                    : 'Chain several jobs into one sequential run'
+              }
+              onClick={() => setCreatingPipeline(true)}
+            >
               New pipeline
             </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<Plus className="h-4 w-4" />}
+              disabled={!mayWrite}
+              onClick={() => setCreating(true)}
+            >
+              New job
+            </Button>
           </div>
-        )}
-      </div>
+        </div>
+
+        <div className="space-y-6">
+          {ownedPipelines.length > 0 && (
+            <section className="space-y-2">
+              <SectionTitle>Pipelines</SectionTitle>
+              <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface shadow-card">
+                {ownedPipelines.map((pipeline) => (
+                  <PipelineRow
+                    key={pipeline.id}
+                    pipeline={pipeline}
+                    jobs={owned}
+                    onOpen={() => navigate(`/pipelines/${pipeline.id}`)}
+                    onRename={() => setRenamingPipeline(pipeline)}
+                    onDelete={() => void handleDeletePipeline(pipeline)}
+                    editable={mayWrite}
+                    deletable={mayDelete}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {owned.length === 0 ? (
+            <div className="card">
+              <EmptyState
+                icon={<JobIcon />}
+                title="No jobs in this workflow"
+                description="Start from a blank canvas or pick a template that already wires a source, transformations and a destination."
+                action={
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={<Plus className="h-4 w-4" />}
+                    disabled={!mayWrite}
+                    onClick={() => setCreating(true)}
+                  >
+                    New job
+                  </Button>
+                }
+              />
+            </div>
+          ) : rows.length === 0 ? (
+            <div className="card">
+              <EmptyState
+                icon={<Search />}
+                title="No matches"
+                description={`Nothing in this workflow matches "${query.trim()}".`}
+                action={
+                  <Button size="sm" onClick={() => setQuery('')}>
+                    Clear search
+                  </Button>
+                }
+              />
+            </div>
+          ) : (
+            <section className="space-y-2">
+              {ownedPipelines.length > 0 && <SectionTitle>Jobs</SectionTitle>}
+              <ul
+                aria-label="Jobs"
+                className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface shadow-card"
+              >
+                {rows.map((job) => (
+                  <JobRow
+                    key={job.id}
+                    job={job}
+                    onOpen={() => navigate(`/jobs/${job.id}`)}
+                    onDuplicate={() => void handleDuplicate(job)}
+                    onRename={() => setRenaming(job)}
+                    onMove={() => setMoving(job)}
+                    onExport={() => exportJob(job)}
+                    onDelete={() => void handleDelete(job)}
+                    editable={mayWrite}
+                    deletable={mayDelete}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {/* Nothing here orders the jobs: a Pipeline is the only place the author
+              draws the sequence and runs it, so the way in stays on screen even
+              when this workflow has none yet. */}
+          {owned.length > 0 && ownedPipelines.length === 0 && (
+            <div className="card flex flex-wrap items-center gap-3 px-4 py-3">
+              <ListOrdered className="h-4 w-4 shrink-0 text-brand-500" aria-hidden />
+              <p className="min-w-0 flex-1 text-2xs leading-relaxed text-content-muted">
+                Need these jobs to run one after another? A pipeline lets you draw the order
+                yourself and run the whole sequence.
+              </p>
+              <Button size="sm" onClick={() => setCreatingPipeline(true)}>
+                New pipeline
+              </Button>
+            </div>
+          )}
+        </div>
+        </>
+      )}
+
 
       {creating && (
         <NewJobModal workflowId={workflow.id} onClose={() => setCreating(false)} />
@@ -472,7 +552,7 @@ export function WorkflowDetail() {
       )}
       {moving && <MoveJobModal job={moving} onClose={() => setMoving(null)} />}
       {confirmDialog}
-    </div>
+    </PageShell>
   )
 }
 

@@ -119,11 +119,18 @@ class Pipeline:
         self._columns: Dict[str, Any] = columns or {}
         # input_view aceita uma string (nome, escopo "session") ou um dict
         # {"name": ..., "type": "session"|"global"}. Normaliza para nome + escopo.
-        if isinstance(input_view, dict):
-            self._input_view = input_view.get("name")
-            self._input_view_scope = input_view.get("type", "session")
+        #
+        # Precedência ARGUMENTO > JSON, igual à de `columns` e `input_df`: a chave
+        # `input_view` do JSON é o padrão do pipeline, e quem usa o Sparquet como
+        # biblioteca continua podendo sobrepor sem reescrever a conf. Só cai para o
+        # config quando o argumento não foi passado — `None` aqui significa "não
+        # opinei", não "sem view".
+        spec = input_view if input_view is not None else getattr(config, "input_view", None)
+        if isinstance(spec, dict):
+            self._input_view = spec.get("name")
+            self._input_view_scope = spec.get("type", "session")
         else:
-            self._input_view = input_view
+            self._input_view = spec
             self._input_view_scope = "session"
 
     @classmethod

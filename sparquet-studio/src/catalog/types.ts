@@ -37,6 +37,15 @@ export type FieldType =
   | 'json'
   /** Nested source config `{ format, path, options }` — rendered as a sub-form. */
   | 'source'
+  /**
+   * A credential — a password, a token, a connection URI that carries one.
+   *
+   * Rendered as text with the runner's secrets one click away, because what
+   * belongs in the Job is the reference `{secret:name/field}` rather than the
+   * value. The framework never learns the difference: it receives a string, and
+   * the runner has already replaced the reference on the way to Spark.
+   */
+  | 'secret'
 
 export interface FieldOption {
   value: string

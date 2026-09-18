@@ -6,6 +6,11 @@
  * runner's workspace, and every read of it would come back 401.
  *
  * A runner with no users never renders this — see `store/auth.ts`.
+ *
+ * It carries the runner token field as well, folded away. The token normally
+ * lives in Settings, which is behind this screen; when the runner has been
+ * restarted with a different one, that is a closed loop with no way out through
+ * the interface, and the only fix left is editing localStorage by hand.
  */
 
 import { useEffect, useState, type FormEvent } from 'react'
@@ -94,6 +99,8 @@ export function LoginGate() {
           I have a recovery code
         </button>
 
+        <RunnerTokenEscape />
+
         <p className="mt-4 text-[11px] leading-relaxed text-content-subtle">
           No account yet? The first one is created on the machine running the runner:
           <code className="mx-1 rounded bg-surface-sunken px-1 py-0.5">
@@ -101,6 +108,70 @@ export function LoginGate() {
           </code>
         </p>
       </form>
+    </div>
+  )
+}
+
+/**
+ * The runner token, on the one screen that used to be unable to show it.
+ *
+ * A runner with users does not ask for the token to log in, so this is folded
+ * away: it is there for the case where the token is what is actually wrong —
+ * an older runner that still demands it everywhere, or a token rotated while
+ * this browser held the previous one. Signing in would succeed and every screen
+ * behind it would come back 401.
+ *
+ * Retrying is explicit rather than automatic on every keystroke: pasting a token
+ * character by character would fire a request per character, each one a failed
+ * attempt against a runner that now rate-limits them.
+ */
+function RunnerTokenEscape() {
+  const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const setRunnerToken = useSettingsStore((state) => state.setRunnerToken)
+  const refresh = useAuthStore((state) => state.refresh)
+  const busy = useAuthStore((state) => state.busy)
+
+  const [open, setOpen] = useState(false)
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="mt-2 w-full text-[11px] text-content-subtle underline-offset-2 hover:underline"
+        onClick={() => setOpen(true)}
+      >
+        The runner is asking for a token
+      </button>
+    )
+  }
+
+  return (
+    <div className="mt-4 space-y-2 border-t border-line pt-3">
+      <Field
+        label="Runner token"
+        htmlFor="login-runner-token"
+        help="Printed in the runner's terminal on startup, or pinned with SPARQUET_STUDIO_TOKEN."
+      >
+        <Input
+          id="login-runner-token"
+          mono
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          value={runnerToken}
+          placeholder="Paste the token from the runner terminal"
+          onChange={(event) => setRunnerToken(event.target.value)}
+        />
+      </Field>
+      <Button
+        type="button"
+        variant="secondary"
+        className="w-full"
+        disabled={busy}
+        onClick={() => void refresh()}
+      >
+        {busy ? <Spinner className="h-4 w-4" /> : 'Try the runner again'}
+      </Button>
     </div>
   )
 }
@@ -189,6 +260,8 @@ function RecoverForm({ onDone }: { onDone: () => void }) {
         >
           Back to sign in
         </button>
+
+        <RunnerTokenEscape />
 
         <p className="mt-4 text-[11px] leading-relaxed text-content-subtle">
           No code? An administrator issues one in Settings → Access, or whoever runs the machine

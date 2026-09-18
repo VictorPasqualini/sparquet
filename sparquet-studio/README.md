@@ -4,7 +4,7 @@
 
 **The visual editor for data pipelines that are just JSON.**
 
-Design a Spark job on a canvas, let an AI draft it for you, and run it on your machine — the file it produces is plain [Sparquet](../README.md) JSON your cluster already understands.
+Design a Spark job on a canvas, let an AI draft it for you, and run it on your machine — the file it produces is plain [Sparquet](https://github.com/VictorPasqualini/sparquet) JSON your cluster already understands.
 
 [Quickstart](#quickstart) · [Why](#why-this-exists) · [Features](#features) · [Vocabulary](#workflows-jobs-and-pipelines) · [Your first job](#your-first-job) · [AI assistant](#ai-assistant) · [Local runner](#local-runner) · [Pipelines](#pipelines) · [Architecture](#architecture) · [Contributing](#contributing)
 
@@ -29,7 +29,7 @@ If you know n8n, you already know the idea. This is that, for data engineering.
 | **Visual job editor** | Drag sources, transformations, validations and destinations onto a canvas. Joins and unions take a second input, so a branching Job reads like a diagram instead of nested JSON. |
 | **Data quality on the canvas** | Every validation rule is a box, and so are the three datasets the `validations` block writes: the quality report and the two quarantine outputs come from the Quality section of the palette and sit beside a main chain that keeps every row. |
 | **Every Sparquet feature, typed** | All 20 transformations, 7 IO formats and 6 validators, with per-field help, defaults and the gotchas that only live in the framework source (positional `union`, hand-written `MERGE` clauses, `{{runtime}}` pushdown, dot-path `struct`, …). |
-| **AI that writes jobs** | Describe what you need and get a complete, valid Job back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI, Google or any OpenAI-compatible endpoint. |
+| **AI that writes jobs** | Describe what you need and get a complete, valid Job back — or ask it to modify, explain, optimize or fix the one on screen. Bring your own key for Anthropic, OpenAI or Google, or answer from your own machine with Ollama or the local runner, for free. |
 | **Live linting** | 20+ rules run as you type: unreachable nodes, a `merge` write without an ON or WHEN clauses, a `{{var}}` no `collect` publishes, a `{param}` you never declared, `collect` before `checkpoint`, two sinks fighting over one path, a quarantine output with no row-level rule to fill it. |
 | **Round-trip JSON** | Import an existing config, edit it visually, export it byte-for-byte usable. The compiler is covered by tests that round-trip the framework's own example configs. |
 | **Run it locally** | An optional Python service executes the compiled JSON with the real `Sparquet` and streams back counters, validation results, a data preview and the framework's structured logs. |
@@ -183,18 +183,54 @@ Ask it to:
 
 Every proposal arrives as a card you review before applying, and applying it is a single undo away.
 
+### Asking without a canvas
+
+The Studio opens on **Assistant** (`/`) rather than on a list of what you already have, because the first question is usually "how do I express this at all", not "which of my jobs was it". The screen is a plain conversation with the same provider, model and key the panel uses — no second place to configure anything, no second bill.
+
+Before anything is typed the screen is an invitation rather than a blank page: the mark, one sentence saying what kind of answer it is good at, and four openings of different shapes — show me one, which of these, why is mine wrong, how do I. The first message replaces all of it with the transcript.
+
+It is deliberately not the canvas assistant: there is no job open, so no pipeline, no selection and no lint output leave the browser — only what you type. It answers about Sparquet itself.
+
+With the **Local runner** provider selected it can also *look*: read the formats this installation actually registered, and validate a config against the framework instead of recalling what it thinks the schema is. The tools it ran are named above each answer, because "checked" and "remembered" are different claims about how much to trust a reply. Acting — creating the job it just described, running it — is still the next step in `BACKLOG.md`.
+
 ### Setting it up
 
 **Settings → AI assistant**, pick a provider and paste a key:
 
 | Provider | Get a key | Default model |
 |---|---|---|
+| **Local runner** | none — the runner holds it | whatever the runner was configured with |
+| **Ollama** | none — nothing leaves the machine | `qwen2.5-coder:7b` |
 | Anthropic | <https://console.anthropic.com/settings/keys> | `claude-sonnet-4-5` |
 | OpenAI | <https://platform.openai.com/api-keys> | `gpt-4.1` |
 | Google | <https://aistudio.google.com/apikey> | `gemini-2.5-pro` |
-| OpenAI-compatible | your own gateway, Ollama, vLLM… | free text |
+| OpenAI-compatible | your own gateway, vLLM… | free text |
 
 The key is used to call the provider **directly from your browser** and is never sent anywhere else — there is no Sparquet server in the loop. By default it is kept in memory for the session only; "Remember key in this browser" stores it in `localStorage`, which is convenient on a personal machine and a bad idea on a shared one.
+
+#### Picked for you, if something is already running
+
+A Studio nobody has configured looks for a model on this machine at boot — the
+local runner first, because it is the only provider that can call tools and the
+only one whose turns show up in Billing, then Ollama on `localhost:11434`. Two
+probes against localhost, both silent when nothing answers, and **never** a
+switch to a provider that bills: the fallback is no provider at all, and the
+assistant screen then says what to install.
+
+Choosing anything in **Settings › AI** ends the looking and the choice stays,
+including on a machine where the runner is not up; the notice at the top of that
+section says which of the two you are in and offers to look again. Installs from
+before this existed are treated as chosen, so nothing moves under anyone.
+
+#### Answering from your own machine
+
+The first two providers ask for no key at all.
+
+**Ollama** is the browser talking to [Ollama](https://ollama.com) on `http://localhost:11434`. Nothing leaves the machine and nothing is billed. `ollama pull qwen2.5-coder:7b` once and it works.
+
+**Local runner** sends the question to the runner you already started, which answers with its own model — Ollama by default — and can call its own tools on the way. Settings hides the base URL and key fields for it, because neither is the browser's to set, and shows what the runner answered instead: backend, model, endpoint, tools, and whether a turn is going to cost anything. Setup, models and the `SPARQUET_STUDIO_ASSISTANT` knobs are in [server/README.md](server/README.md#the-assistant).
+
+Every turn appears under **Billing**, including the free ones — a team that moved its assistant in-house watches the turns climb while the charge stays flat, which is the evidence the move worked.
 
 ## Local runner
 
@@ -227,8 +263,8 @@ From the `sparquet-studio/` directory, create and activate a venv, then install 
 cd sparquet-studio
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r server/requirements.txt
-pip install sparquet                 # brings pyspark + sparquet-cola
+pip install -r server/requirements.txt   # FastAPI + the pinned sparquet
+pip install pyspark                      # the Spark line you run
 ```
 
 > If PowerShell blocks the activation script, allow it for the current user once:
@@ -240,11 +276,15 @@ pip install sparquet                 # brings pyspark + sparquet-cola
 cd sparquet-studio
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r server/requirements.txt
-pip install sparquet                 # brings pyspark + sparquet-cola
+pip install -r server/requirements.txt   # FastAPI + the pinned sparquet
+pip install pyspark                      # the Spark line you run
 ```
 
-> Prefer the in-repo framework instead of the published package? Swap `pip install sparquet` for `pip install -r ../requirements.txt` (installs `pyspark` + `sparquet-cola`). Running from `sparquet-studio/` puts the repo root on `sys.path`, so the local `sparquet/` package resolves either way.
+> **Why `pyspark` separately.** The framework declares a floor (`pyspark>=3.4`) rather than a version, because which Spark line to install belongs to the cluster you deploy to, not to this service.
+>
+> **Prefer a checkout of the framework to the published package?** `pip install -e ../` from here satisfies the pin with your working copy, and nothing else changes. Two fallbacks also exist for a checkout that is not installed at all: a repository root above `sparquet-studio/` is added to `sys.path` when it holds a `sparquet/` package, and `SPARQUET_FRAMEWORK_PATH` names one anywhere.
+>
+> **Version.** `server/requirements.txt` pins the range this Studio was built against, declared once in `server/compat.py`. `GET /health` reports whether the installed framework falls inside it, and **Settings → Local runner** shows the sentence when it does not — a mismatch should be a line of text, not a run that fails oddly later.
 
 ### 3. Run the runner and wire the token
 
@@ -377,6 +417,10 @@ A **Pipeline** is an ordered set of Jobs from the same Workflow. It stores no JS
 5. **Run it.** Same runner and same token as a single Job — the request goes to `POST /run/flow/stream` and arrives as Server-Sent Events.
 
 **Running a file the Studio did not write.** A stage names either a Job or a `.json` that already exists in the library — generated by another team, versioned in another repository, written by hand. Nothing is imported and nothing is cached: the runner reads the file at the moment that stage starts, so an edit made outside the Studio is what the next run executes, and the file stays the source. The reference is a path **relative to the library root**, because an absolute one names a directory that exists on exactly one machine. A file-backed box shows the path instead of endpoints and has no **Open** — there is no canvas behind it; if the file is missing, is not JSON, or points outside the library, the run is refused before anything is charged or executed, not halfway through.
+
+**Browsing the whole directory.** **Library files** is a tab rather than a screen of its own, and it is the same idea one level up: instead of pointing at one file at a time, open the library directory and walk it. It sits in two places, on the same library: next to the Workflow tab on `/workflow`, and inside a Workflow beside its Jobs and Pipelines (`/workflows/:id/files`). It is a tab because every answer it gives leads back into the rest of the Studio — run this file, see what is wrong with it, put it on a canvas. The folder tree is derived from the paths the runner reports — a folder is whatever the paths have in common — and the folder being browsed is part of the URL (`/workflow/files/vendas/gold`), so a path several levels in is something you can send somebody. Search reaches the whole library and matches every word typed, in any order. Selecting a file reads it and runs it through the same compiler the editor uses, so what the Studio understands of it — including keys it does not know and preserves — and the issues the linter finds in it are visible *before* the run rather than after it fails on a cluster; and the file can be executed as it stands — as a one-stage flow, filed in the runner's catalog under `file:<path>`, so its runs show up in per-Job health and can be tagged like any other.
+
+Every file also says who wrote it. One the Studio wrote is the artefact of a Job, a Pipeline or the Workflow itself, and **Open canvas** goes straight to that record. A file nobody here wrote has no canvas behind it, so opening it on one **copies** it into a Workflow as a new Job — a fork, not an import: the file on disk stays where it is and from then on the two are separate. The destination is the Workflow being browsed; from `/workflow`, where none is, it is the Workflow touched most recently, and the dialog names it before anything is written. That same file is the only kind that can be **deleted** (`DELETE /workspace/files/{path}`, `workspace:Delete`) — from the disk, with no undo and no trash. Deleting the file of a Job is refused instead of done: the record would be left behind and the next save would write the file again, so the Job is what you delete. Nothing else here writes: no rename, no save in place. It is the adoption path for a repository of confs that predate the Studio.
 
 **How a stage hands data to the next.** Stages do not pass a DataFrame between themselves. They share **one Spark session**, and a stage reads what an earlier one wrote: a path or table (stage 1 writes `bronze.orders`, stage 2 reads it), or a temp view (a `view` output read back as the next stage's `input`, without touching storage). There is no extra wiring for it, and none is needed — a link on the canvas sets *when* a stage runs, not *what* it receives.
 

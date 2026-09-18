@@ -24,6 +24,13 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    # 3.14 exige pyspark >= 4.2.0. Não dá para expressar isso em `dependencies`
+    # (a marca seria `pyspark>=4.2; python_version>="3.14"`, e isso obrigaria
+    # todo mundo que já tem 4.1 a subir de linha do Spark ao instalar), então
+    # fica declarado aqui e explicado no README: em 4.1.1 o worker morre com
+    # `Python worker exited unexpectedly (crashed)`, sem dizer por quê.
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -67,12 +74,36 @@ sparquet = "sparquet.cli:main"
 [tool.setuptools.dynamic]
 version = { attr = "sparquet.__version__" }
 
-[tool.setuptools.packages.find]
+[tool.setuptools]
 # Distribuição é SÓ o pacote `sparquet`. O motor de DQ `sparquet_cola` agora é um
-# pacote separado (declarado em dependencies). Lista explícita (não `exclude`)
-# para que os outros projetos do repositório — `sparquet-studio/` (frontend) — e
-# qualquer pasta nova nunca entrem no wheel/sdist por acidente.
-include = ["sparquet", "sparquet.*"]
+# pacote separado (declarado em dependencies). A lista é explícita, e não um
+# `find`, por dois motivos: nenhuma outra pasta do repositório —
+# `sparquet-studio/` (frontend), `docs/`, `tests/` — entra no wheel/sdist por
+# acidente, e `sparquet.examples` só existe por causa do mapeamento abaixo, que
+# um `find` não descobriria. Subpacote novo aqui esquecido quebra
+# `tests/test_packaging.py`, que compara esta lista com o que existe em disco.
+packages = [
+    "sparquet",
+    "sparquet.core",
+    "sparquet.io",
+    "sparquet.observability",
+    "sparquet.transform",
+    "sparquet.utils",
+    "sparquet.validation",
+    "sparquet.examples",
+]
+
+[tool.setuptools.package-dir]
+# Os JSON de exemplo moram em `examples/`, na raiz do repositório — é para lá que
+# a documentação aponta — e viajam dentro do wheel como `sparquet.examples`.
+# Eles não são só ilustração: são as fixtures que prendem o compilador do Studio
+# ao JSON que este framework de fato executa, e o Studio, como repositório
+# separado, só alcança o que o pacote instalado carrega. Quem quiser o caminho
+# em tempo de execução usa `sparquet.examples_path()`.
+"sparquet.examples" = "examples"
+
+[tool.setuptools.package-data]
+"sparquet.examples" = ["*.json"]
 
 [tool.ruff]
 # O piso de suporte é 3.9 (ver `requires-python`). Sem isto o ruff assume a

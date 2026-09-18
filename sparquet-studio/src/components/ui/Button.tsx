@@ -29,6 +29,19 @@ const SIZES: Record<ButtonSize, string> = {
   lg: 'h-11 px-5 text-sm gap-2 rounded-xl',
 }
 
+// An icon is sized by the control it sits in, not by whoever passed it. Lucide
+// renders at 24px unless told otherwise, so `icon={<Tag />}` used to come out
+// three times the size of the same glyph inside an `IconButton` — which does
+// size its children — and a row mixing the two looked broken. The selector is
+// `>svg` so only the `icon`/`trailing` slots are caught: an icon nested inside
+// `children` belongs to whatever composed it.
+const ICON_SLOT: Record<ButtonSize, string> = {
+  xs: '[&>svg]:h-3 [&>svg]:w-3 [&>svg]:shrink-0',
+  sm: '[&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:shrink-0',
+  md: '[&>svg]:h-4 [&>svg]:w-4 [&>svg]:shrink-0',
+  lg: '[&>svg]:h-5 [&>svg]:w-5 [&>svg]:shrink-0',
+}
+
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant
   size?: ButtonSize
@@ -64,6 +77,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         'disabled:pointer-events-none disabled:opacity-50',
         VARIANTS[variant],
         SIZES[size],
+        ICON_SLOT[size],
         fullWidth && 'w-full',
         className,
       )}

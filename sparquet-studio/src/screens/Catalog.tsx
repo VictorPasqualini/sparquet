@@ -1,4 +1,4 @@
-import { Network, Search, Share2, Sparkles, Table2, X } from 'lucide-react'
+import { Database, KeyRound, Network, Search, Share2, Sparkles, Table2, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -13,6 +13,8 @@ import {
   Select,
   type SegmentedOption,
 } from '@/components/ui'
+import { PageHeader, PageShell } from '@/components/layout/PageShell'
+import { SecretsPanel } from '@/components/catalog/SecretsPanel'
 import { CatalogBrowser } from '@/components/lineage/CatalogBrowser'
 import { DatasetSheet } from '@/components/lineage/DatasetSheet'
 import { LineageGraph } from '@/components/lineage/LineageGraph'
@@ -21,16 +23,33 @@ import {
   buildColumnGraph,
   catalogStats,
   deriveSchemas,
+  type ColumnAnnotation,
   type DatasetAnnotation,
   type ProbedField,
 } from '@/lib/datacatalog'
-import { fetchDatasetSchema } from '@/lib/runner/client'
+import {
+  decide,
+  grantsByResource,
+  tagScopes,
+  type DatasetGrant,
+  type Decision,
+} from '@/lib/iam'
+import { fetchDatasetSchema, runQuery, type RunnerQueryResult } from '@/lib/runner/client'
+import { sparkForDatasets } from '@/lib/runner/session'
+import { viewAlias } from '@/lib/sql/views'
 import { buildLineage, type DatasetPlace } from '@/lib/lineage'
 import {
   LINEAGE_EXAMPLE_WORKFLOW,
   lineageExampleTemplates,
 } from '@/data/templates'
 import { useCatalogStore } from '@/store/catalog'
+import {
+  effectiveOwnerOf,
+  mayAdministerResource,
+  useIamStore,
+} from '@/store/iam'
+import { useAuthStore } from '@/store/auth'
+import type { AuthTeam, AuthUser } from '@/types/auth'
 import { useLibraryStore } from '@/store/library'
 import { useSettingsStore } from '@/store/settings'
 
@@ -53,7 +72,39 @@ const PLACE_HINT: Record<DatasetPlace, string> = {
 
 const FILTERS: PlaceFilter[] = ['all', 'intermediate', 'external', 'terminal', 'isolated']
 
-type View = 'list' | 'graph'
+/**
+ * Governance, filtered the way it is asked about: what is mine, what is closed
+ * to me, and what nobody has claimed yet. The last one is the working list for
+ * anyone rolling governance out — everything on it is still open.
+ */
+type GovFilter = 'all' | 'mine' | 'closed' | 'ungoverned'
+
+const GOV_FILTERS: GovFilter[] = ['all', 'mine', 'closed', 'ungoverned']
+
+const GOV_LABEL: Record<GovFilter, string> = {
+  all: 'Any access',
+  mine: 'Mine',
+  closed: 'Closed to me',
+  ungoverned: 'Ungoverned',
+}
+
+const GOV_HINT: Record<GovFilter, string> = {
+  all: 'Every dataset, whatever its rules say.',
+  mine: 'You own it, or hold admin on it — the ones whose rules you can change yourself.',
+  closed: 'A rule governs it and none of them reaches you. Ask whoever owns it.',
+  ungoverned: 'No owner and no rule, here or on any path above it: open to anyone who may query the runner.',
+}
+
+/** Whether a dataset belongs on the list this filter is asking for. */
+function matchesGovernance(filter: GovFilter, decision: Decision | undefined): boolean {
+  if (filter === 'all') return true
+  if (!decision || !decision.governed) return filter === 'ungoverned'
+  if (filter === 'mine') return decision.owned || decision.level === 'admin'
+  if (filter === 'closed') return decision.level === null
+  return false
+}
+
+type View = 'list' | 'graph' | 'connections'
 
 const VIEWS: SegmentedOption<View>[] = [
   {
@@ -76,6 +127,16 @@ const VIEWS: SegmentedOption<View>[] = [
       </span>
     ),
   },
+  {
+    value: 'connections',
+    title: 'The credentials that open those datasets — named here, never shown',
+    label: (
+      <span className="flex items-center gap-1.5">
+        <KeyRound className="h-3 w-3" />
+        Connections
+      </span>
+    ),
+  },
 ]
 
 /** Scope value that means "the whole library", not one workflow. */
@@ -88,6 +149,9 @@ const ALL_WORKFLOWS = 'all'
  * looking at is everything the editor cannot see — the OTHER Jobs that touch the
  * same path. Inside one canvas the answer is already on screen.
  */
+/** Stable empty list, so an ungoverned dataset does not remount the panel. */
+const EMPTY_GRANTS: DatasetGrant[] = []
+
 export function Catalog() {
   const navigate = useNavigate()
   const jobs = useLibraryStore((state) => state.jobs)
@@ -95,7 +159,20 @@ export function Catalog() {
   const annotations = useCatalogStore((state) => state.annotations)
   const loadCatalog = useCatalogStore((state) => state.load)
   const annotate = useCatalogStore((state) => state.annotate)
+  const annotateColumn = useCatalogStore((state) => state.annotateColumn)
   const forget = useCatalogStore((state) => state.forget)
+  const grants = useIamStore((state) => state.grants)
+  const loadGrants = useIamStore((state) => state.load)
+  const addGrant = useIamStore((state) => state.grant)
+  const revokeGrant = useIamStore((state) => state.revoke)
+  const owners = useIamStore((state) => state.owners)
+  const setOwner = useIamStore((state) => state.setOwner)
+  const clearOwner = useIamStore((state) => state.clearOwner)
+  const principal = useAuthStore((state) => state.principal)
+  const fetchTeams = useAuthStore((state) => state.fetchTeams)
+  const fetchUsers = useAuthStore((state) => state.fetchUsers)
+  const [teams, setTeams] = useState<AuthTeam[]>([])
+  const [users, setUsers] = useState<AuthUser[]>([])
   const createWorkflow = useLibraryStore((state) => state.createWorkflow)
   const createJob = useLibraryStore((state) => state.createJob)
   const createPipeline = useLibraryStore((state) => state.createPipeline)
@@ -103,15 +180,40 @@ export function Catalog() {
   const [view, setView] = useState<View>('list')
   const [scope, setScope] = useState<string>(ALL_WORKFLOWS)
   const [place, setPlace] = useState<PlaceFilter>('all')
+  const [governance, setGovernance] = useState<GovFilter>('all')
   const [query, setQuery] = useState('')
   const [openKey, setOpenKey] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+
+  /**
+   * Who exists, for the grant picker. Only while a sheet is open, and a failure
+   * is silent on purpose: a runner with no user records still has a token
+   * identity, and the picker falls back to typing a name.
+   */
+  useEffect(() => {
+    if (!openKey) return
+    let alive = true
+    void (async () => {
+      try {
+        const [nextTeams, nextUsers] = await Promise.all([fetchTeams(), fetchUsers()])
+        if (!alive) return
+        setTeams(nextTeams)
+        setUsers(nextUsers)
+      } catch {
+        /* no IAM on this runner; the picker stays free text */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [openKey, fetchTeams, fetchUsers])
 
   // The catalog is read here rather than at boot: it is only ever needed by this
   // screen, and the editor should not pay for it.
   useEffect(() => {
     void loadCatalog()
-  }, [loadCatalog])
+    void loadGrants()
+  }, [loadCatalog, loadGrants])
 
   /**
    * A workflow scope narrows WHICH Jobs are read, not which datasets are shown.
@@ -134,6 +236,42 @@ export function Catalog() {
   const schemas = useMemo(() => deriveSchemas(scoped), [scoped])
   // Where each column came from and what it feeds, from that same walk.
   const columns = useMemo(() => buildColumnGraph(scoped), [scoped])
+  // Access rules per dataset address. Grouped once here because both the browser
+  // and the sheet want them, and both are keyed by the same address.
+  const datasetGrants = useMemo(() => grantsByResource(grants, 'dataset'), [grants])
+
+  /**
+   * The access answer for every dataset on screen, decided once.
+   *
+   * Not `accessTo` from the store: this screen already subscribes to the grants
+   * and the owners, and a helper that reads them through `getState` would leave
+   * the badges showing yesterday's rules until something else re-rendered. The
+   * scopes a dataset inherits from are its own address, which `scopeChain`
+   * derives, plus the tags its catalog entry gives it, which only the catalog
+   * knows — so those are handed in, exactly as `parentsOf` does elsewhere.
+   */
+  const identity = useMemo(
+    () => ({
+      userId: principal?.userId ?? null,
+      username: principal?.username ?? null,
+      teamId: principal?.teamId ?? null,
+    }),
+    [principal],
+  )
+
+  const decisions = useMemo(() => {
+    const map = new Map<string, Decision>()
+    for (const { dataset, annotation } of entries) {
+      const tags = annotation
+        ? tagScopes(annotation.tags, {
+            classification: annotation.classification,
+            domain: annotation.domain,
+          })
+        : []
+      map.set(dataset.key, decide(grants, 'dataset', dataset.key, identity, owners, tags))
+    }
+    return map
+  }, [entries, grants, owners, identity])
 
   const searched = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -158,8 +296,12 @@ export function Catalog() {
 
   const visible = useMemo(
     () =>
-      place === 'all' ? searched : searched.filter((entry) => entry.dataset.place === place),
-    [searched, place],
+      searched.filter(
+        (entry) =>
+          (place === 'all' || entry.dataset.place === place) &&
+          matchesGovernance(governance, decisions.get(entry.dataset.key)),
+      ),
+    [searched, place, governance, decisions],
   )
 
   const open = useMemo(
@@ -188,13 +330,25 @@ export function Catalog() {
     [workflows],
   )
 
+  // Each filter counts what the OTHER one is already showing, so the numbers add
+  // up to the list on screen rather than to a list nobody is looking at.
+  const byGovernance = useMemo(
+    () => searched.filter((entry) => matchesGovernance(governance, decisions.get(entry.dataset.key))),
+    [searched, governance, decisions],
+  )
+
+  const byPlace = useMemo(
+    () => searched.filter((entry) => place === 'all' || entry.dataset.place === place),
+    [searched, place],
+  )
+
   const options: SegmentedOption<PlaceFilter>[] = useMemo(
     () =>
       FILTERS.map((value) => {
         const count =
           value === 'all'
-            ? searched.length
-            : searched.filter((entry) => entry.dataset.place === value).length
+            ? byGovernance.length
+            : byGovernance.filter((entry) => entry.dataset.place === value).length
         return {
           value,
           title: value === 'all' ? 'Every dataset' : PLACE_HINT[value],
@@ -206,7 +360,29 @@ export function Catalog() {
           ),
         }
       }),
-    [searched],
+    [byGovernance],
+  )
+
+  const govOptions: SegmentedOption<GovFilter>[] = useMemo(
+    () =>
+      GOV_FILTERS.map((value) => {
+        const count =
+          value === 'all'
+            ? byPlace.length
+            : byPlace.filter((entry) => matchesGovernance(value, decisions.get(entry.dataset.key)))
+                .length
+        return {
+          value,
+          title: GOV_HINT[value],
+          label: (
+            <span className="flex items-center gap-1.5">
+              {GOV_LABEL[value]}
+              <span className="tabular-nums text-content-subtle">{count}</span>
+            </span>
+          ),
+        }
+      }),
+    [byPlace, decisions],
   )
 
   const openJob = useCallback((jobId: string) => navigate(`/jobs/${jobId}`), [navigate])
@@ -222,13 +398,51 @@ export function Catalog() {
     async (key: string, format: string): Promise<ProbedField[]> => {
       const schema = await fetchDatasetSchema(
         runnerUrl,
-        { format, path: key },
+        {
+          format,
+          path: key,
+          // How the Jobs that touch this dataset open it. A Delta table is
+          // unreadable on a SparkSession built without its jars and extensions,
+          // and those are honoured only when a session is created — so the
+          // runner is told what this read needs and rebuilds if it has to.
+          spark: sparkForDatasets(jobs, [key]),
+        },
         undefined,
         runnerToken,
       )
       return schema.fields
     },
-    [runnerUrl, runnerToken],
+    [jobs, runnerUrl, runnerToken],
+  )
+
+  /**
+   * Asks the runner for the dataset's first rows.
+   *
+   * The same `/query` the SQL editor uses, with one source and a statement this
+   * screen writes: the runner registers the dataset as a temporary view and
+   * selects from it, so every format the framework can read samples here, and
+   * the read-only rule and the row cap that bound a query bound this too.
+   *
+   * It names neither a tab nor a saved query on purpose. Those are what the
+   * runner files a run under, and a sample somebody asked a catalog sheet for is
+   * not a statement they wrote — it has no business in their query history.
+   */
+  const sample = useCallback(
+    async (key: string, format: string, limit: number): Promise<RunnerQueryResult> => {
+      const alias = viewAlias(key)
+      return runQuery(
+        runnerUrl,
+        {
+          sql: `SELECT * FROM ${alias}`,
+          sources: [{ alias, format, path: key }],
+          limit,
+          spark: sparkForDatasets(jobs, [key]),
+        },
+        undefined,
+        runnerToken,
+      )
+    },
+    [jobs, runnerUrl, runnerToken],
   )
 
   const save = useCallback(
@@ -240,6 +454,17 @@ export function Catalog() {
       }
     },
     [annotate],
+  )
+
+  const saveColumn = useCallback(
+    async (key: string, column: string, patch: Partial<ColumnAnnotation>) => {
+      try {
+        await annotateColumn(key, column, patch)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Could not save the column')
+      }
+    },
+    [annotateColumn],
   )
 
   const drop = useCallback(
@@ -295,12 +520,20 @@ export function Catalog() {
   const clear = useCallback(() => {
     setQuery('')
     setPlace('all')
+    setGovernance('all')
     searchRef.current?.focus()
   }, [])
 
+  // How much of the catalog anybody has claimed. The complement is the backlog:
+  // every dataset with no rule is open to whoever may query the runner.
+  const governed = useMemo(
+    () => [...decisions.values()].filter((decision) => decision.governed).length,
+    [decisions],
+  )
+
   if (jobs.length === 0) {
     return (
-      <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
+      <PageShell>
         <div className="card">
           <EmptyState
             icon={<Network />}
@@ -320,40 +553,39 @@ export function Catalog() {
             }
           />
         </div>
-      </div>
+      </PageShell>
     )
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-6 py-8 animate-fade-in">
-      <header className="mb-6 flex items-start gap-4">
-        <div className="space-y-1">
-          <h1 className="text-sm font-semibold text-content">Data catalog</h1>
-          <p className="max-w-2xl text-xs leading-relaxed text-content-muted">
-            Every table, bucket and topic your Jobs touch, grouped the way a metastore groups
-            them — except nothing was registered anywhere: the hierarchy is read back out of the
-            addresses. Lineage is the same inventory seen edge-first, which is why it lives here:
-            two Jobs are linked by the address alone, one writes a path and another reads it. What
-            the data MEANS is the one thing no pipeline can say, so it is the one thing you type.
-          </p>
-        </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          className="ml-auto shrink-0"
-          onClick={loadExample}
-          loading={loadingExample}
-        >
-          <Sparkles />
-          Load example
-        </Button>
-      </header>
+    <PageShell width="full">
+      <PageHeader
+        icon={<Database />}
+        title="Data catalog"
+        description="Every table, bucket and topic your Jobs touch, grouped the way a metastore
+          groups them — except nothing was registered anywhere: the hierarchy is read back out of
+          the addresses. Lineage is the same inventory seen edge-first, which is why it lives
+          here: two Jobs are linked by the address alone, one writes a path and another reads it.
+          What the data MEANS is the one thing no pipeline can say, so it is the one thing you
+          type."
+        actions={
+          <Button size="sm" variant="secondary" onClick={loadExample} loading={loadingExample}>
+            <Sparkles />
+            Load example
+          </Button>
+        }
+      />
 
-      <dl className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <dl className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {(
           [
             ['Datasets', String(index.datasets.length), 'Every address these Jobs read or write.'],
             ['Jobs', String(index.jobs.length), 'Jobs in scope.'],
+            [
+              'Governed',
+              `${governed}/${entries.length}`,
+              'Datasets an owner or a grant names, here or on a path above them. The rest are open to anyone who may query the runner.',
+            ],
             [
               'Handoffs between Jobs',
               String(index.edges.length),
@@ -385,8 +617,24 @@ export function Catalog() {
           />
         ) : null}
         {view === 'list' ? (
-          <Segmented value={place} onChange={setPlace} options={options} size="sm" />
+          <>
+            <Segmented
+              value={place}
+              onChange={setPlace}
+              options={options}
+              size="sm"
+              ariaLabel="Placement"
+            />
+            <Segmented
+              value={governance}
+              onChange={setGovernance}
+              options={govOptions}
+              size="sm"
+              ariaLabel="Governance"
+            />
+          </>
         ) : null}
+        {view === 'connections' ? null : (
         <div className="relative ml-auto w-full max-w-xs">
           <Input
             ref={searchRef}
@@ -415,9 +663,12 @@ export function Catalog() {
             </span>
           )}
         </div>
+        )}
       </div>
 
-      {view === 'graph' ? (
+      {view === 'connections' ? (
+        <SecretsPanel />
+      ) : view === 'graph' ? (
         <div className="space-y-2">
           <div className="h-[70vh] overflow-hidden rounded-lg border border-line">
             <LineageGraph
@@ -452,6 +703,9 @@ export function Catalog() {
           entries={visible}
           searching={query.trim() !== ''}
           schemas={schemas}
+          grants={datasetGrants}
+          owners={owners}
+          decisions={decisions}
           onOpenDataset={setOpenKey}
           workflowName={workflowName}
         />
@@ -465,13 +719,35 @@ export function Catalog() {
           suggestions={knownTags}
           schema={schemas.get(open.dataset.key) ?? null}
           columns={columns}
+          grants={datasetGrants.get(open.dataset.key) ?? EMPTY_GRANTS}
+          teams={teams}
+          users={users}
+          onGrant={(input) => addGrant({ ...input, resource: 'dataset', resourceId: open.dataset.key })}
+          onRevoke={revokeGrant}
+          owner={
+            owners.find(
+              (owner) => owner.resource === 'dataset' && owner.resourceId === open.dataset.key,
+            ) ?? null
+          }
+          ownerEffective={effectiveOwnerOf('dataset', open.dataset.key)}
+          onAssignOwner={(input) =>
+            setOwner({ ...input, resource: 'dataset', resourceId: open.dataset.key })
+          }
+          onClearOwner={() => clearOwner('dataset', open.dataset.key)}
+          mayManageAccess={mayAdministerResource('dataset', open.dataset.key)}
           probe={runnerUrl ? (format) => probe(open.dataset.key, format) : null}
+          sample={
+            runnerUrl
+              ? (format, limit) => sample(open.dataset.key, format, limit)
+              : null
+          }
           onClose={() => setOpenKey(null)}
           onSave={(patch) => save(open.dataset.key, patch)}
+          onSaveColumn={(column, patch) => saveColumn(open.dataset.key, column, patch)}
           onForget={() => drop(open.dataset.key)}
           onOpenJob={openJob}
         />
       ) : null}
-    </div>
+    </PageShell>
   )
 }

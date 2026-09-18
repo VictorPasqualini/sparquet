@@ -9,24 +9,36 @@ SECURITY WARNING
 Every request executes arbitrary Spark work: arbitrary SQL, arbitrary reads and
 arbitrary writes on the machine (and on any warehouse this machine can reach).
 
-`/run` and `/validate` therefore require a shared secret in the `X-Sparquet-Token`
-header, printed on startup (or taken from `SPARQUET_STUDIO_TOKEN`), and reject any
-request whose `Origin` is outside the allow-list. Without that, any web page the
-developer happens to visit could drive this runner: CORS withholds the *response*
-from the attacker but never stops the request from executing. `/health` stays open
-so Studio can detect the runner and prompt for the token.
+`/run` and `/validate` therefore require a credential in a header of their own —
+the shared secret in `X-Sparquet-Token`, printed on startup (or taken from
+`SPARQUET_STUDIO_TOKEN`), or a live session — and reject any request whose
+`Origin` is outside the allow-list. Without that, any web page the developer
+happens to visit could drive this runner: CORS withholds the *response* from the
+attacker but never stops the request from executing. `/health` stays open so
+Studio can detect the runner and prompt for the token.
+
+The three endpoints somebody locked out has to reach — `/auth/status`,
+`/auth/login` and `/auth/recover` — ask for no token once the runner has users,
+or the token would guard the only screen that can hand it back. The Origin check
+still covers them, and `_LoginThrottle` caps how fast a password can be guessed.
 
 This is still a single-developer tool: keep it bound to 127.0.0.1 and never expose
 it to a network or the public internet.
 
-Run it from the `sparquet-studio` directory; this module inserts the repository
-root into sys.path so `sparquet` is importable:
+Run it from the `sparquet-studio` directory:
 
     uvicorn server.main:app --port 8787
+
+`sparquet` is imported like any other dependency — `server/requirements.txt`
+pins the range in `compat.py`, and `/health` reports a version outside it. Two
+escapes exist for a checkout that is not installed: a repository root above this
+directory is added to sys.path when it holds a `sparquet/` package, and
+`SPARQUET_FRAMEWORK_PATH` names one anywhere.
 """
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import importlib
 import importlib.util
@@ -45,11 +57,11 @@ from datetime import date, datetime, timezone
 from datetime import time as clock_time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 SERVICE_VERSION = "0.2.0"
@@ -129,7 +141,16 @@ workspace = _load_sibling_module("workspace")
 auth = _load_sibling_module("auth")
 credits = _load_sibling_module("credits")
 audit = _load_sibling_module("audit")
+grants = _load_sibling_module("grants")
 providers = _load_sibling_module("providers")
+#: Named `vault` and not `secrets` on purpose: `secrets` is the stdlib module
+#: imported above for token generation, and a sibling of that name would replace
+#: it for every module the runner loads.
+vault = _load_sibling_module("vault")
+compat = _load_sibling_module("compat")
+monitoring = _load_sibling_module("monitoring")
+scheduling = _load_sibling_module("scheduling")
+assistant = _load_sibling_module("assistant")
 
 
 # ------------------------------------------------------------------ models
@@ -183,6 +204,10 @@ class FlowStageRequest(BaseModel):
     path: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     job_id: Optional[str] = None
+    #: Filled by `_resolve_staged_files` for a `path` stage no Job owns: the
+    #: catalog identity of the file itself (`file:<relative path>`). Not part of
+    #: what a client sends, and deliberately not `job_id` — see `_file_job_id`.
+    file_job_id: Optional[str] = None
 
 
 class RunFlowRequest(BaseModel):
@@ -217,10 +242,10 @@ class DatasetSchemaRequest(BaseModel):
     format: str
     path: str
     options: Optional[Dict[str, Any]] = None
-    #: Session config, as in a pipeline's `spark` block. Only honoured while no
-    #: SparkSession exists yet: `spark.jars.packages` and `spark.sql.extensions`
-    #: are read when the session is created and ignored afterwards, so a runner
-    #: that has already executed something keeps the session it has.
+    #: Session config, as in a pipeline's `spark` block. `spark.jars.packages`
+    #: and `spark.sql.extensions` are read when the SparkSession is CREATED and
+    #: ignored afterwards, so asking for a connector the live session was not
+    #: built with restarts that session — see `_ensure_framework`.
     spark: Optional[Dict[str, Any]] = None
 
 
@@ -237,6 +262,9 @@ class DatasetSchemaResponse(BaseModel):
     path: str
     fields: List[SchemaFieldOut]
     read_at: str
+    #: True when the SparkSession had to be rebuilt to load the connector this
+    #: format needs. Worth showing: it is why the call took twenty seconds.
+    session_restarted: bool = False
 
 
 class QuerySource(BaseModel):
@@ -258,8 +286,16 @@ class QueryRequest(BaseModel):
     #: Cancels the query by itself after this many seconds. None leaves it to
     #: run until it finishes or someone cancels it.
     timeout_seconds: Optional[int] = None
-    #: As in `DatasetSchemaRequest`: honoured only while no SparkSession exists.
+    #: As in `DatasetSchemaRequest`: a connector the live session lacks rebuilds it.
     spark: Optional[Dict[str, Any]] = None
+    #: The library file this statement came from, when it came from one. Sent so
+    #: the runner can check the grants on the saved query itself; an unsaved
+    #: buffer has no id and is governed only by the tables it names.
+    saved_query_id: Optional[str] = None
+    #: The editor tab this ran from, which is what its history is keyed by while
+    #: the buffer has no file yet. Omitted — by the catalog's row sample, say —
+    #: the run is executed and not recorded: nothing would ever read it back.
+    tab: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -270,6 +306,57 @@ class QueryResponse(BaseModel):
     #: True when the query had more rows than `limit`, so the table can say so.
     truncated: bool
     elapsed_ms: int
+    #: The SparkSession was rebuilt before this query, to load a connector it
+    #: was missing. Explains an otherwise inexplicable first-query latency.
+    session_restarted: bool = False
+
+
+class QueryRunOut(BaseModel):
+    id: str
+    at: str
+    sql: str
+    limit: int
+    elapsed_ms: int
+    rows: int
+    truncated: bool
+    error: Optional[str] = None
+    run_as: Optional[str] = None
+
+
+class QueryHistoryResponse(BaseModel):
+    runs: List[QueryRunOut] = Field(default_factory=list)
+
+
+class MoveHistoryRequest(BaseModel):
+    #: The scratch buffer the runs are under now.
+    tab: str
+    #: The file it has just been saved as, and the key they belong under from now on.
+    saved_query_id: str
+
+
+class ValidateQueryRequest(BaseModel):
+    """A statement to parse without running it."""
+
+    sql: str
+
+
+class ValidateQueryResponse(BaseModel):
+    """What the parser made of a statement.
+
+    `checked` is the honest part: it is False when no SparkSession was alive to
+    ask, and the editor then marks nothing rather than guessing in a dialect it
+    does not implement. `ok` is only meaningful when `checked` is True.
+    """
+
+    checked: bool
+    ok: bool = True
+    message: str = ""
+    #: 1-based, as the parser counts, and as an editor numbers its lines.
+    line: Optional[int] = None
+    #: 0-based, as the parser counts. Spark calls it `pos`.
+    column: Optional[int] = None
+    #: Why nothing was checked, when nothing was.
+    reason: str = ""
 
 
 class ValidationOut(BaseModel):
@@ -365,6 +452,13 @@ class HealthResponse(BaseModel):
     # An operator debugging a hosted runner should not have to infer this from
     # behaviour. See `providers.py`.
     providers: Dict[str, str] = Field(default_factory=dict)
+    # Whether the installed framework falls inside the range this Studio was
+    # built against, and what to do when it does not. True with no message is
+    # the ordinary case, including a machine with no framework at all — that is
+    # `spark_available`'s problem, not a version mismatch. See `compat.py`.
+    framework_supported: bool = True
+    framework_message: Optional[str] = None
+    framework_requirement: str = ""
 
 
 class CapabilitiesResponse(BaseModel):
@@ -750,6 +844,42 @@ _HISTORY_DB_PATH = Path(
 )
 _history: Any = history.SQLiteExecutionRepository(_HISTORY_DB_PATH)
 
+# The rules that watch that history, in their own file: they are configuration,
+# and the runs they are about are purged on a schedule.
+_monitors = monitoring.MonitorStore(
+    Path(os.getenv("SPARQUET_STUDIO_MONITORS_DB"))
+    if os.getenv("SPARQUET_STUDIO_MONITORS_DB")
+    else None
+)
+
+# Set when a run finishes, so an alert about a failure does not wait for the next
+# tick of the timer. The timer is still what answers "this Job did not run at
+# all" — that one has no event to hang off, which is the whole reason it exists.
+_MONITOR_WAKE = threading.Event()
+
+# When each schedule last fired, in this process, and when this process started.
+# Deliberately not persisted: it says what *this* runner has already done, and a
+# second runner pointed at the same library is a different answer to the same
+# question. The schedules themselves live in the library records, committed with
+# the project — see `scheduling.py`.
+_SCHEDULE_ANCHORS: Dict[str, datetime] = {}
+_SCHEDULE_LOCK = threading.Lock()
+_SCHEDULE_WAKE = threading.Event()
+_SCHEDULER_STARTED_AT = datetime.now(timezone.utc)
+
+
+def _finish_pipeline_run(*args: Any, **kwargs: Any) -> Any:
+    """Closes a run in the history and nudges the monitor sweep.
+
+    Every path that finishes a run goes through here rather than calling the
+    repository directly: a rule that only notices on the next tick would report a
+    failure a minute after the person who started it already saw it.
+    """
+    result = _history.finish_pipeline_run(*args, **kwargs)
+    _MONITOR_WAKE.set()
+    return result
+
+
 #: How often the retention policy is applied on its own. Once a day is enough for
 #: a rule expressed in days, and it never runs on the execution path — a purge
 #: rewrites the database, which is not something to do while a run is streaming.
@@ -840,9 +970,11 @@ def _import(module_name: str) -> Any:
         raise HTTPException(
             status_code=503,
             detail=(
-                f"Cannot import '{module_name}': {exc}. Start the runner from the "
-                "sparquet-studio directory inside the Sparquet repository, or "
-                "install pyspark and the sparquet framework in this environment."
+                f"Cannot import '{module_name}': {exc}. Install the runner's "
+                f"requirements into this environment (pip install -r "
+                f"server/requirements.txt, which brings {compat.REQUIREMENT}) and "
+                "pyspark for the Spark line you run — or point "
+                "SPARQUET_FRAMEWORK_PATH at a checkout of the framework."
             ),
         ) from exc
 
@@ -854,6 +986,382 @@ def _get_framework() -> Any:
     if _framework is None:
         _framework = _import("sparquet").Sparquet()
     return _framework
+
+
+#: Configs Spark only reads while the SparkSession is being BUILT. Setting one
+#: on a live session is accepted and then ignored by the JVM, which is what made
+#: "Delta works in a Job but not in the SQL editor" so hard to see: the first
+#: request to reach this process fixed the session for every request after it,
+#: connectors included.
+_CREATION_ONLY = (
+    "spark.jars",
+    "spark.sql.extensions",
+    "spark.sql.catalog.",
+    "spark.serializer",
+    "spark.kryo",
+    "spark.plugins",
+    "spark.driver.",
+    "spark.executor.",
+    "spark.hadoop.",
+)
+
+#: Creation-time configs whose value is a comma-separated LIST. A restart merges
+#: them instead of replacing: rebuilding the session for Delta must not drop the
+#: Iceberg packages an earlier request asked for.
+_LIST_CONFIGS = (
+    "spark.jars.packages",
+    "spark.jars",
+    "spark.jars.repositories",
+    "spark.sql.extensions",
+    "spark.plugins",
+)
+
+#: The connector coordinates the runner falls back to when nobody told it any.
+#:
+#: A Job carries its own `spark` block, and that is the right place for it. But
+#: the SQL editor and the schema probe open datasets that no Job may mention yet
+#: — somebody points at a Delta table on disk and asks what is in it — and with
+#: no coordinate anywhere the read fails with `[DATA_SOURCE_NOT_FOUND] delta`,
+#: which reads as "there is no such format".
+#:
+#: So the runner keeps a default per format, applied only when a request
+#: actually asks for that format. A plain Parquet runner never downloads a jar
+#: it has no use for, and a runner that has no network still starts.
+#:
+#: The pins are the ones the Spark line ships against. Override either with
+#: `SPARQUET_STUDIO_DELTA_PACKAGE` / `SPARQUET_STUDIO_ICEBERG_PACKAGE`, or turn
+#: the whole fallback off with `SPARQUET_STUDIO_NO_AUTO_CONNECTORS=1`.
+_DELTA_PACKAGE = {4: "io.delta:delta-spark_2.13:4.3.1", 3: "io.delta:delta-spark_2.12:3.3.2"}
+_ICEBERG_PACKAGE = {
+    4: "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
+    3: "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0",
+}
+
+
+def _spark_line() -> int:
+    """The major version of the PySpark in this environment, 4 if unreadable."""
+    try:
+        return int(str(_import("pyspark").__version__).split(".")[0])
+    except Exception:
+        return 4
+
+
+def _connector_configs(formats: Iterable[str]) -> Dict[str, str]:
+    """The creation-time configs these formats need, as far as the runner knows.
+
+    Empty for every format that needs nothing beyond what Spark ships — Parquet,
+    CSV, JSON — and empty for all of them when the fallback is turned off.
+    """
+    if os.environ.get("SPARQUET_STUDIO_NO_AUTO_CONNECTORS", "").strip().lower() in ("1", "true", "yes"):
+        return {}
+
+    wanted = {str(name or "").strip().lower() for name in formats}
+    line = _spark_line()
+    configs: Dict[str, str] = {}
+
+    def add(key: str, value: str) -> None:
+        configs[key] = _merge_list(configs.get(key), value) if key in _LIST_CONFIGS else value
+
+    if "delta" in wanted:
+        add("spark.jars.packages", os.environ.get("SPARQUET_STUDIO_DELTA_PACKAGE")
+            or _DELTA_PACKAGE.get(line, _DELTA_PACKAGE[4]))
+        add("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        add("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+    if "iceberg" in wanted:
+        add("spark.jars.packages", os.environ.get("SPARQUET_STUDIO_ICEBERG_PACKAGE")
+            or _ICEBERG_PACKAGE.get(line, _ICEBERG_PACKAGE[4]))
+        add("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+    return configs
+
+
+def _formats_of(config: Any) -> List[str]:
+    """Every format a submitted JSON reads or writes.
+
+    Same reading as the lineage the run is recorded with, so a Job that reaches a
+    Delta table through a join is counted like one that reads it directly.
+    """
+    raw = history.lineage_of(config)
+    if not raw:
+        return []
+    try:
+        lineage = json.loads(raw)
+    except ValueError:
+        return []
+    out: List[str] = []
+    for side in ("inputs", "outputs"):
+        for entry in lineage.get(side) or []:
+            fmt = entry.get("format")
+            if isinstance(fmt, str) and fmt:
+                out.append(fmt)
+    return out
+
+
+def _spark_for_formats(
+    spark_settings: Optional[Dict[str, Any]], formats: Iterable[str]
+) -> Optional[Dict[str, Any]]:
+    """What the caller asked for, plus whatever these formats need to load at all.
+
+    The caller wins on every key it set: a Job pinned to one Delta version must
+    not be quietly moved to another because the runner has a newer default.
+    """
+    fallback = _connector_configs(formats)
+    if not fallback:
+        return spark_settings
+    settings = dict(spark_settings or {})
+    configs = dict(fallback)
+    for key, value in _configs_of(spark_settings).items():
+        configs[key] = _merge_list(fallback.get(key), value) if key in _LIST_CONFIGS else value
+    settings["configs"] = configs
+    return settings
+
+
+#: Queries in flight. A session restart stops the JVM, so it may only happen
+#: while nothing is running — `_RUN_LOCK` covers pipeline runs, this covers
+#: `/query` and `/dataset/schema`, which deliberately do not take that lock.
+_QUERY_COUNT = 0
+_QUERY_COUNT_LOCK = threading.Lock()
+_SESSION_LOCK = threading.RLock()
+
+
+def _query_enter() -> None:
+    """Marks a query as running, so a session restart refuses to interrupt it."""
+    global _QUERY_COUNT
+    with _QUERY_COUNT_LOCK:
+        _QUERY_COUNT += 1
+
+
+def _query_exit() -> None:
+    global _QUERY_COUNT
+    with _QUERY_COUNT_LOCK:
+        _QUERY_COUNT = max(0, _QUERY_COUNT - 1)
+
+
+def _creation_only(key: str) -> bool:
+    return any(key == prefix or key.startswith(prefix) for prefix in _CREATION_ONLY)
+
+
+def _merge_list(current: Optional[str], wanted: str) -> str:
+    """Union of two comma-separated config values, order preserved."""
+    out: List[str] = []
+    for value in (current or "", wanted):
+        for item in value.split(","):
+            item = item.strip()
+            if item and item not in out:
+                out.append(item)
+    return ",".join(out)
+
+
+def _configs_of(spark_settings: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    configs = (spark_settings or {}).get("configs") or {}
+    if not isinstance(configs, dict):
+        return {}
+    return {str(key): str(value) for key, value in configs.items()}
+
+
+def _session_gap(session: Any, wanted: Dict[str, str]) -> Dict[str, str]:
+    """Creation-time configs the live session does not already satisfy."""
+    try:
+        conf = session.sparkContext.getConf()
+    except Exception:
+        return {}
+    gap: Dict[str, str] = {}
+    for key, value in wanted.items():
+        if not _creation_only(key):
+            continue
+        current = conf.get(key, None)
+        if current is None:
+            gap[key] = value
+        elif key in _LIST_CONFIGS:
+            have = {item.strip() for item in str(current).split(",") if item.strip()}
+            missing = [item.strip() for item in value.split(",") if item.strip() and item.strip() not in have]
+            if missing:
+                gap[key] = _merge_list(str(current), value)
+        elif str(current) != value:
+            gap[key] = value
+    return gap
+
+
+def _live_creation_configs(session: Any) -> Dict[str, str]:
+    """What the live session was built with, so a restart keeps it."""
+    try:
+        pairs = session.sparkContext.getConf().getAll()
+    except Exception:
+        return {}
+    return {str(key): str(value) for key, value in pairs if _creation_only(str(key))}
+
+
+def _release_jvm() -> None:
+    """Shut the py4j gateway down so the next session starts a NEW JVM.
+
+    `SparkSession.stop()` stops the context and leaves the JVM running, and
+    `spark.jars.packages` is resolved by SparkSubmit *while the JVM is starting*
+    — never afterwards. So a session rebuilt over a live gateway comes back
+    reporting the packages it was asked for and still cannot open the format:
+
+        Py4JJavaError: An error occurred while calling o67.load
+
+    with a `DATA_SOURCE_NOT_FOUND` or an EOFException from the Python data
+    source lookup underneath, depending on the Spark line. Dropping the gateway
+    is what makes the restart real; the next `getOrCreate` relaunches it with
+    the merged submit arguments.
+
+    Not done where the session belongs to someone else: on Databricks the
+    cluster owns the JVM, and killing it is not this process's business.
+    """
+    context = _import("sparquet.core.context")
+    try:
+        if context.SparkContextManager.current_environment() == "databricks":
+            return
+    except Exception:  # an older framework without the accessor: assume ours
+        pass
+
+    from pyspark import SparkContext  # local import: the runner may have no Spark
+
+    gateway = getattr(SparkContext, "_gateway", None)
+    if gateway is not None:
+        try:
+            gateway.shutdown()
+        except Exception:  # already gone, or the JVM died on its own
+            pass
+    SparkContext._gateway = None
+    SparkContext._jvm = None
+
+
+def _ensure_framework(
+    spark_settings: Optional[Dict[str, Any]], *, run_lock_held: bool = False
+) -> Tuple[Any, bool]:
+    """The framework, with a SparkSession that can actually open what was asked.
+
+    The session is a process-wide singleton and its connector configs are frozen
+    at creation, so a caller asking for Delta after somebody else created a
+    plain session used to get `[DATA_SOURCE_NOT_FOUND] delta` with nothing in the
+    message pointing at the real cause. When the request needs a creation-time
+    config the live session lacks, the session is rebuilt with the union of both
+    — and refused, loudly, while anything is still running on it.
+
+    Returns the framework and whether a restart happened.
+
+    `run_lock_held` is for the run path, which already owns `_RUN_LOCK`: it is
+    the thing the restart would otherwise wait for, and re-taking a lock you
+    hold refuses your own run.
+    """
+    global _framework
+    wanted = _configs_of(spark_settings)
+
+    with _SESSION_LOCK:
+        if _framework is None:
+            _framework = _import("sparquet").Sparquet(spark=spark_settings or None)
+            return _framework, False
+
+        if not wanted:
+            return _framework, False
+
+        session = _framework.spark
+        gap = _session_gap(session, wanted)
+        if not gap:
+            return _framework, False
+
+        busy_query = _QUERY_COUNT > 0
+        acquired = True if run_lock_held else _RUN_LOCK.acquire(blocking=False)
+        if busy_query or not acquired:
+            if acquired and not run_lock_held:
+                _RUN_LOCK.release()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This SparkSession was created without "
+                    + ", ".join(sorted(gap))
+                    + ", and those only take effect when the session is built. "
+                    "Rebuilding it means restarting the JVM, which would kill the "
+                    "run or query using it right now. Try again when it finishes."
+                ),
+            )
+
+        try:
+            merged = _live_creation_configs(session)
+            for key, value in gap.items():
+                merged[key] = _merge_list(merged.get(key), value) if key in _LIST_CONFIGS else value
+            settings = dict(spark_settings or {})
+            settings["configs"] = merged
+            _import("sparquet.core.context").SparkContextManager.stop()
+            _release_jvm()
+            _framework = _import("sparquet").Sparquet(spark=settings)
+            # Touch it here so a failure to build surfaces as this call, not as
+            # an unrelated one two requests later.
+            _framework.spark
+        finally:
+            if not run_lock_held:
+                _RUN_LOCK.release()
+        return _framework, True
+
+
+def _warm_configs() -> Dict[str, str]:
+    """The creation-time configs the saved Jobs between them ask for.
+
+    Warming a plain session would be half a warm-up: connector jars and SQL
+    extensions are read only when a session is built, so the first Delta query
+    against a plain session rebuilds it — JVM and all — and the wait comes back
+    exactly where it was meant to be gone. So the session is built with the union
+    of what the library already declares, which is the closest thing the runner
+    has to knowing what it will be asked for.
+
+    A library that declares nothing warms a plain session, which is the right
+    answer for a Parquet-only runner: it downloads no jar it has no use for.
+    """
+    try:
+        jobs = _workspace.snapshot().jobs
+    except Exception:  # pragma: no cover - a library that cannot be read warms plain
+        return {}
+    configs: Dict[str, str] = {}
+    for document in jobs:
+        record = document.record if isinstance(document.record, dict) else {}
+        settings = record.get("settings")
+        declared = ((settings or {}).get("spark") or {}).get("configs")
+        if not isinstance(declared, dict):
+            continue
+        for key, value in declared.items():
+            key, value = str(key), str(value)
+            configs[key] = (
+                _merge_list(configs.get(key), value) if key in _LIST_CONFIGS else value
+            )
+    return configs
+
+
+def _warm_enabled(env: Optional[Dict[str, str]] = None) -> bool:
+    """Whether this process builds the SparkSession before anybody asks for one."""
+    source = env if env is not None else os.environ
+    value = (source.get("SPARQUET_STUDIO_WARM_SPARK") or "").strip().lower()
+    return value in ("1", "on", "true", "yes")
+
+
+def _warm_spark() -> None:
+    """Builds the SparkSession now, so the first person to ask does not wait.
+
+    A cold first query pays for a JVM launch, the connector jars being resolved
+    and a session being configured — tens of seconds, all of it before any work
+    starts, and all of it charged to whoever happened to click Run first. Nothing
+    here is new machinery: it is the same `_ensure_framework` every request goes
+    through, called once at start-up on a daemon thread so it overlaps with the
+    person opening the browser instead of with their first query.
+
+    Failures are logged and swallowed. A warm-up is an optimisation, and a runner
+    that cannot build a session at start-up must still start — the same request
+    that would have built one will fail with its own, much better message.
+    """
+    started = time.perf_counter()
+    try:
+        configs = _warm_configs()
+        framework, _ = _ensure_framework({"configs": configs} if configs else None)
+        # `Sparquet` builds the session lazily, so touching it here is what
+        # actually pays the cost on this thread rather than on the first request.
+        framework.spark
+        _log.info(
+            "Spark warmed up in %s ms%s.",
+            int((time.perf_counter() - started) * 1000),
+            f" with {len(configs)} config(s) from the library" if configs else "",
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.warning("Spark warm-up failed, the first query will build the session: %s", exc)
 
 
 def _apply_params(pipeline: Dict[str, Any], params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -987,6 +1495,56 @@ def _describe(exc: Exception) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+#: What each format needs in the `spark` block to exist at all. The version is
+#: deliberately left as a placeholder: the right coordinate depends on the Spark
+#: line the runner is on (Scala 2.13 on Spark 4.x, 2.12 on 3.5), and printing a
+#: wrong pin is worse than printing the shape of the right one.
+_CONNECTOR_HINT: Dict[str, str] = {
+    "delta": (
+        "spark.jars.packages=io.delta:delta-spark_<scala>:<version> plus "
+        "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension and "
+        "spark.sql.catalog.spark_catalog="
+        "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    ),
+    "iceberg": (
+        "spark.jars.packages="
+        "org.apache.iceberg:iceberg-spark-runtime-<spark>_<scala>:<version> plus "
+        "spark.sql.extensions="
+        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    ),
+    "hudi": "spark.jars.packages=org.apache.hudi:hudi-spark<spark>-bundle_<scala>:<version>",
+    "kafka": "spark.jars.packages=org.apache.spark:spark-sql-kafka-0-10_<scala>:<version>",
+    "bigquery": "spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_<scala>:<version>",
+    "mongodb": "spark.jars.packages=org.mongodb.spark:mongo-spark-connector_<scala>:<version>",
+    "cassandra": "spark.jars.packages=com.datastax.spark:spark-cassandra-connector_<scala>:<version>",
+    "elasticsearch": "spark.jars.packages=org.elasticsearch:elasticsearch-spark-30_<scala>:<version>",
+    "opensearch": "spark.jars.packages=org.opensearch.client:opensearch-spark-30_<scala>:<version>",
+    "snowflake": "spark.jars.packages=net.snowflake:spark-snowflake_<scala>:<version>",
+}
+
+
+def _describe_io(exc: Exception, fmt: str) -> str:
+    """`_describe`, plus what a missing connector actually means.
+
+    Spark answers a format it cannot load with `[DATA_SOURCE_NOT_FOUND] Failed
+    to find the data source: delta`, which reads as "there is no such thing" when
+    it means "this session was built without the jar". The two are fixed very
+    differently, so the message says which one this is.
+    """
+    text = _describe(exc)
+    name = (fmt or "").strip().lower()
+    marker = "DATA_SOURCE_NOT_FOUND" in text or "ClassNotFoundException" in text
+    if not marker or name not in _CONNECTOR_HINT:
+        return text
+    return (
+        f"{text}\n\nThe {name} connector is not on this SparkSession. Its jars and "
+        "extensions are read only when the session is created, so declaring them "
+        "afterwards has no effect. Put them in the `spark` block of a Job that "
+        f"touches this dataset — {_CONNECTOR_HINT[name]} — and the runner rebuilds "
+        "the session with them the next time nothing is running on it."
+    )
+
+
 def _build_preview(df: Any, limit: int, collector: _LogCollector) -> Optional[PreviewOut]:
     try:
         columns = [str(name) for name in df.columns]
@@ -1073,13 +1631,12 @@ def _announce_token() -> None:
 _announce_token()
 
 
-def require_token(request: Request) -> None:
-    """Blocks drive-by requests from any page the developer happens to visit.
+def _check_origin(request: Request) -> None:
+    """The half of the guard that is not about a secret at all.
 
-    CORS cannot do this: for a request with no custom header and no JSON content
-    type the browser skips the preflight, the app runs, and only the *response*
-    is withheld from the attacker. A header the browser refuses to attach
-    cross-origin without a preflight, plus a server-side Origin check, do.
+    A browser will not send a request carrying a custom header cross-origin
+    without asking first, and this refuses the asking. It runs on every guarded
+    endpoint, whatever credential the caller goes on to present.
     """
     origin = request.headers.get("origin")
     if origin is not None and origin not in _allowed_origins():
@@ -1091,8 +1648,9 @@ def require_token(request: Request) -> None:
             ),
         )
 
-    if not secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), AUTH_TOKEN):
-        raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
+
+def _token_matches(request: Request) -> bool:
+    return secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), AUTH_TOKEN)
 
 
 # ------------------------------------------------------------------ identity
@@ -1125,6 +1683,50 @@ def _session_token(request: Request) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
+def require_token(request: Request) -> None:
+    """Blocks drive-by requests from any page the developer happens to visit.
+
+    CORS cannot do this: for a request with no custom header and no JSON content
+    type the browser skips the preflight, the app runs, and only the *response*
+    is withheld from the attacker. A header the browser refuses to attach
+    cross-origin without a preflight, plus a server-side Origin check, do.
+
+    A live session is taken in the token's place, because it buys the very same
+    thing: it also travels in a header of its own, so a browser will not attach
+    it cross-origin without the preflight the Origin check refuses. Demanding
+    both would mean that rotating the runner's token locks every user out of a
+    screen whose only purpose is to let them back in — and once someone has
+    logged in, the session is the credential they actually hold.
+    """
+    _check_origin(request)
+    if _token_matches(request):
+        return
+    session = _session_token(request)
+    if not session:
+        raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
+    principal = _auth.resolve_session(session)
+    if principal is None:
+        # Name the credential that went stale. Answering "no token" to somebody
+        # holding an expired session sends them looking for the wrong thing.
+        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_HELP)
+    request.state.principal = principal
+
+
+def require_token_unless_users(request: Request) -> None:
+    """The guard on the three endpoints a locked-out person has to reach.
+
+    `/auth/status`, `/auth/login` and `/auth/recover` behind the shared token is
+    a closed loop: the token is typed in Settings, and Settings is behind the
+    login. So on a runner that has users these ask for no token — the login is
+    the wall, and the Origin check still stands in front of it. With no users
+    there is nothing else to ask for, and the token stays mandatory.
+    """
+    _check_origin(request)
+    if _auth.has_users() or _token_matches(request):
+        return
+    raise HTTPException(status_code=401, detail=UNAUTHORIZED_HELP)
+
+
 def current_principal(request: Request) -> Any:
     """Who is calling, after `require_token` has already vouched for the request.
 
@@ -1133,6 +1735,11 @@ def current_principal(request: Request) -> Any:
     rights — that runner has one operator, and upgrading must not lock them out.
     With users, a session is required for everything but logging in.
     """
+    resolved = getattr(request.state, "principal", None)
+    if resolved is not None:
+        # `require_token` already looked this session up on the way in, and a
+        # second lookup would only cost another read of the identity store.
+        return resolved
     token = _session_token(request)
     if token:
         principal = _auth.resolve_session(token)
@@ -1144,6 +1751,94 @@ def current_principal(request: Request) -> Any:
         raise HTTPException(status_code=401, detail=LOGIN_REQUIRED_HELP)
     request.state.principal = auth.TOKEN_PRINCIPAL
     return auth.TOKEN_PRINCIPAL
+
+
+class _LoginThrottle:
+    """A sliding window over failed credential attempts.
+
+    `/auth/login` and `/auth/recover` stopped needing the shared token, so what
+    used to gate a guesser is now only the password itself. This puts a ceiling
+    on how fast one can be guessed. It counts failures only — someone who logs in
+    is forgotten immediately, so a person who mistypes twice and then succeeds
+    pays nothing.
+
+    Deliberately in memory and per process: a restart clears it, which is the
+    right trade for a single-developer runner, and there is no second process to
+    keep in step with.
+    """
+
+    def __init__(self, limit: int, window: int) -> None:
+        self._limit = max(1, limit)
+        self._window = max(1, window)
+        self._hits: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
+
+    def _fresh(self, key: str, now: float) -> List[float]:
+        hits = [at for at in self._hits.get(key, []) if now - at < self._window]
+        if hits:
+            self._hits[key] = hits
+        else:
+            self._hits.pop(key, None)
+        return hits
+
+    def retry_after(self, keys: Iterable[str]) -> int:
+        """Seconds to wait, or 0 to go ahead. The longest wait of any key wins."""
+        now = time.time()
+        wait = 0
+        with self._lock:
+            for key in keys:
+                hits = self._fresh(key, now)
+                if len(hits) >= self._limit:
+                    wait = max(wait, int(hits[0] + self._window - now) + 1)
+        return wait
+
+    def record_failure(self, keys: Iterable[str]) -> None:
+        now = time.time()
+        with self._lock:
+            for key in keys:
+                self._hits.setdefault(key, []).append(now)
+
+    def forget(self, keys: Iterable[str]) -> None:
+        with self._lock:
+            for key in keys:
+                self._hits.pop(key, None)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, "").strip() or default))
+    except ValueError:
+        return default
+
+
+_LOGIN_THROTTLE = _LoginThrottle(
+    _int_env("SPARQUET_STUDIO_LOGIN_ATTEMPTS", 10),
+    _int_env("SPARQUET_STUDIO_LOGIN_WINDOW", 300),
+)
+
+
+def _throttle_keys(request: Request, username: Optional[str] = None) -> List[str]:
+    """Both axes, because either alone has a hole: counting only the caller lets
+    a botnet spread the guessing across addresses, and counting only the account
+    lets one caller sweep every account at full speed."""
+    client = request.client.host if request.client else "unknown"
+    keys = [f"ip:{client}"]
+    if username and username.strip():
+        keys.append(f"user:{username.strip().lower()}")
+    return keys
+
+
+def _refuse_if_throttled(keys: List[str]) -> None:
+    wait = _LOGIN_THROTTLE.retry_after(keys)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Too many failed attempts. Try again in {wait} seconds, or restart "
+                "the runner if you are the operator and locked yourself out."
+            ),
+            headers={"Retry-After": str(wait)},
+        )
 
 
 def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
@@ -1169,6 +1864,11 @@ def requires(action: str, resource: Any = "*") -> Callable[[Request], Any]:
             )
         return principal
 
+    # Written on the closure so the guard can be read back off a route: the
+    # question "which action protects this endpoint?" is worth being able to ask
+    # of the app object rather than of the source.
+    dependency.action = action  # type: ignore[attr-defined]
+    dependency.resource = resource  # type: ignore[attr-defined]
     return dependency
 
 
@@ -1348,6 +2048,630 @@ def _authorize_run(
     )
 
 
+def _may_run(
+    principal: Any, action: str, *, workflow_id: Optional[str] = None,
+    pipeline_id: Optional[str] = None, job_id: Optional[str] = None,
+) -> bool:
+    """`_authorize_run` as a question instead of an answer.
+
+    Needed because a schedule is authorized for *two* accounts: the one saving it
+    and the one it will run as. Refusing the save has to say which of the two was
+    the problem, so the second check cannot be the one that raises.
+    """
+    targets = _run_targets(workflow_id, pipeline_id, job_id)
+    if any(principal.denies(action, target) for target in targets):
+        return False
+    return any(principal.allows(action, target) for target in targets)
+
+
+#: What makes two schedules the same schedule. Deliberately not the whole block:
+#: the Studio also keeps presentation there, and a save that only moved a label
+#: must not demand permission to run.
+def _schedule_shape(schedule: Any) -> Optional[Tuple[Any, ...]]:
+    if schedule is None:
+        return None
+    return (schedule.cron, schedule.timezone, schedule.enabled, schedule.run_as)
+
+
+def _read_schedule(kind: str, record_id: str, record: Any) -> Optional[Any]:
+    """The schedule of a record as the scheduler itself would read it, or `None`.
+
+    Going through `scheduling.from_record` rather than reading the dict here is
+    the point: the guard has to judge the schedule that would actually fire, not
+    a second interpretation of the same keys that could drift from it.
+    """
+    if not isinstance(record, dict):
+        return None
+    try:
+        return scheduling.from_record(kind, record, record_id)
+    except Exception:  # an unreadable record is not a schedule
+        return None
+
+
+def _authorize_schedule_change(
+    principal: Any, kind: str, record_id: str, before: Any, after: Any
+) -> None:
+    """A schedule is a run. Saving one needs the permission to start it.
+
+    Without this, `workspace:Write` was enough to schedule anything: someone who
+    may edit a Job but not run it could write `0 6 * * *` into it and have the
+    scheduler run it for them every morning. Worse, the `run_as` field names the
+    account the run is authorized as, so the same save could borrow an
+    administrator's access — permission granted by typing a username.
+
+    So two questions, and both of them only when the schedule actually changed:
+
+    * may **you** run this thing? Anything else lets writing substitute for
+      executing.
+    * and if you named somebody else in `run_as`, may you act for that account
+      (`iam:ManageUsers`), does it exist, and may **it** run this thing? The last
+      one matters on its own: naming an account that cannot run the Job produces
+      a schedule that fails every morning at six, silently, forever.
+
+    Skipped entirely when the runner has no users — that is the single-operator
+    case, where the shared token is the only identity there is and there is
+    nobody to escalate to.
+    """
+    if kind not in scheduling.KINDS or not _auth.has_users():
+        return
+    old, new = _read_schedule(kind, record_id, before), _read_schedule(kind, record_id, after)
+    if _schedule_shape(old) == _schedule_shape(new):
+        return
+
+    ids: Dict[str, Optional[str]] = {
+        "workflow_id": (new or old).workflow_id if (new or old) else None,
+        "pipeline_id": record_id if kind == scheduling.PIPELINE else None,
+        "job_id": record_id if kind == scheduling.JOB else None,
+    }
+    # Removing or disabling a schedule is checked the same way. It changes what
+    # runs, and "may stop the nightly load" is not a lesser permission.
+    _authorize_run(principal, "run:Execute", **ids)
+
+    run_as = ((new.run_as if new else "") or "").strip()
+    if not run_as or run_as == principal.username:
+        return
+    if not principal.allows("iam:ManageUsers"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{principal.username}' cannot schedule a run as '{run_as}'. "
+                "Scheduling for another account needs iam:ManageUsers; leave the "
+                "field empty to run as yourself."
+            ),
+        )
+    owner = _auth.principal_for(run_as)
+    if owner is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"There is no account named '{run_as}' to run this schedule as.",
+        )
+    if not _may_run(owner, "run:Execute", **ids):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{run_as}' is not allowed to run {kind}/{record_id}, so a schedule "
+                "running as that account would fail on every occurrence. Grant it "
+                "run:Execute on the target, or name another account."
+            ),
+        )
+
+
+# ------------------------------------------------------------------- grants
+
+
+def _grants_now() -> List[Any]:
+    """The dataset, Job and Pipeline rules as they stand on disk right now.
+
+    Deliberately not cached: revoking access has to take effect when somebody
+    saves it, not when the runner is next restarted, and re-reading a few
+    kilobytes of JSON beside a query that is about to start a Spark job costs
+    nothing worth measuring.
+    """
+    try:
+        raw = _workspace.read_meta().get("grants")
+    except Exception:  # a missing or unreadable meta file is simply no rules
+        return []
+    return grants.load(raw)
+
+
+def _owners_now() -> List[Any]:
+    """Who owns each dataset, Job, Pipeline and Workflow, as it stands on disk.
+
+    Read beside the grants and never cached, for the same reason: a transfer of
+    ownership has to take effect when it is saved.
+    """
+    try:
+        raw = _workspace.read_meta().get("owners")
+    except Exception:  # a missing or unreadable meta file is simply no owners
+        return []
+    return grants.load_owners(raw)
+
+
+def _catalog_now() -> Dict[str, Any]:
+    """The dataset annotations as they stand on disk right now.
+
+    Same record the Studio writes from the catalog screen, and re-read for the
+    same reason the grants are: a tag added this morning has to govern this
+    afternoon's query, not the one after the next restart.
+    """
+    try:
+        raw = _workspace.read_meta().get("catalog")
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _tags_of(address: str) -> List[tuple]:
+    """The tag scopes one dataset carries, from its catalog entry.
+
+    A tag is the one container a dataset has that is not in its address: the
+    catalog says `pii`, and a rule written on `tag/pii` reaches every table that
+    says so, including the ones described after the rule was written.
+    """
+    entry = _catalog_now().get(_dataset_id(address))
+    if not isinstance(entry, dict):
+        return []
+    tags = entry.get("tags")
+    return grants.tag_scopes(
+        tags if isinstance(tags, list) else [],
+        {
+            "classification": entry.get("classification"),
+            "domain": entry.get("domain"),
+        },
+    )
+
+
+def _column_tags_of(address: str, column: str) -> List[tuple]:
+    """The tag scopes one column carries, from the catalog entry of its dataset.
+
+    Column annotations live inside the dataset's entry, keyed by the lower-cased
+    column name, because a column has no address that survives its table. A
+    column that was never described carries nothing of its own and is governed by
+    its table alone.
+    """
+    entry = _catalog_now().get(_dataset_id(address))
+    if not isinstance(entry, dict):
+        return []
+    columns = entry.get("columns")
+    if not isinstance(columns, dict):
+        return []
+    annotation = columns.get((column or "").strip().lower())
+    if not isinstance(annotation, dict):
+        return []
+    tags = annotation.get("tags")
+    return grants.tag_scopes(
+        tags if isinstance(tags, list) else [],
+        {"classification": annotation.get("classification")},
+    )
+
+
+def _parents_of(resource: str, resource_id: str) -> List[tuple]:
+    """The containers one securable inherits from — the Workflow a Job or a
+    Pipeline lives in, and the tags the catalog gives a dataset.
+
+    A dataset's path ancestors need nothing here: they are in the address
+    itself, and `grants.scope_chain` derives them without asking anybody. Its
+    tags are the opposite — they exist only in the catalog entry somebody typed.
+    Mirrors `parentsOf` in `src/store/iam.ts`.
+    """
+    if resource == "dataset":
+        return _tags_of(resource_id)
+    if resource == "column":
+        # Both sets of tags, the column's first: a column classified
+        # `restricted` inside an `internal` table has to be reached by a rule on
+        # `tag/classification:restricted`, and the table's own vocabulary still
+        # applies to it. `grants.scope_chain` puts the dataset above the column
+        # on its own; only the tags have to be looked up here.
+        parsed = grants.parse_column_resource(resource_id)
+        if parsed is None:
+            return []
+        key, column = parsed
+        seen = set()
+        out: List[tuple] = []
+        for scope in _column_tags_of(key, column) + _tags_of(key):
+            if scope[1] in seen:
+                continue
+            seen.add(scope[1])
+            out.append(scope)
+        return out
+    if resource == "secret":
+        # A credential carries the catalog's own vocabulary, so one rule on
+        # `tag/pii` closes the table and the password that opens it together.
+        secret = _secrets_now().items.get(vault.normalize(resource_id))
+        return grants.tag_scopes(secret.tags if secret else [], {})
+    if resource not in grants.CONTAINED_KINDS or not resource_id:
+        return []
+    try:
+        doc = _workspace.read(resource, resource_id)
+    except Exception:
+        return []
+    if doc is None:
+        return []
+    workflow_id = str((doc.record or {}).get("workflowId") or "").strip()
+    return [("workflow", workflow_id)] if workflow_id else []
+
+
+#: What a securable created through this runner is governed by, before anybody
+#: writes a rule. `creator+team` — the default — makes the person who created it
+#: the owner and gives their team `write` over it, so a new Job is administered
+#: by its author and still editable by the people beside them. `creator` leaves
+#: out the team grant, which suits a runner where teams are departments rather
+#: than squads. `off` restores the older behaviour: a new record is ungoverned,
+#: and whoever may run anything may run it.
+_NEW_RESOURCE_DEFAULTS = ("creator+team", "creator", "off")
+
+#: What the team grant is worth, per kind. A credential is the exception: a
+#: teammate may *use* `pg-prod` without being able to repoint it at another
+#: database, which is the difference between `read` and `write` on a secret.
+_TEAM_LEVEL = {
+    "job": "write",
+    "pipeline": "write",
+    "workflow": "write",
+    "dataset": "write",
+    "secret": "read",
+    "query": "write",
+}
+
+
+def _new_resource_policy() -> str:
+    value = os.getenv("SPARQUET_STUDIO_NEW_RESOURCE_DEFAULT", "").strip().lower()
+    return value if value in _NEW_RESOURCE_DEFAULTS else "creator+team"
+
+
+def _claim_new_resources(principal: Any, targets: Iterable[tuple]) -> None:
+    """The default access brand-new securables get, written once, at creation.
+
+    Three conditions, and all three matter.
+
+    It only fires for a **real user**: a token-only runner has no principal to
+    name, and inventing an owner there would govern a record that nobody could
+    then be matched against.
+
+    It only fires when nothing in the securable's chain governs it yet. A Job
+    saved into a Workflow that already has rules inherits them, and writing an
+    owner here would quietly override the Workflow with something narrower —
+    the opposite of what a container is for. `governed` is exactly that
+    question, which is why the decision carries it apart from the level.
+
+    And it writes the whole batch in one pass. A catalog save arrives as a map
+    and can name several new datasets at once; claiming them one at a time would
+    rewrite the meta file once per dataset.
+    """
+    policy = _new_resource_policy()
+    user_id = getattr(principal, "user_id", None)
+    if policy == "off" or not user_id or getattr(principal, "token_only", False):
+        return
+
+    wanted: List[tuple] = []
+    seen = set()
+    for resource, resource_id in targets:
+        resource_id = str(resource_id or "").strip()
+        if not resource_id or resource not in grants.OWNABLE_KINDS:
+            continue
+        if (resource, resource_id) in seen:
+            continue
+        seen.add((resource, resource_id))
+        wanted.append((resource, resource_id))
+    if not wanted:
+        return
+
+    try:
+        meta = _workspace.read_meta()
+    except Exception:  # an unreadable meta file is not worth failing a save over
+        return
+    owner_records = meta.get("owners")
+    owner_records = list(owner_records) if isinstance(owner_records, list) else []
+    grant_records = meta.get("grants")
+    grant_records = list(grant_records) if isinstance(grant_records, list) else []
+
+    rules = grants.load(grant_records)
+    owners = grants.load_owners(owner_records)
+    identity = _identity_of(principal)
+    team_id = getattr(principal, "team_id", None)
+    with_team = policy == "creator+team" and bool(team_id)
+
+    claimed = False
+    for resource, resource_id in wanted:
+        decision = grants.evaluate(
+            rules, owners, resource, resource_id, identity,
+            _parents_of(resource, resource_id),
+        )
+        if decision.governed:
+            continue
+        claimed = True
+        owner_records.append(
+            {
+                "resource": resource,
+                "resourceId": resource_id,
+                "principalKind": "user",
+                "principalId": str(user_id),
+            }
+        )
+        if with_team:
+            grant_records.append(
+                {
+                    "resource": resource,
+                    "resourceId": resource_id,
+                    "principalKind": "team",
+                    "principalId": str(team_id),
+                    "level": _TEAM_LEVEL.get(resource, "write"),
+                    "effect": "allow",
+                }
+            )
+    if not claimed:
+        return
+    _workspace.write_meta("owners", owner_records)
+    if with_team:
+        _workspace.write_meta("grants", grant_records)
+
+
+def _claim_new_resource(principal: Any, resource: str, resource_id: str) -> None:
+    """One securable, by the rules of `_claim_new_resources`."""
+    _claim_new_resources(principal, [(resource, resource_id)])
+
+
+def _identity_of(principal: Any) -> Any:
+    """The principals one caller is, in the shape `grants` matches against."""
+    return grants.Identity(
+        user_id=getattr(principal, "user_id", None),
+        username=getattr(principal, "username", None),
+        team_id=getattr(principal, "team_id", None),
+    )
+
+
+def _dataset_id(address: str) -> str:
+    """An address as the Studio catalog keys it: trailing slashes gone, case kept.
+
+    Must agree with `datasetKey` in `src/lib/lineage/lineage.ts`, or a rule
+    written against `/data/orders` would miss a Job that names `/data/orders/`.
+    """
+    trimmed = (address or "").strip()
+    return trimmed.rstrip("/") or trimmed
+
+
+def _authorize_resource(
+    principal: Any,
+    resource: str,
+    resource_id: str,
+    level: str,
+    rules: Optional[List[Any]] = None,
+) -> None:
+    """Refuse when a grant closes this dataset, Job or Pipeline to this caller.
+
+    Skipped on a token-only runner, for the reason `auth.py` gives the shared
+    token the admin policy: no users exist there, so no rule can name anybody,
+    and a `*` deny would lock the single operator out of their own machine.
+    """
+    if getattr(principal, "token_only", False):
+        return
+    scoped = _grants_now() if rules is None else rules
+    owners = _owners_now()
+    if not scoped and not owners:
+        return
+    if grants.allows(
+        scoped, resource, resource_id, _identity_of(principal), level,
+        owners=owners, parents=_parents_of(resource, resource_id),
+    ):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=grants.refusal(
+            resource, resource_id, level, getattr(principal, "username", "")
+        ),
+    )
+
+
+# ------------------------------------------------------------------ secrets
+
+
+def _secrets_now() -> Any:
+    """The secret store as it stands on disk right now.
+
+    Re-read rather than cached, like the grants beside it: a credential rotated
+    at nine has to be the one used at ten, and the store is a few kilobytes.
+    """
+    try:
+        raw = _workspace.read_meta().get("secrets")
+    except Exception:  # an unreadable meta file is simply no secrets
+        return vault.Store()
+    return vault.load(raw)
+
+
+def _write_secrets(store: Any) -> None:
+    _workspace.write_meta("secrets", store.as_dict())
+
+
+def _resolve_secrets(
+    document: Dict[str, Any], principal: Any
+) -> Tuple[Dict[str, Any], List[str]]:
+    """A copy of a pipeline with its `{secret:...}` references filled in.
+
+    Two things happen here and both matter. Access is checked per secret before
+    anything is decrypted, so a refusal costs nothing and names the secret rather
+    than the database behind it. And the values that were used come back with the
+    document, because the caller has to mask them out of whatever it prints — a
+    driver that cannot connect quotes the URL it tried, password included.
+
+    `read` is the level asked for. On a secret that means "may be used by a run",
+    not "may be looked at": no level returns a value to a person.
+    """
+    if not document:
+        return document, []
+    names = vault.names_in(document)
+    if not names:
+        return document, []
+
+    for name in names:
+        _authorize_resource(principal, "secret", name, "read")
+
+    store = _secrets_now()
+    try:
+        rendered, used = vault.render(
+            document, lambda name, field: vault.value_of(store, name, field)
+        )
+    except vault.SecretError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    _audit.record(
+        actor=getattr(principal, "username", None) or "anonymous",
+        actor_id=getattr(principal, "user_id", None),
+        team_id=getattr(principal, "team_id", None),
+        action="secrets:Use",
+        method="POST",
+        path="/secrets/use",
+        resource=", ".join(f"secret/{name}" for name in names),
+        outcome=audit.ALLOWED,
+    )
+    return rendered, used
+
+
+#: Meta records that are not bookkeeping but policy, and the action each needs.
+#: `workspace:Write` covers the rest of `meta/*`, and an editor holds it — which
+#: must not be a way to rewrite the rules that restrain the editor.
+_META_GUARDS = {"grants": "iam:ManageGrants", "owners": "iam:ManageGrants"}
+
+
+#: Meta records the generic endpoint refuses outright, whoever is asking. The
+#: secret store is written only through `/secrets`, which encrypts, checks access
+#: per secret and keeps the existing material when one field is rotated. A blanket
+#: PUT would do none of that, and would let a caller replace every credential on
+#: the runner with one request.
+_META_SEALED = {"secrets"}
+
+
+def _guard_meta_key(principal: Any, key: str, value: Any = None) -> None:
+    if str(key) in _META_SEALED:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{key}' is not writable here. Connection secrets are managed "
+                "through /secrets, which encrypts the value and checks access to "
+                "each secret on its own."
+            ),
+        )
+    action = _META_GUARDS.get(str(key))
+    if action is None or getattr(principal, "token_only", False):
+        return
+    if principal.allows(action, "*") and not principal.denies(action, "*"):
+        return
+    # Not a platform administrator — but possibly the owner of the securables
+    # being changed, which in this model is the whole point: whoever owns a table
+    # grants on that table without being handed the runner. So the change is
+    # inspected rather than the caller, and it passes only if every securable it
+    # touches is one this caller owns or holds admin on.
+    if _owner_may_change_meta(principal, str(key), value):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"'{principal.username}' is not allowed to {action}, and does not own "
+            "every resource this change touches. Access rules are changed by an "
+            "administrator, or by the owner of the resource itself."
+        ),
+    )
+
+
+def _meta_entry_keys(key: str, value: Any) -> set:
+    """The `(kind, id)` securables one stored `grants`/`owners` value names."""
+    records: List[Any]
+    if isinstance(value, dict):
+        records = list(value.values())
+    elif isinstance(value, list):
+        records = list(value)
+    else:
+        records = []
+    out = set()
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("resource") or "")
+        ident = str(item.get("resourceId") or "").strip()
+        if kind in grants.RESOURCE_KINDS and ident:
+            out.add((kind, ident))
+    return out
+
+
+def _owner_may_change_meta(principal: Any, key: str, value: Any) -> bool:
+    """Whether this caller owns everything a `grants`/`owners` write changes.
+
+    Deleting the whole record is never an owner's call: it would drop rules over
+    resources they have nothing to do with, so it stays with `iam:ManageGrants`.
+    Transferring ownership away is not one either — an owner may hand out
+    privileges on what they own, and giving away the object itself is a change
+    only an administrator or the current owner of that exact object can make,
+    which is what `may_administer` already answers.
+    """
+    if key not in ("grants", "owners") or value is None:
+        return False
+    try:
+        current_raw = _workspace.read_meta().get(key)
+    except Exception:
+        return False
+
+    before = _meta_entry_keys(key, current_raw)
+    after = _meta_entry_keys(key, value)
+    touched = before.symmetric_difference(after) or before.union(after)
+    if not touched:
+        return False
+
+    rules = _grants_now()
+    owners = _owners_now()
+    identity = _identity_of(principal)
+    for kind, ident in touched:
+        if not grants.may_administer(
+            rules, owners, kind, ident, identity, parents=_parents_of(kind, ident)
+        ):
+            return False
+    return True
+
+
+def _authorize_datasets(principal: Any, config: Any) -> None:
+    """Check every dataset a submitted JSON reads and writes, before it runs.
+
+    Reading a table through a Job is still reading it: a deny that only covered
+    `/query` would be walked around by running a two-line pipeline that selects
+    from the table and writes it somewhere the caller does own. The addresses
+    come from `history.lineage_of`, which is the same extraction the catalog
+    derives its dataset list from — so a rule written in the catalog names the
+    same string this reads back.
+    """
+    if getattr(principal, "token_only", False):
+        return
+    raw = history.lineage_of(config)
+    if not raw:
+        return
+    try:
+        lineage = json.loads(raw)
+    except ValueError:
+        return
+    rules = _grants_now()
+    if not rules:
+        return
+    for side, level in (("inputs", "read"), ("outputs", "write")):
+        for entry in lineage.get(side) or []:
+            address = _dataset_id(str(entry.get("address") or ""))
+            if address:
+                _authorize_resource(principal, "dataset", address, level, rules)
+
+
+def _authorize_document(principal: Any, kind: str, record_id: str, level: str) -> None:
+    """Layer two on one library file, for the kinds whose edit path is the only
+    place a rule on them could be enforced.
+
+    A Job and a Pipeline are checked where it matters most for them — the run
+    endpoints, which is where reading a table actually happens. A saved query has
+    no such endpoint for its *file*: `/query` runs a statement, and the statement
+    can be pasted. So the rule on the file is enforced where the file is touched,
+    which is here. Other kinds are left to their own paths rather than widened in
+    passing; doing that for Jobs is a change with its own consequences.
+    """
+    if kind != workspace.QUERY:
+        return
+    clean = str(record_id or "").strip()
+    if clean:
+        _authorize_resource(principal, "query", clean, level)
+
+
 def _workspace_resource(request: Request) -> str:
     """`job/j1` — what a workspace call is actually touching, so a role can be
     scoped to one record without the endpoints changing."""
@@ -1442,14 +2766,18 @@ app.add_middleware(
 def health() -> HealthResponse:
     available = _spark_available()
     version = _framework_version()
+    compatibility = compat.check(version)
     return HealthResponse(
-        status="ok" if available and version else "degraded",
+        status="ok" if available and version and compatibility.supported else "degraded",
         version=SERVICE_VERSION,
         spark_available=available,
         framework_version=version,
         login_required=_auth.has_users(),
         credits_enforced=credits.enforced(),
         providers=providers.describe(),
+        framework_supported=compatibility.supported,
+        framework_message=compatibility.message,
+        framework_requirement=compatibility.requirement,
     )
 
 
@@ -1468,7 +2796,9 @@ def validate(body: ValidateRequest) -> ValidateResponse:
     response_model=DatasetSchemaResponse,
     dependencies=[Depends(requires("catalog:Inspect"))],
 )
-def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
+def dataset_schema(
+    body: DatasetSchemaRequest, principal: Any = Depends(current_principal)
+) -> DatasetSchemaResponse:
     """The schema a dataset really has, read from the storage itself.
 
     The catalog in Studio derives a schema from the canvas, which is a claim
@@ -1476,23 +2806,35 @@ def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
     can be compared and a drift can be named. Nothing is written, and no rows
     are collected: a reader is built and only `df.schema` is taken.
     """
-    global _framework
-    if _framework is None and body.spark:
-        _framework = _import("sparquet").Sparquet(spark=body.spark)
-    framework = _get_framework()
+    _authorize_resource(principal, "dataset", _dataset_id(body.path), "read")
+
+    # Options are where a connection lives — the JDBC url, the user, the password
+    # — so they carry `{secret:...}` here for the same reason a Job's do. The
+    # values come back to be masked out of the error below: a driver that cannot
+    # connect quotes the whole URL it tried.
+    options, secret_values = _resolve_secrets(dict(body.options or {}), principal)
+
+    framework, restarted = _ensure_framework(_spark_for_formats(body.spark, [body.format]))
 
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
     try:
         config = config_module.InputConfig.from_dict(
-            {"format": body.format, "path": body.path, "options": body.options or {}}
+            {"format": body.format, "path": body.path, "options": options}
         )
-        reader = factory.ReaderFactory.create(framework.spark, config)
-        schema = reader.read().schema
+        _query_enter()
+        try:
+            reader = factory.ReaderFactory.create(framework.spark, config)
+            schema = reader.read().schema
+        finally:
+            _query_exit()
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=_describe(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail=vault.mask(_describe_io(exc, body.format), secret_values),
+        ) from exc
 
     return DatasetSchemaResponse(
         format=config.format,
@@ -1506,6 +2848,7 @@ def dataset_schema(body: DatasetSchemaRequest) -> DatasetSchemaResponse:
             for field in schema.fields
         ],
         read_at=_now_iso(),
+        session_restarted=restarted,
     )
 
 
@@ -1620,12 +2963,99 @@ def _check_query_id(query_id: str) -> str:
     return query_id
 
 
+#: Everything in a tab id or a username that is not this is dropped before it
+#: becomes part of a history key — the key is an identifier, not free text.
+_HISTORY_WORD = re.compile(r"[^A-Za-z0-9_.@-]")
+
+#: A statement longer than this is a generated one, and the history is there to
+#: be read. Kept generously long: a hand-written query with a long CASE is not
+#: unusual, and truncating one would make "put it back in the editor" a lie.
+MAX_HISTORY_SQL = 20000
+
+
+def _history_key(principal: Any, saved_query_id: Optional[str], tab: Optional[str]) -> str:
+    """Which history a run is filed under, or "" for one nobody will read back.
+
+    A saved query is keyed by its file, so everyone who may open the query sees
+    the same history — that is the whole point of keeping it here rather than in
+    a browser. A buffer with no file is keyed by the tab *and the person*: a
+    scratch statement is nobody else's business, and the key being principal-
+    scoped is what makes that true, rather than a filter somebody has to
+    remember to apply on the way out.
+    """
+    saved = (saved_query_id or "").strip()
+    if saved:
+        return f"q:{saved}"
+    scratch = _HISTORY_WORD.sub("", tab or "")[:64]
+    if not scratch:
+        return ""
+    return f"t:{_HISTORY_WORD.sub('_', _run_as(principal, None))[:64]}:{scratch}"
+
+
+def _record_query_run(
+    key: str, body: QueryRequest, principal: Any, *, elapsed_ms: int, rows: int,
+    truncated: bool, error: Optional[str],
+) -> None:
+    """Files one run under `key`, and never fails the query it describes."""
+    if not key:
+        return
+    try:
+        _history.record_query_run(
+            key,
+            sql=(body.sql or "").strip()[:MAX_HISTORY_SQL],
+            limit=max(1, min(int(body.limit or DEFAULT_PREVIEW_LIMIT), MAX_PREVIEW_LIMIT)),
+            elapsed_ms=elapsed_ms,
+            rows=rows,
+            truncated=truncated,
+            error=error,
+            run_as=_run_as(principal, None),
+        )
+    except Exception:  # a history that cannot be written is not a failed query
+        pass
+
+
+def _first_line(text: str) -> str:
+    """The sentence that says what went wrong, without the stack under it."""
+    return (text or "").strip().split("\n", 1)[0][:2000]
+
+
 @app.post(
     "/query",
     response_model=QueryResponse,
     dependencies=[Depends(requires("catalog:Query"))],
 )
-def query(body: QueryRequest) -> QueryResponse:
+def query(body: QueryRequest, principal: Any = Depends(current_principal)) -> QueryResponse:
+    """Runs a statement and records what happened to it.
+
+    The recording is the runner's rather than the browser's because the runner
+    is the side that knows: how long it took, how many rows came back, whether
+    the cap cut them, and what the failure said. A history a teammate reads has
+    to be a record of what happened, not of what a client reported — and it is
+    the same reason the history of a saved query lives next to the file rather
+    than in whichever browser happened to run it.
+
+    A failed run is kept too, including one refused before Spark saw it: "what
+    did I run that broke" is asked at least as often as the other question.
+    """
+    key = _history_key(principal, body.saved_query_id, body.tab)
+    started = time.perf_counter()
+    try:
+        answer = _run_query(body, principal)
+    except HTTPException as exc:
+        _record_query_run(
+            key, body, principal,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            rows=0, truncated=False, error=_first_line(str(exc.detail)),
+        )
+        raise
+    _record_query_run(
+        key, body, principal, elapsed_ms=answer.elapsed_ms, rows=len(answer.rows),
+        truncated=answer.truncated, error=None,
+    )
+    return answer
+
+
+def _run_query(body: QueryRequest, principal: Any) -> QueryResponse:
     """Runs one read-only SQL statement over datasets opened by the framework.
 
     Each source is opened through the same `ReaderFactory` a Job uses and
@@ -1634,9 +3064,11 @@ def query(body: QueryRequest) -> QueryResponse:
     reach the storage. The views are temporary and dropped at the end; nothing
     is written.
     """
-    global _framework
-    if _framework is None and body.spark:
-        _framework = _import("sparquet").Sparquet(spark=body.spark)
+    # The formats the query names decide what the session has to be able to open,
+    # so a Delta table is readable here even when no Job has ever mentioned it.
+    framework, restarted = _ensure_framework(
+        _spark_for_formats(body.spark, [source.format for source in body.sources])
+    )
 
     statement = _read_only_sql(body.sql)
     limit = max(1, min(int(body.limit or DEFAULT_PREVIEW_LIMIT), MAX_PREVIEW_LIMIT))
@@ -1658,7 +3090,32 @@ def query(body: QueryRequest) -> QueryResponse:
             )
         seen[source.alias] = source.path
 
-    framework = _get_framework()
+    # Each source is a table someone may be denied. Checked before any of them is
+    # opened, so a refused query never touches storage at all.
+    rules = _grants_now()
+    for source in body.sources:
+        _authorize_resource(
+            principal, "dataset", _dataset_id(source.path), "read", rules
+        )
+
+    # A saved query is its own securable. Checked apart from the sources because
+    # it answers a different question — who may open this statement — and it
+    # never widens the other answer: the tables are authorized above either way,
+    # so `read` on a query is not a way to reach a table through somebody else's
+    # file.
+    if body.saved_query_id:
+        _authorize_resource(principal, "query", body.saved_query_id, "read", rules)
+
+    # Same as a Job: the connection lives in the options, and a reference there is
+    # resolved before any source is opened, so a refused secret costs no storage
+    # access at all. What was used is kept to mask the errors further down.
+    source_options: List[Dict[str, Any]] = []
+    query_secret_values: List[str] = []
+    for source in body.sources:
+        resolved, used = _resolve_secrets(dict(source.options or {}), principal)
+        source_options.append(resolved)
+        query_secret_values.extend(used)
+
     spark = framework.spark
     config_module = _import("sparquet.core.config")
     factory = _import("sparquet.io.factory")
@@ -1666,14 +3123,17 @@ def query(body: QueryRequest) -> QueryResponse:
     registered: List[str] = []
     timer: Optional[threading.Timer] = None
     started = time.perf_counter()
+    # Counted while it runs so a concurrent request cannot restart the session
+    # under it: rebuilding stops the JVM, which would kill this query.
+    _query_enter()
     try:
-        for source in body.sources:
+        for index, source in enumerate(body.sources):
             try:
                 config = config_module.InputConfig.from_dict(
                     {
                         "format": source.format,
                         "path": source.path,
-                        "options": source.options or {},
+                        "options": source_options[index],
                     }
                 )
                 reader = factory.ReaderFactory.create(spark, config)
@@ -1681,7 +3141,11 @@ def query(body: QueryRequest) -> QueryResponse:
             except Exception as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot open {source.path!r} as {source.alias}: {_describe(exc)}",
+                    detail=vault.mask(
+                        f"Cannot open {source.path!r} as {source.alias}: "
+                        f"{_describe_io(exc, source.format)}",
+                        query_secret_values,
+                    ),
                 ) from exc
             registered.append(source.alias)
 
@@ -1704,7 +3168,9 @@ def query(body: QueryRequest) -> QueryResponse:
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=_describe(exc)) from exc
+            raise HTTPException(
+                status_code=400, detail=vault.mask(_describe(exc), query_secret_values)
+            ) from exc
 
         return QueryResponse(
             query_id=query_id,
@@ -1720,8 +3186,10 @@ def query(body: QueryRequest) -> QueryResponse:
             rows=[[_json_safe(value) for value in row] for row in rows[:limit]],
             truncated=len(rows) > limit,
             elapsed_ms=int((time.perf_counter() - started) * 1000),
+            session_restarted=restarted,
         )
     finally:
+        _query_exit()
         if timer is not None:
             timer.cancel()
         try:
@@ -1733,6 +3201,169 @@ def query(body: QueryRequest) -> QueryResponse:
                 spark.catalog.dropTempView(alias)
             except Exception:  # the view outliving the request is harmless
                 pass
+
+
+_PARSE_POSITION = re.compile(r"\(line (\d+), pos (\d+)\)")
+
+
+def _parse_failure(exc: Exception) -> Tuple[str, Optional[int], Optional[int]]:
+    """A parser error as a message and a place, as far as it names one.
+
+    Spark reports the position inside the message — `(line 3, pos 12)` — on both
+    the Python and the JVM side of the error, so the position is read out of the
+    text rather than out of an attribute that differs between the two.
+    """
+    # The exception class name belongs in a log, not in a tooltip six pixels
+    # under the word it is about — so the message alone, unless there is none.
+    text = str(exc).strip() or _describe(exc)
+    # The JVM traceback and the echoed SQL under a parse error are noise there
+    # too: the first paragraph is the sentence that says what is wrong.
+    head = text.split("\n\n", 1)[0].strip()
+    found = _PARSE_POSITION.search(text)
+    if not found:
+        return head, None, None
+    return head, int(found.group(1)), int(found.group(2))
+
+
+@app.post(
+    "/query/validate",
+    response_model=ValidateQueryResponse,
+    dependencies=[Depends(requires("catalog:Query"))],
+)
+def validate_query(body: ValidateQueryRequest) -> ValidateQueryResponse:
+    """Parses a statement without running it, so the editor can mark syntax.
+
+    The check has to come from the parser that will execute the query. A
+    hand-written one in the browser would disagree with Spark about its own
+    dialect — lateral views, `QUALIFY`, backtick identifiers, interval literals
+    — and an editor that underlines valid SQL is worse than one that underlines
+    nothing.
+
+    `parsePlan` is the whole check: it builds the logical plan and stops there,
+    so it never touches storage, never starts a job and never needs the tables
+    to exist. That last part matters — the editor validates while the statement
+    is being typed, long before its views are registered.
+
+    A session is used only if one is already up. Building one costs a JVM
+    launch, which is not something a keystroke should pay for, and the answer
+    without one is "not checked" rather than a guess.
+    """
+    statement = (body.sql or "").strip()
+    # A buffer holding only comments is a statement nobody has written yet, not
+    # a broken one. Marking it would put a squiggle under a note to self.
+    if not _strip_sql_comments(statement).strip(" ;\n\t\r"):
+        return ValidateQueryResponse(checked=False, reason="Nothing to check.")
+
+    framework = _framework
+    if framework is None:
+        return ValidateQueryResponse(
+            checked=False,
+            reason="No SparkSession is up yet — syntax is checked once one is.",
+        )
+
+    # The read-only rule is part of what the editor will refuse, so it is worth
+    # saying before the run rather than after it.
+    try:
+        statement = _read_only_sql(statement)
+    except HTTPException as exc:
+        return ValidateQueryResponse(
+            checked=True, ok=False, message=str(exc.detail), line=1, column=0
+        )
+
+    try:
+        session = framework.spark
+        parser = session._jsparkSession.sessionState().sqlParser()
+    except Exception as exc:  # an old Spark, or a session that died under us
+        return ValidateQueryResponse(
+            checked=False, reason=f"This Spark exposes no parser to ask: {_describe(exc)}"
+        )
+
+    try:
+        parser.parsePlan(statement)
+    except Exception as exc:
+        message, line, column = _parse_failure(exc)
+        return ValidateQueryResponse(
+            checked=True, ok=False, message=message, line=line, column=column
+        )
+
+    return ValidateQueryResponse(checked=True, ok=True)
+
+
+def _history_scope(
+    principal: Any, saved_query_id: Optional[str], tab: Optional[str]
+) -> str:
+    """The key a history call may touch, refusing the ones it may not.
+
+    Reading the history of a saved query is reading the query: the statements
+    are in it. So the same `read` that governs the file governs this, and a
+    scratch key is reachable only by the person whose runs are under it —
+    `_history_key` builds that in rather than filtering it out.
+    """
+    key = _history_key(principal, saved_query_id, tab)
+    if not key:
+        raise HTTPException(
+            status_code=400, detail="Name a saved query or a tab to read the history of."
+        )
+    if (saved_query_id or "").strip():
+        _authorize_resource(principal, "query", (saved_query_id or "").strip(), "read")
+    return key
+
+
+def _query_run_out(run: Any) -> QueryRunOut:
+    return QueryRunOut(
+        id=run.id, at=run.at, sql=run.sql, limit=run.limit, elapsed_ms=run.elapsed_ms,
+        rows=run.rows, truncated=run.truncated, error=run.error, run_as=run.run_as,
+    )
+
+
+@app.get(
+    "/query/history",
+    response_model=QueryHistoryResponse,
+    dependencies=[Depends(requires("catalog:Query"))],
+)
+def query_history(
+    saved_query_id: Optional[str] = None,
+    tab: Optional[str] = None,
+    limit: int = 0,
+    principal: Any = Depends(current_principal),
+) -> QueryHistoryResponse:
+    """What this query has been run as, newest first.
+
+    Shared by the runner: two people who may open the same saved query read the
+    same history, and each run says who made it. A buffer nobody has saved yet
+    has no file to share, so its runs are the caller's own.
+    """
+    key = _history_scope(principal, saved_query_id, tab)
+    runs = _history.list_query_runs(key, limit=limit)
+    return QueryHistoryResponse(runs=[_query_run_out(run) for run in runs])
+
+
+@app.delete("/query/history", dependencies=[Depends(requires("catalog:Query"))])
+def clear_query_history(
+    saved_query_id: Optional[str] = None,
+    tab: Optional[str] = None,
+    principal: Any = Depends(current_principal),
+) -> Dict[str, Any]:
+    """Forgets one query's runs. Shared history, shared clearing: it removes the
+    runs of everyone who has run this query, which is what "clear" has to mean
+    once the record stopped being one browser's."""
+    key = _history_scope(principal, saved_query_id, tab)
+    return {"removed": _history.clear_query_runs(key)}
+
+
+@app.post("/query/history/move", dependencies=[Depends(requires("catalog:Query"))])
+def move_query_history(
+    body: MoveHistoryRequest, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
+    """Carries a scratch buffer's runs onto the file it was just saved as.
+
+    Saving is what turns a private history into a shared one, so both ends are
+    checked: the scratch key is the caller's by construction, and the file has
+    to be one they may read.
+    """
+    source = _history_scope(principal, None, body.tab)
+    target = _history_scope(principal, body.saved_query_id, None)
+    return {"moved": _history.move_query_runs(source, target)}
 
 
 @app.post("/query/{query_id}/cancel", dependencies=[Depends(requires("catalog:Query"))])
@@ -1788,6 +3419,16 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     _authorize_run(
         principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
     )
+    # Then the second, narrower layer: the rules written in the catalog, which
+    # name the Job itself and every dataset the JSON touches. `run:Execute` says
+    # this person may run things here; these say *what*.
+    if body.job_id:
+        _authorize_resource(principal, "job", body.job_id, "write")
+    _authorize_datasets(principal, body.pipeline)
+    # And the credentials the JSON references, before anything is decrypted or
+    # any lock is taken: `rendered` is what Spark receives, `body.pipeline` — the
+    # one with `{secret:...}` still in it — is what history and the screens keep.
+    rendered, secret_values = _resolve_secrets(body.pipeline, principal)
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -1846,7 +3487,9 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     _ACTIVE_RUN.begin(pipeline_run_id)
     try:
         with _capture_logs(tracker.handle) as collector:
-            response = _execute_run(body, name, started, collector)
+            response = _execute_run(
+                body, name, started, collector, rendered, secret_values
+            )
     finally:
         cancelled = _ACTIVE_RUN.cancelled
         _ACTIVE_RUN.end()
@@ -1875,7 +3518,7 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
         error=error, rows_read=response.rows_read,
         rows_written=response.rows_written,
     )
-    _history.finish_pipeline_run(
+    _finish_pipeline_run(
         pipeline_run_id, status=status, duration_ms=response.duration_ms,
         error=error,
     )
@@ -1893,23 +3536,70 @@ def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunRes
     return response
 
 
+def _masked(response: RunResponse, values: Iterable[str]) -> RunResponse:
+    """The response with every resolved secret blanked out of it.
+
+    Applied to the whole payload rather than to `error` alone. A JDBC driver
+    quotes the URL it failed to open, password and all, and that string arrives
+    in the error, in a log line, and sometimes in a warning attached to a step —
+    masking only the field where it is expected to appear is how it gets out.
+    """
+    secret_values = [value for value in values if value]
+    if not secret_values:
+        return response
+    return RunResponse(**vault.scrub(response.model_dump(), secret_values))
+
+
+def _scrubbed(entry: Dict[str, Any], values: Iterable[str]) -> Dict[str, Any]:
+    """One event, on its way out of the run queue.
+
+    Applied where the queue is drained rather than where the stream is written,
+    because the same event goes two places: to the browser as SSE and into the
+    run history. A driver that quotes the URL it could not open would otherwise
+    put the password on the screen once and in the database for good.
+    """
+    return vault.scrub(entry, values) if values else entry
+
+
 def _execute_run(
-    body: RunRequest, name: Optional[str], started: float, collector: _LogCollector
+    body: RunRequest,
+    name: Optional[str],
+    started: float,
+    collector: _LogCollector,
+    rendered: Optional[Dict[str, Any]] = None,
+    secret_values: Iterable[str] = (),
 ) -> RunResponse:
     """The body shared by `/run` and `/run/stream`: execute the pipeline and shape
-    the response. The caller owns the run lock and the log capture."""
-    framework = _get_framework()
+    the response. The caller owns the run lock and the log capture.
+
+    `rendered` is the pipeline with its `{secret:...}` references already
+    replaced. It is a separate argument, and not a rewritten `body.pipeline`,
+    because everything else the caller does with the body — history, lineage,
+    the config hash, the credit charge — must keep the references."""
+    document = body.pipeline if rendered is None else rendered
+    # The Job's own `spark` block only reaches Spark if the session is built with
+    # it, and the session outlives the run before this one. Writing Delta on a
+    # runner whose session was created plain failed here for the same reason
+    # reading it failed in the SQL editor.
+    pipeline = document if isinstance(document, dict) else {}
+    framework, _ = _ensure_framework(
+        _spark_for_formats(pipeline.get("spark"), _formats_of(pipeline)),
+        run_lock_held=True,
+    )
     try:
-        result = framework.run_from_dict(body.pipeline, params=body.params or None)
+        result = framework.run_from_dict(document, params=body.params or None)
     except Exception as exc:
         # Config loading (missing keys, bad $include) raises outside the
         # pipeline's own try block and never reaches PipelineResult.
-        return RunResponse(
-            success=False,
-            pipeline_name=name,
-            duration_ms=_elapsed_ms(started),
-            error=_describe(exc),
-            logs=[LogOut(**entry) for entry in collector.records],
+        return _masked(
+            RunResponse(
+                success=False,
+                pipeline_name=name,
+                duration_ms=_elapsed_ms(started),
+                error=_describe(exc),
+                logs=[LogOut(**entry) for entry in collector.records],
+            ),
+            secret_values,
         )
 
     output_df = getattr(result, "output_df", None)
@@ -1919,7 +3609,7 @@ def _execute_run(
         else None
     )
 
-    return RunResponse(
+    return _masked(RunResponse(
         success=bool(result.success),
         skipped=bool(getattr(result, "skipped", False)),
         pipeline_name=str(getattr(result, "pipeline_name", None) or name or ""),
@@ -1931,7 +3621,7 @@ def _execute_run(
         output_metrics=_map_output_metrics(getattr(result, "output_metrics", [])),
         preview=preview,
         logs=[LogOut(**entry) for entry in collector.records],
-    )
+    ), secret_values)
 
 
 @app.post("/run/stream")
@@ -1952,6 +3642,16 @@ def run_stream(
     _authorize_run(
         principal, "run:Execute", workflow_id=body.workflow_id, job_id=body.job_id,
     )
+    # Then the second, narrower layer: the rules written in the catalog, which
+    # name the Job itself and every dataset the JSON touches. `run:Execute` says
+    # this person may run things here; these say *what*.
+    if body.job_id:
+        _authorize_resource(principal, "job", body.job_id, "write")
+    _authorize_datasets(principal, body.pipeline)
+    # And the credentials the JSON references, before anything is decrypted or
+    # any lock is taken: `rendered` is what Spark receives, `body.pipeline` — the
+    # one with `{secret:...}` still in it — is what history and the screens keep.
+    rendered, secret_values = _resolve_secrets(body.pipeline, principal)
     started = time.perf_counter()
     pipeline_name = body.pipeline.get("name")
     name = str(pipeline_name) if isinstance(pipeline_name, str) else None
@@ -1999,9 +3699,11 @@ def run_stream(
         log.addHandler(collector)
         try:
             with _capture_streams(events):
-                box["response"] = _execute_run(body, name, started, collector)
+                box["response"] = _execute_run(
+                    body, name, started, collector, rendered, secret_values
+                )
         except Exception as exc:  # pragma: no cover - defensive
-            box["error"] = _describe(exc)
+            box["error"] = vault.mask(_describe(exc), secret_values)
         finally:
             log.removeHandler(collector)
             log.setLevel(previous_level)
@@ -2022,6 +3724,7 @@ def run_stream(
                 entry = events.get()
                 if entry is None:
                     break
+                entry = _scrubbed(entry, secret_values)
                 recorder.add(entry)
                 yield _sse("log", entry)
             recorder.flush()
@@ -2042,7 +3745,7 @@ def run_stream(
                     error=error, rows_read=response.rows_read,
                     rows_written=response.rows_written,
                 )
-                _history.finish_pipeline_run(
+                _finish_pipeline_run(
                     pipeline_run_id, status=status, duration_ms=response.duration_ms,
                     error=error,
                 )
@@ -2074,7 +3777,7 @@ def run_stream(
                     job_run_id, status=status, duration_ms=duration_ms,
                     error=error_message, rows_read=None, rows_written=None,
                 )
-                _history.finish_pipeline_run(
+                _finish_pipeline_run(
                     pipeline_run_id, status=status, duration_ms=duration_ms,
                     error=error_message,
                 )
@@ -2100,6 +3803,79 @@ def run_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+#: What a catalog record for a bare file is called. A prefix rather than a bare
+#: path so no Studio-generated id can ever collide with one, and so a glance at a
+#: row says where the record came from.
+FILE_JOB_PREFIX = "file:"
+
+
+def _file_job_id(path: str) -> str:
+    """The catalog identity of a `.json` that no Job owns.
+
+    A stage can run a file by path — written by another team, generated by a
+    script, kept in another repository. Those runs used to land in the history
+    with no `job_id` at all, which was enough for the timeline and left the
+    catalog with no owner: nobody to tag, nobody to hold, and — because §9.4
+    health is per Job — no row in `GET /health/jobs` and no alert rule that could
+    ever see them. So the file gets an identity of its own, derived from its path
+    so that two runs of the same file are two runs of the same object.
+
+    It stays out of `job_id` on the request on purpose. `job_id` is what the IAM
+    resource rules are written against, and minting one here would start refusing
+    flows that run today under a policy that never had this id to name.
+    """
+    return FILE_JOB_PREFIX + path.strip().replace("\\", "/").lstrip("/")
+
+
+def _stage_job_id(stage: FlowStageRequest) -> Optional[str]:
+    """Which catalog record this stage's execution belongs to.
+
+    The Job when a Job owns the file, the file itself when nothing does.
+    """
+    return stage.job_id or stage.file_job_id
+
+
+def _file_job_name(path: str, pipeline: Dict[str, Any]) -> str:
+    """What the catalog should call a file that owns itself.
+
+    The `name` the config declares first: that is what the file calls itself, and
+    what somebody reading the catalog will recognise. The file name otherwise.
+    """
+    declared = pipeline.get("name") if isinstance(pipeline, dict) else None
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    return path.rsplit("/", 1)[-1]
+
+
+def _register_file_jobs(
+    stages: List[FlowStageRequest], workflow_id: Optional[str]
+) -> None:
+    """Gives every bare file in this flow its catalog record.
+
+    Created, never overwritten — the same rule the rest of the catalog follows: a
+    run knows an id, and whoever curated the record afterwards knows what it is
+    called. So a second run of the same file does not undo the name, description
+    or tags somebody put on it, and the first run is still enough for the record
+    to exist with a name and a path.
+
+    Called after the flow is authorized: a run nobody was allowed to start should
+    not leave a record behind saying it was.
+    """
+    for stage in stages:
+        if not stage.file_job_id:
+            continue
+        # The path the id was built from, not the raw one the client sent: the
+        # record and its identity must agree on how the file is spelled.
+        path = stage.file_job_id[len(FILE_JOB_PREFIX):]
+        try:
+            _history.ensure_run_targets(
+                workflow_id=workflow_id, pipeline_id=None, job_id=stage.file_job_id,
+                name=_file_job_name(path, stage.pipeline), path=path,
+            )
+        except Exception:  # pragma: no cover - bookkeeping must never fail a run
+            _log.warning("Could not register %s in the catalog.", stage.file_job_id)
 
 
 def _resolve_staged_files(stages: List[FlowStageRequest]) -> None:
@@ -2131,6 +3907,12 @@ def _resolve_staged_files(stages: List[FlowStageRequest]) -> None:
             stage.pipeline = _workspace.read_file(named)
         except workspace.WorkspaceError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        # The file is its own catalog record when no Job owns it, so the runs of
+        # it have somewhere to hang: an owner, tags, and a health row. Only the
+        # identity here — the record itself is written once the flow is allowed
+        # to run, by `_register_file_jobs`.
+        if not stage.job_id:
+            stage.file_job_id = _file_job_id(named)
 
 
 @app.post("/run/flow/stream")
@@ -2155,6 +3937,8 @@ def run_flow_stream(
         principal, "run:Execute", workflow_id=body.workflow_id,
         pipeline_id=body.pipeline_id,
     )
+    if body.pipeline_id:
+        _authorize_resource(principal, "pipeline", body.pipeline_id, "write")
     started = time.perf_counter()
 
     if not body.stages:
@@ -2164,6 +3948,22 @@ def run_flow_stream(
     # gets that file read now, so a missing or unparseable one is a 400 naming it
     # rather than a flow that dies halfway with earlier stages already written.
     _resolve_staged_files(body.stages)
+
+    # Every stage is a Job with its own datasets, and a flow is not a way around
+    # a rule on any of them. Checked once for the whole flow, before the first
+    # stage starts: a flow that stops halfway has already written something.
+    stage_rendered: List[Dict[str, Any]] = []
+    flow_secret_values: List[str] = []
+    for stage in body.stages:
+        if stage.job_id:
+            _authorize_resource(principal, "job", stage.job_id, "write")
+        _authorize_datasets(principal, stage.pipeline)
+        # The credentials too, and for the same reason the datasets are checked
+        # here: a flow refused its secret at stage three must not have written
+        # stages one and two first.
+        stage_document, stage_used = _resolve_secrets(stage.pipeline, principal)
+        stage_rendered.append(stage_document)
+        flow_secret_values.extend(stage_used)
 
     # One check for the flow, against its first stage: a Pipeline whose team has
     # nothing available should not start at all. Nothing is held here — each stage
@@ -2176,9 +3976,10 @@ def run_flow_stream(
             detail="A pipeline run is already in progress on this runner.",
         )
 
+    _register_file_jobs(body.stages, body.workflow_id)
     _ensure_catalog(
         workflow_id=body.workflow_id, pipeline_id=body.pipeline_id, name=body.name,
-        job_ids=[stage.job_id for stage in body.stages],
+        job_ids=[_stage_job_id(stage) for stage in body.stages],
     )
     pipeline_run_id = _history.create_pipeline_run(
         kind="pipeline", workflow_id=body.workflow_id, pipeline_id=body.pipeline_id,
@@ -2199,7 +4000,7 @@ def run_flow_stream(
         for stage_index in range(from_index, len(body.stages)):
             pending = body.stages[stage_index]
             _history.skip_job_run(
-                pipeline_run_id, job_id=pending.job_id, name=pending.name,
+                pipeline_run_id, job_id=_stage_job_id(pending), name=pending.name,
                 stage_index=stage_index, status=history.CANCELLED,
             )
             events.put({"__stage_cancelled__": {
@@ -2232,19 +4033,19 @@ def run_flow_stream(
                 except HTTPException as refusal:
                     box["error"] = str(refusal.detail)
                     _history.skip_job_run(
-                        pipeline_run_id, job_id=stage.job_id, name=stage.name,
+                        pipeline_run_id, job_id=_stage_job_id(stage), name=stage.name,
                         stage_index=index, status=history.FAILED,
                     )
                     for pending_index in range(index + 1, len(body.stages)):
                         pending = body.stages[pending_index]
                         _history.skip_job_run(
-                            pipeline_run_id, job_id=pending.job_id, name=pending.name,
+                            pipeline_run_id, job_id=_stage_job_id(pending), name=pending.name,
                             stage_index=pending_index, status=history.SKIPPED,
                         )
                     break
                 stage_hash, stage_config = _config_version(stage.pipeline, stage.params)
                 job_run_id = _history.create_job_run(
-                    pipeline_run_id, job_id=stage.job_id, name=stage.name,
+                    pipeline_run_id, job_id=_stage_job_id(stage), name=stage.name,
                     stage_index=index,
                     lineage=_lineage(stage.pipeline, stage.params),
                     config_hash=stage_hash, config=stage_config,
@@ -2269,7 +4070,8 @@ def run_flow_stream(
                 try:
                     with _capture_streams(events):
                         response = _execute_run(
-                            request, stage.name, stage_started, collector
+                            request, stage.name, stage_started, collector,
+                            stage_rendered[index], flow_secret_values,
                         )
                 except Exception as exc:  # pragma: no cover - defensive
                     response = RunResponse(
@@ -2303,7 +4105,7 @@ def run_flow_stream(
                     workflow_id=body.workflow_id,
                     tags=_run_tags(
                         workflow_id=body.workflow_id, pipeline_id=body.pipeline_id,
-                        job_id=stage.job_id, extra=body.tags,
+                        job_id=_stage_job_id(stage), extra=body.tags,
                     ),
                 ))
                 payload = {
@@ -2351,7 +4153,7 @@ def run_flow_stream(
                         }})
                     break
         except Exception as exc:  # pragma: no cover - defensive
-            box["error"] = _describe(exc)
+            box["error"] = vault.mask(_describe(exc), flow_secret_values)
         finally:
             log.setLevel(previous_level)
             events.put(None)  # sentinel: work finished
@@ -2369,6 +4171,7 @@ def run_flow_stream(
                 entry = events.get()
                 if entry is None:
                     break
+                entry = _scrubbed(entry, flow_secret_values)
                 marker = entry.get("__stage__")
                 if marker is not None:
                     current = marker["id"]
@@ -2406,7 +4209,7 @@ def run_flow_stream(
                 status = history.SUCCESS
             else:
                 status = history.FAILED
-            _history.finish_pipeline_run(
+            _finish_pipeline_run(
                 pipeline_run_id, status=status,
                 duration_ms=_elapsed_ms(started), error=box["error"],
             )
@@ -2545,6 +4348,71 @@ def list_runs(
     return [_pipeline_run_out(run) for run in runs]
 
 
+class RunGroupOut(BaseModel):
+    key: Optional[str] = None
+    label: str
+    runs: int
+    failed: int
+    duration_ms_avg: Optional[int] = None
+    duration_ms_total: int
+
+
+class RunDayOut(BaseModel):
+    day: str
+    runs: int
+    failed: int
+
+
+class RunMetricsOut(BaseModel):
+    period: str
+    total: int
+    succeeded: int
+    failed: int
+    other: int
+    duration_ms_avg: Optional[int] = None
+    duration_ms_p50: Optional[int] = None
+    duration_ms_p95: Optional[int] = None
+    duration_ms_total: int
+    days: List[RunDayOut] = Field(default_factory=list)
+    groups: List[RunGroupOut] = Field(default_factory=list)
+    group_by: str
+
+
+# Declared before `/runs/{run_id}`: routes match in the order they are added, and
+# the other way round this path would be read as a run whose id is "metrics".
+@app.get(
+    "/runs/metrics",
+    response_model=RunMetricsOut,
+    dependencies=[Depends(requires("history:Read"))],
+)
+def run_metrics(
+    period: Optional[str] = None,
+    group_by: str = "pipeline",
+    workflow_id: Optional[str] = None,
+    limit: int = 20,
+) -> RunMetricsOut:
+    """How much this runner ran in one month, and how it went.
+
+    The operational half of Billing. Credits count what was charged, which leaves
+    out every local run and every run that failed before writing; this counts
+    executions, so a month that cost nothing still has a shape. Same month, same
+    breakdown dimensions, read from the execution history instead of the ledger.
+    """
+    metrics = _history.run_metrics(
+        period=period, group_by=group_by, workflow_id=workflow_id,
+        limit=min(max(limit, 1), 100),
+    )
+    return RunMetricsOut(
+        **{
+            key: value
+            for key, value in vars(metrics).items()
+            if key not in ("days", "groups")
+        },
+        days=[RunDayOut(**vars(day)) for day in metrics.days],
+        groups=[RunGroupOut(**vars(group)) for group in metrics.groups],
+    )
+
+
 @app.get(
     "/runs/{run_id}",
     response_model=PipelineRunOut,
@@ -2651,12 +4519,819 @@ def ingest_run(document: Dict[str, Any] = Body(...)) -> RunIngestResponse:
 # opening the same checkout sees the same library.
 
 
+# ------------------------------------------------------- monitoring & alerts
+
+
+class JobHealthOut(BaseModel):
+    job_id: str
+    name: Optional[str] = None
+    workflow_id: Optional[str] = None
+    last_run_id: Optional[str] = None
+    last_status: Optional[str] = None
+    last_started_at: Optional[str] = None
+    last_finished_at: Optional[str] = None
+    last_duration_ms: Optional[int] = None
+    last_rows_read: Optional[int] = None
+    last_rows_written: Optional[int] = None
+    last_error: Optional[str] = None
+    last_success_at: Optional[str] = None
+    consecutive_failures: int = 0
+    runs: int = 0
+    failures: int = 0
+    #: Past successful runs, newest first — the shape of the Job over time, which
+    #: is what a sparkline draws and what a median rule compares against.
+    durations: List[int] = Field(default_factory=list)
+    volumes: List[int] = Field(default_factory=list)
+
+
+class MonitorOut(BaseModel):
+    id: str
+    kind: str
+    job_id: str
+    threshold: float
+    baseline: str
+    window: int
+    enabled: bool
+    name: Optional[str] = None
+    created_at: str
+    updated_at: str
+    #: The rule in words, built by the server so the interface and the webhook
+    #: describe it the same way.
+    rule: str
+
+
+class MonitorIn(BaseModel):
+    kind: str
+    job_id: str = monitoring.ANY_JOB
+    threshold: float = 1.0
+    baseline: str = monitoring.ABSOLUTE
+    window: int = monitoring.DEFAULT_WINDOW
+    enabled: bool = True
+    name: Optional[str] = None
+
+
+class MonitorPatch(BaseModel):
+    kind: Optional[str] = None
+    job_id: Optional[str] = None
+    threshold: Optional[float] = None
+    baseline: Optional[str] = None
+    window: Optional[int] = None
+    enabled: Optional[bool] = None
+    name: Optional[str] = None
+
+
+class MonitorStateOut(BaseModel):
+    monitor_id: str
+    job_id: str
+    firing: bool
+    reason: str
+    since: Optional[str] = None
+    checked_at: Optional[str] = None
+    value: Optional[float] = None
+    baseline: Optional[float] = None
+    run_id: Optional[str] = None
+    #: Denormalised so the alert list reads without a second request.
+    kind: Optional[str] = None
+    rule: Optional[str] = None
+    name: Optional[str] = None
+    job_name: Optional[str] = None
+
+
+class MonitorEventOut(BaseModel):
+    id: str
+    monitor_id: str
+    job_id: str
+    at: str
+    firing: bool
+    reason: str
+    value: Optional[float] = None
+    baseline: Optional[float] = None
+    run_id: Optional[str] = None
+
+
+class MonitorSweepOut(BaseModel):
+    checked: int
+    firing: int
+    transitions: List[MonitorEventOut] = Field(default_factory=list)
+
+
+def _job_facts(health: Any) -> Any:
+    """`history.JobHealth` as `monitoring.JobFacts`.
+
+    The one place the two modules meet. Written out field by field rather than
+    passed as a dict so that a field added on one side and not the other fails
+    here, where it is obvious, instead of silently evaluating a rule against a
+    default.
+    """
+    return monitoring.JobFacts(
+        job_id=health.job_id,
+        name=health.name,
+        workflow_id=health.workflow_id,
+        last_run_id=health.last_run_id,
+        last_status=health.last_status,
+        last_started_at=health.last_started_at,
+        last_finished_at=health.last_finished_at,
+        last_duration_ms=health.last_duration_ms,
+        last_rows_read=health.last_rows_read,
+        last_rows_written=health.last_rows_written,
+        last_error=health.last_error,
+        last_success_at=health.last_success_at,
+        consecutive_failures=health.consecutive_failures,
+        runs=health.runs,
+        failures=health.failures,
+        durations=list(health.durations),
+        volumes=list(health.volumes),
+    )
+
+
+def _monitor_out(monitor: Any) -> MonitorOut:
+    return MonitorOut(**vars(monitor), rule=monitor.describe())
+
+
+def _sweep_monitors() -> MonitorSweepOut:
+    """Evaluates every rule once, against the health of every Job right now."""
+    health = _history.job_health()
+    facts = [_job_facts(record) for record in health]
+    _monitors.forget([record.job_id for record in health])
+    transitions = monitoring.sweep(_monitors, facts)
+    firing = sum(1 for state in _monitors.states() if state.firing)
+    return MonitorSweepOut(
+        checked=len(facts),
+        firing=firing,
+        transitions=[MonitorEventOut(**vars(event)) for event in transitions],
+    )
+
+
+def _watch_monitors() -> None:
+    """Runs the sweep on a timer, and again whenever a run has just finished.
+
+    Failures are logged and swallowed, like the purge above: a rule that could not
+    be evaluated is a gap in the alerting, not a reason for the runner to stop
+    serving the people who are trying to fix whatever it was going to tell them
+    about.
+    """
+    interval = monitoring.interval_seconds()
+    while True:
+        try:
+            report = _sweep_monitors()
+            for event in report.transitions:
+                _log.info(
+                    "Monitor %s %s for job %s: %s",
+                    event.monitor_id,
+                    "firing" if event.firing else "resolved",
+                    event.job_id,
+                    event.reason,
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("Monitor sweep failed: %s", exc)
+        _MONITOR_WAKE.wait(interval)
+        _MONITOR_WAKE.clear()
+
+
+@app.get(
+    "/health/jobs",
+    response_model=List[JobHealthOut],
+    dependencies=[Depends(requires("monitoring:Read"))],
+)
+def job_health(samples: int = 20) -> List[JobHealthOut]:
+    """Every Job in the library and what its own runs say about it.
+
+    The answer to a question the run list cannot be asked: the run list is
+    ordered by time, so a Job that stopped running a week ago is not near the
+    top of it — it is nowhere in it.
+    """
+    return [JobHealthOut(**vars(record)) for record in _history.job_health(samples=samples)]
+
+
+@app.get(
+    "/monitors",
+    response_model=List[MonitorOut],
+    dependencies=[Depends(requires("monitoring:Read"))],
+)
+def list_monitors() -> List[MonitorOut]:
+    return [_monitor_out(monitor) for monitor in _monitors.list()]
+
+
+@app.post(
+    "/monitors",
+    response_model=MonitorOut,
+    dependencies=[Depends(requires("monitoring:Manage"))],
+)
+def create_monitor(body: MonitorIn) -> MonitorOut:
+    try:
+        monitor = _monitors.create(
+            body.kind, job_id=body.job_id, threshold=body.threshold,
+            baseline=body.baseline, window=body.window, enabled=body.enabled,
+            name=body.name,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return _monitor_out(monitor)
+
+
+@app.patch(
+    "/monitors/{monitor_id}",
+    response_model=MonitorOut,
+    dependencies=[Depends(requires("monitoring:Manage"))],
+)
+def update_monitor(monitor_id: str, body: MonitorPatch) -> MonitorOut:
+    changes = {key: value for key, value in body.model_dump().items() if value is not None}
+    try:
+        monitor = _monitors.update(monitor_id, **changes)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if monitor is None:
+        raise HTTPException(status_code=404, detail="No such monitor.")
+    return _monitor_out(monitor)
+
+
+@app.delete(
+    "/monitors/{monitor_id}",
+    dependencies=[Depends(requires("monitoring:Manage"))],
+)
+def delete_monitor(monitor_id: str) -> Dict[str, bool]:
+    if not _monitors.delete(monitor_id):
+        raise HTTPException(status_code=404, detail="No such monitor.")
+    return {"deleted": True}
+
+
+@app.get(
+    "/monitors/status",
+    response_model=List[MonitorStateOut],
+    dependencies=[Depends(requires("monitoring:Read"))],
+)
+def monitor_status(firing_only: bool = False) -> List[MonitorStateOut]:
+    """What every rule is currently saying, per Job.
+
+    A wildcard rule has one row per Job here — which is the point: "anything that
+    failed" is one rule to write and a list of the Jobs it is true of to read.
+    """
+    rules = {monitor.id: monitor for monitor in _monitors.list()}
+    names = {
+        record.job_id: record.name for record in _history.job_health(samples=2)
+    }
+    out: List[MonitorStateOut] = []
+    for state in _monitors.states():
+        if firing_only and not state.firing:
+            continue
+        monitor = rules.get(state.monitor_id)
+        out.append(
+            MonitorStateOut(
+                **vars(state),
+                kind=monitor.kind if monitor else None,
+                rule=monitor.describe() if monitor else None,
+                name=monitor.name if monitor else None,
+                job_name=names.get(state.job_id),
+            )
+        )
+    return out
+
+
+@app.get(
+    "/monitors/events",
+    response_model=List[MonitorEventOut],
+    dependencies=[Depends(requires("monitoring:Read"))],
+)
+def monitor_events(limit: int = 50, monitor_id: Optional[str] = None) -> List[MonitorEventOut]:
+    """The transitions, newest first: when each alert started and when it cleared."""
+    return [
+        MonitorEventOut(**vars(event))
+        for event in _monitors.events(limit=limit, monitor_id=monitor_id)
+    ]
+
+
+@app.post(
+    "/monitors/evaluate",
+    response_model=MonitorSweepOut,
+    dependencies=[Depends(requires("monitoring:Read"))],
+)
+def evaluate_monitors() -> MonitorSweepOut:
+    """Runs the sweep now instead of waiting for the timer.
+
+    Read rather than manage: asking a question of the history changes no rule,
+    and somebody who has just fixed a Job wants the alert to clear without
+    waiting a minute to find out whether it did.
+    """
+    return _sweep_monitors()
+
+
+# ----------------------------------------------------------------- schedules
+
+
+class ScheduleOut(BaseModel):
+    """One scheduled Job or Pipeline, as the library states it plus what the
+    runner knows: when it fires next and when it last did."""
+
+    kind: str
+    id: str
+    name: str
+    cron: str
+    timezone: str
+    enabled: bool
+    run_as: str = ""
+    workflow_id: Optional[str] = None
+    #: Why this schedule cannot fire — an expression that does not parse, or an
+    #: account that no longer exists. Null when there is nothing wrong with it.
+    error: Optional[str] = None
+    rule: str
+    next_fire: Optional[str] = None
+    last_fire: Optional[str] = None
+    last_run_id: Optional[str] = None
+    last_status: Optional[str] = None
+
+
+class ScheduleFireOut(BaseModel):
+    kind: str
+    id: str
+    name: str
+    #: The occurrence this fire is for, which is not the same as when it started:
+    #: a run held up by the one before it starts late and is still that occurrence.
+    due_at: str
+    started: bool = False
+    run_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ScheduleSweepOut(BaseModel):
+    checked: int
+    fired: int
+    fires: List[ScheduleFireOut] = Field(default_factory=list)
+
+
+def _library_schedules() -> Tuple[List[Any], Any]:
+    """Every schedule in the library, with the snapshot they were read from.
+
+    The snapshot comes back too because whatever fires needs the same read: the
+    file a Job compiles to, the stages of a Pipeline, the names those stages sort
+    by. Reading the library twice would leave a run using half of one version.
+    """
+    snapshot = _workspace.snapshot()
+    triples = [(scheduling.JOB, doc.id, doc.record) for doc in snapshot.jobs]
+    triples += [(scheduling.PIPELINE, doc.id, doc.record) for doc in snapshot.pipelines]
+    return scheduling.read_schedules(triples), snapshot
+
+
+def _schedule_document(snapshot: Any, kind: str, doc_id: str) -> Optional[Any]:
+    documents = snapshot.jobs if kind == scheduling.JOB else snapshot.pipelines
+    for doc in documents:
+        if doc.id == doc_id:
+            return doc
+    return None
+
+
+def _schedule_principal(schedule: Any) -> Optional[Any]:
+    """Who a scheduled run is authorized as.
+
+    The account that saved the schedule, assembled the way a login assembles it,
+    so a schedule can never outlive the access of whoever wrote it: take the
+    person's roles away and their schedules stop running with them. There is no
+    service account here on purpose — an identity that belongs to nobody is an
+    identity nobody notices still has access.
+
+    With no users on this runner the shared token is the only identity there is,
+    which is the single-operator case `Principal.token_only` exists for.
+    """
+    if not _auth.has_users():
+        return auth.TOKEN_PRINCIPAL
+    username = (schedule.run_as or "").strip()
+    if not username:
+        return None
+    return _auth.principal_for(username)
+
+
+def _drain_stream(response: Any) -> Optional[str]:
+    """Consumes a streaming response to the end, with nobody watching it.
+
+    `/run/flow/stream` is the only path that runs a Pipeline, and it is a stream
+    because that is what the Studio needs. A schedule has no browser to show the
+    events to, but it still has to consume every one of them: releasing the run
+    lock, settling the credit holds and closing the run in the history all happen
+    in the generator's `finally`, and a generator nobody finishes never gets there.
+
+    The run id is picked out of the first event on the way past, so a scheduled
+    Pipeline can be linked to its run the way a scheduled Job is.
+    """
+    iterator = getattr(response, "body_iterator", None)
+    if iterator is None:
+        return None
+    found: List[str] = []
+
+    async def _consume() -> None:
+        async for chunk in iterator:
+            if found:
+                continue
+            text = chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else str(chunk)
+            match = re.search(r'"pipeline_run_id":\s*"([^"]+)"', text)
+            if match:
+                found.append(match.group(1))
+
+    asyncio.run(_consume())
+    return found[0] if found else None
+
+
+def _fire_job(schedule: Any, snapshot: Any, principal: Any) -> RunResponse:
+    """Runs a scheduled Job through `/run`, exactly as pressing run would.
+
+    What executes is the compiled JSON in the library — the same file the
+    framework runs and the same one code review saw — read at the moment it
+    fires. Nothing is cached here: a Job edited this morning runs as edited.
+    """
+    doc = _schedule_document(snapshot, scheduling.JOB, schedule.id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="This Job is no longer in the library.")
+    if not doc.path:
+        raise HTTPException(
+            status_code=409,
+            detail="This Job has no compiled file in the library yet. Open and save it once.",
+        )
+    return run(
+        RunRequest(
+            pipeline=_workspace.read_file(doc.path),
+            job_id=schedule.id,
+            job_name=schedule.name,
+            workflow_id=schedule.workflow_id,
+            run_as=schedule.run_as or None,
+            launched=history.SCHEDULED,
+        ),
+        principal,
+    )
+
+
+def _fire_pipeline(schedule: Any, snapshot: Any, principal: Any) -> Optional[str]:
+    """Runs a scheduled Pipeline through `/run/flow/stream`, drained here.
+
+    Every stage points at a file — the Job's compiled JSON, or the `.json` the
+    stage names directly — so the Pipeline runs what the library holds rather
+    than anything this process compiled itself.
+    """
+    doc = _schedule_document(snapshot, scheduling.PIPELINE, schedule.id)
+    if doc is None:
+        raise HTTPException(
+            status_code=404, detail="This Pipeline is no longer in the library."
+        )
+    raw_stages = doc.record.get("stages")
+    stages = [item for item in raw_stages if isinstance(item, dict)] if isinstance(raw_stages, list) else []
+    if not stages:
+        raise HTTPException(status_code=422, detail="This Pipeline has no stages.")
+    links = doc.record.get("links") if isinstance(doc.record.get("links"), list) else []
+
+    jobs = {job.id: job for job in snapshot.jobs}
+    names: Dict[str, str] = {}
+    for stage in stages:
+        job = jobs.get(str(stage.get("jobId") or ""))
+        path = str(stage.get("path") or "")
+        label = str(job.record.get("name") or "") if job else (path.rsplit("/", 1)[-1] if path else "")
+        names[str(stage.get("id") or "")] = label
+
+    ordered, cyclic = scheduling.order_stages(stages, links, names)
+    if cyclic:
+        _log.warning(
+            "Pipeline %s has stages on a cycle (%s); they run last.",
+            schedule.name, ", ".join(cyclic),
+        )
+
+    flow_stages: List[FlowStageRequest] = []
+    for stage in ordered:
+        stage_id = str(stage.get("id") or "")
+        job_id = str(stage.get("jobId") or "")
+        path = str(stage.get("path") or "")
+        if not path:
+            job = jobs.get(job_id)
+            if job is None or not job.path:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Stage {names.get(stage_id) or stage_id} points at a Job with no "
+                        "compiled file in the library."
+                    ),
+                )
+            path = job.path
+        flow_stages.append(
+            FlowStageRequest(
+                id=stage_id,
+                name=names.get(stage_id) or None,
+                path=path,
+                job_id=job_id or None,
+            )
+        )
+
+    return _drain_stream(
+        run_flow_stream(
+            RunFlowRequest(
+                stages=flow_stages,
+                pipeline_id=schedule.id,
+                name=schedule.name,
+                workflow_id=schedule.workflow_id,
+                run_as=schedule.run_as or None,
+                launched=history.SCHEDULED,
+            ),
+            principal,
+        )
+    )
+
+
+def _fire_schedule(schedule: Any, snapshot: Any, due: datetime) -> ScheduleFireOut:
+    """One occurrence, started and reported. Never raises.
+
+    A refusal is an outcome, not an exception: the runner already had a run in
+    progress, the account is gone, the Job was deleted. Each of those is written
+    down and the sweep carries on to the next schedule — one broken schedule must
+    not stop the twelve that are fine.
+    """
+    report = ScheduleFireOut(
+        kind=schedule.kind, id=schedule.id, name=schedule.name,
+        due_at=due.isoformat().replace("+00:00", "Z"),
+    )
+    principal = _schedule_principal(schedule)
+    if principal is None:
+        report.error = (
+            f"{schedule.run_as!r} is not an account on this runner."
+            if schedule.run_as
+            else "This schedule names no account to run as."
+        )
+        return report
+    try:
+        if schedule.kind == scheduling.JOB:
+            response = _fire_job(schedule, snapshot, principal)
+            report.started = True
+            report.run_id = response.pipeline_run_id
+            report.error = response.error
+        else:
+            report.run_id = _fire_pipeline(schedule, snapshot, principal)
+            report.started = True
+    except HTTPException as exc:
+        # 409 is the overlap case and the common one: this runner shares a single
+        # SparkSession, so a Job still running when its next occurrence comes
+        # round means that occurrence is skipped rather than queued. Queueing
+        # would turn a slow morning into a backlog nobody asked for.
+        report.error = str(exc.detail)
+    except Exception as exc:  # pragma: no cover - defensive
+        report.error = _describe(exc)
+    return report
+
+
+def _sweep_schedules() -> ScheduleSweepOut:
+    """Fires whatever is due, one at a time, in the order the library lists it."""
+    now = datetime.now(timezone.utc)
+    schedules, snapshot = _library_schedules()
+    grace = scheduling.grace_seconds()
+    fires: List[ScheduleFireOut] = []
+    for schedule in schedules:
+        key = f"{schedule.kind}:{schedule.id}"
+        with _SCHEDULE_LOCK:
+            anchor = _SCHEDULE_ANCHORS.get(key, _SCHEDULER_STARTED_AT)
+        due = scheduling.due_at(
+            schedule, anchor=anchor, now=now, grace_seconds=grace
+        )
+        if due is None:
+            continue
+        # Recorded as fired before it runs, and against `now` rather than the
+        # occurrence: a run that takes an hour must not come back to a clock that
+        # thinks its next two occurrences are still owed.
+        with _SCHEDULE_LOCK:
+            _SCHEDULE_ANCHORS[key] = datetime.now(timezone.utc)
+        fires.append(_fire_schedule(schedule, snapshot, due))
+    return ScheduleSweepOut(
+        checked=len(schedules),
+        fired=sum(1 for fire in fires if fire.started),
+        fires=fires,
+    )
+
+
+def _watch_schedules() -> None:
+    """The timer. Failures are logged and swallowed, like the monitor sweep."""
+    interval = scheduling.interval_seconds()
+    while True:
+        try:
+            report = _sweep_schedules()
+            for fire in report.fires:
+                _log.info(
+                    "Schedule fired %s %s (due %s): %s",
+                    fire.kind, fire.name, fire.due_at,
+                    fire.error or fire.run_id or "started",
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("Schedule sweep failed: %s", exc)
+        _SCHEDULE_WAKE.wait(interval)
+        _SCHEDULE_WAKE.clear()
+
+
+def _last_scheduled_run(schedule: Any) -> Optional[Any]:
+    """The most recent run this schedule started, for the screen.
+
+    Read from the history rather than from the anchor above, because the anchor
+    only knows about this process: a runner restarted an hour ago would otherwise
+    show a Job that runs every morning as having never run.
+    """
+    selector = (
+        {"job_id": schedule.id}
+        if schedule.kind == scheduling.JOB
+        else {"pipeline_id": schedule.id}
+    )
+    try:
+        recent = _history.list_pipeline_runs(limit=20, **selector)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    for record in recent:
+        if getattr(record, "launched", None) == history.SCHEDULED:
+            return record
+    return None
+
+
+def _schedule_out(schedule: Any, now: datetime) -> ScheduleOut:
+    upcoming = scheduling.next_fire(schedule, now) if schedule.runnable else None
+    last = _last_scheduled_run(schedule)
+    return ScheduleOut(
+        kind=schedule.kind, id=schedule.id, name=schedule.name, cron=schedule.cron,
+        timezone=schedule.timezone, enabled=schedule.enabled,
+        run_as=schedule.run_as, workflow_id=schedule.workflow_id,
+        error=schedule.error, rule=schedule.describe(),
+        next_fire=upcoming.isoformat().replace("+00:00", "Z") if upcoming else None,
+        last_fire=getattr(last, "started_at", None) if last else None,
+        last_run_id=getattr(last, "id", None) if last else None,
+        last_status=getattr(last, "status", None) if last else None,
+    )
+
+
+@app.get(
+    "/schedules",
+    response_model=List[ScheduleOut],
+    dependencies=[Depends(requires("workspace:Read"))],
+)
+def list_schedules() -> List[ScheduleOut]:
+    """Every schedule the library carries, with its next and last fire.
+
+    Guarded by `workspace:Read` rather than an action of its own: a schedule is a
+    field of a record, and whoever may read the record already reads it. A second
+    permission over the same bytes would only be able to disagree with the first.
+    """
+    now = datetime.now(timezone.utc)
+    schedules, _ = _library_schedules()
+    return [_schedule_out(schedule, now) for schedule in schedules]
+
+
+@app.post(
+    "/schedules/evaluate",
+    response_model=ScheduleSweepOut,
+    dependencies=[Depends(requires("run:Execute"))],
+)
+def evaluate_schedules() -> ScheduleSweepOut:
+    """Sweeps now instead of waiting for the timer.
+
+    `run:Execute` and not a read: unlike the monitors' evaluate, this one starts
+    runs. Each still runs as the account its own schedule names, so pressing it
+    cannot be a way to run something as somebody else.
+    """
+    return _sweep_schedules()
+
+
+# ------------------------------------------------------------------- metrics
+
+#: Prometheus asks for this exact content type, down to the version.
+_PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+
+def _escape_label(value: Optional[str]) -> str:
+    """Backslash, quote and newline, in that order — the order matters."""
+    text = "" if value is None else str(value)
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _labels(pairs: Dict[str, Optional[str]]) -> str:
+    inner = ",".join(f'{key}="{_escape_label(value)}"' for key, value in pairs.items())
+    return "{" + inner + "}"
+
+
+def _epoch_seconds(value: Optional[str]) -> Optional[float]:
+    moment = monitoring._parse_iso(value)
+    return moment.timestamp() if moment else None
+
+
+def _render_metrics(health: List[Any], states: List[Any], rules: Dict[str, Any]) -> str:
+    """The exposition text, built from the same two reads the screens use.
+
+    Everything here is a gauge, including the counts. A Prometheus counter has to
+    be monotonic over the process's life, and these are read from a database whose
+    old rows are purged on a schedule — a `_total` that goes down on purge day
+    would make every `rate()` over it wrong. So the counts are named for what they
+    are: how many runs are *on record* for this Job.
+    """
+    lines: List[str] = []
+
+    def series(name: str, kind: str, help_text: str) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {kind}")
+
+    series("sparquet_job_last_run_success", "gauge",
+           "1 if the last recorded run of this Job succeeded, 0 otherwise.")
+    for record in health:
+        if record.last_status is None:
+            continue
+        labels = _labels({
+            "job": record.name or record.job_id,
+            "job_id": record.job_id,
+            "workflow_id": record.workflow_id or "",
+        })
+        lines.append(
+            f"sparquet_job_last_run_success{labels} "
+            f"{1 if record.last_status == history.SUCCESS else 0}"
+        )
+
+    for name, kind, help_text, read in (
+        ("sparquet_job_last_run_timestamp_seconds", "gauge",
+         "When the last recorded run of this Job started, in epoch seconds.",
+         lambda record: _epoch_seconds(record.last_started_at)),
+        ("sparquet_job_last_success_timestamp_seconds", "gauge",
+         "When this Job last succeeded, in epoch seconds. Missing means never.",
+         lambda record: _epoch_seconds(record.last_success_at)),
+        ("sparquet_job_last_run_duration_seconds", "gauge",
+         "How long the last recorded run of this Job took.",
+         lambda record: (record.last_duration_ms / 1000.0)
+         if record.last_duration_ms is not None else None),
+        ("sparquet_job_last_rows_written", "gauge",
+         "Rows the last recorded run of this Job wrote.",
+         lambda record: record.last_rows_written),
+        ("sparquet_job_last_rows_read", "gauge",
+         "Rows the last recorded run of this Job read.",
+         lambda record: record.last_rows_read),
+        ("sparquet_job_consecutive_failures", "gauge",
+         "Failed runs since this Job last succeeded.",
+         lambda record: record.consecutive_failures),
+        ("sparquet_job_runs_recorded", "gauge",
+         "Runs of this Job still on record, within the sampled window.",
+         lambda record: record.runs),
+        ("sparquet_job_failures_recorded", "gauge",
+         "Failed runs of this Job still on record, within the sampled window.",
+         lambda record: record.failures),
+    ):
+        series(name, kind, help_text)
+        for record in health:
+            value = read(record)
+            if value is None:
+                continue
+            labels = _labels({
+                "job": record.name or record.job_id,
+                "job_id": record.job_id,
+                "workflow_id": record.workflow_id or "",
+            })
+            lines.append(f"{name}{labels} {value}")
+
+    series("sparquet_monitor_firing", "gauge",
+           "1 while this rule is firing for this Job, 0 while it is not.")
+    for state in states:
+        monitor = rules.get(state.monitor_id)
+        labels = _labels({
+            "monitor": state.monitor_id,
+            "monitor_name": (monitor.name if monitor else None) or "",
+            "kind": monitor.kind if monitor else "",
+            "job_id": state.job_id,
+        })
+        lines.append(f"sparquet_monitor_firing{labels} {1 if state.firing else 0}")
+
+    series("sparquet_monitors_firing", "gauge",
+           "How many (rule, Job) pairs are firing right now.")
+    lines.append(f"sparquet_monitors_firing {sum(1 for state in states if state.firing)}")
+
+    series("sparquet_runner_info", "gauge",
+           "Always 1. The labels carry the runner's version.")
+    lines.append(f'sparquet_runner_info{_labels({"version": SERVICE_VERSION})} 1')
+
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/metrics", dependencies=[Depends(requires("monitoring:Read"))])
+def metrics() -> Response:
+    """The health of every Job in Prometheus exposition format.
+
+    Text over HTTP and nothing else — no client library, no push gateway, no
+    OpenTelemetry SDK. A scraper is a thing that reads a page, and the whole
+    contract is four hundred bytes of documented text; taking a dependency to
+    produce it would be taking a dependency, and its upgrades, to concatenate
+    strings.
+
+    Guarded by `monitoring:Read` like the screens, which for a scraper means the
+    runner token in a bearer header — Prometheus has `authorization` in its scrape
+    config for exactly this.
+    """
+    health = _history.job_health()
+    rules = {monitor.id: monitor for monitor in _monitors.list()}
+    return Response(
+        content=_render_metrics(health, _monitors.states(), rules),
+        media_type=_PROMETHEUS_CONTENT_TYPE,
+    )
+
+
 class WorkspaceDocumentOut(BaseModel):
     kind: str
     id: str
     record: Dict[str, Any]
     #: Relative path of the reviewable file, so the UI can tell the user what to commit.
     path: Optional[str] = None
+    #: What the record's bytes hash to right now. Send it back on the next save and
+    #: the runner refuses to overwrite a change made since. Empty means the record
+    #: is not on disk yet. An older Studio that ignores it keeps the old behaviour:
+    #: last write wins.
+    revision: Optional[str] = None
 
 
 class WorkspaceSnapshotOut(BaseModel):
@@ -2664,6 +5339,9 @@ class WorkspaceSnapshotOut(BaseModel):
     workflows: List[WorkspaceDocumentOut] = Field(default_factory=list)
     jobs: List[WorkspaceDocumentOut] = Field(default_factory=list)
     pipelines: List[WorkspaceDocumentOut] = Field(default_factory=list)
+    #: Saved SQL queries. An older Studio ignores the field; a newer one talking
+    #: to an older runner gets an empty list, which is the same as "none saved".
+    queries: List[WorkspaceDocumentOut] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -2673,6 +5351,11 @@ class WorkspaceWriteRequest(BaseModel):
     #: A Job's compiled Sparquet JSON. Sent so the readable file is the pipeline the
     #: framework runs, not an editor-shaped document nobody can execute.
     config: Optional[Dict[str, Any]] = None
+    #: The revision this edit started from. Omit it and the save is unconditional,
+    #: which is what every client did before this existed. Send it — `""` for a
+    #: record believed to be new — and a save that would land on top of somebody
+    #: else's is refused with 409 instead of quietly winning.
+    revision: Optional[str] = None
 
 
 class WorkspaceDeleteResponse(BaseModel):
@@ -2680,7 +5363,10 @@ class WorkspaceDeleteResponse(BaseModel):
 
 
 def _workspace_doc_out(doc: Any) -> WorkspaceDocumentOut:
-    return WorkspaceDocumentOut(kind=doc.kind, id=doc.id, record=doc.record, path=doc.path)
+    return WorkspaceDocumentOut(
+        kind=doc.kind, id=doc.id, record=doc.record, path=doc.path,
+        revision=getattr(doc, "revision", None),
+    )
 
 
 def _mirror_catalog(doc: Any) -> None:
@@ -2715,6 +5401,22 @@ def _mirror_catalog(doc: Any) -> None:
         _log.warning("Could not index %s %s in the catalog.", doc.kind, doc.id)
 
 
+def _public_meta(meta: Any) -> Dict[str, Any]:
+    """The meta records a browser may load — which is every one but the secrets.
+
+    `workspace:Read` is held by anyone who may open the library, and this is the
+    read Studio starts with. The secret store belongs to a narrower audience and
+    to no browser at all: `/secrets` answers with names, field names and tags,
+    and the runner reads the material straight off disk when a run needs it.
+    Sending the record here would put the ciphertext, the salt and every `env`
+    binding into the browser of everybody who can list Jobs, which is the mirror
+    the whole design refuses to keep.
+    """
+    if not isinstance(meta, dict):
+        return {}
+    return {key: value for key, value in meta.items() if key not in _META_SEALED}
+
+
 @app.get(
     "/workspace",
     response_model=WorkspaceSnapshotOut,
@@ -2731,7 +5433,8 @@ def get_workspace() -> WorkspaceSnapshotOut:
         workflows=[_workspace_doc_out(doc) for doc in snapshot.workflows],
         jobs=[_workspace_doc_out(doc) for doc in snapshot.jobs],
         pipelines=[_workspace_doc_out(doc) for doc in snapshot.pipelines],
-        meta=snapshot.meta,
+        queries=[_workspace_doc_out(doc) for doc in snapshot.queries],
+        meta=_public_meta(snapshot.meta),
     )
 
 
@@ -2904,6 +5607,11 @@ class LibraryFileOut(BaseModel):
     name: str
     size: int
     modified: float
+    #: The Studio record whose artefact this file is, when there is one. A file
+    #: with no owner is one the Studio did not write: it has no canvas to open and
+    #: it is the only kind this API will delete.
+    owner_kind: Optional[str] = None
+    owner_id: Optional[str] = None
 
 
 class LibraryFilesOut(BaseModel):
@@ -2953,6 +5661,61 @@ def read_library_file(path: str) -> LibraryFileContentOut:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+class LibraryFileDeletedOut(BaseModel):
+    path: str
+    #: False when the file was already gone — the same end state, not an error.
+    deleted: bool
+
+
+@app.delete(
+    "/workspace/files/{path:path}",
+    response_model=LibraryFileDeletedOut,
+    dependencies=[Depends(requires("workspace:Delete"))],
+)
+def delete_library_file(path: str, request: Request) -> LibraryFileDeletedOut:
+    """Removes a runnable JSON from the library directory. There is no undo.
+
+    Only a file no Studio record owns — a conf left behind by a script, a copy
+    somebody pasted in, a job the team stopped running. A Job's own file is half
+    of a record and is refused here with the record to delete instead, because
+    removing the file alone would leave the sidecar pointing at nothing and the
+    next save would write it straight back.
+
+    Declared before `/workspace/{kind}/{record_id}` on purpose: a file at the root
+    of the library has two path segments and would otherwise be read as a record.
+    """
+    try:
+        deleted = _workspace.delete_file(path)
+    except workspace.WorkspaceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except OSError as error:  # pragma: no cover - a locked or read-only library
+        raise HTTPException(
+            status_code=500, detail=f"Could not delete {path}: {error}"
+        ) from error
+    audit_detail(request, path=path, deleted=deleted)
+    return LibraryFileDeletedOut(path=path, deleted=deleted)
+
+
+def _annotation_keys(value: Any) -> set:
+    """The dataset addresses a catalog map names."""
+    if not isinstance(value, dict):
+        return set()
+    return {str(key).strip() for key in value if str(key).strip()}
+
+
+def _catalog_keys(key: str) -> Optional[set]:
+    """The dataset addresses the stored catalog names, or `None` if there is no
+    stored catalog at all — which is what tells a first sync from a real edit."""
+    if key != "catalog":
+        return None
+    try:
+        meta = _workspace.read_meta()
+    except Exception:
+        return None
+    stored = meta.get("catalog")
+    return _annotation_keys(stored) if isinstance(stored, dict) else None
+
+
 class WorkspaceMetaRequest(BaseModel):
     value: Any = None
 
@@ -2962,11 +5725,26 @@ class WorkspaceMetaRequest(BaseModel):
     response_model=Dict[str, Any],
     dependencies=[Depends(requires("workspace:Write", "meta/*"))],
 )
-def put_workspace_meta(key: str, body: WorkspaceMetaRequest) -> Dict[str, Any]:
+def put_workspace_meta(
+    key: str, body: WorkspaceMetaRequest, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
     """Library-level bookkeeping (storage version, seeded flag). Kept with the files
     rather than in the browser, so the answer to "was this library already
     migrated?" travels with the library."""
+    _guard_meta_key(principal, key, body.value)
+    before = _catalog_keys(key)
     _workspace.write_meta(key, body.value)
+    if before is not None:
+        # A dataset becomes a securable the moment somebody annotates it, so
+        # "created" here means "appeared in this map and was not in the one
+        # before". The first catalog a library ever writes is exempt: that save
+        # is a browser syncing what it already had, and treating a whole
+        # migrated catalog as a hundred fresh creations would hand one person
+        # every table in it.
+        after = _annotation_keys(body.value)
+        _claim_new_resources(
+            principal, [("dataset", name) for name in after - before]
+        )
     return {"key": key, "value": body.value}
 
 
@@ -2975,7 +5753,10 @@ def put_workspace_meta(key: str, body: WorkspaceMetaRequest) -> Dict[str, Any]:
     response_model=Dict[str, Any],
     dependencies=[Depends(requires("workspace:Write", "meta/*"))],
 )
-def delete_workspace_meta(key: str) -> Dict[str, Any]:
+def delete_workspace_meta(
+    key: str, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
+    _guard_meta_key(principal, key)
     _workspace.delete_meta(key)
     return {"key": key, "deleted": True}
 
@@ -2985,7 +5766,10 @@ def delete_workspace_meta(key: str) -> Dict[str, Any]:
     response_model=WorkspaceDocumentOut,
     dependencies=[Depends(requires("workspace:Read", _workspace_resource))],
 )
-def get_workspace_document(kind: str, record_id: str) -> WorkspaceDocumentOut:
+def get_workspace_document(
+    kind: str, record_id: str, principal: Any = Depends(current_principal)
+) -> WorkspaceDocumentOut:
+    _authorize_document(principal, kind, record_id, "read")
     try:
         doc = _workspace.read(kind, record_id)
     except workspace.WorkspaceError as exc:
@@ -3001,21 +5785,62 @@ def get_workspace_document(kind: str, record_id: str) -> WorkspaceDocumentOut:
     dependencies=[Depends(requires("workspace:Write", _workspace_resource))],
 )
 def put_workspace_document(
-    kind: str, record_id: str, body: WorkspaceWriteRequest
+    kind: str,
+    record_id: str,
+    body: WorkspaceWriteRequest,
+    principal: Any = Depends(current_principal),
 ) -> WorkspaceDocumentOut:
     """Saves one record. Writes the file first, then indexes it."""
+    _authorize_document(principal, kind, record_id, "write")
+    # Asked before the write, because afterwards every save looks like the first
+    # one. Only a record that did not exist gets the default access: claiming an
+    # old shared Job for whoever edited it next would be a transfer of ownership
+    # dressed up as a save.
+    try:
+        current = _workspace.read(kind, record_id)
+    except Exception:
+        current = None
+        existed = True
+    else:
+        existed = current is not None
+    # A schedule saved here is a run somebody else's clock will start, so it is
+    # authorized as one. Before the write, so a refused schedule leaves the file
+    # exactly as it was.
+    _authorize_schedule_change(
+        principal, kind, record_id,
+        current.record if current is not None else None,
+        body.record,
+    )
     try:
         doc = _workspace.write(
             workspace.Document(
                 kind=kind, id=record_id, record=body.record, config=body.config
-            )
+            ),
+            expected_revision=body.revision,
         )
+    except workspace.WorkspaceConflict as exc:
+        # 409, not 400: nothing about the request is wrong. The library moved under
+        # it — a second Studio on a shared or synced directory, a `git pull`, the
+        # same file edited by hand. The current revision and record travel with the
+        # refusal so the editor can show what arrived and let the person choose.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "kind": kind,
+                "id": record_id,
+                "revision": exc.revision,
+                "record": exc.record,
+            },
+        ) from exc
     except workspace.WorkspaceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(
             status_code=500, detail=f"Could not write to the workspace: {exc}"
         ) from exc
+    if not existed:
+        _claim_new_resource(principal, kind, record_id)
     _mirror_catalog(doc)
     return _workspace_doc_out(doc)
 
@@ -3025,10 +5850,13 @@ def put_workspace_document(
     response_model=WorkspaceDeleteResponse,
     dependencies=[Depends(requires("workspace:Delete", _workspace_resource))],
 )
-def delete_workspace_document(kind: str, record_id: str) -> WorkspaceDeleteResponse:
+def delete_workspace_document(
+    kind: str, record_id: str, principal: Any = Depends(current_principal)
+) -> WorkspaceDeleteResponse:
     """Removes the files. The catalog row stays, marked deleted, because past runs
     point at it and a run that names a record nobody can look up is worse than a
     record marked gone."""
+    _authorize_document(principal, kind, record_id, "admin")
     try:
         removed = _workspace.delete(kind, record_id)
     except workspace.WorkspaceError as exc:
@@ -3508,7 +6336,11 @@ def _entry_out(entry: Any) -> LedgerEntryOut:
     )
 
 
-@app.get("/auth/status", response_model=AuthStatusOut, dependencies=[Depends(require_token)])
+@app.get(
+    "/auth/status",
+    response_model=AuthStatusOut,
+    dependencies=[Depends(require_token_unless_users)],
+)
 def auth_status(request: Request) -> AuthStatusOut:
     """Whether a login is needed here, and who the caller already is.
 
@@ -3527,20 +6359,37 @@ def auth_status(request: Request) -> AuthStatusOut:
     )
 
 
-@app.post("/auth/login", response_model=SessionOut, dependencies=[Depends(require_token)])
-def auth_login(body: LoginRequest) -> SessionOut:
+@app.post(
+    "/auth/login",
+    response_model=SessionOut,
+    dependencies=[Depends(require_token_unless_users)],
+)
+def auth_login(request: Request, body: LoginRequest) -> SessionOut:
     """Exchanges a username and password for a session.
 
     One message for every kind of failure — unknown user, wrong password, disabled
-    account — because saying which one is a free answer to somebody guessing.
+    account — because saying which one is a free answer to somebody guessing. And
+    a ceiling on how many guesses fit in a window, because this endpoint is
+    reachable without the shared token.
     """
+    keys = _throttle_keys(request, body.username)
+    _refuse_if_throttled(keys)
     session = _auth.login(body.username, body.password)
     if session is None:
+        _LOGIN_THROTTLE.record_failure(keys)
         raise HTTPException(status_code=401, detail="Wrong username or password.")
+    _LOGIN_THROTTLE.forget(keys)
+    # Resolved rather than built from the user record: a principal is roles AND
+    # the statements behind them, plus the team the roles are widened by. Studio
+    # uses this answer to decide what to offer, so a login that reported only the
+    # role names left an administrator looking at an empty policy — every control
+    # greyed out with "your role does not allow ..." until the next reload asked
+    # `/auth/status`, which always answered in full.
+    principal = _auth.resolve_session(session.token)
     return SessionOut(
         token=session.token,
         expires_at=session.expires_at,
-        user=PrincipalOut(
+        user=_principal_out(principal) if principal else PrincipalOut(
             username=session.user.username, display_name=session.user.display_name,
             user_id=session.user.id, roles=list(session.user.roles),
         ),
@@ -3593,6 +6442,467 @@ def policy_vocabulary() -> PolicyVocabularyOut:
             for name, description in sorted(auth.RESOURCE_KINDS.items())
         ],
     )
+
+
+class AccessDecisionOut(BaseModel):
+    resource: str
+    resource_id: str
+    #: Whether any rule or owner names this securable or a container of it.
+    governed: bool
+    #: read / write / admin, or null for "governed and nothing left".
+    level: Optional[str] = None
+    #: True when the level comes from owning it, or owning what contains it.
+    owned: bool = False
+    #: The `kind/id` the winning rule sits on — itself, or the ancestor it was
+    #: inherited from. What the screen needs to send somebody to the right row.
+    source: Optional[str] = None
+    #: Who owns it, as recorded directly on it (not inherited).
+    owner_kind: Optional[str] = None
+    owner_id: Optional[str] = None
+    #: Whether this caller may change the rules on it.
+    may_administer: bool = False
+    #: Every `kind/id` a rule could be written on to reach it, nearest first.
+    chain: List[str] = Field(default_factory=list)
+
+
+def _access_decision_out(
+    principal: Any,
+    kind: str,
+    resource_id: str,
+    rules: List[Any],
+    owners: List[Any],
+    token_only: bool = False,
+) -> AccessDecisionOut:
+    """Layer two's whole answer on one securable, in the shape the screens read.
+
+    Shared by `/iam/access`, which asks it about the caller, and `/iam/simulate`,
+    which asks it about somebody else. The two have to agree, and the only way
+    to be sure they do is for there to be one of them.
+    """
+    identity = _identity_of(principal)
+    parents = _parents_of(kind, resource_id)
+    decision = grants.evaluate(rules, owners, kind, resource_id, identity, parents)
+    owner = grants.owner_of(owners, kind, resource_id)
+    return AccessDecisionOut(
+        resource=kind,
+        resource_id=resource_id,
+        governed=decision.governed,
+        # The shared token is the identity on a runner with no users, and
+        # `_authorize_resource` never refuses it. Reporting anything narrower
+        # here would grey out controls that in fact work.
+        level="admin" if token_only else decision.level,
+        owned=decision.owned,
+        source=decision.source,
+        owner_kind=owner.principal_kind if owner else None,
+        owner_id=owner.principal_id if owner else None,
+        may_administer=token_only or grants.may_administer(
+            rules, owners, kind, resource_id, identity, parents
+        ) or (
+            principal.allows("iam:ManageGrants", "*")
+            and not principal.denies("iam:ManageGrants", "*")
+        ),
+        chain=[f"{k}/{i}" for k, i in grants.scope_chain(kind, resource_id, parents)],
+    )
+
+
+class AccessQueryRequest(BaseModel):
+    #: `[{"resource": "dataset", "resourceId": "/lake/silver/orders"}, ...]`
+    resources: List[Dict[str, str]] = Field(default_factory=list)
+
+
+@app.post("/iam/access", response_model=List[AccessDecisionOut])
+def effective_access(
+    body: AccessQueryRequest, principal: Any = Depends(current_principal)
+) -> List[AccessDecisionOut]:
+    """What this caller actually holds on each securable, and why.
+
+    Studio can evaluate the same rules in the browser and does, to grey out a
+    control rather than let somebody find out from a 403. This endpoint exists
+    for the other half: inheritance needs the Workflow a Job belongs to, and
+    that is a workspace record. Asking here means the explanation the screen
+    shows is the one the runner will act on.
+    """
+    rules = _grants_now()
+    owners = _owners_now()
+    token_only = bool(getattr(principal, "token_only", False))
+
+    out: List[AccessDecisionOut] = []
+    for item in body.resources[:500]:
+        kind = str(item.get("resource") or "")
+        ident = str(item.get("resourceId") or "").strip()
+        if kind not in grants.RESOURCE_KINDS or not ident:
+            continue
+        if kind == "dataset":
+            ident = _dataset_id(ident)
+        out.append(
+            _access_decision_out(principal, kind, ident, rules, owners, token_only)
+        )
+    return out
+
+
+class SecretOut(BaseModel):
+    """One secret, as a screen may know it.
+
+    There is no field here for a value and there is no endpoint that adds one.
+    `fields` are names, and `binding` — the environment variables an `env` secret
+    reads — is operational information: it says where the runner looks, never
+    what it found.
+    """
+
+    name: str
+    provider: str
+    description: str = ""
+    tags: List[str] = Field(default_factory=list)
+    fields: List[str] = Field(default_factory=list)
+    binding: Dict[str, str] = Field(default_factory=dict)
+    updated_at: float = 0.0
+    updated_by: str = ""
+    #: Layer two, on this secret, for the caller — so the screen can grey out a
+    #: rotate button instead of offering one the runner will refuse.
+    governed: bool = False
+    level: Optional[str] = None
+    owned: bool = False
+
+
+class SecretWriteRequest(BaseModel):
+    provider: str = "local"
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    #: A patch over the fields: a value sets it, `null` removes it, and a field
+    #: left out keeps what it had. Rotating a password means sending that one
+    #: field — the caller could not resend the others, never having read them.
+    values: Dict[str, Optional[str]] = Field(default_factory=dict)
+
+
+class SecretCheckOut(BaseModel):
+    name: str
+    #: Field name to `"ok"` or to what went wrong reading it.
+    fields: Dict[str, str] = Field(default_factory=dict)
+    healthy: bool = False
+
+
+def _secret_out(secret: Any, principal: Any, rules: List[Any], owners: List[Any]) -> SecretOut:
+    token_only = bool(getattr(principal, "token_only", False))
+    decision = grants.evaluate(
+        rules, owners, "secret", secret.name, _identity_of(principal),
+        grants.tag_scopes(secret.tags, {}),
+    )
+    redacted = secret.redacted()
+    return SecretOut(
+        name=redacted["name"],
+        provider=redacted["provider"],
+        description=redacted["description"],
+        tags=redacted["tags"],
+        fields=redacted["fields"],
+        binding=redacted.get("binding") or {},
+        updated_at=redacted["updated_at"],
+        updated_by=redacted["updated_by"],
+        governed=decision.governed,
+        level="admin" if token_only else decision.level,
+        owned=decision.owned,
+    )
+
+
+@app.get(
+    "/secrets",
+    response_model=List[SecretOut],
+    dependencies=[Depends(requires("secrets:Read"))],
+)
+def list_secrets(principal: Any = Depends(current_principal)) -> List[SecretOut]:
+    """Which connection secrets exist, and what this caller may do with each.
+
+    A secret the caller cannot reach is left out rather than shown greyed: the
+    name of a credential is itself information, and a deny on `secret/pg-prod`
+    should not leave the name of the production database on the screen.
+    """
+    store = _secrets_now()
+    rules = _grants_now()
+    owners = _owners_now()
+    out: List[SecretOut] = []
+    for secret in sorted(store.items.values(), key=lambda item: item.name):
+        entry = _secret_out(secret, principal, rules, owners)
+        if entry.governed and not entry.level and not entry.owned:
+            continue
+        out.append(entry)
+    return out
+
+
+@app.put(
+    "/secrets/{name}",
+    response_model=SecretOut,
+    dependencies=[Depends(requires("secrets:Write"))],
+)
+def put_secret(
+    name: str, body: SecretWriteRequest, principal: Any = Depends(current_principal)
+) -> SecretOut:
+    """Create a secret, or change one — including rotating a single field."""
+    try:
+        clean = vault.check_name(name)
+    except vault.SecretError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    store = _secrets_now()
+    existed = clean in store.items
+    if existed:
+        _authorize_resource(principal, "secret", clean, "write")
+
+    try:
+        updated = vault.put(
+            store,
+            clean,
+            provider=body.provider,
+            values=body.values,
+            description=body.description,
+            tags=body.tags,
+            actor=str(getattr(principal, "username", "") or ""),
+        )
+    except vault.SecretError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    _write_secrets(updated)
+    if not existed:
+        _claim_new_resource(principal, "secret", clean)
+    return _secret_out(updated.items[clean], principal, _grants_now(), _owners_now())
+
+
+@app.delete(
+    "/secrets/{name}",
+    response_model=Dict[str, Any],
+    dependencies=[Depends(requires("secrets:Write"))],
+)
+def delete_secret(
+    name: str, principal: Any = Depends(current_principal)
+) -> Dict[str, Any]:
+    clean = vault.normalize(name)
+    _authorize_resource(principal, "secret", clean, "write")
+    try:
+        _write_secrets(vault.remove(_secrets_now(), clean))
+    except vault.SecretError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {"name": clean, "deleted": True}
+
+
+@app.post(
+    "/secrets/{name}/check",
+    response_model=SecretCheckOut,
+    dependencies=[Depends(requires("secrets:Read"))],
+)
+def check_secret(
+    name: str, principal: Any = Depends(current_principal)
+) -> SecretCheckOut:
+    """Whether every field still resolves — the master key, the variable, the file.
+
+    Not a connection test: reaching the database needs its driver and a network
+    route, and a failure there says nothing about the secret. This answers the
+    part the store is responsible for, and answers it without the value leaving
+    the runner.
+    """
+    clean = vault.normalize(name)
+    _authorize_resource(principal, "secret", clean, "read")
+    try:
+        fields = vault.check(_secrets_now(), clean)
+    except vault.SecretError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return SecretCheckOut(
+        name=clean,
+        fields=fields,
+        healthy=all(state == "ok" for state in fields.values()),
+    )
+
+
+#: The grant level the runner demands beside each action, so a simulation asks
+#: layer two the question the endpoints actually ask it. Running a Job needs
+#: `write` on the Job, not `read`: a run writes wherever its JSON points.
+_ACTION_LEVEL: Dict[str, str] = {
+    "run:Execute": "write",
+    "run:Cancel": "write",
+    "workspace:Write": "write",
+    "workspace:Delete": "write",
+    "iam:ManageGrants": "admin",
+    "secrets:Write": "write",
+}
+
+
+def _policy_targets(resource: str, resource_id: str) -> List[str]:
+    """The `kind/id` strings layer one is asked about for one securable.
+
+    A Job is reached by a role written on the Job or on the Workflow that holds
+    it — the same pair `_run_targets` builds for a real run. A dataset is reached
+    by neither: policy actions are the platform's verbs, and which table they
+    touch is layer two's question, so the action is checked against `*` alone.
+    """
+    if not resource or not resource_id or resource == "dataset":
+        return ["*"]
+    targets = [f"{resource}/{resource_id}"]
+    targets += [
+        f"{kind}/{ident}"
+        for kind, ident in _parents_of(resource, resource_id)
+        if kind == "workflow"
+    ]
+    return targets
+
+
+class PolicyVerdictOut(BaseModel):
+    action: str
+    #: True when a statement allows the action on one of `targets` and none denies it.
+    allowed: bool
+    #: The target an explicit deny matched. It settles the verdict whatever else allows.
+    denied_on: Optional[str] = None
+    #: The target that carried the allow, so a screen can name the rule that answered.
+    allowed_on: Optional[str] = None
+    #: Everything the action was checked against, nearest first.
+    targets: List[str] = Field(default_factory=list)
+
+
+class SimulationRequest(BaseModel):
+    #: Whose access to answer for — somebody else. The caller's own is `/iam/access`.
+    username: str
+    #: A platform action, for layer one. Optional: asking only about a securable
+    #: is a fair question on its own ("what does Ana hold on this table?").
+    action: Optional[str] = None
+    #: A securable, for layer two. Also optional, for the mirror-image question.
+    resource: str = ""
+    resource_id: str = ""
+    #: read / write / admin. Defaults to whatever the runner demands for `action`.
+    level: Optional[str] = None
+
+
+class SimulationOut(BaseModel):
+    username: str
+    #: False when no such user. The answer is then "nothing", which is more useful
+    #: to show than a 404 in a screen whose whole job is answering questions.
+    found: bool = False
+    #: A disabled account is refused at login, whatever its roles say.
+    disabled: bool = False
+    display_name: Optional[str] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    #: The roles that come from the team rather than from the account itself,
+    #: because "why can she do that?" is usually answered by this list.
+    team_roles: List[str] = Field(default_factory=list)
+    policy: Optional[PolicyVerdictOut] = None
+    access: Optional[AccessDecisionOut] = None
+    #: The level layer two was asked for, once `action` had been taken into account.
+    level_asked: Optional[str] = None
+    #: Both layers together: what would happen if this person tried it right now.
+    allowed: bool = False
+    #: Why, in the words the refusal itself would use.
+    reason: str = ""
+
+
+@app.post(
+    "/iam/simulate",
+    response_model=SimulationOut,
+    dependencies=[Depends(requires("iam:ReadUsers"))],
+)
+def simulate_access(body: SimulationRequest) -> SimulationOut:
+    """What somebody else would be allowed to do, and which layer decides it.
+
+    Almost every refusal involves both layers, and they refuse for unrelated
+    reasons: a missing action is a role to fix, a missing level is an owner to
+    ask. Showing them side by side is the difference between an administrator
+    knowing what to change and guessing.
+
+    Answered by the same code the request itself would take — `principal_for`
+    assembles the principal exactly as a login does, and layer two runs through
+    `_access_decision_out` — so the simulation cannot drift from the runner it
+    is describing.
+    """
+    username = (body.username or "").strip()
+    principal = _auth.principal_for(username) if username else None
+    if principal is None:
+        return SimulationOut(
+            username=username,
+            reason=f"No user named '{username}' on this runner.",
+        )
+
+    user = _auth.find_user(username)
+    disabled = bool(getattr(user, "disabled", False))
+    out = SimulationOut(
+        username=principal.username,
+        found=True,
+        disabled=disabled,
+        display_name=principal.display_name,
+        team_id=principal.team_id,
+        team_name=principal.team_name,
+        roles=list(principal.roles),
+        team_roles=list(principal.team_roles),
+    )
+
+    kind = (body.resource or "").strip()
+    resource_id = (body.resource_id or "").strip()
+    if kind and kind not in grants.RESOURCE_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown resource kind '{kind}'.")
+    if kind == "dataset":
+        resource_id = _dataset_id(resource_id)
+
+    action = (body.action or "").strip()
+    if action:
+        if action not in auth.ACTIONS:
+            raise HTTPException(status_code=400, detail=f"Unknown action '{action}'.")
+        targets = _policy_targets(kind, resource_id)
+        # Same rule as `_authorize_run`: one allow among the targets is enough,
+        # but a deny on any of them is final, or a deny could be widened away by
+        # a broader grant written somewhere else.
+        denied_on = next((t for t in targets if principal.denies(action, t)), None)
+        allowed_on = next((t for t in targets if principal.allows(action, t)), None)
+        out.policy = PolicyVerdictOut(
+            action=action,
+            allowed=denied_on is None and allowed_on is not None,
+            denied_on=denied_on,
+            allowed_on=None if denied_on else allowed_on,
+            targets=targets,
+        )
+
+    if kind and resource_id:
+        level = (body.level or _ACTION_LEVEL.get(action, "read")).strip()
+        if level not in grants.LEVELS:
+            raise HTTPException(status_code=400, detail=f"Unknown level '{level}'.")
+        out.level_asked = level
+        out.access = _access_decision_out(
+            principal, kind, resource_id, _grants_now(), _owners_now()
+        )
+
+    policy_ok = out.policy is None or out.policy.allowed
+    access_ok = True
+    if out.access is not None and out.access.governed:
+        held = out.access.level
+        access_ok = held is not None and (
+            grants.LEVEL_RANK[held] >= grants.LEVEL_RANK[out.level_asked or "read"]
+        )
+    out.allowed = policy_ok and access_ok and not disabled
+
+    if disabled:
+        out.reason = f"'{out.username}' is disabled and cannot sign in at all."
+    elif not policy_ok and out.policy is not None:
+        held_roles = ", ".join(principal.roles) or "none"
+        where = out.policy.denied_on
+        out.reason = (
+            f"Denied by a role on '{where}': no role may {action} there. "
+            f"Roles held: {held_roles}."
+            if where
+            else f"No role held allows {action}. Roles held: {held_roles}."
+        )
+    elif not access_ok and out.access is not None:
+        out.reason = grants.refusal(
+            kind, resource_id, out.level_asked or "read", out.username
+        )
+    elif out.access is not None and not out.access.governed:
+        out.reason = (
+            f"Allowed. Nothing governs '{kind}/{resource_id}', "
+            "so layer one decides on its own."
+        )
+    elif out.access is not None:
+        via = f" via {out.access.source}" if out.access.source else ""
+        holds = "owns it" if out.access.owned else f"holds {out.access.level}"
+        out.reason = f"Allowed. {out.username} {holds} on '{kind}/{resource_id}'{via}."
+    else:
+        out.reason = (
+            f"Allowed. A role held permits {action}." if action else "Nothing asked."
+        )
+
+    return out
 
 
 @app.post(
@@ -3835,20 +7145,26 @@ def issue_recovery(
     )
 
 
-@app.post("/auth/recover", dependencies=[Depends(require_token)])
-def recover_password(body: RecoverRequest) -> Dict[str, bool]:
+@app.post("/auth/recover", dependencies=[Depends(require_token_unless_users)])
+def recover_password(request: Request, body: RecoverRequest) -> Dict[str, bool]:
     """Trades a recovery code for a new password. No session required — the
-    caller is by definition locked out — but the shared token still is, because
-    this endpoint is on the same runner as everything else.
+    caller is by definition locked out — and on a runner with users no shared
+    token either, since somebody locked out of Settings cannot read one.
 
     Every failure reads the same, deliberately: unknown code, expired code, code
-    already used, account disabled. A specific answer would make this an oracle
-    for someone holding the token and guessing.
+    already used, account disabled. A specific answer would turn this into an
+    oracle for somebody guessing. The rate limit is what keeps the guessing slow;
+    it counts against the caller only, since the code names no account until it
+    is redeemed.
     """
+    keys = _throttle_keys(request)
+    _refuse_if_throttled(keys)
     try:
         _auth.redeem_recovery(body.code, body.password)
     except auth.AuthError as error:
+        _LOGIN_THROTTLE.record_failure(keys)
         raise HTTPException(status_code=400, detail=str(error)) from error
+    _LOGIN_THROTTLE.forget(keys)
     return {"changed": True}
 
 
@@ -4067,11 +7383,261 @@ def _elapsed_ms(started: float) -> int:
 
 # Started last, once `_log` and the whole module exist: the first purge runs
 # immediately, on a daemon thread, so it never delays a request or survives a
+
+# ------------------------------------------------------- the assistant
+
+
+class AssistantTurnIn(BaseModel):
+    """One message of the transcript the browser is holding.
+
+    Only `user` and `assistant` are accepted; tool calls and results are the
+    runner's business and are rebuilt on every turn rather than trusted from the
+    client — a transcript that can name a tool result is a transcript that can
+    forge one.
+    """
+
+    role: str
+    content: str
+
+
+class AssistRequest(BaseModel):
+    messages: List[AssistantTurnIn] = Field(default_factory=list)
+    #: Overrides the runner's default for this turn only. Free text, like every
+    #: model id in this product.
+    model: Optional[str] = None
+    #: What the question is about, so the cost lands on the right line of the
+    #: bill. Optional, because a question asked from the assistant screen belongs
+    #: to no Workflow and saying so is more honest than guessing.
+    workflow_id: Optional[str] = None
+    #: Extra guidance appended to the runner's own prompt — how the caller wants
+    #: the answer shaped, which the canvas panel uses to ask for the JSON
+    #: envelope it knows how to apply. It never replaces the prompt.
+    instructions: Optional[str] = None
+
+
+class AssistantInfo(BaseModel):
+    """What `GET /assistant` answers: whether it can answer, and with what."""
+
+    backend: str
+    available: bool
+    local: bool
+    model: str = ""
+    base_url: str = ""
+    models: List[str] = Field(default_factory=list)
+    tools: List[str] = Field(default_factory=list)
+    agent: str = ""
+    version: str = ""
+    hint: str = ""
+    error: str = ""
+
+
+class AssistTurnOut(BaseModel):
+    id: str
+    period: str
+    backend: str
+    provider: str
+    model: str
+    local: bool
+    input_tokens: int
+    output_tokens: int
+    tool_calls: int
+    duration_ms: int
+    amount: int
+    created_at: str
+    actor: Optional[str] = None
+    workflow_id: Optional[str] = None
+
+
+class AssistSummaryOut(BaseModel):
+    period: str
+    scope: str
+    turns: int
+    local_turns: int
+    remote_turns: int
+    input_tokens: int
+    output_tokens: int
+    tool_calls: int
+    charged: int
+    seconds: int
+    recent: List[AssistTurnOut] = Field(default_factory=list)
+
+
+def _assistant_info(detail: Dict[str, Any]) -> AssistantInfo:
+    return AssistantInfo(
+        backend=str(detail.get("backend") or ""),
+        available=bool(detail.get("available")),
+        local=bool(detail.get("local", True)),
+        model=str(detail.get("model") or ""),
+        base_url=str(detail.get("baseUrl") or ""),
+        models=[str(name) for name in detail.get("models") or []],
+        tools=[str(name) for name in detail.get("tools") or []],
+        agent=str(detail.get("agent") or ""),
+        version=str(detail.get("version") or ""),
+        hint=str(detail.get("hint") or ""),
+        error=str(detail.get("error") or ""),
+    )
+
+
+@app.get("/assistant", response_model=AssistantInfo)
+def assistant_info() -> AssistantInfo:
+    """Which runtime answers here, and whether it can right now.
+
+    No permission needed, and deliberately: the Studio asks this on every load to
+    decide whether to offer the runner's assistant at all, and a 403 would be
+    indistinguishable from a runner that has none.
+    """
+    try:
+        return _assistant_info(assistant.describe())
+    except assistant.AssistantUnavailable as error:
+        return AssistantInfo(
+            backend=assistant.backend_name(), available=False, local=True,
+            error=str(error), hint=getattr(error, "hint", ""),
+        )
+
+
+@app.post(
+    "/assistant/stream",
+    dependencies=[Depends(requires("assistant:Ask"))],
+)
+def assistant_stream(
+    body: AssistRequest, principal: Any = Depends(current_principal)
+) -> StreamingResponse:
+    """One turn, as Server-Sent Events.
+
+    Events: `delta` with the text as it arrives, `tool` when the assistant called
+    one of this runner's tools and what it answered, then a final `done` carrying
+    what the turn consumed — or `error`.
+
+    The turn is metered when it ends, not when it starts, because what it cost is
+    not known until the model stops. A client that hangs up mid-answer still pays
+    for the work, which is why the recording happens in `finally` and not after
+    the last yield.
+    """
+    try:
+        backend = assistant.build()
+    except assistant.AssistantUnavailable as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{error} {getattr(error, 'hint', '')}".strip(),
+        ) from error
+
+    turns = assistant.turns_of(body.messages)
+    if not turns:
+        raise HTTPException(status_code=400, detail="There is nothing to answer.")
+
+    account_id, username = credits.account_for(principal)
+    actor = credits.actor_for(principal)
+
+    def _stream() -> Iterator[str]:
+        usage: Optional[Any] = None
+        try:
+            system = assistant.prompt_with(body.instructions or "")
+            for event in backend.stream(turns, model=body.model, system=system):
+                if event.kind == "done":
+                    usage = event.usage
+                yield _sse(event.kind, event.payload())
+        except assistant.AssistantUnavailable as error:
+            yield _sse("error", {"message": str(error), "hint": getattr(error, "hint", "")})
+        except Exception as error:  # pragma: no cover - defensive
+            yield _sse("error", {"message": f"{type(error).__name__}: {error}"})
+        finally:
+            if usage is not None:
+                try:
+                    _credits.record_assist(
+                        account_id, backend=backend.id, provider=usage.provider,
+                        model=usage.model, local=usage.local,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        duration_ms=usage.duration_ms, tool_calls=usage.tool_calls,
+                        username=username, actor=actor, workflow_id=body.workflow_id,
+                    )
+                except Exception:  # pragma: no cover - metering must not break a turn
+                    _log.exception("Could not record the assistant turn")
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/credits/assist", response_model=AssistSummaryOut)
+def assist_usage(
+    period: Optional[str] = None,
+    account_id: Optional[str] = None,
+    limit: int = 20,
+    principal: Any = Depends(current_principal),
+) -> AssistSummaryOut:
+    """A month of assistant work, and the most recent turns behind it.
+
+    Reported next to the rest of billing and not inside the assistant screen,
+    because the question it answers — is this thing costing us anything — is a
+    billing question. Scope follows the same rule as every other bill: your own
+    team always, the whole runner with `credits:Read`.
+    """
+    own, _ = credits.account_for(principal)
+    everyone = principal is not None and principal.allows("credits:Read")
+    if account_id and account_id != own and not everyone:
+        raise HTTPException(
+            status_code=403,
+            detail="Reading another account's spending needs credits:Read.",
+        )
+    scoped = account_id or (None if everyone else own)
+    summary = _credits.assist_summary(account_id=scoped, period=period)
+    recent = _credits.assist_turns(
+        account_id=scoped, limit=limit, period=period or credits.current_period()
+    )
+    return AssistSummaryOut(
+        period=summary.period, scope=summary.account_id, turns=summary.turns,
+        local_turns=summary.local_turns, remote_turns=summary.remote_turns,
+        input_tokens=summary.input_tokens, output_tokens=summary.output_tokens,
+        tool_calls=summary.tool_calls, charged=summary.charged,
+        seconds=summary.seconds,
+        recent=[
+            AssistTurnOut(
+                id=turn.id, period=turn.period, backend=turn.backend,
+                provider=turn.provider, model=turn.model, local=turn.local,
+                input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                tool_calls=turn.tool_calls, duration_ms=turn.duration_ms,
+                amount=turn.amount, created_at=turn.created_at, actor=turn.actor,
+                workflow_id=turn.workflow_id,
+            )
+            for turn in recent
+        ],
+    )
+
+
+
 # shutdown. `SPARQUET_STUDIO_HISTORY_PURGE=off` leaves the database untouched.
 if history.RetentionPolicy.enabled():
     threading.Thread(
         target=_purge_history_periodically, name="history-purge", daemon=True
     ).start()
+
+
+# On unless turned off, like the purge and unlike the warm-up: a sweep is one
+# query against a SQLite file, and a rule nobody evaluates is not a rule.
+# `SPARQUET_STUDIO_MONITORS=off` stops the timer and leaves the rules in place.
+if monitoring.sweeping_enabled():
+    threading.Thread(target=_watch_monitors, name="monitor-sweep", daemon=True).start()
+
+
+# On unless turned off, for the same reason: a schedule honoured only while
+# somebody has the Studio open is not a schedule. `SPARQUET_STUDIO_SCHEDULER=off`
+# stops the timer and leaves the records alone, which is how a second runner
+# pointed at the same library avoids both of them firing the same Job.
+if scheduling.scheduling_enabled():
+    threading.Thread(target=_watch_schedules, name="schedule-sweep", daemon=True).start()
+
+
+# Off unless asked for, unlike the purge above, and the asymmetry is deliberate:
+# importing this module must not cost a JVM. The tests import it, and so does
+# anything that inspects the app — a warm-up on import would turn every one of
+# those into a Spark start-up. `SPARQUET_STUDIO_WARM_SPARK=on` is for the process
+# that serves the Studio, where the session is going to be built anyway and the
+# only question is who waits for it.
+if _warm_enabled():
+    threading.Thread(target=_warm_spark, name="spark-warm", daemon=True).start()
 
 
 if __name__ == "__main__":

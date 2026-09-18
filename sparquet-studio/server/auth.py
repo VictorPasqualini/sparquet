@@ -183,21 +183,48 @@ TOKEN_PRINCIPAL = Principal(
 ACTIONS: Dict[str, str] = {
     "workspace:Read": "Read the Workflows, Jobs and Pipelines in the library.",
     "workspace:Write": "Create or change a record in the library.",
-    "workspace:Delete": "Remove a record from the library.",
+    "workspace:Delete": "Remove a record, or a loose file, from the library.",
     "run:Execute": "Run a Job or a Pipeline on this runner.",
     "run:Cancel": "Stop a run that is in progress.",
     "run:Validate": "Check a JSON without running it.",
     "catalog:Inspect": "Read the real schema of a dataset by opening it on this runner.",
+    "assistant:Ask": (
+        "Ask the runner's assistant a question. Separate from `run:Validate` even "
+        "though the assistant mostly validates: a turn answered by a model this "
+        "runner does not host is billable, and whoever pays wants to choose who "
+        "can spend it."
+    ),
     "catalog:Query": "Run a read-only SQL query over datasets on this runner.",
     "history:Read": "Read past executions, their steps, logs and configuration.",
     "history:Pin": "Mark a run as kept forever, so retention never expires it.",
     "history:Purge": "Apply the retention policy by hand, deleting old history.",
     "history:Ingest": "Report a run executed somewhere else, so it lands in this history.",
+    "monitoring:Read": "See the health of every Job and which alerts are firing.",
+    "monitoring:Manage": (
+        "Create and change the rules that raise an alert. Separate from "
+        "`monitoring:Read` for the same reason a grant is separate from a Job: "
+        "whoever is on call reads the alerts, and turning one off is a decision "
+        "with consequences for everybody else who relies on it."
+    ),
     "iam:ReadUsers": "See who has access, in which teams and with which roles.",
     "iam:ManageUsers": "Create users, change roles, reset passwords, remove access.",
     "iam:ManageRoles": "Create and edit roles, and choose the actions each one allows.",
     "iam:ManageTeams": "Create teams, move people between them, give a team roles.",
+    "iam:ManageGrants": (
+        "Grant or deny access to a dataset, a Job or a Pipeline. Separate from "
+        "`workspace:Write` on purpose: whoever may edit a Job must not thereby "
+        "be able to widen their own access to the tables it reads."
+    ),
     "iam:ReadAudit": "Read the audit log: who changed what, and who was refused.",
+    "secrets:Read": (
+        "See which connection secrets exist, what they are called and which fields "
+        "they carry. Never the values: no action, and no access level, returns one."
+    ),
+    "secrets:Write": (
+        "Create, rotate and delete connection secrets. Separate from using one: a "
+        "Job may read a database through `pg-prod` without anybody on that team "
+        "being able to change what `pg-prod` points at."
+    ),
     "credits:Read": "See every team's execution credits and what they were spent on.",
     "credits:Manage": "Grant execution credits, or take them back.",
     # Deliberately not under `workspace:*`: moving the whole library to another
@@ -210,9 +237,11 @@ ACTIONS: Dict[str, str] = {
 #: runner passes these to `authorize` as `kind/id`, so a role scoped to
 #: `workflow/w1` allows only what happens inside that Workflow.
 RESOURCE_KINDS: Dict[str, str] = {
+    "dataset": "One dataset address, as the catalog and the SQL editor name it.",
     "workflow": "One Workflow and everything the runner attributes to it.",
     "pipeline": "One Pipeline (an ordered sequence of Jobs).",
     "job": "One Job.",
+    "secret": "One connection secret, by name.",
     "team": "One team, for the IAM actions that act on a team.",
     "user": "One user account.",
 }
@@ -233,8 +262,15 @@ BUILTIN_ROLES: Dict[str, Role] = {
                 "effect": "allow",
                 "actions": [
                     "workspace:*", "run:*", "catalog:Inspect", "catalog:Query",
+                    "assistant:Ask",
                     "history:Read",
                     "history:Pin", "history:Ingest", "credits:Read",
+                    "monitoring:Read", "monitoring:Manage",
+                    # Reading the list, so a Job can reference a secret by name.
+                    # `secrets:Write` is deliberately not here: whoever builds the
+                    # Jobs must not also be able to repoint a connection at a
+                    # database of their choosing.
+                    "secrets:Read",
                 ],
                 "resources": ["*"],
             }
@@ -251,11 +287,13 @@ BUILTIN_ROLES: Dict[str, Role] = {
                     "run:Execute",
                     "run:Cancel",
                     "run:Validate",
+                    "assistant:Ask",
                     "catalog:Inspect",
                     "catalog:Query",
                     "history:Read",
                     "history:Pin",
                     "history:Ingest",
+                    "monitoring:Read",
                 ],
                 "resources": ["*"],
             }
@@ -267,7 +305,7 @@ BUILTIN_ROLES: Dict[str, Role] = {
         statements=[
             {
                 "effect": "allow",
-                "actions": ["workspace:Read", "history:Read"],
+                "actions": ["workspace:Read", "history:Read", "monitoring:Read"],
                 "resources": ["*"],
             }
         ],
@@ -912,6 +950,31 @@ class AuthStore:
             conn.execute("DELETE FROM session WHERE user_id = ?", (row["id"],))
             conn.commit()
             return self._user_of(conn, row)
+
+    def principal_for(self, username: str) -> Optional[Principal]:
+        """The principal somebody would be if they logged in right now.
+
+        The same assembly `resolve_session` does — personal roles plus the
+        team's, then the statements of both — without minting or touching a
+        session. It exists so that "what would Ana be allowed to do?" is
+        answered by the code that will actually answer it when Ana asks, rather
+        than by a second implementation that agrees today.
+        """
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM user WHERE username = ? COLLATE NOCASE",
+                ((username or "").strip(),),
+            ).fetchone()
+            if not row:
+                return None
+            user = self._user_of(conn, row)
+            team_roles = self._team_roles_of(conn, user.team_id)
+            effective = sorted(set(user.roles) | set(team_roles))
+            return Principal(
+                username=user.username, display_name=user.display_name, user_id=user.id,
+                roles=user.roles, statements=self._statements_for(conn, effective),
+                team_id=user.team_id, team_name=user.team_name, team_roles=team_roles,
+            )
 
     def find_user(self, username: str) -> Optional[User]:
         """By name, for the operator commands — a person at a terminal knows the

@@ -7,7 +7,9 @@ import logoMark from '@/assets/logo.png'
 import { LoginGate } from '@/components/auth/LoginGate'
 import { AppShell } from '@/components/layout/AppShell'
 import { Spinner, TooltipProvider } from '@/components/ui'
+import { detectLocalAi } from '@/lib/ai/local'
 import { seedIfEmpty } from '@/lib/storage/seed'
+import { Assistant } from '@/screens/Assistant'
 import { Dashboard } from '@/screens/Dashboard'
 import { NotFound } from '@/screens/NotFound'
 import { useAuthStore } from '@/store/auth'
@@ -15,7 +17,7 @@ import { useLibraryStore } from '@/store/library'
 import { paintTheme, storedTheme, useSettingsStore } from '@/store/settings'
 
 // Split per screen: the editor pulls React Flow and Monaco, which no other
-// route needs, and the overview must stay instant.
+// route needs, and the screen the Studio opens on must stay instant.
 const WorkflowDetail = lazy(() =>
   import('@/screens/WorkflowDetail').then((m) => ({ default: m.WorkflowDetail })),
 )
@@ -32,6 +34,9 @@ const LessonDetail = lazy(() =>
 )
 const Settings = lazy(() => import('@/screens/Settings').then((m) => ({ default: m.Settings })))
 const Billing = lazy(() => import('@/screens/Billing').then((m) => ({ default: m.Billing })))
+const Monitoring = lazy(() =>
+  import('@/screens/Monitoring').then((m) => ({ default: m.Monitoring })),
+)
 const Access = lazy(() => import('@/screens/Access').then((m) => ({ default: m.Access })))
 const JobEditor = lazy(() =>
   import('@/screens/JobEditor').then((m) => ({ default: m.JobEditor })),
@@ -55,8 +60,20 @@ const router = createHashRouter([
   {
     element: <AppShell />,
     children: [
-      { path: '/', element: <Dashboard /> },
+      // The Studio opens on a question rather than on an inventory: `/` is the
+      // assistant, and what used to be here answers to /workflow.
+      { path: '/', element: <Assistant /> },
+      { path: '/workflow', element: <Dashboard /> },
+      // The library directory is a tab, not a screen: of /workflow here, and of a
+      // workflow below. The folder being browsed is part of the route, because a
+      // path several levels into somebody else's directory is exactly the thing one
+      // person sends another. The splat matches an empty tail, so each of these two
+      // routes also serves its own bare `/files`.
+      { path: '/workflow/files/*', element: <Dashboard /> },
+      // Where the library browser answered while it was a screen of its own.
+      { path: '/files', element: <Navigate to="/workflow/files" replace /> },
       { path: '/workflows/:workflowId', element: lazyRoute(<WorkflowDetail />) },
+      { path: '/workflows/:workflowId/files/*', element: lazyRoute(<WorkflowDetail />) },
       { path: '/templates', element: lazyRoute(<Templates />) },
       { path: '/catalog', element: lazyRoute(<Catalog />) },
       { path: '/sql', element: lazyRoute(<SqlEditor />) },
@@ -66,7 +83,14 @@ const router = createHashRouter([
       { path: '/learn', element: lazyRoute(<Learn />) },
       { path: '/learn/:lessonId', element: lazyRoute(<LessonDetail />) },
       { path: '/billing', element: lazyRoute(<Billing />) },
+      { path: '/monitoring', element: lazyRoute(<Monitoring />) },
+      // Sections as routes, like Access: a firing alert is something people
+      // paste into a channel.
+      { path: '/monitoring/:section', element: lazyRoute(<Monitoring />) },
       { path: '/access', element: lazyRoute(<Access />) },
+      // The sections of Access are routes rather than local state: the audit log
+      // in particular is something people send each other a link to.
+      { path: '/access/:section', element: lazyRoute(<Access />) },
       { path: '/settings', element: lazyRoute(<Settings />) },
       { path: '*', element: <NotFound /> },
     ],
@@ -80,6 +104,8 @@ export default function App() {
   const theme = useSettingsStore((state) => state.theme)
   const runnerUrl = useSettingsStore((state) => state.runnerUrl)
   const runnerToken = useSettingsStore((state) => state.runnerToken)
+  const aiPinned = useSettingsStore((state) => state.aiPinned)
+  const adoptAi = useSettingsStore((state) => state.adoptAi)
   const load = useLibraryStore((state) => state.load)
   const refreshAuth = useAuthStore((state) => state.refresh)
   const authReady = useAuthStore((state) => state.ready)
@@ -108,6 +134,24 @@ export default function App() {
   useEffect(() => {
     void refreshAuth()
   }, [refreshAuth, runnerUrl, runnerToken])
+
+  // A Studio nobody configured looks for a model already running on this
+  // machine, once per boot and only while the provider is still the untouched
+  // default. Two probes against localhost, both silent when nothing answers:
+  // the alternative is a first screen that asks for an API key before it has
+  // been useful once.
+  useEffect(() => {
+    if (aiPinned) return
+    const controller = new AbortController()
+    void detectLocalAi({ baseUrl: runnerUrl, token: runnerToken }, controller.signal)
+      .then((choice) => {
+        if (choice && !controller.signal.aborted) adoptAi(choice.settings)
+      })
+      .catch(() => {
+        /* nothing local here; the assistant screen says what to install */
+      })
+    return () => controller.abort()
+  }, [aiPinned, adoptAi, runnerUrl, runnerToken])
 
   useEffect(() => {
     if (!authReady || locked) return

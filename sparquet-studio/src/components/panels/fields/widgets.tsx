@@ -23,6 +23,8 @@ import { getFormat, READABLE_FORMATS, type FieldOption, type FieldSpec } from '@
 import { Button, Field, IconButton, Input, Select, Textarea } from '@/components/ui'
 import { fieldLabelId } from '@/components/ui/Field'
 import { cn } from '@/lib/utils/cn'
+import { useSecretsStore } from '@/store/secrets'
+import { secretRef, secretRefsIn } from '@/types/secrets'
 
 /* ------------------------------------------------------------------ shared */
 
@@ -788,6 +790,84 @@ export function SourceField({ id, value, onChange, disabled, renderOption }: Sou
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ secret */
+
+/**
+ * A credential field: free text, with the runner's secrets one click away.
+ *
+ * The box stays a text box because the value is often not a secret at all — a
+ * `{param}` the caller fills in, a literal user name, a URL with no password in
+ * it. What the picker adds is the reference `{secret:name/field}`, which the
+ * runner resolves on the way to Spark and nothing else ever expands: it is not
+ * stored in the Job, not in the run history, not in the lineage, and not in what
+ * the AI is shown.
+ *
+ * The list comes from the runner and may be empty for three different reasons —
+ * no runner, no `secrets:Read`, or no secrets yet — and the widget treats all
+ * three the same way, by saying so and staying usable.
+ */
+export function SecretField({
+  id,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  invalid,
+}: WidgetProps<string>) {
+  const secrets = useSecretsStore((state) => state.items)
+  const load = useSecretsStore((state) => state.load)
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const choices = secrets.flatMap((secret) =>
+    secret.fields.map((fieldName) => ({
+      value: secretRef(secret.name, fieldName),
+      label: `${secret.name}/${fieldName}`,
+    })),
+  )
+
+  const referenced = secretRefsIn(value ?? '')
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Input
+          id={id}
+          value={value ?? ''}
+          placeholder={placeholder}
+          disabled={disabled}
+          invalid={invalid}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        {choices.length > 0 ? (
+          <Select
+            className="w-44"
+            ariaLabel="Use a secret"
+            value=""
+            placeholder="Use a secret"
+            options={choices}
+            disabled={disabled}
+            onValueChange={(next) => onChange(next)}
+          />
+        ) : null}
+      </div>
+      <p className="text-2xs text-content-subtle">
+        {referenced.length > 0
+          ? `Resolved by the runner from ${referenced
+              .map((reference) => `${reference.name}/${reference.field}`)
+              .join(', ')} — the value is never stored in this Job.`
+          : choices.length > 0
+            ? 'Typed here, this value is stored in the Job JSON. Pick a secret instead to keep it on the runner.'
+            : 'No secret to pick: the Connections tab of the Catalog is where they are created.'}
+      </p>
     </div>
   )
 }

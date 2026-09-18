@@ -170,7 +170,7 @@ export function Segmented<T extends string>({
       role="radiogroup"
       aria-label={ariaLabel}
       className={cn(
-        'inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface-sunken p-0.5',
+        'inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-line bg-surface-sunken p-0.5',
         className,
       )}
     >

@@ -20,6 +20,7 @@ import {
   type LinkRejection,
 } from '@/lib/pipeline'
 import { stageRunStatuses } from '@/lib/runner/stageRuns'
+import { isWorkspaceConflict } from '@/lib/storage/remote'
 import * as db from '@/lib/storage/db'
 import type { ExecutionStatus, PipelineRunRecord } from '@/types/history'
 import type {
@@ -76,6 +77,18 @@ interface PipelineEditorState {
   dirty: boolean
   saving: boolean
   lastSavedAt: number | null
+  /**
+   * The pipeline as it is on disk, when somebody else saved it first. A library
+   * is a folder, so the second writer can be another machine over a share, a
+   * sync or a checkout — see `ConflictBanner`, which is what renders this.
+   */
+  conflict: Pipeline | null
+  /**
+   * True when the runner refused the write rather than this browser noticing it.
+   * The difference matters on screen: a refusal means the edits are still only
+   * here, and nothing is saved until the user picks a version.
+   */
+  conflictRefused: boolean
 
   past: Snapshot[]
   future: Snapshot[]
@@ -100,6 +113,11 @@ interface PipelineEditorState {
   open: (pipeline: Pipeline) => void
   close: () => void
   save: () => Promise<void>
+  dismissConflict: () => void
+  /** Drops the edits on screen and reopens the pipeline as it is on disk. */
+  adoptConflict: () => Promise<void>
+  /** Keeps the edits on screen and writes them over the pipeline on disk. */
+  overwriteConflict: () => Promise<void>
 
   /* graph */
   addStage: (jobId: string, position: { x: number; y: number }) => string
@@ -174,7 +192,22 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
       updatedAt: Date.now(),
       revision: Math.max(pipeline.revision, stored?.revision ?? 0) + 1,
     }
-    await db.savePipeline(next)
+    try {
+      await db.savePipeline(next)
+    } catch (error) {
+      // Refused: the file on disk is not the one this edit started from. `dirty`
+      // stays true, because these edits are still owed to the disk.
+      if (isWorkspaceConflict(error)) {
+        set({
+          saving: false,
+          conflict: (error.record as Pipeline | null) ?? get().conflict,
+          conflictRefused: true,
+        })
+        return
+      }
+      set({ saving: false })
+      throw error
+    }
     useLibraryStore.getState().upsertPipeline(next)
     set((state) => {
       // The editor moved on (closed or switched pipeline): only the write mattered.
@@ -214,6 +247,8 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
     dirty: false,
     saving: false,
     lastSavedAt: null,
+    conflict: null,
+    conflictRefused: false,
 
     past: [],
     future: [],
@@ -242,6 +277,8 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
         selectedStageId: null,
         dirty: false,
         saving: false,
+        conflict: null,
+        conflictRefused: false,
         lastSavedAt: pipeline.updatedAt,
         past: [],
         future: [],
@@ -269,6 +306,8 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
         selectedStageId: null,
         dirty: false,
         saving: false,
+        conflict: null,
+        conflictRefused: false,
         past: [],
         future: [],
         running: false,
@@ -281,6 +320,55 @@ export const usePipelineEditorStore = create<PipelineEditorState>((set, get) => 
     },
 
     save: () => flush(),
+
+    dismissConflict: () => set({ conflict: null, conflictRefused: false }),
+
+    adoptConflict: async () => {
+      const id = get().pipeline?.id
+      if (!id) return
+      // Ask the disk again: between the refusal and this click the other machine
+      // may well have saved once more.
+      const stored = (await db.refreshPipeline(id).catch(() => null)) ?? get().conflict
+      if (!stored) {
+        set({ conflict: null, conflictRefused: false })
+        return
+      }
+      if (autosaveTimer) {
+        clearTimeout(autosaveTimer)
+        autosaveTimer = null
+      }
+      useLibraryStore.getState().upsertPipeline(stored)
+      set({
+        pipeline: stored,
+        stages: stored.stages,
+        links: stored.links,
+        selectedStageId: null,
+        dirty: false,
+        saving: false,
+        conflict: null,
+        conflictRefused: false,
+        past: [],
+        future: [],
+        lastSavedAt: stored.updatedAt,
+      })
+    },
+
+    overwriteConflict: async () => {
+      const { pipeline, conflict } = get()
+      if (!pipeline) return
+      await db.overwriteNext('pipeline', pipeline.id)
+      set({
+        // Past the other machine's number, so the same conflict is not raised
+        // again over a record the user has just resolved.
+        pipeline: { ...pipeline, revision: Math.max(pipeline.revision, conflict?.revision ?? 0) },
+        conflict: null,
+        conflictRefused: false,
+        // A conflict merely noticed left nothing pending; overwriting is still
+        // what was asked for, so the write has to happen.
+        dirty: true,
+      })
+      await flush()
+    },
 
     addStage: (jobId, position) => {
       const stage = newStage(jobId, position)

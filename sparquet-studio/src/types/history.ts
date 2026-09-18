@@ -174,3 +174,56 @@ export interface PipelineRunRecord {
   /** Populated only on `getRun` — a list row never carries the nested detail. */
   jobs: JobRunRecord[]
 }
+
+
+/**
+ * How much this runner ran in one month, and how it went.
+ *
+ * The operational half of Billing, and a different source from the credits: a
+ * charge exists only for a write that landed away from this machine, so a month
+ * of local work costs nothing and still happened. "How much did we run" is a
+ * question somebody asks before "what did it cost".
+ */
+export interface RunMetrics {
+  /** `YYYY-MM`. */
+  period: string
+  total: number
+  succeeded: number
+  failed: number
+  /** Cancelled, skipped, or still going: neither a success nor a failure. */
+  other: number
+  /** Over the runs that finished. Null in a month where none did. */
+  durationMsAvg: number | null
+  /** The typical run, which a long tail does not move. */
+  durationMsP50: number | null
+  /** The one that ruins an evening. */
+  durationMsP95: number | null
+  /** Machine time the month spent running. */
+  durationMsTotal: number
+  /** Every day of the month, including the days nothing ran. */
+  days: RunDay[]
+  groups: RunGroup[]
+  groupBy: RunGroupBy
+}
+
+/** One day of the month. */
+export interface RunDay {
+  /** `YYYY-MM-DD`. */
+  day: string
+  runs: number
+  failed: number
+}
+
+/** One line of the breakdown: a Pipeline, a Job, a Workflow or a person. */
+export interface RunGroup {
+  /** The id, or null for the runs that belong to nothing of this dimension. */
+  key: string | null
+  label: string
+  runs: number
+  failed: number
+  durationMsAvg: number | null
+  durationMsTotal: number
+}
+
+/** The dimension a month is broken down by. */
+export type RunGroupBy = 'pipeline' | 'job' | 'workflow' | 'user'

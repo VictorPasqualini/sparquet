@@ -27,6 +27,7 @@ import {
 import { nanoid } from 'nanoid'
 
 import { sanitizeAnnotations, type CatalogAnnotations } from '@/lib/datacatalog'
+import { sanitizeGrants, sanitizeOwners, type Grant, type Owner } from '@/lib/iam'
 import { upgradeJob } from '@/lib/storage/migrations'
 import { toStorable, type StorageBackend, type StorageKind } from '@/lib/storage/backend'
 import {
@@ -35,11 +36,12 @@ import {
   META_PREFIX,
   NS,
   PROJECT_PREFIX,
+  QUERY_PREFIX,
   STORAGE_PREFIX,
   WORKFLOW_PREFIX,
 } from '@/lib/storage/keys'
 import { workspaceBackend } from '@/lib/storage/remote'
-import type { Pipeline, Workflow, StudioGraph, Job } from '@/types/studio'
+import type { Pipeline, SavedQuery, Workflow, StudioGraph, Job } from '@/types/studio'
 
 /* ------------------------------------------------------------------- keys */
 
@@ -398,6 +400,37 @@ export async function saveJob(job: Job): Promise<Job> {
   return record
 }
 
+/**
+ * Lets the next `saveJob`/`savePipeline` for this record land even though the
+ * copy on disk moved since it was read — the answer to a conflict banner where
+ * the person chose their own version over the other machine's. One record, one
+ * write: the save after it is guarded again.
+ */
+export async function overwriteNext(kind: 'job' | 'pipeline', id: string): Promise<void> {
+  const store = await open()
+  store.overwriteNext?.(kind === 'job' ? KEY.workflow(id) : KEY.flow(id))
+}
+
+/**
+ * Re-reads one record from the store of record and returns it, bypassing any
+ * cache — "what is on the disk right now", the question a conflict raises. On a
+ * backend the browser owns, that is what `getJob` already answers; `null` means
+ * the record is no longer there.
+ */
+export async function refreshJob(id: string): Promise<Job | null> {
+  const store = await open()
+  const key = KEY.workflow(id)
+  const value = store.refresh ? await store.refresh(key) : await store.get(key)
+  return isJob(value) ? value : null
+}
+
+export async function refreshPipeline(id: string): Promise<Pipeline | null> {
+  const store = await open()
+  const key = KEY.flow(id)
+  const value = store.refresh ? await store.refresh(key) : await store.get(key)
+  return isPipeline(value) ? value : null
+}
+
 export async function deleteJob(id: string): Promise<void> {
   const store = await open()
   await store.del(KEY.workflow(id))
@@ -453,6 +486,31 @@ export async function savePipeline(pipeline: Pipeline): Promise<Pipeline> {
 export async function deletePipeline(id: string): Promise<void> {
   const store = await open()
   await store.del(KEY.flow(id))
+}
+
+/* -------------------------------------------------------------- SQL files */
+
+export async function listQueries(): Promise<SavedQuery[]> {
+  const store = await open()
+  return readQueries(store)
+}
+
+export async function getQuery(id: string): Promise<SavedQuery | null> {
+  const store = await open()
+  const value = await store.get(KEY.query(id))
+  return isSavedQuery(value) ? value : null
+}
+
+export async function saveQuery(query: SavedQuery): Promise<SavedQuery> {
+  const store = await open()
+  const record: SavedQuery = { ...query }
+  await store.set(KEY.query(record.id), record)
+  return record
+}
+
+export async function deleteQuery(id: string): Promise<void> {
+  const store = await open()
+  await store.del(KEY.query(id))
 }
 
 /* ---------------------------------------------------------- export/import */
@@ -537,6 +595,35 @@ export async function writeCatalog(annotations: CatalogAnnotations): Promise<voi
   await store.set(KEY.catalog, annotations)
 }
 
+/* ------------------------------------------------------------------- iam */
+
+/**
+ * Every grant, as one list.
+ *
+ * Not cleared by `clearAll`: wiping the library is a "start over with the
+ * canvas" gesture, and dropping the access rules along with it would silently
+ * reopen tables that somebody deliberately closed.
+ */
+export async function readGrants(): Promise<Grant[]> {
+  const store = await open()
+  return sanitizeGrants(await store.get(KEY.grants))
+}
+
+export async function writeGrants(grants: readonly Grant[]): Promise<void> {
+  const store = await open()
+  await store.set(KEY.grants, grants)
+}
+
+export async function readOwners(): Promise<Owner[]> {
+  const store = await open()
+  return sanitizeOwners(await store.get(KEY.owners))
+}
+
+export async function writeOwners(owners: readonly Owner[]): Promise<void> {
+  const store = await open()
+  await store.set(KEY.owners, owners)
+}
+
 /* ------------------------------------------------------------------- seed */
 
 export async function isSeeded(): Promise<boolean> {
@@ -585,6 +672,14 @@ async function readPipelines(store: StorageBackend, workflowId?: string): Promis
   warnUnreadable(values.length - pipelines.length, 'pipeline')
   const scoped = workflowId ? pipelines.filter((pipeline) => pipeline.workflowId === workflowId) : pipelines
   return scoped.sort(byRecency)
+}
+
+async function readQueries(store: StorageBackend): Promise<SavedQuery[]> {
+  const keys = await store.keys(QUERY_PREFIX)
+  const values = await Promise.all(keys.map((key) => store.get(key)))
+  const queries = values.filter(isSavedQuery)
+  warnUnreadable(values.length - queries.length, 'query')
+  return queries.sort(byRecency)
 }
 
 /** Dropped records are invisible in the UI; the console is the only trace left. */
@@ -728,6 +823,18 @@ function isJob(value: unknown): value is Job {
  * checked here. `revision` is required: the editor derives the next one from it,
  * and a record without it would save `NaN` back over a good row.
  */
+function isSavedQuery(value: unknown): value is SavedQuery {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.description === 'string' &&
+    typeof value.sql === 'string' &&
+    typeof value.createdAt === 'number' &&
+    typeof value.updatedAt === 'number'
+  )
+}
+
 function isPipeline(value: unknown): value is Pipeline {
   return (
     isRecord(value) &&

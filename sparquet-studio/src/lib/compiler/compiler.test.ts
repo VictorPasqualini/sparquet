@@ -4,6 +4,12 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import { autoLayout, compileGraph, pipelineToGraph, serializePipeline } from '@/lib/compiler'
+import {
+  exampleConfigs,
+  examplesRequired,
+  MISSING_EXAMPLES,
+  readExampleConfig,
+} from '@/test/exampleConfigs'
 import type { PipelineSpec } from '@/types/pipeline'
 import type {
   SinkNode,
@@ -122,6 +128,139 @@ function expectRoundTrip(pipeline: unknown): PipelineSpec {
 }
 
 /* ------------------------------------------------------------ round trips */
+
+describe('input_view', () => {
+  it('round-trips the short string form', () => {
+    const pipeline = {
+      name: 'self-join',
+      input: { format: 'parquet', path: '/in' },
+      input_view: 'orders',
+      transformations: [{ type: 'sql', query: 'SELECT * FROM orders' }],
+      output: { format: 'parquet', path: '/out', mode: 'overwrite' },
+    }
+
+    const compiled = expectRoundTrip(pipeline)
+    expect(compiled.input_view).toBe('orders')
+
+    const { graph } = pipelineToGraph(pipeline)
+    const source = graph.nodes.find((node) => node.data.kind === 'source') as SourceNode
+    expect(source.data.inputView).toBe('orders')
+    expect(source.data.inputViewScope).toBe('session')
+  })
+
+  it('round-trips the object form with a global scope', () => {
+    const pipeline = {
+      name: 'global-view',
+      input: { format: 'parquet', path: '/in' },
+      input_view: { name: 'orders', type: 'global' },
+      output: { format: 'parquet', path: '/out', mode: 'overwrite' },
+    }
+
+    const compiled = expectRoundTrip(pipeline)
+    expect(compiled.input_view).toEqual({ name: 'orders', type: 'global' })
+  })
+
+  it('writes the short form for the session scope, never a redundant type', () => {
+    const graph = {
+      nodes: [
+        {
+          ...sourceNode('s1'),
+          data: {
+            kind: 'source' as const,
+            format: 'csv',
+            path: '/in',
+            options: {},
+            inputView: 'orders',
+            inputViewScope: 'session' as const,
+          },
+        },
+        sinkNode('k1'),
+      ],
+      edges: [link('s1', 'k1')],
+    }
+
+    const { pipeline } = compileGraph(graph, SETTINGS)
+    expect(pipeline?.input_view).toBe('orders')
+  })
+
+  it('emits nothing when no view is asked for', () => {
+    const { pipeline } = compileGraph(
+      { nodes: [sourceNode('s1'), sinkNode('k1')], edges: [link('s1', 'k1')] },
+      SETTINGS,
+    )
+    expect(pipeline && 'input_view' in pipeline).toBe(false)
+  })
+
+  it('reports an input_view that names nothing instead of dropping it silently', () => {
+    const { issues } = pipelineToGraph({
+      name: 'broken',
+      input: { format: 'csv', path: '/in' },
+      input_view: 42,
+      output: { format: 'parquet', path: '/out' },
+    })
+    expect(issues.some((issue) => issue.message.includes('input_view'))).toBe(true)
+  })
+})
+
+/**
+ * Keys this build does not know must come back out byte for byte. A hand-written
+ * JSON opened on the canvas and saved over used to lose them without a word.
+ */
+describe('unknown keys', () => {
+  it('round-trips a top-level key the compiler does not know', () => {
+    const pipeline = {
+      name: 'from-the-future',
+      input: { format: 'csv', path: '/in' },
+      output: { format: 'parquet', path: '/out', mode: 'overwrite' },
+      retry_policy: { attempts: 3, backoff: '30s' },
+    }
+
+    const compiled = expectRoundTrip(pipeline)
+    expect(compiled.retry_policy).toEqual({ attempts: 3, backoff: '30s' })
+  })
+
+  it('says which keys it did not understand', () => {
+    const { issues } = pipelineToGraph({
+      name: 'from-the-future',
+      input: { format: 'csv', path: '/in' },
+      output: { format: 'parquet', path: '/out' },
+      retry_policy: {},
+    })
+    expect(
+      issues.some(
+        (issue) => issue.severity === 'info' && issue.message.includes('"retry_policy"'),
+      ),
+    ).toBe(true)
+  })
+
+  it('round-trips unknown keys inside input, output and validations', () => {
+    const pipeline = {
+      name: 'nested',
+      input: { format: 'csv', path: '/in', watermark: '5 minutes' },
+      validations: {
+        on_failure: 'warn',
+        sample_rate: 0.1,
+        rules: [{ type: 'not_null', columns: ['id'] }],
+      },
+      output: { format: 'parquet', path: '/out', mode: 'overwrite', vacuum_after: true },
+    }
+
+    const compiled = expectRoundTrip(pipeline)
+    expect(compiled.input.watermark).toBe('5 minutes')
+    expect(compiled.output?.vacuum_after).toBe(true)
+    expect(compiled.validations?.sample_rate).toBe(0.1)
+  })
+
+  it('never lets an unknown key overwrite one the compiler writes', () => {
+    // `extras` are leftovers, not an override: a stale `name` parked in them must
+    // lose to the name the editor holds, or editing the name would do nothing.
+    const { pipeline } = compileGraph(
+      { nodes: [sourceNode('s1'), sinkNode('k1')], edges: [link('s1', 'k1')] },
+      { ...SETTINGS, pipelineName: 'the-real-name', extras: { name: 'stale' } },
+    )
+    expect(pipeline?.name).toBe('the-real-name')
+  })
+})
 
 describe('round trip', () => {
   it('keeps a single source and a single sink', () => {
@@ -1182,20 +1321,23 @@ describe('the executed format fixtures', () => {
  * sentence telling you what happened.
  */
 describe('the shipped example configs', () => {
-  const dir = fileURLToPath(new URL('../../../../examples/', import.meta.url))
-  const examples = readdirSync(dir).filter((name) => name.endsWith('.json')).sort()
+  // Not a path any more: the configs come from whichever `sparquet` this
+  // machine has — the installed package first, the repository next to us only
+  // as the monorepo fallback. See `src/test/exampleConfigs.ts`.
+  const configs = exampleConfigs()
 
-  it('finds the examples directory', () => {
+  it('finds the examples', () => {
+    if (!configs && !examplesRequired()) return
+    expect(configs, MISSING_EXAMPLES).not.toBeNull()
     expect(
-      examples.length,
-      `No .json found in ${dir}. The examples are fixtures for these tests — if they ` +
-        'vanished from your working tree, restore them with `git restore examples`.',
+      configs?.files.length ?? 0,
+      `No .json found in ${configs?.dir} (found via: ${configs?.source}).`,
     ).toBeGreaterThan(0)
   })
 
-  for (const file of examples) {
+  for (const file of configs?.files ?? []) {
     it(`round-trips ${file}`, () => {
-      const original: unknown = JSON.parse(readFileSync(`${dir}${file}`, 'utf8'))
+      const original = readExampleConfig(configs!, file)
       const compiled = expectRoundTrip(original)
       expect(JSON.parse(serializePipeline(compiled))).toEqual(compiled)
     })

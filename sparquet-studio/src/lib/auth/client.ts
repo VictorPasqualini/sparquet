@@ -13,6 +13,8 @@
 
 import { authHeaders, DEFAULT_RUNNER_URL, RunnerError, RUNNER_UNREACHABLE_MESSAGE } from '@/lib/runner/client'
 import type {
+  AccessDecisionReport,
+  AccessSimulation,
   AuthRole,
   AuthSession,
   AuthStatus,
@@ -21,6 +23,7 @@ import type {
   Principal,
   PolicyAction,
   PolicyStatement,
+  PolicyVerdict,
   PolicyVocabulary,
   RecoveryCode,
 } from '@/types/auth'
@@ -264,6 +267,94 @@ export async function getPolicyVocabulary(
     resourceKinds: Array.isArray(record.resource_kinds)
       ? record.resource_kinds.map(toAction)
       : [],
+  }
+}
+
+function toAccessDecision(value: unknown): AccessDecisionReport | null {
+  if (!isRecord(value)) return null
+  const level = value.level
+  const ownerKind = value.owner_kind
+  return {
+    resource: asString(value.resource),
+    resourceId: asString(value.resource_id),
+    governed: value.governed === true,
+    level: level === 'read' || level === 'write' || level === 'admin' ? level : null,
+    owned: value.owned === true,
+    source: asNullableString(value.source),
+    ownerKind: ownerKind === 'team' || ownerKind === 'user' ? ownerKind : null,
+    ownerId: asNullableString(value.owner_id),
+    mayAdminister: value.may_administer === true,
+    chain: asStringList(value.chain),
+  }
+}
+
+function toPolicyVerdict(value: unknown): PolicyVerdict | null {
+  if (!isRecord(value)) return null
+  return {
+    action: asString(value.action),
+    allowed: value.allowed === true,
+    deniedOn: asNullableString(value.denied_on),
+    allowedOn: asNullableString(value.allowed_on),
+    targets: asStringList(value.targets),
+  }
+}
+
+/**
+ * What another person would be allowed to do, and which layer decides it.
+ *
+ * Deliberately a call and not a local evaluation. Studio can work out the grants
+ * half in the browser, but a simulation that answered from the browser would be
+ * a second implementation of the rules — which is the one thing the whole model
+ * is arranged to avoid. Asking the runner means the answer comes from the code
+ * that will answer when the person themselves asks. Needs `iam:ReadUsers`.
+ */
+export async function simulateAccess(
+  baseUrl: string = DEFAULT_RUNNER_URL,
+  query: {
+    username: string
+    action?: string | null
+    resource?: string
+    resourceId?: string
+    level?: 'read' | 'write' | 'admin' | null
+  },
+  token?: string,
+  signal?: AbortSignal,
+): Promise<AccessSimulation> {
+  const payload = await request(
+    baseUrl,
+    '/iam/simulate',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        username: query.username,
+        action: query.action || null,
+        resource: query.resource ?? '',
+        resource_id: query.resourceId ?? '',
+        level: query.level ?? null,
+      }),
+    },
+    token,
+    signal,
+  )
+  const record = isRecord(payload) ? payload : {}
+  const levelAsked = record.level_asked
+  return {
+    username: asString(record.username, query.username),
+    found: record.found === true,
+    disabled: record.disabled === true,
+    displayName: asNullableString(record.display_name),
+    teamId: asNullableString(record.team_id),
+    teamName: asNullableString(record.team_name),
+    roles: asStringList(record.roles),
+    teamRoles: asStringList(record.team_roles),
+    policy: toPolicyVerdict(record.policy),
+    access: toAccessDecision(record.access),
+    levelAsked:
+      levelAsked === 'read' || levelAsked === 'write' || levelAsked === 'admin'
+        ? levelAsked
+        : null,
+    allowed: record.allowed === true,
+    reason: asString(record.reason),
   }
 }
 
