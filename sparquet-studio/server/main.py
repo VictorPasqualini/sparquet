@@ -7425,7 +7425,6 @@ class AssistantInfo(BaseModel):
     base_url: str = ""
     models: List[str] = Field(default_factory=list)
     tools: List[str] = Field(default_factory=list)
-    agent: str = ""
     version: str = ""
     hint: str = ""
     error: str = ""
@@ -7471,7 +7470,6 @@ def _assistant_info(detail: Dict[str, Any]) -> AssistantInfo:
         base_url=str(detail.get("baseUrl") or ""),
         models=[str(name) for name in detail.get("models") or []],
         tools=[str(name) for name in detail.get("tools") or []],
-        agent=str(detail.get("agent") or ""),
         version=str(detail.get("version") or ""),
         hint=str(detail.get("hint") or ""),
         error=str(detail.get("error") or ""),

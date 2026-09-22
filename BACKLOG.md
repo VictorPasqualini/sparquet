@@ -1667,12 +1667,27 @@ O que falta, na ordem em que dói:
   | O que quebrou | Por quê |
   |---|---|
   | Modelo pequeno **imprime** a tool call como texto | `ollama show` anuncia `tools` e o template existe, mas os pesos respondem `{"name": "validate_config", "arguments": {…}}` em prosa. Nada é despachado, o usuário lê um blob de JSON e o turno é medido com zero ferramentas. Não é o adaptador nem a rota: medido também nas rotas cruas (`/v1/chat/completions` e `/api/chat` nativa), com e sem streaming, a temperatura 0 — `tool_calls` volta vazio em todas. É modelo. Pela mesma pergunta, no prompt e nas ferramentas do runner: `qwen3:8b` 5 de 5, `llama3-groq-tool-use:8b` 3 de 6, `llama3.1:8b` 0 de 2, `qwen2.5-coder:7b` 0 de 2. O padrão do runner virou `qwen3:8b` — pensa antes de responder, então o turno leva dezenas de segundos, e é o preço de um que acerta. |
-  | Todo turno local era medido em zero token | O Agents SDK só manda `stream_options: {"include_usage": true}` quando reconhece o endpoint como o da própria OpenAI (`ChatCmplHelpers.is_openai` é um teste de prefixo em `https://api.openai.com`), e o Omnigent nunca define `include_usage`. Apontado para o Ollama, nenhum chunk traz bloco de usage e `TurnComplete.usage` chega vazio — justamente o número que faz "trouxemos o assistant para dentro" ser um fato verificável. O runner passou a pedir (`_ask_for_usage`), e só isso: `is_openai` também decide `store`, que um servidor local recusaria. |
+  | Todo turno local era medido em zero token | O Agents SDK só manda `stream_options: {"include_usage": true}` quando reconhece o endpoint como o da própria OpenAI (`ChatCmplHelpers.is_openai` é um teste de prefixo em `https://api.openai.com`), e o Omnigent nunca define `include_usage`. Apontado para o Ollama, nenhum chunk traz bloco de usage e `TurnComplete.usage` chega vazio — justamente o número que faz "trouxemos o assistant para dentro" ser um fato verificável. O runner passou a pedir (`_ask_for_usage`), e só isso: `is_openai` também decide `store`, que um servidor local recusaria. **Revertido** — ver o item seguinte. |
 
   `GET /assistant` no backend Omnigent também passou a listar os modelos do endpoint
   local, via `/v1/models` (vocabulário da OpenAI, não `/api/tags` do Ollama, porque a
   promessa aqui é só compatibilidade com OpenAI — llama.cpp e vLLM respondem igual).
   Sem isso o seletor de modelo da tela ficava vazio nesse backend.
+
+- ✅ **Três coisas que o Omnigent trouxe e saíram de novo** — a integração passou por
+  uma revisão do que ela custa ao projeto, e três peças foram retiradas porque cada uma
+  mentia de um jeito diferente:
+
+  | O que saiu | Por quê |
+  |---|---|
+  | O monkeypatch de `ChatCmplHelpers.get_stream_options_param` (`_ask_for_usage`) | Substituía um `classmethod` de uma classe privada do Agents SDK, no processo inteiro, no import, para ganhar um número que ninguém cobra: turno local é medido a custo zero de propósito. O preço era uma atualização do SDK derrubando o backend por um detalhe que não é contrato de ninguém. Sem ele, um endpoint que não oferece usage é gravado com zero — e a tela de Billing já dizia *No provider reported tokens* nesse caso, em vez de fingir turno grátis, então nada na interface mudou. Contagem de token agora é o que o endpoint oferecer. |
+  | `SPARQUET_STUDIO_OMNIGENT_AGENT` e o campo `agent` de `GET /assistant` | Documentado como "aponte para o seu YAML de agente", lido em `omnigent_agent_path()` e **nunca usado**: nenhum caminho de código carregava o arquivo. Prompt e ferramentas são de `server/assistant.py`, ponto. O campo saiu do `AssistantInfo` (Python e TS), do parser, da tela de Settings e do README. Documentação que promete o que não existe é pior que a ausência dela. |
+  | Despacho de evento por nome de classe, calado | O adaptador reconhece `TextFragment`, `ToolCallStarted` e `TurnComplete` pelo `__class__.__name__`; um pacote que renomeie um deles deixa de ser entendido sem dizer nada, e o usuário vê resposta vazia. Continua tolerante enquanto o turno responde — o Omnigent vai ganhar eventos que este adaptador nunca ouviu falar —, mas um turno que terminou sem nada agora falha nomeando o que chegou: *"The agent ended the turn without an answer. It sent: TextFragment."* Turno que erra não grava linha em `assist_usage`, igual ao caminho de `ExecutorError` que já existia. |
+
+  Nada disso mexeu no contrato do SSE nem no banco: sem campo novo, sem migração, sem
+  tocar no `Protocol` de `CreditLedger` que provider de terceiro implementa. 61 testes
+  em `server/test_assistant.py` e os 6 de `server/test_omnigent_live.py` (Omnigent
+  0.14.0 instalado, turno real) passam, e o Studio segue com typecheck e suíte limpos.
 
 - [ ] **Agir, não só olhar** — criar o Job que acabou de descrever, rodar, corrigir o
   que o linter apontou. As ferramentas de escrita são a parte que falta, e cada uma

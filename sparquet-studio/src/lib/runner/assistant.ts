@@ -111,7 +111,6 @@ function toInfo(value: unknown): AssistantInfo {
     baseUrl: asString(record.base_url),
     models: asStringList(record.models),
     tools: asStringList(record.tools),
-    agent: asString(record.agent),
     version: asString(record.version),
     hint: asString(record.hint),
     error: asString(record.error),

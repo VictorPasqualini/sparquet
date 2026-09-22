@@ -21,8 +21,6 @@ export interface AssistantInfo {
   models: string[]
   /** Tools the assistant may call — the runner's, not the browser's. */
   tools: string[]
-  /** The Omnigent agent file in use, when that backend is the one answering. */
-  agent: string
   version: string
   /** What to do about it, when `available` is false. Written by the runner. */
   hint: string

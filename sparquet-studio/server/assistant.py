@@ -118,16 +118,6 @@ def default_model() -> str:
     return os.getenv("SPARQUET_STUDIO_ASSISTANT_MODEL", "").strip() or DEFAULT_MODEL
 
 
-def omnigent_agent_path() -> str:
-    """The YAML agent definition Omnigent should load, when there is one.
-
-    Empty means "build one from the prompt and tools in this module", which is
-    what a runner that has never been configured wants. A team that outgrows that
-    writes its own YAML and points here.
-    """
-    return os.getenv("SPARQUET_STUDIO_OMNIGENT_AGENT", "").strip()
-
-
 # -------------------------------------------------------------------- prompt
 
 
@@ -612,44 +602,6 @@ class OllamaBackend:
 # ----------------------------------------------------------------- omnigent
 
 
-_USAGE_ASKED = False
-
-
-def _ask_for_usage() -> None:
-    """Make the Agents SDK request token counts from a non-OpenAI endpoint.
-
-    The SDK only sends `stream_options: {"include_usage": true}` when it
-    recognises the endpoint as OpenAI's own — `ChatCmplHelpers.is_openai` is a
-    prefix test against `https://api.openai.com` — and Omnigent never sets
-    `include_usage` itself. Point the same client at Ollama and no streamed
-    chunk carries a usage block, so `TurnComplete.usage` is empty and Billing
-    records a turn that read and wrote nothing. Ollama does report usage; it
-    only has to be asked, which is what this does.
-
-    Narrow on purpose. `is_openai` also decides `store`, and asking a local
-    server to store the conversation is an OpenAI-side feature it would reject,
-    so only the stream options are touched — and only when nothing else already
-    decided them.
-    """
-    global _USAGE_ASKED
-    if _USAGE_ASKED:
-        return
-    _USAGE_ASKED = True
-    try:
-        from agents.models.chatcmpl_helpers import ChatCmplHelpers
-    except ImportError:  # pragma: no cover - the SDK moved or is absent
-        return
-    original = ChatCmplHelpers.get_stream_options_param.__func__
-
-    def with_usage(cls: Any, client: Any, model_settings: Any, stream: bool) -> Any:
-        chosen = original(cls, client, model_settings, stream)
-        if stream and chosen is None:
-            return {"include_usage": True}
-        return chosen
-
-    ChatCmplHelpers.get_stream_options_param = classmethod(with_usage)
-
-
 def _omnigent() -> Any:
     """The package, or a refusal that says how to get it.
 
@@ -708,13 +660,11 @@ class OmnigentBackend:
 
     def __init__(
         self, base_url: Optional[str] = None, model: Optional[str] = None,
-        *, agent_path: Optional[str] = None,
     ) -> None:
         # The OpenAI-compatible face of the same Ollama the other backend uses,
         # because that is the endpoint an agent SDK knows how to speak to.
         self.base_url = f"{(base_url or ollama_url()).rstrip('/')}/v1"
         self.model = model or default_model()
-        self.agent_path = agent_path if agent_path is not None else omnigent_agent_path()
 
     @property
     def local(self) -> bool:
@@ -760,7 +710,6 @@ class OmnigentBackend:
             "baseUrl": self.base_url,
             "model": self.model,
             "models": self.models(),
-            "agent": self.agent_path or "(built in)",
             "tools": [tool.name for tool in TOOLS],
         }
         try:
@@ -778,7 +727,7 @@ class OmnigentBackend:
         """The executor, pointed at our model and wired to our tools.
 
         Three things here are decided by what the package actually does rather
-        than by what its agent YAML describes:
+        than by what its own documentation describes:
 
         * `auth: {type: api_key, …}` is the *spec* syntax. The constructor takes
           `api_key` and `base_url_override` as plain keywords, and rejects an
@@ -811,8 +760,16 @@ class OmnigentBackend:
                 "This Omnigent's executor does not take an OpenAI-compatible base URL.",
                 hint="Install omnigent>=0.14,<0.15.",
             ) from error
+        # Asserted rather than assumed. The attribute is private, so the package
+        # owes us nothing about it: a version that stops declaring it would
+        # otherwise take every tool call down with it, one silent "no tool
+        # executor" at a time, in the middle of a turn nobody can debug.
+        if not hasattr(executor, "_tool_executor"):  # pragma: no cover - version drift
+            raise AssistantUnavailable(
+                "This Omnigent's executor has no tool bridge to attach to.",
+                hint="Install omnigent>=0.14,<0.15.",
+            )
         executor._tool_executor = lambda name, args: call_tool(name, args)
-        _ask_for_usage()
         return executor
 
     def stream(
@@ -832,6 +789,12 @@ class OmnigentBackend:
         tool_calls = 0
         streamed = False
         usage_report: Dict[str, Any] = {}
+        # Events are dispatched by class name, so a package that renames one
+        # stops being understood without saying so. Tolerated while the turn
+        # still answers — Omnigent will grow events this adapter never heard of
+        # — and named in the error when it does not, because "the assistant
+        # replied with nothing" is not a report anybody can act on.
+        unknown: List[str] = []
 
         # Dicts, not `omnigent.Message`, despite the `list[Message]` annotation
         # on `run_turn`: the executor reads `message.get("role")` and
@@ -897,11 +860,25 @@ class OmnigentBackend:
                         yield Event(kind="delta", text=final)
                     if not getattr(event, "continue_turn", False):
                         break
+                else:
+                    unknown.append(name)
         finally:
             try:
                 loop.close()
             except Exception:  # pragma: no cover - defensive
                 pass
+
+        if not streamed:
+            seen = ", ".join(sorted(set(unknown)))
+            yield Event(
+                kind="error",
+                text=(
+                    f"The agent ended the turn without an answer. It sent: {seen}."
+                    if seen
+                    else "The agent ended the turn without an answer."
+                ),
+            )
+            return
 
         yield Event(
             kind="done",

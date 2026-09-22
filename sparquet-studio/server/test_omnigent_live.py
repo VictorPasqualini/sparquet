@@ -168,18 +168,18 @@ class OmnigentLiveTests(unittest.TestCase):
         text = "".join(event.text for event in self.events if event.kind == "delta")
         self.assertEqual(text, "That config is not valid.")
 
-    def test_the_local_server_was_asked_for_its_token_counts(self):
-        """An OpenAI-compatible server reports usage only when asked to.
-
-        The SDK asks on its own only when the base URL is OpenAI's own, and
-        Omnigent never sets `include_usage`, so without `_ask_for_usage` no
-        chunk carries a usage block and every local turn is metered at zero.
-        This is the only test that runs the real SDK, so it is the only place
-        the request body can be checked rather than a fake's stand-in for it.
-        """
-        self.assertEqual(self.sent[0].get("stream_options"), {"include_usage": True})
-
     def test_usage_survives_the_trip_and_is_free(self):
+        """Token counts an endpoint volunteers reach the `done` event.
+
+        The runner asks for none. The Agents SDK sends
+        `stream_options: {"include_usage": true}` only when it recognises the
+        endpoint as OpenAI's own, and Omnigent exposes no seam to set it, so an
+        endpoint that does not volunteer usage is metered at zero — which the
+        Billing screen renders as "No provider reported tokens" rather than as a
+        free turn. Getting the number back used to mean patching a private
+        classmethod of the SDK in this process; a wrong number on Billing is not
+        worth reaching into somebody else's library to produce.
+        """
         usage = self.events[-1].usage
         self.assertEqual(usage.provider, "omnigent")
         self.assertEqual(usage.model, "stub-model")

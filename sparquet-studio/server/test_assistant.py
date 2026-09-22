@@ -414,6 +414,16 @@ class OmnigentTests(unittest.TestCase):
         self.assertTrue(detail["available"])
         self.assertIn("validate_config", detail["tools"])
 
+    def test_no_agent_file_is_claimed_because_none_is_ever_loaded(self):
+        """The prompt and the tools are this module's, and nothing reads a YAML.
+
+        The field used to be reported anyway, which put `Agent: (built in)` on
+        the Settings screen and a configurable agent path in the README — a
+        promise no code kept.
+        """
+        sys.modules["omnigent"] = _fake_omnigent([])
+        self.assertNotIn("agent", assistant.OmnigentBackend().describe())
+
     def test_the_version_comes_from_the_metadata_when_the_module_has_none(self):
         """0.14.0 exports no `__version__`, and "unknown" is not a report."""
         module = _fake_omnigent([])
@@ -508,6 +518,23 @@ class OmnigentTests(unittest.TestCase):
             ]
         )
         self.assertEqual([event.kind for event in events], ["delta", "done"])
+
+    def test_a_turn_that_answered_nothing_names_what_it_did_get(self):
+        """The failure mode of dispatching on class names, made loud.
+
+        Rename `TextChunk` upstream and every turn goes quiet: no delta, no
+        error, a `done` reading zero in and zero out. Tolerating the unknown
+        event is right — the turn above still answered — but tolerating a turn
+        that answered nothing is how a broken adapter looks healthy.
+        """
+        events = self._stream([_event("TextFragment", text="hi")])
+        self.assertEqual([event.kind for event in events], ["error"])
+        self.assertIn("TextFragment", events[0].text)
+
+    def test_a_turn_with_no_events_at_all_still_ends_in_words(self):
+        events = self._stream([])
+        self.assertEqual([event.kind for event in events], ["error"])
+        self.assertIn("without an answer", events[0].text)
 
     # ---- where the tokens were spent
 
@@ -620,106 +647,6 @@ class OmnigentModelTests(unittest.TestCase):
         self._answer(OSError("refused"))
         backend = assistant.OmnigentBackend(base_url="http://127.0.0.1:9", model="m")
         self.assertEqual(backend.models(), [])
-
-
-class UsageRequestTests(unittest.TestCase):
-    """A local server reports tokens only when asked, and the SDK does not ask.
-
-    Without this the Billing screen shows every local turn as zero in and zero
-    out — the one number that made "we moved the assistant in-house" a fact you
-    can point at, missing precisely on the backend that was supposed to prove it.
-    """
-
-    NAMES = ("agents", "agents.models", "agents.models.chatcmpl_helpers")
-
-    def setUp(self):
-        assistant._USAGE_ASKED = False
-        self._saved = {name: sys.modules.get(name) for name in self.NAMES}
-
-    def tearDown(self):
-        assistant._USAGE_ASKED = False
-        for name, module in self._saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
-
-    def _install_sdk(self):
-        """The Agents SDK's helper, reduced to the decision being changed."""
-
-        class ChatCmplHelpers:
-            @classmethod
-            def is_openai(cls, client):
-                return str(client).startswith("https://api.openai.com")
-
-            @classmethod
-            def get_stream_options_param(cls, client, model_settings, stream):
-                if not stream:
-                    return None
-                default = True if cls.is_openai(client) else None
-                chosen = (
-                    model_settings.include_usage
-                    if model_settings.include_usage is not None
-                    else default
-                )
-                return {"include_usage": chosen} if chosen is not None else None
-
-        helpers = types.ModuleType("agents.models.chatcmpl_helpers")
-        helpers.ChatCmplHelpers = ChatCmplHelpers
-        models = types.ModuleType("agents.models")
-        models.chatcmpl_helpers = helpers
-        package = types.ModuleType("agents")
-        package.models = models
-        sys.modules.update({
-            "agents": package,
-            "agents.models": models,
-            "agents.models.chatcmpl_helpers": helpers,
-        })
-        return ChatCmplHelpers
-
-    def test_a_local_endpoint_is_asked_for_the_tokens_it_would_not_volunteer(self):
-        helpers = self._install_sdk()
-        settings = types.SimpleNamespace(include_usage=None)
-        local = "http://127.0.0.1:11434/v1"
-        self.assertIsNone(helpers.get_stream_options_param(local, settings, True))
-        assistant._ask_for_usage()
-        self.assertEqual(
-            helpers.get_stream_options_param(local, settings, True),
-            {"include_usage": True},
-        )
-
-    def test_openais_own_endpoint_decides_for_itself_as_before(self):
-        helpers = self._install_sdk()
-        assistant._ask_for_usage()
-        settings = types.SimpleNamespace(include_usage=None)
-        self.assertEqual(
-            helpers.get_stream_options_param("https://api.openai.com/v1", settings, True),
-            {"include_usage": True},
-        )
-
-    def test_an_operator_who_said_no_is_not_overruled(self):
-        helpers = self._install_sdk()
-        assistant._ask_for_usage()
-        settings = types.SimpleNamespace(include_usage=False)
-        self.assertEqual(
-            helpers.get_stream_options_param("http://127.0.0.1:11434/v1", settings, True),
-            {"include_usage": False},
-        )
-
-    def test_a_turn_that_is_not_streaming_is_left_alone(self):
-        helpers = self._install_sdk()
-        assistant._ask_for_usage()
-        settings = types.SimpleNamespace(include_usage=None)
-        self.assertIsNone(
-            helpers.get_stream_options_param("http://127.0.0.1:11434/v1", settings, False)
-        )
-
-    def test_a_runner_without_the_sdk_is_not_a_failure(self):
-        """Omnigent absent, or a version that moved the helper: still a no-op."""
-        sys.modules["agents.models.chatcmpl_helpers"] = None  # import raises
-        assistant._ask_for_usage()
-        self.assertTrue(assistant._USAGE_ASKED)
-
 
 
 # ------------------------------------------------------------------ billing

@@ -74,7 +74,6 @@ describe('getAssistantInfo', () => {
         base_url: 'http://127.0.0.1:11434',
         models: ['qwen2.5-coder:7b', 'llama3.1:8b'],
         tools: ['list_formats', 'validate_config'],
-        agent: '',
         version: '',
         hint: '',
         error: '',
