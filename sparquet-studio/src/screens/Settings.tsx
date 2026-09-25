@@ -784,7 +784,6 @@ function RunnerAssistantStatus({ info }: { info: AssistantInfo | null }) {
     { label: 'Endpoint', value: info.baseUrl || '—' },
     { label: 'Tools', value: info.tools.join(', ') || 'none' },
   ]
-  if (info.agent) rows.push({ label: 'Agent', value: info.agent })
 
   return (
     <div className="space-y-2 rounded-lg border border-line bg-surface-sunken p-3">

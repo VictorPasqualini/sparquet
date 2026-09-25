@@ -172,6 +172,7 @@ export function TeamsPanel() {
                             message:
                               'Its members move to the default team and keep their own roles. The ledger it built up stays where it is.',
                             confirmLabel: 'Delete',
+                            confirmName: team.name,
                             variant: 'danger',
                           })
                           if (!ok) return

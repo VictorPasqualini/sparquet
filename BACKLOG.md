@@ -965,12 +965,13 @@ arbitrária**: tudo aqui é, no fim, postura de segurança e de operação. Ele 
   sessão específica e lista de sessões abertas por usuário.
 - [ ] **Segundo fator** — o step-up de recuperação já mostra o padrão; falta TOTP para
   login e para operações sensíveis.
-- [ ] **Testes da camada HTTP** — **parcial**: `requires(...)` agora carrega `action` e
-  `resource` na própria closure, e `server/test_monitoring.py` varre `app.routes`
-  afirmando que toda rota de monitoramento declara permissão e que `PATCH`/`DELETE`
-  exigem `Manage`. Falta estender a varredura ao app inteiro — hoje nada afirma que é o
-  `PUT /workspace` que cobra `workspace:Write` — com uma tabela esperada de rota → ação
-  revisável num diff, e não só a checagem de que *alguma* permissão existe. Ver §11.
+- ✅ **Testes da camada HTTP** — `server/test_http.py` varre `app.routes` do app
+  inteiro: quais rotas são alcançáveis sem credencial (só `/health`, `/capabilities` e
+  `/assistant`, nomeadas uma a uma, para que uma rota nova sem guarda tenha de ser
+  incluída à mão por alguém que decidiu isso), a tabela rota → ação lida da closure de
+  `requires(...)` e revisável num diff, e que toda ação nomeada existe em
+  `auth.ACTIONS` — erro de digitação ali produz guarda que ninguém consegue conceder.
+  Ver §11.
 - [ ] **Principal de serviço** — quem chama `/run` sem ser uma pessoa (o agendador de
   §9.1, um CI, um script de madrugada) só tem o token compartilhado: tudo-ou-nada, sem
   papel, sem equipe que pague a conta e sem identidade própria no audit log, onde a
@@ -1667,12 +1668,66 @@ O que falta, na ordem em que dói:
   | O que quebrou | Por quê |
   |---|---|
   | Modelo pequeno **imprime** a tool call como texto | `ollama show` anuncia `tools` e o template existe, mas os pesos respondem `{"name": "validate_config", "arguments": {…}}` em prosa. Nada é despachado, o usuário lê um blob de JSON e o turno é medido com zero ferramentas. Não é o adaptador nem a rota: medido também nas rotas cruas (`/v1/chat/completions` e `/api/chat` nativa), com e sem streaming, a temperatura 0 — `tool_calls` volta vazio em todas. É modelo. Pela mesma pergunta, no prompt e nas ferramentas do runner: `qwen3:8b` 5 de 5, `llama3-groq-tool-use:8b` 3 de 6, `llama3.1:8b` 0 de 2, `qwen2.5-coder:7b` 0 de 2. O padrão do runner virou `qwen3:8b` — pensa antes de responder, então o turno leva dezenas de segundos, e é o preço de um que acerta. |
-  | Todo turno local era medido em zero token | O Agents SDK só manda `stream_options: {"include_usage": true}` quando reconhece o endpoint como o da própria OpenAI (`ChatCmplHelpers.is_openai` é um teste de prefixo em `https://api.openai.com`), e o Omnigent nunca define `include_usage`. Apontado para o Ollama, nenhum chunk traz bloco de usage e `TurnComplete.usage` chega vazio — justamente o número que faz "trouxemos o assistant para dentro" ser um fato verificável. O runner passou a pedir (`_ask_for_usage`), e só isso: `is_openai` também decide `store`, que um servidor local recusaria. |
+  | Todo turno local era medido em zero token | O Agents SDK só manda `stream_options: {"include_usage": true}` quando reconhece o endpoint como o da própria OpenAI (`ChatCmplHelpers.is_openai` é um teste de prefixo em `https://api.openai.com`), e o Omnigent nunca define `include_usage`. Apontado para o Ollama, nenhum chunk traz bloco de usage e `TurnComplete.usage` chega vazio — justamente o número que faz "trouxemos o assistant para dentro" ser um fato verificável. O runner passou a pedir (`_ask_for_usage`), e só isso: `is_openai` também decide `store`, que um servidor local recusaria. **Revertido** — ver o item seguinte. |
 
   `GET /assistant` no backend Omnigent também passou a listar os modelos do endpoint
   local, via `/v1/models` (vocabulário da OpenAI, não `/api/tags` do Ollama, porque a
   promessa aqui é só compatibilidade com OpenAI — llama.cpp e vLLM respondem igual).
   Sem isso o seletor de modelo da tela ficava vazio nesse backend.
+
+- ✅ **Três coisas que o Omnigent trouxe e saíram de novo** — a integração passou por
+  uma revisão do que ela custa ao projeto, e três peças foram retiradas porque cada uma
+  mentia de um jeito diferente:
+
+  | O que saiu | Por quê |
+  |---|---|
+  | O monkeypatch de `ChatCmplHelpers.get_stream_options_param` (`_ask_for_usage`) | Substituía um `classmethod` de uma classe privada do Agents SDK, no processo inteiro, no import, para ganhar um número que ninguém cobra: turno local é medido a custo zero de propósito. O preço era uma atualização do SDK derrubando o backend por um detalhe que não é contrato de ninguém. Sem ele, um endpoint que não oferece usage é gravado com zero — e a tela de Billing já dizia *No provider reported tokens* nesse caso, em vez de fingir turno grátis, então nada na interface mudou. Contagem de token agora é o que o endpoint oferecer. |
+  | `SPARQUET_STUDIO_OMNIGENT_AGENT` e o campo `agent` de `GET /assistant` | Documentado como "aponte para o seu YAML de agente", lido em `omnigent_agent_path()` e **nunca usado**: nenhum caminho de código carregava o arquivo. Prompt e ferramentas são de `server/assistant.py`, ponto. O campo saiu do `AssistantInfo` (Python e TS), do parser, da tela de Settings e do README. Documentação que promete o que não existe é pior que a ausência dela. |
+  | Despacho de evento por nome de classe, calado | O adaptador reconhece `TextFragment`, `ToolCallStarted` e `TurnComplete` pelo `__class__.__name__`; um pacote que renomeie um deles deixa de ser entendido sem dizer nada, e o usuário vê resposta vazia. Continua tolerante enquanto o turno responde — o Omnigent vai ganhar eventos que este adaptador nunca ouviu falar —, mas um turno que terminou sem nada agora falha nomeando o que chegou: *"The agent ended the turn without an answer. It sent: TextFragment."* Turno que erra não grava linha em `assist_usage`, igual ao caminho de `ExecutorError` que já existia. |
+
+  Nada disso mexeu no contrato do SSE nem no banco: sem campo novo, sem migração, sem
+  tocar no `Protocol` de `CreditLedger` que provider de terceiro implementa. 61 testes
+  em `server/test_assistant.py` e os 6 de `server/test_omnigent_live.py` (Omnigent
+  0.14.0 instalado, turno real) passam, e o Studio segue com typecheck e suíte limpos.
+
+- ✅ **O Omnigent saiu do projeto** — removido em 2026-09-25, depois de responder à
+  pergunta que a integração existia para responder: o que um runtime de agente traz
+  além do laço de ferramentas que já está em `server/assistant.py`. A resposta é
+  sub-agentes, políticas e MCP — e nada no runner usa nenhum dos três. O que o
+  adaptador custava, por outro lado, era concreto: ~320 linhas presas a superfícies
+  privadas de terceiros (`OpenAIAgentsSDKExecutor`, `_tool_executor`, despacho por
+  nome de classe), um piso de Python 3.12 e quatro divergências silenciosas já
+  encontradas — nenhuma delas pega por teste com fake, todas encontradas só com o
+  pacote instalado. Saíram `OmnigentBackend`, `_omnigent*`, `FLAT_TOOL_SPECS`,
+  `server/test_omnigent_live.py`, a seção do `server/README.md` e o valor
+  `omnigent` de `SPARQUET_STUDIO_ASSISTANT`, que agora aceita só `ollama` ou `off`.
+  A costura continua: um segundo backend é um `stream()` que devolve os mesmos
+  `Event`, que é o contrato de que `/assistant` e `credits.record_assist` dependem.
+  `server/test_assistant.py` foi de 61 para 36 testes — nenhum deles perdido por
+  cobertura, todos os 25 eram do adaptador removido; `test_credits.py` (89) segue
+  passando e o Studio segue com typecheck limpo.
+
+- ✅ **Um assistente só, nos dois lugares** — a tela em `/` e o painel do canvas eram dois
+  chats diferentes: o da tela não tinha intents, nem proposta aplicável, nem aviso de
+  runner fora do ar; o do painel descartava as chamadas de ferramenta que o runner
+  reportava. Agora os dois renderizam `src/components/ai/AiConversation.tsx`, e a única
+  diferença é a que a situação impõe: o painel injeta pipeline, lint e nó selecionado —
+  lidos no momento do envio, não no render, porque o canvas se move entre digitar e
+  enviar — e Aplicar reconstrói o Job aberto; em `/` não há Job, nada sobre pipeline é
+  enviado e Aplicar abre `CreateJobFromProposal`, que escolhe o Workflow (ou cria um),
+  nomeia o Job pelo `name` da própria proposta e navega para ele. `AiPanel` e
+  `Assistant` viraram invólucros finos.
+- ✅ **A ferramenta de IA afirmada ponta a ponta** — `src/lib/ai/prompt.test.ts` segura o
+  que o prompt promete: toda transformação, formato e validador do catálogo aparece nele
+  (entrada de catálogo sem linha no prompt é capacidade que a Studio tem e o assistente
+  nega, e o sintoma parece modelo ruim), a divisão legível/gravável por formato, o
+  `input` que a segunda fonte de um join exige — no canvas é uma aresta, no JSON tem
+  nome — e o que o prompt do usuário carrega quando o contexto está desligado.
+  `src/lib/ai/proposal.test.ts` percorre o trecho que ninguém segurava: resposta com
+  prosa e bloco cercado → `extractProposalFor` → `pipelineToGraph` → `lintJob` →
+  `compileGraph`, com o JSON que sai igual ao proposto. Inclui a regressão de
+  `column: "order_id"` no singular, que o linter tem de pegar antes da execução porque o
+  framework itera o valor e caminharia caractere a caractere.
 
 - [ ] **Agir, não só olhar** — criar o Job que acabou de descrever, rodar, corrigir o
   que o linter apontou. As ferramentas de escrita são a parte que falta, e cada uma
@@ -1840,16 +1895,26 @@ a que fechou:
   do incluído, caminho relativo a quem escreveu o include, aninhamento, ciclo com o
   percurso na mensagem, `FileNotFoundError` nomeando o arquivo, e o limite que resta —
   só vale em `transformations`.
-- [ ] **Camada HTTP do runner (`sparquet-studio/server/main.py`)** — os módulos de apoio
-  já têm teste (`history.py`, `auth.py`, `workspace.py`, `credits.py`) e o escopo de
-  execução também (`test_run_scope.py`), mas a **camada HTTP em si não tem nenhum**:
-  token, allow-list de origem, a sequência de eventos SSE, o status por estágio do
-  `/run/flow/stream` e a dependência `requires(...)` que liga cada rota à ação que
-  ela exige — o avaliador de política está pinado, mas nada afirma que é o
-  `PUT /workspace` que cobra `workspace:Write`. É o único componente que executa
-  conf arbitrária, e a postura de segurança dele quebra em silêncio. `TestClient` do
-  FastAPI cobre sem Spark — **exige `httpx` no ambiente de teste**, que hoje não
-  está instalado (foi o que impediu de já fechar esta lacuna).
+- ✅ **Camada HTTP do runner (`sparquet-studio/server/main.py`)** — `server/test_http.py`,
+  17 testes com o `TestClient` do FastAPI e `_execute_run` trocado por um fake: sem JVM,
+  sem rede, sem processo de servidor. Guarda: a varredura de `app.routes` acima, 401 sem
+  token com o texto nomeando o header, 403 de origem estranha mesmo com o token certo,
+  401 de token errado, 200 com token e origem da Studio. Fio: a ordem de quadros
+  `start → stage_start → log → stage_result … → result` do `/run/flow/stream`, o
+  `stage_id` em cada linha de log (a fila é FIFO justamente para que a linha de um
+  estágio não seja atribuída ao vizinho), o status por estágio, o estágio que falha
+  parando o fluxo e anunciando os seguintes como `stage_skipped`, `stop_on_error: false`
+  seguindo em frente, e o `/run/stream` de um Job só.
+  **A varredura achou um buraco de verdade na primeira execução**: onze rotas — `/run`,
+  `/run/stream`, `/run/flow/stream`, `/auth/me`, `/iam/access`,
+  `/auth/users/{user_id}/password`, `/credits/me`, `/credits/usage`,
+  `/credits/timeline`, `/credits/assist` e `/credits/{account_id}/ledger` — dependiam só
+  de `Depends(current_principal)`, que resolve identidade e **não** chama
+  `require_token` nem `_check_origin`. `POST /run` sem token nenhum e com
+  `Origin: http://evil.example` respondia 200 e executava a conf. Corrigido com
+  `dependencies=[Depends(require_token)]` nas onze; o agendador não é afetado porque
+  chama `run_flow_stream(...)` como função, não pela rota. Os 26 arquivos de teste de
+  `server/` seguem verdes depois da mudança.
 - ✅ **`mode: merge` (Delta e Iceberg)** — em
   `tests/io/integration/test_lakehouse_spark.py`, com jar de verdade e pulando-se
   sozinho quando ele falta: upsert (atualiza o que casa, insere o que não casa),

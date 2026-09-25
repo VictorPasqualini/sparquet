@@ -147,6 +147,7 @@ export function RolesPanel() {
                           message:
                             'It is refused while anyone still holds it — move those people to another role first.',
                           confirmLabel: 'Delete',
+                          confirmName: role.name,
                           variant: 'danger',
                         })
                         if (!ok) return

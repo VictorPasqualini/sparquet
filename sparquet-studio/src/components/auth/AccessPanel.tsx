@@ -15,7 +15,17 @@ import { KeyRound, ShieldCheck, Trash2, UserPlus } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
-import { Badge, Button, Field, Input, Modal, Select, Spinner, Toggle } from '@/components/ui'
+import {
+  Badge,
+  Button,
+  Field,
+  Input,
+  Modal,
+  Select,
+  Spinner,
+  Toggle,
+  useConfirm,
+} from '@/components/ui'
 import { useAuthStore } from '@/store/auth'
 import type { AuthRole, AuthTeam, AuthUser, RecoveryCode } from '@/types/auth'
 
@@ -37,6 +47,7 @@ export function AccessPanel() {
   const removeUser = useAuthStore((state) => state.removeUser)
   const changePassword = useAuthStore((state) => state.changePassword)
   const issueRecovery = useAuthStore((state) => state.issueRecovery)
+  const [confirm, confirmDialog] = useConfirm()
 
   const [users, setUsers] = useState<AuthUser[] | null>(null)
   const [roles, setRoles] = useState<AuthRole[]>([])
@@ -155,6 +166,16 @@ export function AccessPanel() {
                     await reload()
                   }}
                   onDelete={async () => {
+                    // Removing a person is not a setting: their grants, their
+                    // sessions and the name on everything they ran go with them.
+                    const ok = await confirm({
+                      title: `Remove ${user.username}?`,
+                      message:
+                        'They lose access at once and their sessions stop working. What they ran stays in the history under this name.',
+                      confirmLabel: 'Remove',
+                      confirmName: user.username,
+                    })
+                    if (!ok) return
                     await removeUser(user.id)
                     await reload()
                   }}
@@ -170,6 +191,8 @@ export function AccessPanel() {
           )}
         </div>
       ) : null}
+
+      {confirmDialog}
 
       <CreateUserDialog
         open={createOpen}

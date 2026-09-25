@@ -65,6 +65,12 @@ export interface AiMessage {
   content: string
   intent?: AiIntent
   createdAt: number
+  /**
+   * Tools the runner called while answering, in call order. Shown because an
+   * answer that went and read the installed formats is worth more than one that
+   * recalled them, and the prose alone does not tell those two apart.
+   */
+  tools?: string[]
   /** Pipeline JSON proposed by the assistant, when the reply contained one. */
   proposal?: {
     pipeline: unknown

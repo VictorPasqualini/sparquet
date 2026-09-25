@@ -504,10 +504,10 @@ class AssistTurn:
     id: str
     account_id: str
     period: str
-    #: `ollama` or `omnigent` — which runtime answered, not which model.
+    #: Which runtime answered, not which model — `ollama` today.
     backend: str
     #: Where the tokens were actually spent. `ollama` for a local model; the
-    #: provider id for anything Omnigent routed outward.
+    #: provider id for a turn a gateway routed outward.
     provider: str
     model: str
     local: bool

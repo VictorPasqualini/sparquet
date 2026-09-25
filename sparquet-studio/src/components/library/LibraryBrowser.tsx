@@ -408,6 +408,7 @@ function FileDetail({ file, workflowId, onDeleted }: FileDetailProps) {
         </>
       ),
       confirmLabel: 'Delete from disk',
+      confirmName: file.name,
     })
     if (!confirmed) return
     setBusy(true)

@@ -121,7 +121,7 @@ describe('detectLocalAi', () => {
 
   it('ignores a runner whose assistant is not local, so nothing silently bills', async () => {
     routes({
-      '/assistant': jsonResponse({ backend: 'omnigent', available: true, local: false }),
+      '/assistant': jsonResponse({ backend: 'ollama', available: true, local: false }),
     })
 
     expect(await detectLocalAi(RUNNER)).toBeNull()

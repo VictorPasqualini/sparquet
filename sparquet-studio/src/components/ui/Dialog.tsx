@@ -1,10 +1,11 @@
 import * as RadixDialog from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useId, useState, type KeyboardEvent, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils/cn'
 
 import { Button, type ButtonVariant } from './Button'
+import { Field, Input } from './Field'
 
 export interface ModalProps {
   open: boolean
@@ -92,6 +93,14 @@ export interface ConfirmOptions {
   confirmLabel?: string
   cancelLabel?: string
   variant?: ButtonVariant
+  /**
+   * Name of the thing being destroyed. Set it and the confirm button stays
+   * disabled until the reader types that name back, the way AWS asks before it
+   * deletes something that does not come back: a dialog answered by reflex is
+   * not an approval, and the one place the reflex breaks is having to read the
+   * name and write it out.
+   */
+  confirmName?: string
 }
 
 /**
@@ -99,6 +108,9 @@ export interface ConfirmOptions {
  *
  * const [confirm, confirmDialog] = useConfirm()
  * if (await confirm({ title: 'Delete workflow', message: '…' })) { … }
+ *
+ * Pass `confirmName` for anything irreversible with a name of its own and the
+ * dialog asks for that name to be typed before it will confirm.
  */
 export function useConfirm(): [
   (options: ConfirmOptions) => Promise<boolean>,
@@ -108,14 +120,26 @@ export function useConfirm(): [
     options: ConfirmOptions
     resolve: (value: boolean) => void
   } | null>(null)
+  const [typed, setTyped] = useState('')
+  const inputId = useId()
 
   const confirm = (options: ConfirmOptions) =>
-    new Promise<boolean>((resolve) => setState({ options, resolve }))
+    new Promise<boolean>((resolve) => {
+      // Cleared here and not on close: a dialog that reopens still holding the
+      // last name typed would confirm the next deletion on one click.
+      setTyped('')
+      setState({ options, resolve })
+    })
 
   const settle = (value: boolean) => {
     state?.resolve(value)
     setState(null)
   }
+
+  const required = state?.options.confirmName?.trim() ?? ''
+  // Trimmed because a name copied out of a table brings whitespace with it;
+  // case is not, since two objects may differ only by it.
+  const matches = required === '' || typed.trim() === required
 
   const dialog = state ? (
     <Modal
@@ -130,13 +154,45 @@ export function useConfirm(): [
           <Button variant="ghost" onClick={() => settle(false)}>
             {state.options.cancelLabel ?? 'Cancel'}
           </Button>
-          <Button variant={state.options.variant ?? 'danger'} onClick={() => settle(true)}>
+          <Button
+            variant={state.options.variant ?? 'danger'}
+            disabled={!matches}
+            onClick={() => settle(true)}
+          >
             {state.options.confirmLabel ?? 'Confirm'}
           </Button>
         </>
       }
     >
-      <div className="text-sm leading-relaxed text-content-muted">{state.options.message}</div>
+      <div className="space-y-3">
+        <div className="text-sm leading-relaxed text-content-muted">{state.options.message}</div>
+        {required !== '' && (
+          <Field
+            label="Confirm the name"
+            htmlFor={inputId}
+            help={
+              <>
+                Type <span className="font-mono text-content">{required}</span> to enable the
+                button.
+              </>
+            }
+          >
+            <Input
+              id={inputId}
+              mono
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              value={typed}
+              placeholder={required}
+              onChange={(event) => setTyped(event.target.value)}
+              onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                if (event.key === 'Enter' && matches) settle(true)
+              }}
+            />
+          </Field>
+        )}
+      </div>
     </Modal>
   ) : null
 

@@ -74,7 +74,6 @@ describe('getAssistantInfo', () => {
         base_url: 'http://127.0.0.1:11434',
         models: ['qwen2.5-coder:7b', 'llama3.1:8b'],
         tools: ['list_formats', 'validate_config'],
-        agent: '',
         version: '',
         hint: '',
         error: '',
@@ -97,18 +96,18 @@ describe('getAssistantInfo', () => {
   it('keeps the hint when the runner cannot answer, because it says what to do', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse({
-        backend: 'omnigent',
+        backend: 'ollama',
         available: false,
         local: true,
-        error: 'Omnigent is not installed on this runner.',
-        hint: '"pip install omnigent" (Python 3.12 or newer)',
+        error: 'No model is pulled on this machine.',
+        hint: 'ollama pull qwen3:8b',
       }),
     )
 
     const info = await getAssistantInfo()
 
     expect(info.available).toBe(false)
-    expect(info.hint).toContain('pip install omnigent')
+    expect(info.hint).toContain('ollama pull')
   })
 
   it('treats an older runner that says nothing as local rather than as billable', async () => {

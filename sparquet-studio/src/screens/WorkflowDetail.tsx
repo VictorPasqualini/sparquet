@@ -204,6 +204,7 @@ export function WorkflowDetail() {
         </>
       ),
       confirmLabel: 'Delete workflow',
+      confirmName: workflow.name,
     })
     if (!confirmed) return
     await deleteWorkflow(workflow.id)
@@ -236,6 +237,7 @@ export function WorkflowDetail() {
         </>
       ),
       confirmLabel: 'Delete',
+      confirmName: job.name,
     })
     if (!confirmed) return
     await deleteJob(job.id)
@@ -252,6 +254,7 @@ export function WorkflowDetail() {
         </>
       ),
       confirmLabel: 'Delete',
+      confirmName: pipeline.name,
     })
     if (!confirmed) return
     await deletePipeline(pipeline.id)

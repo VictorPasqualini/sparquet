@@ -10,7 +10,7 @@
 
 /** What `GET /assistant` answers: whether it can answer, and with what. */
 export interface AssistantInfo {
-  /** `ollama`, `omnigent`, or `off`. */
+  /** `ollama` or `off`. */
   backend: string
   available: boolean
   /** The model answers on the runner's own machine, so the turn costs nothing. */
@@ -21,8 +21,6 @@ export interface AssistantInfo {
   models: string[]
   /** Tools the assistant may call — the runner's, not the browser's. */
   tools: string[]
-  /** The Omnigent agent file in use, when that backend is the one answering. */
-  agent: string
   version: string
   /** What to do about it, when `available` is false. Written by the runner. */
   hint: string
