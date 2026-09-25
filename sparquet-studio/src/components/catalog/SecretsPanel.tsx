@@ -278,6 +278,7 @@ function SecretRow({ secret, editable }: { secret: Secret; editable: boolean }) 
       message:
         'Every Job, query and schema read that references it stops working at once, and the material cannot be recovered from here.',
       confirmLabel: 'Delete',
+      confirmName: secret.name,
       variant: 'danger',
     })
     if (!ok) return

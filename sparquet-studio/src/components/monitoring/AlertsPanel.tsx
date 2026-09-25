@@ -403,6 +403,7 @@ export function AlertsPanel() {
                               // nobody can read.
                               message: `“${monitor.name ?? monitor.rule}” stops being checked, and the alerts it raised stop being listed. The runs themselves stay in the history.`,
                               confirmLabel: 'Delete',
+                              confirmName: monitor.name ?? monitor.rule,
                               variant: 'danger',
                             })
                             if (ok) await act(() => deleteMonitor(monitor.id, url, token))

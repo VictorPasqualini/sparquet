@@ -10,7 +10,7 @@
 
 /** What `GET /assistant` answers: whether it can answer, and with what. */
 export interface AssistantInfo {
-  /** `ollama`, `omnigent`, or `off`. */
+  /** `ollama` or `off`. */
   backend: string
   available: boolean
   /** The model answers on the runner's own machine, so the turn costs nothing. */

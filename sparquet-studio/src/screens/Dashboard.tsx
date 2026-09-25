@@ -148,6 +148,7 @@ export function Dashboard() {
         </>
       ),
       confirmLabel: 'Delete',
+      confirmName: job.name,
     })
     if (!confirmed) return
     await deleteJob(job.id)

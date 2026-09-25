@@ -17,6 +17,13 @@ export interface ProposalCardProps {
   onApply: () => void
   onView: () => void
   applied?: boolean
+  /**
+   * What accepting it does, which is not the same everywhere: beside the canvas
+   * it rebuilds the open job, and at the front door there is no job yet, so it
+   * makes one. The button says which.
+   */
+  applyLabel?: string
+  appliedLabel?: string
 }
 
 export function ProposalCard({
@@ -24,6 +31,8 @@ export function ProposalCard({
   onApply,
   onView,
   applied = false,
+  applyLabel = 'Apply to canvas',
+  appliedLabel = 'Applied',
 }: ProposalCardProps) {
   const stats = readStats(proposal.pipeline)
 
@@ -87,7 +96,7 @@ export function ProposalCard({
           icon={<Check className="h-3 w-3" />}
           className="flex-1"
         >
-          {applied ? 'Applied' : 'Apply to canvas'}
+          {applied ? appliedLabel : applyLabel}
         </Button>
         <Button
           size="xs"

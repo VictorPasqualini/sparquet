@@ -945,6 +945,7 @@ export function SqlEditor() {
       title: `Delete ${tab.name}?`,
       message: 'The file goes from the library. The tab stays open as a draft.',
       confirmLabel: 'Delete',
+      confirmName: tab.name,
       variant: 'danger',
     })
     if (!ok) return

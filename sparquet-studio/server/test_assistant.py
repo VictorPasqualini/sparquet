@@ -4,10 +4,10 @@ Stdlib only, like the rest of the server's tests:
 
     python sparquet-studio/server/test_assistant.py
 
-Nothing here talks to a model. Ollama is replaced by the frames it would have
-sent, and Omnigent by a module with the three names the adapter uses — which is
-the point: what is being protected is the code between the model and the
-runner, and that code has to be right on a machine where neither is installed.
+Nothing here talks to a model: Ollama is replaced by the frames it would have
+sent, which is the point — what is being protected is the code between the model
+and the runner, and that code has to be right on a machine where no model is
+installed.
 
 Four things are worth breaking a build over.
 
@@ -30,10 +30,8 @@ fact rather than an absence of rows.
 """
 from __future__ import annotations
 
-import importlib.metadata
 import json
 import os
-import sys
 import tempfile
 import types
 import unittest
@@ -68,10 +66,6 @@ class SettingsTests(unittest.TestCase):
     def test_the_default_backend_is_the_local_one(self):
         self.assertEqual(assistant.backend_name(), "ollama")
         self.assertIsInstance(assistant.build(), assistant.OllamaBackend)
-
-    def test_omnigent_is_opt_in(self):
-        os.environ["SPARQUET_STUDIO_ASSISTANT"] = "omnigent"
-        self.assertIsInstance(assistant.build(), assistant.OmnigentBackend)
 
     def test_a_runner_can_refuse_to_answer_at_all(self):
         os.environ["SPARQUET_STUDIO_ASSISTANT"] = "off"
@@ -315,340 +309,6 @@ class OllamaDescribeTests(unittest.TestCase):
         self.assertIn("not pulled yet", detail["hint"])
 
 
-# ----------------------------------------------------------------- omnigent
-
-
-def _event(class_name, **fields):
-    """One of Omnigent's executor events.
-
-    The adapter dispatches on the class name, so the fakes have to carry the
-    real ones — a fake that answered the right attributes under the wrong class
-    would pass a test the real Omnigent fails.
-    """
-    return type(class_name, (), fields)()
-
-
-def _fake_omnigent(events):
-    """A module with the three names the adapter touches, and nothing else.
-
-    No `__version__`: the real 0.14.0 does not export one either, and a fake
-    that did would hide the fact that `describe()` has to ask the distribution
-    metadata instead.
-    """
-    module = types.ModuleType("omnigent")
-
-    class Message:
-        def __init__(self, role, content):
-            self.role, self.content = role, content
-
-    class ExecutorConfig:
-        def __init__(self, model=None):
-            self.model = model
-
-    class OpenAIAgentsSDKExecutor:
-        seen = {}
-        calls = []
-        instance = None
-
-        # Keyword-only, and exactly these names: the real constructor rejects an
-        # `auth` keyword, and defaults `use_responses` to True — the endpoint
-        # Ollama does not implement. A fake that accepted anything would have
-        # let both mistakes ship.
-        def __init__(self, *, api_key=None, base_url_override=None, use_responses=True):
-            OpenAIAgentsSDKExecutor.seen = {
-                "api_key": api_key,
-                "base_url_override": base_url_override,
-                "use_responses": use_responses,
-            }
-            self._tool_executor = None
-            OpenAIAgentsSDKExecutor.instance = self
-
-        def run_turn(self, messages, tools, system_prompt, config=None):
-            OpenAIAgentsSDKExecutor.calls.append(
-                {"messages": messages, "tools": tools, "system": system_prompt,
-                 "config": config}
-            )
-
-            async def _iterate():
-                for event in events:
-                    yield event
-
-            return _iterate()
-
-    module.Message = Message
-    module.ExecutorConfig = ExecutorConfig
-    module.OpenAIAgentsSDKExecutor = OpenAIAgentsSDKExecutor
-    return module
-
-
-class OmnigentTests(unittest.TestCase):
-    """The adapter, against a module that is not installed on this machine."""
-
-    def setUp(self):
-        self._previous = sys.modules.get("omnigent")
-
-    def tearDown(self):
-        if self._previous is None:
-            sys.modules.pop("omnigent", None)
-        else:
-            sys.modules["omnigent"] = self._previous
-
-    def _stream(self, events, base_url="http://127.0.0.1:11434"):
-        self.module = _fake_omnigent(events)
-        self.module.OpenAIAgentsSDKExecutor.calls = []
-        sys.modules["omnigent"] = self.module
-        backend = assistant.OmnigentBackend(base_url=base_url, model="m")
-        return list(backend.stream([{"role": "user", "content": "q"}]))
-
-    # ---- what is absent
-
-    def test_a_runner_without_omnigent_says_what_to_install(self):
-        sys.modules["omnigent"] = None  # importing None raises ImportError
-        detail = assistant.OmnigentBackend().describe()
-        self.assertFalse(detail["available"])
-        self.assertIn("pip install omnigent", detail["hint"])
-
-    def test_an_installed_omnigent_reports_its_version_and_tools(self):
-        sys.modules["omnigent"] = _fake_omnigent([])
-        detail = assistant.OmnigentBackend().describe()
-        self.assertTrue(detail["available"])
-        self.assertIn("validate_config", detail["tools"])
-
-    def test_no_agent_file_is_claimed_because_none_is_ever_loaded(self):
-        """The prompt and the tools are this module's, and nothing reads a YAML.
-
-        The field used to be reported anyway, which put `Agent: (built in)` on
-        the Settings screen and a configurable agent path in the README — a
-        promise no code kept.
-        """
-        sys.modules["omnigent"] = _fake_omnigent([])
-        self.assertNotIn("agent", assistant.OmnigentBackend().describe())
-
-    def test_the_version_comes_from_the_metadata_when_the_module_has_none(self):
-        """0.14.0 exports no `__version__`, and "unknown" is not a report."""
-        module = _fake_omnigent([])
-        self.assertFalse(hasattr(module, "__version__"))
-        sys.modules["omnigent"] = module
-        try:
-            expected = importlib.metadata.version("omnigent")
-        except importlib.metadata.PackageNotFoundError:
-            self.skipTest("omnigent is not installed here")
-        self.assertEqual(assistant.OmnigentBackend().describe()["version"], expected)
-
-    # ---- the events
-
-    def test_text_chunks_become_deltas(self):
-        events = self._stream([_event("TextChunk", text="hi")])
-        self.assertEqual(events[0].kind, "delta")
-        self.assertEqual(events[0].text, "hi")
-
-    def test_a_tool_call_is_reported_and_counted(self):
-        events = self._stream(
-            [
-                _event("ToolCallRequest", name="list_formats", args={}, metadata={}),
-                _event("TurnComplete", response="ok", continue_turn=False, usage=None),
-            ]
-        )
-        call = next(event for event in events if event.kind == "tool")
-        self.assertEqual(call.name, "list_formats")
-        self.assertEqual(events[-1].usage.tool_calls, 1)
-
-    def test_a_finished_tool_call_carries_its_result(self):
-        events = self._stream(
-            [_event("ToolCallComplete", name="list_formats", status="ok",
-                    result={"read": []})]
-        )
-        self.assertEqual(events[0].kind, "tool")
-        self.assertEqual(events[0].result, {"read": []})
-
-    def test_an_executor_error_ends_the_turn(self):
-        events = self._stream(
-            [
-                _event("ExecutorError", message="the harness died"),
-                _event("TextChunk", text="never reached"),
-            ]
-        )
-        self.assertEqual([event.kind for event in events], ["error"])
-        self.assertIn("the harness died", events[0].text)
-
-    def test_a_turn_that_never_streamed_still_says_something(self):
-        events = self._stream(
-            [_event("TurnComplete", response="the answer", continue_turn=False,
-                    usage=None)]
-        )
-        self.assertEqual(events[0].kind, "delta")
-        self.assertEqual(events[0].text, "the answer")
-
-    def test_a_streamed_answer_is_not_repeated_at_the_end(self):
-        events = self._stream(
-            [
-                _event("TextChunk", text="hello"),
-                _event("TurnComplete", response="hello", continue_turn=False,
-                       usage=None),
-            ]
-        )
-        self.assertEqual([event.text for event in events if event.kind == "delta"],
-                         ["hello"])
-
-    def test_usage_is_taken_from_the_harness_when_it_reports_any(self):
-        events = self._stream(
-            [_event("TurnComplete", response="hi", continue_turn=False,
-                    usage={"input_tokens": 12, "output_tokens": 3})]
-        )
-        done = events[-1]
-        self.assertEqual(done.kind, "done")
-        self.assertEqual(done.usage.input_tokens, 12)
-        self.assertEqual(done.usage.output_tokens, 3)
-        self.assertEqual(done.usage.provider, "omnigent")
-        self.assertEqual(done.usage.model, "m")
-
-    def test_a_harness_that_reports_nothing_still_closes_the_turn(self):
-        events = self._stream(
-            [_event("TurnComplete", response="hi", continue_turn=False, usage=None)]
-        )
-        self.assertEqual(events[-1].kind, "done")
-        self.assertEqual(events[-1].usage.input_tokens, 0)
-
-    def test_an_unknown_event_is_ignored_rather_than_fatal(self):
-        """Omnigent will grow events this adapter has never heard of."""
-        events = self._stream(
-            [
-                _event("ThinkingChunk", text="hmm"),
-                _event("TurnComplete", response="hi", continue_turn=False, usage=None),
-            ]
-        )
-        self.assertEqual([event.kind for event in events], ["delta", "done"])
-
-    def test_a_turn_that_answered_nothing_names_what_it_did_get(self):
-        """The failure mode of dispatching on class names, made loud.
-
-        Rename `TextChunk` upstream and every turn goes quiet: no delta, no
-        error, a `done` reading zero in and zero out. Tolerating the unknown
-        event is right — the turn above still answered — but tolerating a turn
-        that answered nothing is how a broken adapter looks healthy.
-        """
-        events = self._stream([_event("TextFragment", text="hi")])
-        self.assertEqual([event.kind for event in events], ["error"])
-        self.assertIn("TextFragment", events[0].text)
-
-    def test_a_turn_with_no_events_at_all_still_ends_in_words(self):
-        events = self._stream([])
-        self.assertEqual([event.kind for event in events], ["error"])
-        self.assertIn("without an answer", events[0].text)
-
-    # ---- where the tokens were spent
-
-    def test_a_loopback_model_is_local_and_anything_else_is_not(self):
-        self.assertTrue(assistant.OmnigentBackend(base_url="http://127.0.0.1:11434").local)
-        self.assertTrue(assistant.OmnigentBackend(base_url="http://localhost:11434").local)
-        # A GPU box on the next desk is somebody else's compute, and the ledger's
-        # question is whether this runner paid for it.
-        self.assertFalse(assistant.OmnigentBackend(base_url="http://gpu.local:11434").local)
-        self.assertFalse(assistant.OmnigentBackend(base_url="https://api.openai.com").local)
-
-    def test_the_done_event_carries_where_it_ran(self):
-        events = self._stream(
-            [_event("TurnComplete", response="hi", continue_turn=False, usage=None)],
-            base_url="https://api.openai.com",
-        )
-        self.assertFalse(events[-1].usage.local)
-
-    # ---- how it is wired
-
-    def test_it_is_pointed_at_the_openai_compatible_face_of_ollama(self):
-        self.assertEqual(
-            assistant.OmnigentBackend(base_url="http://127.0.0.1:11434/").base_url,
-            "http://127.0.0.1:11434/v1",
-        )
-        self._stream([_event("TurnComplete", response="hi", continue_turn=False,
-                             usage=None)])
-        seen = self.module.OpenAIAgentsSDKExecutor.seen
-        self.assertEqual(seen["base_url_override"], "http://127.0.0.1:11434/v1")
-        # `/responses` is the constructor default and Ollama does not implement
-        # it, so leaving it alone breaks the backend it is pointed at by default.
-        self.assertFalse(seen["use_responses"])
-        # Ollama checks no key and the SDK refuses to build a client without one.
-        self.assertTrue(seen["api_key"])
-
-    def test_the_tools_are_dispatched_by_us_and_not_left_unanswered(self):
-        """Omnigent calls a private attribute its own adapter assigns."""
-        self._stream([_event("TurnComplete", response="hi", continue_turn=False,
-                             usage=None)])
-        run = self.module.OpenAIAgentsSDKExecutor.instance._tool_executor
-        self.assertIsNotNone(run)
-        self.assertIn("There is no tool called", run("nope", {})["error"])
-        self.assertFalse(run("validate_config", {"config": "not json"})["valid"])
-
-    def test_the_runners_tools_and_prompt_are_handed_over(self):
-        self._stream([_event("TurnComplete", response="hi", continue_turn=False,
-                             usage=None)])
-        call = self.module.OpenAIAgentsSDKExecutor.calls[0]
-        # Flat, not OpenAI-shaped: Omnigent reads the name off the top of the
-        # spec, and a spec whose name it cannot find is skipped silently — an
-        # assistant with no tools rather than an error anybody would notice.
-        self.assertEqual(
-            [spec["name"] for spec in call["tools"]],
-            [tool.name for tool in assistant.TOOLS],
-        )
-        self.assertTrue(all("parameters" in spec for spec in call["tools"]))
-        self.assertIn("Workflow", call["system"])
-        self.assertEqual(call["config"].model, "m")
-        # Dicts: the executor reads `.get("role")` off each message, whatever
-        # the `list[Message]` annotation on `run_turn` says.
-        self.assertEqual(call["messages"][0]["content"], "q")
-        self.assertEqual(call["messages"][0]["role"], "user")
-
-    def test_every_turn_gets_a_session_of_its_own(self):
-        """Omnigent replays a session's history; ours already carries it."""
-        keys = set()
-        for _ in range(2):
-            self._stream([_event("TurnComplete", response="hi", continue_turn=False,
-                                 usage=None)])
-            keys.add(self.module.OpenAIAgentsSDKExecutor.calls[-1]["messages"][-1]["session_id"])
-        self.assertEqual(len(keys), 2)
-
-
-class OmnigentModelTests(unittest.TestCase):
-    """What the Studio's model picker is offered when the backend is Omnigent."""
-
-    def setUp(self):
-        self._get_json = assistant._get_json
-
-    def tearDown(self):
-        assistant._get_json = self._get_json
-
-    def _answer(self, body):
-        seen = {}
-
-        def fake(url, timeout=None):
-            seen["url"] = url
-            if isinstance(body, Exception):
-                raise body
-            return body
-
-        assistant._get_json = fake
-        return seen
-
-    def test_a_local_endpoint_lists_what_it_will_serve(self):
-        """`/v1/models`, because the promise here is OpenAI-compatible."""
-        seen = self._answer({"data": [{"id": "qwen2.5-coder:7b"}, {"id": "llama3.1:8b"}]})
-        backend = assistant.OmnigentBackend(base_url="http://127.0.0.1:11434", model="m")
-        self.assertEqual(backend.models(), ["llama3.1:8b", "qwen2.5-coder:7b"])
-        self.assertEqual(seen["url"], "http://127.0.0.1:11434/v1/models")
-
-    def test_a_hosted_endpoint_is_not_asked(self):
-        """Its catalogue is thousands long and some plans bill for the call."""
-        seen = self._answer({"data": [{"id": "gpt-4o"}]})
-        backend = assistant.OmnigentBackend(base_url="https://api.openai.com", model="m")
-        self.assertEqual(backend.models(), [])
-        self.assertNotIn("url", seen)
-
-    def test_a_server_that_is_down_leaves_the_picker_to_typing(self):
-        self._answer(OSError("refused"))
-        backend = assistant.OmnigentBackend(base_url="http://127.0.0.1:9", model="m")
-        self.assertEqual(backend.models(), [])
-
-
 # ------------------------------------------------------------------ billing
 
 
@@ -677,7 +337,7 @@ class AssistMeteringTests(unittest.TestCase):
 
     def _remote(self, **extra):
         return self.store.record_assist(
-            "t1", backend="omnigent", provider="omnigent", model="gpt-4.1",
+            "t1", backend="ollama", provider="gateway", model="gpt-4.1",
             local=False, input_tokens=100, output_tokens=40, **extra,
         )
 

@@ -3411,7 +3411,11 @@ def capabilities() -> CapabilitiesResponse:
     )
 
 
-@app.post("/run", response_model=RunResponse)
+@app.post(
+    "/run",
+    response_model=RunResponse,
+    dependencies=[Depends(require_token)],
+)
 def run(body: RunRequest, principal: Any = Depends(current_principal)) -> RunResponse:
     # Authorized here rather than through `Depends(requires(...))`: the Job being
     # run is in the body, so this is the first point where the permission can be
@@ -3624,7 +3628,7 @@ def _execute_run(
     ), secret_values)
 
 
-@app.post("/run/stream")
+@app.post("/run/stream", dependencies=[Depends(require_token)])
 def run_stream(
     body: RunRequest, principal: Any = Depends(current_principal)
 ) -> StreamingResponse:
@@ -3915,7 +3919,7 @@ def _resolve_staged_files(stages: List[FlowStageRequest]) -> None:
             stage.file_job_id = _file_job_id(named)
 
 
-@app.post("/run/flow/stream")
+@app.post("/run/flow/stream", dependencies=[Depends(require_token)])
 def run_flow_stream(
     body: RunFlowRequest, principal: Any = Depends(current_principal)
 ) -> StreamingResponse:
@@ -6406,7 +6410,11 @@ def auth_logout(request: Request) -> Dict[str, bool]:
     return {"logged_out": True}
 
 
-@app.get("/auth/me", response_model=PrincipalOut)
+@app.get(
+    "/auth/me",
+    response_model=PrincipalOut,
+    dependencies=[Depends(require_token)],
+)
 def auth_me(principal: Any = Depends(current_principal)) -> PrincipalOut:
     return _principal_out(principal)
 
@@ -6510,7 +6518,11 @@ class AccessQueryRequest(BaseModel):
     resources: List[Dict[str, str]] = Field(default_factory=list)
 
 
-@app.post("/iam/access", response_model=List[AccessDecisionOut])
+@app.post(
+    "/iam/access",
+    response_model=List[AccessDecisionOut],
+    dependencies=[Depends(require_token)],
+)
 def effective_access(
     body: AccessQueryRequest, principal: Any = Depends(current_principal)
 ) -> List[AccessDecisionOut]:
@@ -7080,7 +7092,7 @@ def update_user(request: Request, user_id: str, body: UpdateUserRequest) -> User
     return _user_out(user)
 
 
-@app.post("/auth/users/{user_id}/password")
+@app.post("/auth/users/{user_id}/password", dependencies=[Depends(require_token)])
 def set_password(
     user_id: str, body: PasswordRequest, principal: Any = Depends(current_principal)
 ) -> Dict[str, bool]:
@@ -7216,7 +7228,11 @@ def list_audit(
     ]
 
 
-@app.get("/credits/me", response_model=CreditsOut)
+@app.get(
+    "/credits/me",
+    response_model=CreditsOut,
+    dependencies=[Depends(require_token)],
+)
 def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
     """Your own balance. No permission needed: knowing what you may spend is part
     of being able to spend it, and refusing to say would only produce runs that
@@ -7231,7 +7247,11 @@ def my_credits(principal: Any = Depends(current_principal)) -> CreditsOut:
     )
 
 
-@app.get("/credits/usage", response_model=UsageBreakdownOut)
+@app.get(
+    "/credits/usage",
+    response_model=UsageBreakdownOut,
+    dependencies=[Depends(require_token)],
+)
 def credit_usage(
     group_by: str = "workflow",
     period: Optional[str] = None,
@@ -7280,7 +7300,11 @@ def credit_usage(
     )
 
 
-@app.get("/credits/timeline", response_model=UsageTimelineOut)
+@app.get(
+    "/credits/timeline",
+    response_model=UsageTimelineOut,
+    dependencies=[Depends(require_token)],
+)
 def credit_timeline(
     months: int = 6,
     account_id: Optional[str] = None,
@@ -7322,6 +7346,7 @@ def list_credit_accounts() -> List[AccountOut]:
 @app.get(
     "/credits/{account_id}/ledger",
     response_model=List[LedgerEntryOut],
+    dependencies=[Depends(require_token)],
 )
 def credit_ledger(
     account_id: str, limit: int = 100, principal: Any = Depends(current_principal)
@@ -7559,7 +7584,11 @@ def assistant_stream(
     )
 
 
-@app.get("/credits/assist", response_model=AssistSummaryOut)
+@app.get(
+    "/credits/assist",
+    response_model=AssistSummaryOut,
+    dependencies=[Depends(require_token)],
+)
 def assist_usage(
     period: Optional[str] = None,
     account_id: Optional[str] = None,

@@ -388,8 +388,8 @@ ollama pull qwen3:8b
 
 Any pulled model is offered — `GET /assistant` lists what `/api/tags` reports.
 `qwen3:8b` is the default because it fits in 8 GB of RAM *and* was the only
-small model measured calling this runner's tools every time (see
-[Omnigent](#omnigent) for the numbers). A machine with more room does better
+small model measured calling this runner's tools every time (the table further
+down has the numbers). A machine with more room does better
 with `qwen3:30b`.
 
 `/api/chat` is used rather than Ollama's OpenAI-compatible `/v1` route, because
@@ -413,56 +413,6 @@ accepted from the caller. A transcript the browser could write is a transcript
 that can tell the model a configuration validated when it did not; `POST
 /assistant/stream` therefore takes `user` and `assistant` text and nothing else.
 A model that calls tools six times without answering is stopped and says so.
-
-### Omnigent
-
-`SPARQUET_STUDIO_ASSISTANT=omnigent` swaps the loop for
-[Omnigent](https://pypi.org/project/omnigent/) (Apache-2.0), keeping the same
-tools, the same streaming contract and the same metering. It is an optional
-dependency of the runner and is imported lazily — absent, `GET /assistant`
-answers `available: false` with the hint that installs it:
-
-```bash
-pip install omnigent      # Python 3.12+ only
-```
-
-That floor is why it is optional rather than required: the framework itself
-supports 3.9, and a runner on 3.10 must keep working. It is not a fork in the
-road, though — the framework is tested on 3.12 and 3.13 as well, so a single
-interpreter carries both and `pip install sparquet omnigent` resolves without a
-conflict.
-
-Omnigent is pointed at the same Ollama by default, so choosing it changes the
-agent loop without starting to spend money. Three things about the wiring follow
-from what the package does rather than from what its own documentation
-describes, and every one of them fails quietly when guessed wrong:
-
-| Wiring | Why |
-|---|---|
-| `OpenAIAgentsSDKExecutor(api_key=…, base_url_override=…)` | `auth: {type: api_key, base_url}` is the *spec* syntax. The constructor takes plain keywords and rejects an `auth` keyword outright. |
-| `use_responses=False` | It defaults to True, which is OpenAI's `/responses` endpoint. Ollama does not implement it, so the default breaks the backend this is pointed at by default. |
-| Flat tool specs rather than OpenAI-shaped ones | Omnigent reads `name`, `description` and `parameters` off the top of each spec. In the nested shape it finds no name, and a spec with no name is skipped rather than refused — the symptom is an assistant answering from memory, not an error anybody sees. |
-| `_tool_executor`, and a fresh `session_id` on every turn | Tool calls are dispatched through the attribute Omnigent's own runtime adapter assigns; without it every call comes back "no tool executor" and the model reasons on from a failure it cannot fix. The session key is what Omnigent replays history against, and our transcript already arrives whole from the browser — one shared key would show the model its own past twice, and on a runner with more than one user, somebody else's. |
-
-**Token counts are whatever the endpoint volunteers.** The Agents SDK asks for
-them (`stream_options: {"include_usage": true}`) only when it recognises the
-base URL as OpenAI's own, Omnigent exposes no seam to set it, and a local server
-does not volunteer usage unasked — so an Ollama turn is recorded with zero in and
-zero out. Billing renders that as *No provider reported tokens*, not as a free
-turn: the turn count and the duration are still real, and those are the numbers
-that show an assistant moved in-house. The runner briefly patched the SDK's own
-`ChatCmplHelpers.get_stream_options_param` to get the counts back; reaching into
-a third-party class at import time, in a long-lived server, to improve a figure
-nobody bills on was the wrong trade, and it is gone.
-
-`server/test_omnigent_live.py` is what keeps that table honest. It skips when
-the package is absent and, when it is there, drives the installed executor
-through a real turn — tool call, tool result, streamed answer, usage — against a
-stub that speaks the OpenAI streaming shape in place of model weights.
-
-The prompt and the tools are this module's, in `server/assistant.py`. There is no
-agent YAML: nothing here loads one, and a team that outgrows the built-in prompt
-edits that file.
 
 **Pick a model that calls tools.** The loop is only as good as the weights
 behind it, and `tools` in `ollama show` is not evidence that they will be used.
@@ -572,8 +522,8 @@ and deferred-warning buffer.
 | `SPARQUET_STUDIO_CREDITS_INITIAL` | `0` | Balance an account is created with the first time it is seen. |
 | `SPARQUET_STUDIO_CREDITS_DB` | `server/data/credits.sqlite3` | SQLite file holding accounts and the credit ledger. |
 | `SPARQUET_STUDIO_CREDITS_PER_ASSIST` | `1` | Credits one assistant turn costs when it was **not** answered on this machine. A local turn is recorded at zero whatever this says. |
-| `SPARQUET_STUDIO_ASSISTANT` | `ollama` | Which runtime answers questions. `omnigent` uses Omnigent instead; `off`/`none`/`disabled` turns the assistant off and makes the routes say so rather than never replying. |
-| `SPARQUET_STUDIO_OLLAMA_URL` | `http://127.0.0.1:11434` | Where Ollama is. Both backends talk to it. |
+| `SPARQUET_STUDIO_ASSISTANT` | `ollama` | Which runtime answers questions. `off`/`none`/`disabled` turns the assistant off and makes the routes say so rather than never replying. |
+| `SPARQUET_STUDIO_OLLAMA_URL` | `http://127.0.0.1:11434` | Where Ollama is. |
 | `SPARQUET_STUDIO_ASSISTANT_MODEL` | `qwen3:8b` | Model used when the caller names none. Free text — any pulled model works, but pick one that calls tools. |
 | `SPARQUET_STUDIO_ASSISTANT_KEY` | unset | API key for the assistant endpoint, for the deployment that points `SPARQUET_STUDIO_OLLAMA_URL` at something that wants one. Ollama itself ignores it. |
 | `SPARQUET_STUDIO_SECRET_KEY` | unset | Master key the `local` connection secrets are encrypted with. Without it the runner still boots and still serves `env` secrets — it refuses only to seal or open a `local` one. Changing it makes every existing `local` secret unreadable. |
@@ -1574,7 +1524,7 @@ rather than as an unconfigured one.
 ```
 
 `available: false` always carries `error` — what is wrong — and `hint` — what to
-do about it, such as `ollama pull qwen2.5-coder:7b` or `pip install omnigent`.
+do about it, such as `ollama pull qwen2.5-coder:7b`.
 `local` says whether a turn is going to cost anything, which is what Studio puts
 next to the model name.
 

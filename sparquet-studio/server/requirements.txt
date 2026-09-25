@@ -24,17 +24,8 @@ pydantic>=2.6,<3.0
 cryptography>=42.0
 
 # The assistant answers through Ollama over plain HTTP, so nothing is listed for
-# it here — the default backend needs no Python package at all, only a model
-# pulled on the machine.
-#
-# `omnigent` is the other backend (SPARQUET_STUDIO_ASSISTANT=omnigent) and is
-# deliberately NOT listed: it requires Python 3.12, while the framework supports
-# 3.9, so installing it narrows the interpreter of every runner that never asked
-# for an agent loop. Install it yourself when you want it:
-#
-#     pip install omnigent
-#
-# Wanting it costs nothing else. The framework is tested through 3.14, so a
-# runner on a 3.12+ interpreter is an ordinary runner, and `sparquet` and
-# `omnigent` resolve together without a conflict — verified on 3.12 with
-# omnigent 0.14.0 (pydantic and fastapi land inside the ranges above).
+# it here — it needs no Python package at all, only a model pulled on the
+# machine. That is also why it is the only backend: an agent runtime installed
+# here would raise the interpreter floor of every runner that never asked for
+# one, while buying nothing the tool loop in `assistant.py` does not already
+# do.
