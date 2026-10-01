@@ -8,7 +8,7 @@ name = "sparquet"
 # dinamicamente abaixo via [tool.setuptools.dynamic]. Para subir de versão,
 # altere apenas o __version__.
 dynamic = ["version"]
-description = "JSON-driven Spark pipeline framework for ingestion, transformation, and data quality"
+description = "Data engineering as JSON — a Spark pipeline framework for ingestion, transformation, and data quality"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }

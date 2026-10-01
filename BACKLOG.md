@@ -1761,6 +1761,8 @@ O que falta, na ordem em que dói:
   observabilidade agregada, colaboração, IA com chave da plataforma, catálogo como
   serviço) vive em repositório privado próprio (`../sparquet-cloud`), consumindo o
   runner aberto pelos slots acima. Escopo e backlog lá, em `SCOPE.md` e `BACKLOG.md`.
+  O que é pré-requisito **deste** lado — imagem, persistência fora da árvore e execução
+  fora do processo HTTP — está no §12.
 - [ ] **`sparquet-lite` — um segundo motor, sem JVM** — nome provisório; ver *Nome* no fim
   do item. Hoje todo JSON precisa de Spark, e Spark cobra caro pelo que não usa: uns
   poucos segundos de JVM subindo, Java instalado, jar do Maven baixado na primeira
@@ -1967,3 +1969,121 @@ a que fechou:
   vermelho um refactor honesto.
 - [ ] **`dynamodb` sem serviço** — é o único conector NoSQL sem container na
   `docker-compose.yml`. `amazon/dynamodb-local` fecharia a lacuna sem conta AWS.
+
+---
+
+## 12. Deploy em cloud — runbook do runner hospedado
+
+Este plano cobre **hospedar o runner aberto** (um container, uma equipe, dados
+persistentes) — não a multi-tenancy, que vive no `sparquet-cloud` (§10). As etapas 1 a 6
+valem para os dois alvos e são pré-requisito do segundo; a etapa 7 é a fronteira entre
+eles. A ordem é de dependência, não de preferência: cada etapa só é verificável depois
+da anterior.
+
+O que já está pronto e não aparece abaixo: os três slots de provider
+(`SPARQUET_STUDIO_{CREDITS,AUTH,WORKSPACE}_PROVIDER`), o vault com chave mestra
+obrigatória sem fallback, a checagem de `Origin` server-side além do CORS, e
+`GET /health` reportando qual provider carregou e se a versão do framework está na faixa.
+
+### Etapa 1 — Imagem e dados fora da árvore do código
+
+Não existe `Dockerfile` no repositório (o único `docker-compose.yml` é o de serviços de
+teste, em `tests/io/integration/`). Falta:
+
+- [ ] **`Dockerfile` multi-stage** — estágio node (`npm ci && npm run build`) produzindo
+  `dist/`, estágio python instalando `server/requirements.txt` + JDK, copiando `dist/` e
+  `server/`. O JDK é o que decide o tamanho da imagem: sem ele o runner sobe e só quebra
+  na primeira execução, com uma mensagem que não aponta para a imagem.
+- [ ] **`SPARQUET_STUDIO_DATA_DIR`** — hoje cada store resolve seu próprio caminho e cada
+  um tem override próprio (`SPARQUET_STUDIO_HISTORY_DB`, `_AUDIT_DB`, `_MONITORS_DB`,
+  `_AUTH_DB`, `_CREDITS_DB`), mas o **default de todos é `server/data/`, dentro do
+  pacote** — em container isso é efêmero e some no primeiro redeploy. Uma variável só,
+  com os cinco defaults derivando dela, troca cinco pontos de configuração por um ponto
+  de montagem. Os overrides individuais continuam valendo e ganham precedência.
+- [ ] **Volume persistente** montado nesse diretório, mais o workspace
+  (`SPARQUET_STUDIO_WORKSPACE`) fora do checkout — o próprio runner já avisa isso no
+  boot quando a biblioteca está dentro da árvore do código.
+
+**Pronto quando:** `docker run` sobe, `GET /health` responde, e derrubar e recriar o
+container preserva histórico de execução, créditos e segredos.
+
+### Etapa 2 — Servir o SPA pelo próprio runner
+
+`main.py` não tem `StaticFiles` nem `app.mount`: o `dist/` do Vite precisa de hosting
+próprio hoje. Hospedar os dois separados transforma toda chamada em cross-origin de
+verdade — CORS real, cookie de sessão com `SameSite`, e `navigator.clipboard` (usado em
+vários pontos do Studio sem fallback) exigindo secure context nas duas pontas.
+
+- [ ] **Montar o build no runner**, com fallback de SPA: rota desconhecida que não seja
+  de API devolve `index.html`, senão recarregar a página em `/catalog` dá 404.
+- [ ] **`runnerUrl` vazio = mesma origem** no cliente, para a instalação hospedada não
+  precisar configurar endereço nenhum.
+
+**Pronto quando:** `GET /` devolve o Studio, F5 em qualquer tela funciona, e nenhuma
+requisição do app é cross-origin.
+
+### Etapa 3 — Configuração obrigatória no boot, não no primeiro uso
+
+Três valores hoje falham tarde ou silenciosamente:
+
+- [ ] **`SPARQUET_STUDIO_TOKEN`** — sem ele, `_load_token()` gera um
+  `secrets.token_urlsafe(24)` **por processo** e imprime no terminal. Em container isso
+  significa token novo a cada restart e token diferente por réplica.
+- [ ] **`SPARQUET_STUDIO_ORIGINS`** — o default é
+  `http://localhost:5273,http://127.0.0.1:5273`. Resolvido pela etapa 2 para o app, mas
+  continua valendo para qualquer cliente externo.
+- [ ] **`SPARQUET_STUDIO_SECRET_KEY`** — já é obrigatória e sem fallback, mas a falta só
+  aparece na primeira tentativa de selar um segredo `local`, não no start.
+
+Os três devem derrubar o processo no boot quando o runner está em modo hospedado, pelo
+mesmo argumento que já derruba um provider que falha de carregar: cair no default local
+calado é falha de isolamento, não modo degradado.
+
+**Pronto quando:** subir o container sem qualquer uma das três falha imediatamente, com
+mensagem nomeando a variável.
+
+### Etapa 4 — Uma réplica, e isso declarado no código
+
+Três pontos assumem processo único e hoje não dizem isso:
+
+- [ ] **`_credits.release_stale()` roda no import** (`main.py`) — com mais de um worker, o
+  segundo libera os holds das execuções vivas do primeiro. Move para o `lifespan` de
+  startup, que é onde eventos de boot pertencem.
+- [ ] **Quatro threads daemon por processo** — `history-purge`, `monitor-sweep`,
+  `schedule-sweep` e `spark-warm`. Com N réplicas, todo agendamento dispara N vezes.
+  Enquanto não há leader election, uma variável (`SPARQUET_STUDIO_SWEEPERS=on|off`)
+  permite subir N réplicas com os sweepers ligados em exatamente uma.
+- [ ] **`--workers 1` como requisito documentado** — `_RUN_LOCK` é um
+  `threading.Lock()` de processo e `_ACTIVE_RUN` é estado em memória; com dois workers,
+  duas execuções simultâneas passam pelo lock e o 409 de "execução em andamento" para de
+  valer.
+
+**Pronto quando:** duas réplicas com sweepers ligados em uma só não disparam agendamento
+duplicado, e o README do runner diz por que `--workers` não é ajustável.
+
+### Etapa 5 — TLS, domínio e healthcheck
+
+- [ ] **HTTPS obrigatório** — não é só política: `navigator.clipboard` e vários
+  comportamentos do editor exigem secure context.
+- [ ] **Readiness separado de liveness** — `/health` responde cedo, mas
+  `SPARQUET_STUDIO_WARM_SPARK=on` deixa o primeiro minuto sem JVM pronta. Orquestrador
+  que mata o container por timeout de readiness nunca deixa o warm terminar.
+- [ ] **Log estruturado para stdout**, já que o disco do container não é lugar de log.
+
+### Etapa 6 — Execução fora do processo HTTP
+
+Esta é a etapa que destrava escala horizontal e é o teto real de tudo acima: enquanto o
+run acontece dentro do processo que atende HTTP, um container = uma execução por vez, e
+qualquer réplica a mais é uma réplica que não pode executar. Fila + worker separado, com
+o estado do run no mesmo store que o histórico já usa.
+
+**Esta é a dependência de verdade do `sparquet-cloud`** — multi-tenancy sem isso é vários
+tenants disputando um lock.
+
+### Etapa 7 — Multi-tenancy: fronteira com o `sparquet-cloud` (§10)
+
+Tudo acima é single-tenant hospedado e pertence a este repositório. Isolamento por
+tenant, cobrança como produto, identidade federada e catálogo como serviço consomem os
+três slots de provider e vivem no repositório privado — o backlog é lá.
+
+---

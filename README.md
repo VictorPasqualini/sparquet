@@ -2,9 +2,10 @@
 
 # Sparquet
 
-**Data engineering as JSON — with a canvas to design it and Spark to run it.**
+**Data engineering as JSON.**
 
-A configuration-driven PySpark framework: describe a pipeline as a JSON document, run it anywhere Spark runs.
+A configuration-driven PySpark framework, with a canvas to design it and Spark to run it:
+describe a pipeline as a JSON document, run it anywhere Spark runs.
 Then open the same document in **[Sparquet Studio](sparquet-studio/)**, a visual, AI-assisted editor for those pipelines.
 
 [Two halves](#two-halves-of-one-idea) · [Install](#install) · [Pipeline in 30 seconds](#a-pipeline-in-30-seconds) · [What the language covers](#what-the-language-covers) · [Docs](#documentation) · [Contributing](#contributing)
@@ -19,7 +20,7 @@ Then open the same document in **[Sparquet Studio](sparquet-studio/)**, a visual
 
 |  |  |
 |---|---|
-| **The framework** (`sparquet/`) | Reads a JSON pipeline and executes it on Spark: readers and writers for files (Parquet, Delta, Iceberg, CSV, JSON, ORC, Avro, XML, Hudi, text), temp views, Kafka, JDBC databases, warehouses and NoSQL stores; 19 transformations; a validation engine with a data-quality report and row-level quarantine; template parameters, runtime pushdown variables and reusable includes. Runs locally, on Databricks, EMR, Dataproc or Synapse — the session manager detects the environment. |
+| **The framework** (`sparquet/`) | Reads a JSON pipeline and executes it on Spark: readers and writers for files (Parquet, Delta, Iceberg, CSV, JSON, ORC, Avro, XML, Hudi, text), temp views, Kafka, JDBC databases, warehouses and NoSQL stores; 20 transformations; a validation engine with a data-quality report and row-level quarantine; template parameters, runtime pushdown variables and reusable includes. Runs locally, on Databricks, EMR, Dataproc or Synapse — the session manager detects the environment. |
 | **The studio** (`sparquet-studio/`) | A browser app that reads and writes exactly those documents on a node canvas, lints them as you type, generates them with an LLM of your choice, and executes them through a local runner. No account, no server, no telemetry. |
 
 The JSON is the contract between them. Studio never invents syntax the framework does not support, and the framework never needs Studio to run.

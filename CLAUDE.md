@@ -4,6 +4,10 @@ Framework Python/PySpark orientado a JSON para pipelines de dados. É um **produ
 reutilizável**, não um job pontual: toda mudança precisa valer para qualquer caso de
 ingestão/transformação/qualidade, não só para o caso que motivou o pedido.
 
+Slogan do projeto: **"Data engineering as JSON."** — em inglês, com ponto final, sem
+tradução. É a linha do README, do vídeo de lançamento e do `description` do PyPI; use-a
+literal em qualquer material novo em vez de escrever uma variação.
+
 ---
 
 ## Regras de trabalho
