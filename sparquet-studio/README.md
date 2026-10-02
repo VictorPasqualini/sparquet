@@ -381,7 +381,7 @@ Endpoints: `GET /health`, `POST /run`, `POST /run/stream`, `POST /run/flow/strea
 
 ### Execution history
 
-Every run — a single Job or a whole Pipeline — is persisted as it happens: a `PipelineRun`, one `JobRun` per Job it executed (or skipped, after an earlier one failed), and one `StepRun` per input/transformation/validation/output step, each with its status, timing and — on failure — the error. It lives in a local SQLite file (`server/data/history.sqlite3`, gitignored), behind an `ExecutionRepository` abstraction (`server/history.py`) so a future cloud runner can swap in `PostgresExecutionRepository`/`CloudExecutionRepository` without touching the execution code.
+Every run — a single Job or a whole Pipeline — is persisted as it happens: a `PipelineRun`, one `JobRun` per Job it executed (or skipped, after an earlier one failed), and one `StepRun` per input/transformation/validation/output step, each with its status, timing and — on failure — the error. It lives in a local SQLite file (`server/data/execution_history.sqlite3`, gitignored), behind an `ExecutionRepository` abstraction (`server/history.py`) so a future cloud runner can swap in `PostgresExecutionRepository`/`CloudExecutionRepository` without touching the execution code.
 
 This is what makes a past run inspectable after you close and reopen Studio, not just while its own stream is live: the **History** panel under a Job's or Pipeline's **Run** tab lists past executions (✓/✗, when, how long) and opening one shows the Job/step tree with the failed step's error — even for a run from before the app was last closed.
 

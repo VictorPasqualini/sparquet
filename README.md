@@ -134,7 +134,7 @@ See [CLAUDE.md](CLAUDE.md) for the complete schema reference.
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, tests, conventions, how to propose a change |
 | [SECURITY.md](SECURITY.md) | Supported versions and how to report a vulnerability |
-| [docs/DEPLOY_PYPI.md](docs/DEPLOY_PYPI.md) | Publishing the framework to PyPI |
+| [docs/DEPLOY_PYPI.md](docs/DEPLOY_PYPI.md) | Publishing the framework to PyPI: version bump, `python -m build`, `twine`, the GitHub Actions release pipeline and Trusted Publishing. In Portuguese. |
 | [sparquet.dev](https://sparquet.dev) | The public site: landing plus full documentation in English, Portuguese and Spanish, built from the separate [sparquet-web](https://github.com/VictorPasqualini/sparquet-web) repository |
 
 The data-quality engine is a separate package and repository too:
@@ -148,7 +148,7 @@ sparquet/               the framework (readers, writers, transformations, valida
 sparquet-studio/        the visual editor (React + TypeScript) and its local runner
 examples/               example pipelines, one per capability
 tests/                  unit tests and a full real-world migration case
-docs/                   documentation index and the PyPI release guide
+docs/                   the test plan and the PyPI release guide
 CLAUDE.md               the JSON schema and API reference
 BACKLOG.md              roadmap
 ```
